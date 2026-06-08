@@ -1,0 +1,22 @@
+[package]
+name = "termquill-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+termquill-kernel = { path = "../termquill-kernel" }
+termquill-mcp = { path = "../termquill-mcp" }
+termquill-provider-deepseek = { path = "../termquill-provider-deepseek" }
+termquill-tools-builtin = { path = "../termquill-tools-builtin" }
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "termquill-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+termquill-kernel = { path = "../termquill-kernel" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

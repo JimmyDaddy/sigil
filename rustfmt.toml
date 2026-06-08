@@ -1,0 +1,20 @@
+# Keep rustfmt conservative and stable across contributors.
+# This repo uses only stable rustfmt options on purpose.
+
+# Parse and format as Rust 2024.
+edition = "2024"
+style_edition = "2024"
+
+# Preserve the current line-length target used across the repo.
+max_width = 100
+
+# Normalize line endings for a shared cross-platform repository.
+newline_style = "Unix"
+
+# Prefer modern idiomatic Rust when rustfmt can rewrite safely.
+use_field_init_shorthand = true
+use_try_shorthand = true
+
+# Make default import/module ordering explicit for consistency in editor runs.
+reorder_imports = true
+reorder_modules = true

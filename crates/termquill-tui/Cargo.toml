@@ -1,0 +1,30 @@
+[package]
+name = "termquill-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+termquill-kernel = { path = "../termquill-kernel" }
+termquill-mcp = { path = "../termquill-mcp" }
+termquill-provider-deepseek = { path = "../termquill-provider-deepseek" }
+termquill-tools-builtin = { path = "../termquill-tools-builtin" }
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+futures.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
