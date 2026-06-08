@@ -80,6 +80,8 @@ termquill/
       src/
     termquill-mcp/
       src/
+    termquill-runtime/
+      src/
     termquill-cli/
       src/
     termquill-tui/
@@ -92,10 +94,13 @@ termquill/
 - `termquill-provider-deepseek`：首个旗舰 provider，实现 DeepSeek 专项能力与 OpenAI-compatible 主链路适配。
 - `termquill-tools-builtin`：隔离文件、shell、搜索等内置工具。
 - `termquill-mcp`：隔离 stdio / HTTP MCP client 和工具适配逻辑。
+- `termquill-runtime`：收口跨入口共享的 provider factory、tool registry 和 run options，避免 TUI / CLI 各自硬编码装配链。
 - `termquill-cli`：薄启动器、调试入口和自动化入口，不承担最终产品心智。
 - `termquill-tui`：第一层用户入口，负责真正的交互体验、审批流和会话可见性。
 
 这个拆分刻意比“教科书式 Clean Architecture”更少。memory、permission、config、controller 在第一阶段都留在 `termquill-kernel` 内，因为它们会一起快速演化，过早拆包只会增加 friction。
+
+当前落地实现中，`termquill-runtime` 是必要的轻量装配层，而不是新的领域层。它只负责把 `RootConfig` 解析成 `Box<dyn Provider>`、`ToolRegistry` 和 `AgentRunOptions`；kernel 仍然不知道 runtime 存在。
 
 这里要特别说明：这不意味着 `termquill` 被做成 DeepSeek 专属，而是表示第一套“做深做透”的 provider 先落在 DeepSeek 上。未来仍可增加：
 
@@ -137,6 +142,7 @@ pub trait Provider: Send + Sync {
 - 切模型是 config 和 controller 层的问题，不是编译期静态问题
 - provider 抽象必须能承载 background task、response handle、reasoning artifact、续跑 cursor 这些能力位
 - 不能把 provider 的长任务、推理摘要、工具流事件都压扁成“只有文本 delta”的模型
+- provider 的 `stream()` 必须是真流式：HTTP/SSE body 读取、SSE frame 解码和 `ProviderChunk` 映射应边读边 yield；只允许在尚未 yield 任何 chunk 前做透明 retry
 
 ### 6.2 Tool 抽象
 
@@ -168,6 +174,7 @@ pub trait Tool: Send + Sync {
 - 每个工具都要暴露 JSON Schema 兼容的参数定义
 - 工具执行失败要返回给模型，不应该直接把整个进程打死
 - preview 是可选能力，只给交互式前端做审批卡片和 diff 预览用
+- 文件类内置工具必须对 workspace root 做 canonicalize，并用路径组件判断 confinement；绝对路径、`..`、目标 symlink 或父目录 symlink 指向 workspace 外时都必须拒绝
 
 ### 6.3 Tool Registry
 
@@ -279,6 +286,7 @@ pub enum ProviderChunk {
     BackgroundTaskStatus(BackgroundTaskStatus),
     ResponseHandle(ResponseHandle),
     ReasoningArtifact(ReasoningArtifact),
+    ContinuationState(ProviderContinuationState),
     Done,
 }
 ```
@@ -289,6 +297,7 @@ pub enum ProviderChunk {
 - `Usage` 必须是正式 chunk，不要依赖调用方从原始 HTTP body 里偷偷扒字段
 - `ReasoningSummaryDelta` 和 `ReasoningArtifact` 必须分开，前者可展示，后者是 opaque continuation object
 - `ResponseHandle` / `BackgroundTaskHandle` 需要作为正式输出，而不是只存在 provider adapter 私有状态里
+- `ContinuationState` 是 provider 私有续跑状态的流式出口，kernel 只负责持久化和恢复，不解释其内部语义
 
 #### ToolCall / ToolResult
 
@@ -333,10 +342,13 @@ pub enum SessionLogEntry {
 
 ```rust
 pub enum ControlEntry {
+    SessionIdentity { provider_name: String, model_name: String },
     ContinuationStateSaved(ProviderContinuationState),
     ResponseHandleTracked(ResponseHandle),
     BackgroundTaskTracked(BackgroundTaskHandle),
     PrefixSnapshotCaptured(PrefixSnapshot),
+    UsageSnapshot(UsageStats),
+    CompactionApplied(CompactionRecord),
     Note { kind: String, data: serde_json::Value },
 }
 ```
@@ -347,9 +359,13 @@ pub enum ControlEntry {
 - `ResponseHandleTracked`：记录可续跑句柄
 - `BackgroundTaskTracked`：记录后台任务句柄
 - `PrefixSnapshotCaptured`：记录当前稳定前缀的快照
+- `UsageSnapshot`：记录 usage 与 cache token 统计，供 resume 后恢复 session stats
+- `CompactionApplied`：记录稳定 compaction summary 与 tail 计数，供后续 request 做 provider-visible projection
 - `Note`：承接不值得升格为独立结构的控制面元数据
 
 这样做的好处是，provider continuation、后台任务恢复、缓存诊断都会落在同一条 append-only 审计链上，而不是散在 runtime 内存和 UI 状态里。
+
+当前实现中，`Session` 提供 `latest_response_handle`、`latest_prefix_snapshot`、`latest_compaction_record` 和 `continuation_states` 这类显式查询方法；agent run 初始化下一轮 request 时会从 durable control state 恢复最新匹配 provider 的 response handle，而不是只依赖进程内变量。
 
 建议至少保留一类 provider 无关的 continuation 记录：
 
@@ -995,6 +1011,8 @@ pub struct ProviderCapabilities {
 - provider 视图：不仅展示当前 provider-visible context，还应承载 compaction preview 这类“提交前先解释后果”的上下文操作
 
 这意味着 `kernel` 事件流在 phase 1 就要按 TUI 消费习惯设计，而不是先按“stdout 打印一堆日志”来塑形。
+
+当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛行为编排，输入焦点、approval state、session history、slash selector、timeline state、provider status 等纯状态放在独立模块；`ui.rs` 保留顶层 layout 和共享 theme，approval modal 等复杂渲染块拆到 `ui/*`。
 
 ### 15.2 TUI-first 下的能力暴露规则
 

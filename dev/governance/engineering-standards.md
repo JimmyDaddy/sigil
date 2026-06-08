@@ -31,6 +31,7 @@
 - `crates/termquill-provider-deepseek`：DeepSeek provider
 - `crates/termquill-tools-builtin`：内置工具
 - `crates/termquill-mcp`：MCP 接入
+- `crates/termquill-runtime`：跨 TUI / CLI 的 provider、tool registry、run options 装配
 
 ## 3. 变更流程
 
@@ -113,6 +114,7 @@ cargo clippy --all-targets -- -D warnings
 - 键位、状态栏、面板提示必须同步更新
 - 审批体验优先级很高：写工具要尽量有 preview / diff / 导航
 - session 体验要可持续使用，而不只是“一次性跑完一轮”
+- `AppState` 应保持 façade；可独立演进的输入、审批、session、slash、timeline、provider status 和渲染块应拆入独立模块，避免 `app.rs` / `ui.rs` 重新膨胀
 
 ## 8. Provider 与工具工程规范
 
@@ -121,10 +123,12 @@ cargo clippy --all-targets -- -D warnings
 - 保持 `DeepSeek-first`，但不要把仓库做窄成 `DeepSeek-only`
 - provider 专项能力写在 provider crate，不反向污染 kernel
 - Beta-only 能力要明确标识，避免误导成默认稳定能力
+- chat 主链路必须保持真实 streaming；只有首个 chunk yield 前允许透明 retry，yield 后的错误应作为 stream error 暴露
 
 ### 8.2 Tool
 
 - 工具必须考虑 workspace confinement
+- 文件类工具必须拒绝绝对路径、`..` 和指向 workspace 外的 symlink；新增路径要校验最近存在父目录仍在 workspace root 内
 - 写工具要考虑 preview、审批、失败回灌、恢复一致性
 - shell 工具要特别注意工作目录、超时和错误输出结构化
 
@@ -132,6 +136,7 @@ cargo clippy --all-targets -- -D warnings
 
 - session log 采用 append-only JSONL
 - control state 不能只存在运行内存
+- response handle、continuation state、prefix snapshot、compaction record 等 durable control state 要有显式查询/恢复路径
 - 任何恢复相关设计，都要优先考虑“进程重启后是否还能正确继续”
 
 ## 10. 评审标准

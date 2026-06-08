@@ -84,14 +84,21 @@
 - 工具必须有稳定 `ToolSpec`
 - 写工具默认提供 `preview`，尤其是 `write_file`、`edit_file`、`bash`
 - 所有路径操作必须限制在 workspace root 内
+- workspace confinement 必须基于 canonicalized root 和路径组件判断；文件、目录和父目录链上的 symlink 指向 workspace 外时必须拒绝
 - 工具失败必须结构化返回，不能 panic
 
 ### 3.4 `termquill-tui`
 
 - 优先分离“状态模型”和“渲染”
-- 输入、审批、session、事件流等交互状态应集中收敛到 `app.rs`
-- `ui.rs` 尽量只负责视图拼装和显示逻辑
+- `app.rs` 保持 `AppState` façade 和行为编排；输入、审批、session、slash、timeline、provider status 等独立状态类型优先拆到同 crate 模块
+- `ui.rs` 保持顶层 layout / theme / shared renderer；审批、timeline、tool card、config 等独立渲染块优先拆到 `ui/*`
 - 改键位时必须同步更新界面提示
+
+### 3.5 `termquill-runtime`
+
+- 负责 TUI、CLI 和未来入口共享的 provider、tool registry、run options 装配
+- 入口层不应各自硬编码 DeepSeek provider、built-in tools 或 MCP 注册流程
+- runtime 只依赖 kernel、provider、tools、MCP 等下层 crate；kernel 不得反向依赖 runtime
 
 ## 4. 数据与状态规则
 
@@ -99,6 +106,7 @@
 
 - `SessionLogEntry` 与 `ControlEntry` 的职责要清晰
 - continuation state、response handle、background task handle 等控制面信息必须能被持久化
+- resume 后会影响下一轮 request 的 durable control state 必须通过 `Session` 查询方法恢复，不要让调用侧手写扫描逻辑
 - 不要把会影响恢复正确性的状态只存在 provider 私有字段中
 
 ### 4.2 Deterministic / Cache-safe

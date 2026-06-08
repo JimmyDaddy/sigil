@@ -5,6 +5,7 @@
 当前仓库已经具备这些核心能力：
 
 - 通用 `kernel`：统一承载 provider、tool、session、approval、event 契约
+- 共享 `runtime`：TUI / CLI 统一通过 `termquill-runtime` 装配 provider、内置工具、MCP 工具和 run options
 - `DeepSeek-first` provider：优先支持 DeepSeek 流式对话、工具调用、reasoning replay 与 Beta 扩展点
 - 内置工具注册表：文件读写、编辑、搜索、shell 执行
 - stdio MCP 工具接入：远程工具通过统一 `ToolRegistry` 暴露给 agent
@@ -22,6 +23,7 @@ termquill/
     termquill-provider-deepseek/   # DeepSeek provider 实现
     termquill-tools-builtin/       # 内置工具
     termquill-mcp/                 # stdio MCP client 与工具适配
+    termquill-runtime/             # 入口共享的 provider / tool / run options 装配
     termquill-cli/                 # 薄 CLI 启动器与调试入口
     termquill-tui/                 # 第一用户入口
   dev/governance/                # 开发约束、代码规范、工程规范
@@ -132,6 +134,7 @@ cargo run -p termquill-tui -- --config /absolute/path/to/termquill.toml
 当前恢复语义还包括：
 
 - session identity 会跟随 durable log 恢复，而不是盲目回退到当前配置里的 provider/model
+- response handle、provider continuation state、prefix snapshot 与 compaction record 都写入 append-only control log；resume 后下一轮 request 会恢复最新匹配 provider 的 response handle
 - `/config` 保存后的默认 provider/model 不会静默改写当前 session identity；当前会话仍以 durable log 中的身份为准，新默认值会用于后续新 session 或空白 session
 - 运行中取消后，TUI 会从 durable JSONL log 重建会话视图，避免把临时内存态当成恢复真相
 - 每轮 usage 会追加持久化 control 记录，session resume 后可恢复 cache hit、累计 usage 和最近一次 prompt pressure
@@ -172,7 +175,7 @@ tail_messages = 6
 - 如果配置文件在当前仓库里，`.` 仍然表示该配置文件旁边的工作区
 - 如果配置文件在用户配置目录里，`.` 会在启动时解析成你运行 `termquill-tui` 或 `termquill-cli` 时所在的目录
 
-注意：permission 只负责 allow / ask / deny 策略判断，不等同于 shell sandbox。当前仍只保持 workspace 路径约束，不提供更强进程隔离。
+注意：permission 只负责 allow / ask / deny 策略判断，不等同于 shell sandbox。文件类内置工具会 canonicalize workspace root，并拒绝 `..`、绝对路径和指向 workspace 外的 symlink；`bash` 仍不提供更强进程隔离。
 
 ### Provider 环境变量 override
 
