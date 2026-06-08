@@ -4,6 +4,7 @@ use std::path::PathBuf;
 pub struct SessionHistoryEntry {
     pub path: PathBuf,
     pub label: String,
+    pub title: Option<String>,
     pub modified_epoch_secs: u64,
     pub bytes: u64,
 }

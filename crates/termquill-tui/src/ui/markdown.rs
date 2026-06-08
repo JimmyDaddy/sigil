@@ -1,0 +1,1333 @@
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
+use super::{
+    primitives::{timeline_content_line, timeline_section_line},
+    text::{pad_display_width, truncate_display_width, wrap_display_width},
+    theme::{accent_blue, accent_gold, accent_lime, accent_teal, dim, ink, muted},
+};
+
+#[derive(Default)]
+pub(crate) struct MarkdownRenderState {
+    in_fenced_code: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MarkdownRenderOptions {
+    pub max_content_width: usize,
+    pub code_wrap: CodeWrapMode,
+    pub show_link_urls: bool,
+    pub table_mode: TableRenderMode,
+}
+
+impl MarkdownRenderOptions {
+    pub(crate) fn timeline(max_content_width: usize) -> Self {
+        let max_content_width = if max_content_width == 0 {
+            80
+        } else {
+            max_content_width
+        };
+        Self {
+            max_content_width,
+            code_wrap: CodeWrapMode::Preserve,
+            show_link_urls: true,
+            table_mode: TableRenderMode::Compact,
+        }
+        .normalized()
+    }
+
+    pub(crate) fn tool_preview(max_content_width: usize) -> Self {
+        Self::timeline(max_content_width)
+    }
+
+    pub(crate) fn modal(max_content_width: usize) -> Self {
+        Self::timeline(max_content_width)
+    }
+
+    fn normalized(mut self) -> Self {
+        self.max_content_width = self.max_content_width.max(20);
+        self
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodeWrapMode {
+    Preserve,
+    Wrap,
+    Truncate,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TableRenderMode {
+    Compact,
+    Preserve,
+}
+
+pub(crate) fn render_markdown_timeline_lines(
+    accent: Color,
+    body_style: Style,
+    text: &str,
+    options: MarkdownRenderOptions,
+) -> Vec<Line<'static>> {
+    let source_lines = text.lines().collect::<Vec<_>>();
+    let mut rendered = Vec::new();
+    let options = options.normalized();
+    let mut index = 0usize;
+    while index < source_lines.len() {
+        let line = source_lines[index];
+        if line.trim().is_empty() {
+            if rendered
+                .last()
+                .map(|line: &Line<'static>| !line.spans.is_empty())
+                .unwrap_or(false)
+            {
+                rendered.push(Line::raw(String::new()));
+            }
+            index += 1;
+            continue;
+        }
+        if let Some((level, content)) = markdown_heading(line) {
+            rendered.extend(render_markdown_heading_block(
+                level, content, body_style, options,
+            ));
+            index += 1;
+            continue;
+        }
+        if let Some(language) = fenced_code_language(line) {
+            let label = if language.is_empty() {
+                "plain"
+            } else {
+                language
+            };
+            index += 1;
+            let mut block_lines = Vec::new();
+            while index < source_lines.len() {
+                if fenced_code_language(source_lines[index]).is_some() {
+                    index += 1;
+                    break;
+                }
+                block_lines.push(source_lines[index]);
+                index += 1;
+            }
+            rendered.push(timeline_section_line(
+                accent,
+                "code",
+                accent_blue(),
+                vec![Span::styled(label.to_owned(), Style::default().fg(dim()))],
+            ));
+            if block_lines.is_empty() {
+                rendered.push(timeline_content_line(
+                    accent,
+                    render_code_line_spans_with_bg(
+                        "",
+                        accent_blue(),
+                        Style::default().fg(ink()),
+                        Color::Rgb(28, 33, 41),
+                    ),
+                ));
+            } else {
+                for block_line in block_lines {
+                    for code_row in code_block_render_rows(block_line, options) {
+                        rendered.push(timeline_content_line(
+                            accent,
+                            render_code_line_spans_with_bg(
+                                &code_row,
+                                accent_blue(),
+                                Style::default().fg(ink()),
+                                Color::Rgb(28, 33, 41),
+                            ),
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        if markdown_table_line(line) {
+            let start = index;
+            while index < source_lines.len() && markdown_table_line(source_lines[index]) {
+                index += 1;
+            }
+            rendered.extend(render_markdown_table_block(
+                accent,
+                body_style,
+                &source_lines[start..index],
+                options,
+            ));
+            continue;
+        }
+        if markdown_quote(line).is_some() {
+            let start = index;
+            while index < source_lines.len() && markdown_quote(source_lines[index]).is_some() {
+                index += 1;
+            }
+            rendered.push(timeline_section_line(
+                accent,
+                "quote",
+                accent_teal(),
+                vec![Span::styled("quoted context", Style::default().fg(dim()))],
+            ));
+            for quote_line in &source_lines[start..index] {
+                let content = markdown_quote(quote_line).unwrap_or_else(|| quote_line.trim());
+                rendered.extend(render_wrapped_content_lines(
+                    accent,
+                    quote_prefix_spans(),
+                    quote_prefix_spans(),
+                    render_inline_markdown_spans_with_options(
+                        content,
+                        body_style.fg(muted()),
+                        options,
+                    ),
+                    options,
+                ));
+            }
+            continue;
+        }
+
+        rendered.extend(render_wrapped_markdown_line(
+            accent, line, body_style, options,
+        ));
+        index += 1;
+    }
+    rendered
+}
+
+fn code_block_render_rows(line: &str, options: MarkdownRenderOptions) -> Vec<String> {
+    let width = options.max_content_width.saturating_sub(2).max(1);
+    match options.code_wrap {
+        CodeWrapMode::Preserve => {
+            if UnicodeWidthStr::width(line) > width {
+                wrap_display_width(line, width)
+            } else {
+                vec![line.to_owned()]
+            }
+        }
+        CodeWrapMode::Wrap => wrap_display_width(line, width),
+        CodeWrapMode::Truncate => vec![truncate_display_width(line, width)],
+    }
+}
+
+fn render_wrapped_markdown_line(
+    accent: Color,
+    line: &str,
+    body_style: Style,
+    options: MarkdownRenderOptions,
+) -> Vec<Line<'static>> {
+    let options = options.normalized();
+    if markdown_rule(line) {
+        return vec![timeline_content_line(
+            accent,
+            vec![Span::styled(
+                "────────────────────────────────",
+                Style::default().fg(dim()),
+            )],
+        )];
+    }
+    if let Some((checked, content)) = markdown_task_item(line) {
+        let marker = if checked { "[x]" } else { "[ ]" };
+        let indent = markdown_list_indent(line);
+        let prefix = vec![Span::styled(
+            format!("{}{marker} ", "  ".repeat(indent)),
+            Style::default()
+                .fg(if checked {
+                    accent_lime()
+                } else {
+                    accent_gold()
+                })
+                .add_modifier(Modifier::BOLD),
+        )];
+        return render_wrapped_content_lines(
+            accent,
+            prefix.clone(),
+            continuation_indent_spans(&prefix, body_style),
+            render_inline_markdown_spans_with_options(content, body_style, options),
+            options,
+        );
+    }
+    if let Some(content) = markdown_bullet_item(line) {
+        let indent = markdown_list_indent(line);
+        let prefix = vec![Span::styled(
+            format!("{}• ", "  ".repeat(indent)),
+            Style::default()
+                .fg(accent_gold())
+                .add_modifier(Modifier::BOLD),
+        )];
+        return render_wrapped_content_lines(
+            accent,
+            prefix.clone(),
+            continuation_indent_spans(&prefix, body_style),
+            render_inline_markdown_spans_with_options(content, body_style, options),
+            options,
+        );
+    }
+    if let Some((number, content)) = markdown_ordered_item(line) {
+        let indent = markdown_list_indent(line);
+        let prefix = vec![Span::styled(
+            format!("{}{number}. ", "  ".repeat(indent)),
+            Style::default()
+                .fg(accent_gold())
+                .add_modifier(Modifier::BOLD),
+        )];
+        return render_wrapped_content_lines(
+            accent,
+            prefix.clone(),
+            continuation_indent_spans(&prefix, body_style),
+            render_inline_markdown_spans_with_options(content, body_style, options),
+            options,
+        );
+    }
+    if let Some(content) = markdown_quote(line) {
+        return render_wrapped_content_lines(
+            accent,
+            quote_prefix_spans(),
+            quote_prefix_spans(),
+            render_inline_markdown_spans_with_options(content, body_style.fg(muted()), options),
+            options,
+        );
+    }
+    if line_looks_like_code(line) {
+        return code_block_render_rows(line, options)
+            .into_iter()
+            .map(|row| {
+                timeline_content_line(
+                    accent,
+                    render_code_line_spans_with_bg(
+                        &row,
+                        accent_blue(),
+                        Style::default().fg(ink()),
+                        Color::Rgb(28, 33, 41),
+                    ),
+                )
+            })
+            .collect();
+    }
+    render_wrapped_content_lines(
+        accent,
+        Vec::new(),
+        Vec::new(),
+        render_inline_markdown_spans_with_options(line, body_style, options),
+        options,
+    )
+}
+
+fn render_wrapped_content_lines(
+    accent: Color,
+    first_prefix: Vec<Span<'static>>,
+    continuation_prefix: Vec<Span<'static>>,
+    content: Vec<Span<'static>>,
+    options: MarkdownRenderOptions,
+) -> Vec<Line<'static>> {
+    wrap_prefixed_spans(
+        first_prefix,
+        continuation_prefix,
+        content,
+        options.max_content_width,
+    )
+    .into_iter()
+    .map(|spans| timeline_content_line(accent, spans))
+    .collect()
+}
+
+fn wrap_prefixed_spans(
+    first_prefix: Vec<Span<'static>>,
+    continuation_prefix: Vec<Span<'static>>,
+    content: Vec<Span<'static>>,
+    max_width: usize,
+) -> Vec<Vec<Span<'static>>> {
+    let max_width = max_width.max(1);
+    let continuation_width = spans_display_width(&continuation_prefix);
+    let mut rows = Vec::new();
+    let mut current = first_prefix;
+    let mut current_width = spans_display_width(&current);
+    let mut current_has_content = false;
+
+    for span in content {
+        for grapheme in span.content.as_ref().graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme).max(1);
+            if current_has_content && current_width + grapheme_width > max_width {
+                rows.push(current);
+                current = continuation_prefix.clone();
+                current_width = continuation_width;
+            }
+            push_styled_text(&mut current, grapheme, span.style);
+            current_width += grapheme_width;
+            current_has_content = true;
+        }
+    }
+
+    if current_has_content || rows.is_empty() {
+        rows.push(current);
+    }
+    rows
+}
+
+fn push_styled_text(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push_str(text);
+        return;
+    }
+    spans.push(Span::styled(text.to_owned(), style));
+}
+
+fn continuation_indent_spans(prefix: &[Span<'static>], style: Style) -> Vec<Span<'static>> {
+    vec![Span::styled(" ".repeat(spans_display_width(prefix)), style)]
+}
+
+fn quote_prefix_spans() -> Vec<Span<'static>> {
+    vec![Span::styled(
+        "▌ ",
+        Style::default()
+            .fg(accent_teal())
+            .add_modifier(Modifier::BOLD),
+    )]
+}
+
+fn spans_display_width(spans: &[Span<'static>]) -> usize {
+    spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+fn render_markdown_heading_block(
+    level: usize,
+    content: &str,
+    base_style: Style,
+    options: MarkdownRenderOptions,
+) -> Vec<Line<'static>> {
+    let accent = match level {
+        1 => accent_gold(),
+        2 => accent_blue(),
+        3 => accent_lime(),
+        _ => accent_teal(),
+    };
+    let title_spans = render_inline_markdown_spans_with_options(
+        content,
+        base_style.fg(accent).add_modifier(Modifier::BOLD),
+        options,
+    );
+    let mut lines = vec![Line::from(title_spans)];
+    if level <= 2 {
+        let underline_width =
+            UnicodeWidthStr::width(content).clamp(8, options.max_content_width.max(8));
+        lines.push(Line::from(vec![Span::styled(
+            "─".repeat(underline_width),
+            Style::default().fg(dim()),
+        )]));
+    }
+    lines
+}
+
+fn render_markdown_table_block(
+    accent: Color,
+    body_style: Style,
+    rows: &[&str],
+    options: MarkdownRenderOptions,
+) -> Vec<Line<'static>> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+
+    let parsed_rows = rows
+        .iter()
+        .map(|line| {
+            markdown_table_cells(line)
+                .into_iter()
+                .map(|cell| markdown_plain_text(&cell))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let header = parsed_rows.first().cloned().unwrap_or_default();
+    let has_divider = parsed_rows
+        .get(1)
+        .is_some_and(|row| row.iter().all(|cell| markdown_table_divider_cell(cell)));
+    let body_rows = if has_divider {
+        parsed_rows.iter().skip(2).cloned().collect::<Vec<_>>()
+    } else {
+        parsed_rows.iter().skip(1).cloned().collect::<Vec<_>>()
+    };
+    let column_count = parsed_rows.iter().map(Vec::len).max().unwrap_or(0);
+    if column_count == 0 {
+        return Vec::new();
+    }
+
+    let natural_widths = (0..column_count)
+        .map(|column| {
+            parsed_rows
+                .iter()
+                .filter_map(|row| row.get(column))
+                .filter(|cell| !markdown_table_divider_cell(cell))
+                .map(|cell| UnicodeWidthStr::width(cell.as_str()))
+                .max()
+                .unwrap_or(3)
+                .max(3)
+        })
+        .collect::<Vec<_>>();
+    let widths = match options.table_mode {
+        TableRenderMode::Compact => {
+            clamp_table_widths(&natural_widths, options.max_content_width.max(24))
+        }
+        TableRenderMode::Preserve => natural_widths,
+    };
+
+    let summary = format!(
+        "{} cols · {} rows",
+        column_count,
+        body_rows.len().saturating_add(1)
+    );
+    let mut lines = vec![timeline_section_line(
+        accent,
+        "table",
+        accent_teal(),
+        vec![Span::styled(summary, Style::default().fg(dim()))],
+    )];
+
+    lines.push(timeline_content_line(
+        accent,
+        vec![Span::styled(
+            markdown_table_border(&widths, '┌', '┬', '┐', '─'),
+            Style::default().fg(dim()),
+        )],
+    ));
+    for header_line in markdown_table_row_lines(&header, &widths) {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                header_line,
+                body_style.fg(accent_blue()).add_modifier(Modifier::BOLD),
+            )],
+        ));
+    }
+    lines.push(timeline_content_line(
+        accent,
+        vec![Span::styled(
+            markdown_table_border(&widths, '├', '┼', '┤', if has_divider { '═' } else { '─' }),
+            Style::default().fg(dim()),
+        )],
+    ));
+    for row in body_rows {
+        for row_line in markdown_table_row_lines(&row, &widths) {
+            lines.push(timeline_content_line(
+                accent,
+                vec![Span::styled(row_line, body_style)],
+            ));
+        }
+    }
+    lines.push(timeline_content_line(
+        accent,
+        vec![Span::styled(
+            markdown_table_border(&widths, '└', '┴', '┘', '─'),
+            Style::default().fg(dim()),
+        )],
+    ));
+    lines
+}
+
+fn markdown_table_cells(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_owned())
+        .collect()
+}
+
+fn markdown_table_divider_cell(cell: &str) -> bool {
+    !cell.is_empty()
+        && cell
+            .chars()
+            .all(|character| matches!(character, '-' | ':' | ' '))
+}
+
+fn markdown_table_border(
+    widths: &[usize],
+    left: char,
+    join: char,
+    right: char,
+    fill: char,
+) -> String {
+    let mut out = String::new();
+    out.push(left);
+    for (index, width) in widths.iter().enumerate() {
+        out.push_str(&fill.to_string().repeat(width + 2));
+        if index + 1 < widths.len() {
+            out.push(join);
+        }
+    }
+    out.push(right);
+    out
+}
+
+fn markdown_table_row(cells: &[String], widths: &[usize]) -> String {
+    let mut out = String::new();
+    out.push('│');
+    for (index, width) in widths.iter().enumerate() {
+        let cell = cells.get(index).map(String::as_str).unwrap_or("");
+        out.push(' ');
+        out.push_str(cell);
+        let cell_width = UnicodeWidthStr::width(cell);
+        if *width > cell_width {
+            out.push_str(&" ".repeat(*width - cell_width));
+        }
+        out.push(' ');
+        out.push('│');
+    }
+    out
+}
+
+fn markdown_table_row_lines(cells: &[String], widths: &[usize]) -> Vec<String> {
+    let wrapped_cells = widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            let cell = cells.get(index).map(String::as_str).unwrap_or("");
+            wrap_display_width(cell, *width)
+        })
+        .collect::<Vec<_>>();
+    let row_height = wrapped_cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let mut lines = Vec::with_capacity(row_height);
+    for line_index in 0..row_height {
+        let row = widths
+            .iter()
+            .enumerate()
+            .map(|(column, width)| {
+                let text = wrapped_cells[column]
+                    .get(line_index)
+                    .cloned()
+                    .unwrap_or_default();
+                pad_display_width(&text, *width)
+            })
+            .collect::<Vec<_>>();
+        lines.push(markdown_table_row(&row, widths));
+    }
+    lines
+}
+
+fn clamp_table_widths(widths: &[usize], max_content_width: usize) -> Vec<usize> {
+    if widths.is_empty() {
+        return Vec::new();
+    }
+    let mut clamped = widths.to_vec();
+    let min_widths = widths
+        .iter()
+        .map(|width| (*width).min(12).clamp(4, 12))
+        .collect::<Vec<_>>();
+    while markdown_table_total_width(&clamped) > max_content_width {
+        let Some((index, _)) = clamped
+            .iter()
+            .enumerate()
+            .filter(|(index, width)| **width > min_widths[*index])
+            .max_by_key(|(_, width)| **width)
+        else {
+            break;
+        };
+        clamped[index] = clamped[index].saturating_sub(1);
+    }
+    clamped
+}
+
+fn markdown_table_total_width(widths: &[usize]) -> usize {
+    if widths.is_empty() {
+        return 0;
+    }
+    widths.iter().sum::<usize>() + widths.len() * 3 + 1
+}
+
+pub(crate) fn render_markdown_spans(
+    line: &str,
+    base_style: Style,
+    state: &mut MarkdownRenderState,
+    options: MarkdownRenderOptions,
+) -> Vec<Span<'static>> {
+    if state.in_fenced_code {
+        return render_code_line_spans(line, accent_blue(), Style::default().fg(ink()));
+    }
+    if let Some((level, content)) = markdown_heading(line) {
+        let accent = match level {
+            1 => accent_gold(),
+            2 => accent_blue(),
+            3 => accent_lime(),
+            _ => accent_teal(),
+        };
+        return render_inline_markdown_spans_with_options(
+            content,
+            base_style.fg(accent).add_modifier(Modifier::BOLD),
+            options,
+        );
+    }
+    if markdown_rule(line) {
+        return vec![Span::styled(
+            "────────────────────────────────",
+            Style::default().fg(dim()),
+        )];
+    }
+    if let Some((checked, content)) = markdown_task_item(line) {
+        let marker = if checked { "[x]" } else { "[ ]" };
+        let indent = markdown_list_indent(line);
+        let mut spans = vec![Span::styled(
+            format!("{}{marker} ", "  ".repeat(indent)),
+            Style::default()
+                .fg(if checked {
+                    accent_lime()
+                } else {
+                    accent_gold()
+                })
+                .add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(render_inline_markdown_spans_with_options(
+            content, base_style, options,
+        ));
+        return spans;
+    }
+    if let Some(content) = markdown_bullet_item(line) {
+        let indent = markdown_list_indent(line);
+        let mut spans = vec![Span::styled(
+            format!("{}• ", "  ".repeat(indent)),
+            Style::default()
+                .fg(accent_gold())
+                .add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(render_inline_markdown_spans_with_options(
+            content, base_style, options,
+        ));
+        return spans;
+    }
+    if let Some((number, content)) = markdown_ordered_item(line) {
+        let indent = markdown_list_indent(line);
+        let mut spans = vec![Span::styled(
+            format!("{}{number}. ", "  ".repeat(indent)),
+            Style::default()
+                .fg(accent_gold())
+                .add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(render_inline_markdown_spans_with_options(
+            content, base_style, options,
+        ));
+        return spans;
+    }
+    if let Some(content) = markdown_quote(line) {
+        let mut spans = vec![Span::styled("│ ", Style::default().fg(accent_teal()))];
+        spans.extend(render_inline_markdown_spans_with_options(
+            content,
+            base_style.fg(muted()),
+            options,
+        ));
+        return spans;
+    }
+    if markdown_table_line(line) {
+        return render_table_spans(line, base_style, options);
+    }
+    if line_looks_like_code(line) {
+        return render_code_line_spans(line, accent_blue(), Style::default().fg(ink()));
+    }
+    render_inline_markdown_spans_with_options(line, base_style, options)
+}
+
+pub(crate) fn render_inline_markdown_spans_with_options(
+    text: &str,
+    base_style: Style,
+    options: MarkdownRenderOptions,
+) -> Vec<Span<'static>> {
+    let options = options.normalized();
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let next_marker = next_inline_marker(rest);
+
+        let Some(marker_index) = next_marker else {
+            spans.push(Span::styled(rest.to_owned(), base_style));
+            break;
+        };
+
+        if marker_index > 0 {
+            spans.push(Span::styled(rest[..marker_index].to_owned(), base_style));
+            rest = &rest[marker_index..];
+            continue;
+        }
+
+        if let Some((label, url, consumed)) = markdown_link(rest) {
+            spans.push(Span::styled(
+                label.to_owned(),
+                base_style
+                    .fg(accent_blue())
+                    .add_modifier(Modifier::UNDERLINED | Modifier::BOLD),
+            ));
+            if options.show_link_urls {
+                let url_width = options
+                    .max_content_width
+                    .saturating_sub(UnicodeWidthStr::width(label))
+                    .saturating_sub(4)
+                    .max(12);
+                spans.push(Span::styled(
+                    format!(" <{}>", truncate_display_width(url, url_width)),
+                    Style::default().fg(dim()),
+                ));
+            }
+            rest = &rest[consumed..];
+            continue;
+        }
+
+        if let Some(after) = rest.strip_prefix("**") {
+            if let Some(end) = after.find("**") {
+                spans.push(Span::styled(
+                    after[..end].to_owned(),
+                    base_style.add_modifier(Modifier::BOLD),
+                ));
+                rest = &after[end + 2..];
+            } else {
+                spans.push(Span::styled("**".to_owned(), base_style));
+                rest = after;
+            }
+            continue;
+        }
+
+        if let Some((content, consumed)) = markdown_emphasis(rest) {
+            spans.push(Span::styled(
+                content.to_owned(),
+                base_style.add_modifier(Modifier::ITALIC),
+            ));
+            rest = &rest[consumed..];
+            continue;
+        }
+
+        if let Some(after) = rest.strip_prefix('`') {
+            if let Some(end) = after.find('`') {
+                spans.push(Span::styled(
+                    after[..end].to_owned(),
+                    Style::default()
+                        .fg(accent_blue())
+                        .bg(Color::Rgb(35, 40, 48))
+                        .add_modifier(Modifier::BOLD),
+                ));
+                rest = &after[end + 1..];
+            } else {
+                spans.push(Span::styled("`".to_owned(), base_style));
+                rest = after;
+            }
+            continue;
+        }
+
+        spans.push(Span::styled(rest.to_owned(), base_style));
+        break;
+    }
+    spans
+}
+
+pub(crate) fn markdown_plain_text(text: &str) -> String {
+    let mut plain = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let next_marker = next_inline_marker(rest);
+        let Some(marker_index) = next_marker else {
+            plain.push_str(rest);
+            break;
+        };
+        if marker_index > 0 {
+            plain.push_str(&rest[..marker_index]);
+            rest = &rest[marker_index..];
+            continue;
+        }
+        if let Some((label, _, consumed)) = markdown_link(rest) {
+            plain.push_str(label);
+            rest = &rest[consumed..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix("**")
+            && let Some(end) = after.find("**")
+        {
+            plain.push_str(&after[..end]);
+            rest = &after[end + 2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('`')
+            && let Some(end) = after.find('`')
+        {
+            plain.push_str(&after[..end]);
+            rest = &after[end + 1..];
+            continue;
+        }
+        if let Some((content, consumed)) = markdown_emphasis(rest) {
+            plain.push_str(content);
+            rest = &rest[consumed..];
+            continue;
+        }
+        if let Some(character) = rest.chars().next() {
+            plain.push(character);
+            rest = &rest[character.len_utf8()..];
+        } else {
+            break;
+        }
+    }
+    plain
+}
+
+pub(crate) fn render_code_line_spans(
+    line: &str,
+    accent: Color,
+    base_style: Style,
+) -> Vec<Span<'static>> {
+    render_code_line_spans_with_bg(line, accent, base_style, Color::Rgb(28, 33, 41))
+}
+
+pub(crate) fn render_code_line_spans_with_bg(
+    line: &str,
+    accent: Color,
+    base_style: Style,
+    bg: Color,
+) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            "│ ",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if line.is_empty() {
+                " ".to_owned()
+            } else {
+                line.to_owned()
+            },
+            base_style.bg(bg),
+        ),
+    ]
+}
+
+fn fenced_code_language(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    trimmed.strip_prefix("```").map(str::trim)
+}
+
+fn markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let trimmed = line.trim_start();
+    let level = trimmed
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+    if !(1..=6).contains(&level) {
+        return None;
+    }
+    let remainder = trimmed[level..].trim_start();
+    if remainder.is_empty() {
+        None
+    } else {
+        Some((level, remainder))
+    }
+}
+
+fn markdown_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.len() >= 3
+        && trimmed
+            .chars()
+            .all(|character| matches!(character, '-' | '*' | '_' | ' '))
+}
+
+fn markdown_task_item(line: &str) -> Option<(bool, &str)> {
+    let trimmed = line.trim_start();
+    let content = trimmed
+        .strip_prefix("- [ ] ")
+        .or_else(|| trimmed.strip_prefix("* [ ] "))
+        .map(|content| (false, content));
+    content.or_else(|| {
+        trimmed
+            .strip_prefix("- [x] ")
+            .or_else(|| trimmed.strip_prefix("* [x] "))
+            .map(|content| (true, content))
+    })
+}
+
+fn markdown_bullet_item(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+}
+
+fn markdown_ordered_item(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim_start();
+    let digits = trimmed
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    let number = &trimmed[..digits];
+    let rest = trimmed[digits..].strip_prefix(". ")?;
+    Some((number, rest))
+}
+
+fn markdown_list_indent(line: &str) -> usize {
+    line.chars()
+        .take_while(|character| matches!(character, ' ' | '\t'))
+        .map(|character| if character == '\t' { 4 } else { 1 })
+        .sum::<usize>()
+        / 2
+}
+
+fn markdown_quote(line: &str) -> Option<&str> {
+    line.trim_start().strip_prefix("> ")
+}
+
+fn markdown_table_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.matches('|').count() >= 2
+}
+
+fn markdown_link(text: &str) -> Option<(&str, &str, usize)> {
+    let after_label = text.strip_prefix('[')?;
+    let label_end = after_label.find("](")?;
+    let label = &after_label[..label_end];
+    let after_url = &after_label[label_end + 2..];
+    let url_end = after_url.find(')')?;
+    let url = &after_url[..url_end];
+    let consumed = 1 + label_end + 2 + url_end + 1;
+    Some((label, url, consumed))
+}
+
+fn markdown_emphasis(text: &str) -> Option<(&str, usize)> {
+    for marker in ['*', '_'] {
+        let Some(after) = text.strip_prefix(marker) else {
+            continue;
+        };
+        if after.starts_with(marker) {
+            continue;
+        }
+        let end = emphasis_end(after, marker)?;
+        let content = &after[..end];
+        if content.is_empty() {
+            continue;
+        }
+        return Some((content, 1 + end + 1));
+    }
+    None
+}
+
+fn emphasis_end(text: &str, marker: char) -> Option<usize> {
+    if marker != '_' {
+        return text.find(marker);
+    }
+    for (index, character) in text.char_indices() {
+        if character != marker {
+            continue;
+        }
+        let previous = text[..index].chars().next_back();
+        let next = text[index + marker.len_utf8()..].chars().next();
+        if previous.is_some_and(char::is_alphanumeric) && next.is_some_and(char::is_alphanumeric) {
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn next_inline_marker(text: &str) -> Option<usize> {
+    let markers = [
+        text.find("**"),
+        text.find('`'),
+        text.find('['),
+        text.find('*'),
+        next_underscore_marker(text),
+    ];
+    markers.into_iter().flatten().min()
+}
+
+fn next_underscore_marker(text: &str) -> Option<usize> {
+    for (index, character) in text.char_indices() {
+        if character != '_' {
+            continue;
+        }
+        let previous = text[..index].chars().next_back();
+        let next = text[index + character.len_utf8()..].chars().next();
+        if previous.is_some_and(char::is_alphanumeric) && next.is_some_and(char::is_alphanumeric) {
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn render_table_spans(
+    line: &str,
+    base_style: Style,
+    options: MarkdownRenderOptions,
+) -> Vec<Span<'static>> {
+    let cells = line
+        .trim()
+        .trim_matches('|')
+        .split('|')
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if cells.is_empty() {
+        return vec![Span::styled(line.to_owned(), base_style)];
+    }
+    if cells.iter().all(|cell| {
+        !cell.is_empty()
+            && cell
+                .chars()
+                .all(|character| matches!(character, '-' | ':' | ' '))
+    }) {
+        let width = cells
+            .iter()
+            .map(|cell| cell.len().max(3) + 2)
+            .sum::<usize>()
+            .saturating_add(cells.len().saturating_sub(1) * 3)
+            .max(12);
+        return vec![Span::styled("┄".repeat(width), Style::default().fg(dim()))];
+    }
+    let mut spans = vec![Span::styled("│ ", Style::default().fg(Color::DarkGray))];
+    for (index, cell) in cells.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        }
+        if cell.is_empty() {
+            spans.push(Span::styled(" ", base_style));
+        } else {
+            spans.extend(render_inline_markdown_spans_with_options(
+                cell, base_style, options,
+            ));
+        }
+    }
+    spans.push(Span::styled(" │", Style::default().fg(Color::DarkGray)));
+    spans
+}
+
+fn line_looks_like_code(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    line.starts_with("    ")
+        || line.starts_with('\t')
+        || line.contains('│')
+        || line.contains('└')
+        || line.contains('├')
+        || line.contains('┌')
+        || line.contains('─')
+        || trimmed.starts_with('{')
+        || trimmed.starts_with('}')
+        || trimmed.starts_with('[')
+        || trimmed.starts_with(']')
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::style::{Color, Style};
+
+    use super::*;
+
+    fn plain_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    fn line_plain_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn markdown_timeline_lines_render_code_blocks() {
+        let lines = render_markdown_timeline_lines(
+            Color::Cyan,
+            Style::default(),
+            "```rust\nfn main() {}\n```",
+            MarkdownRenderOptions::timeline(80),
+        );
+        let plain = plain_text(&lines);
+        assert!(plain.contains("rust"));
+        assert!(plain.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn markdown_timeline_lines_apply_code_wrap_options() {
+        let source = "```text\nabcdefghijklmnopqrstuvwxyz\n```";
+        let wrapped = render_markdown_timeline_lines(
+            Color::Cyan,
+            Style::default(),
+            source,
+            MarkdownRenderOptions {
+                code_wrap: CodeWrapMode::Wrap,
+                ..MarkdownRenderOptions::timeline(20)
+            },
+        );
+        let truncated = render_markdown_timeline_lines(
+            Color::Cyan,
+            Style::default(),
+            source,
+            MarkdownRenderOptions {
+                code_wrap: CodeWrapMode::Truncate,
+                ..MarkdownRenderOptions::timeline(20)
+            },
+        );
+
+        assert!(wrapped.len() > truncated.len());
+        assert!(plain_text(&truncated).contains("..."));
+    }
+
+    #[test]
+    fn markdown_table_options_compact_or_preserve_widths() {
+        let source = "| name | description |\n| --- | --- |\n| 文件 | very very long value |";
+        let compact = render_markdown_timeline_lines(
+            Color::Cyan,
+            Style::default(),
+            source,
+            MarkdownRenderOptions::timeline(24),
+        );
+        let preserve = render_markdown_timeline_lines(
+            Color::Cyan,
+            Style::default(),
+            source,
+            MarkdownRenderOptions {
+                table_mode: TableRenderMode::Preserve,
+                ..MarkdownRenderOptions::timeline(24)
+            },
+        );
+
+        let compact_widest = compact
+            .iter()
+            .map(|line| UnicodeWidthStr::width(plain_text(std::slice::from_ref(line)).as_str()))
+            .max()
+            .unwrap_or(0);
+        let preserve_widest = preserve
+            .iter()
+            .map(|line| UnicodeWidthStr::width(plain_text(std::slice::from_ref(line)).as_str()))
+            .max()
+            .unwrap_or(0);
+
+        assert!(compact_widest <= preserve_widest);
+        assert!(plain_text(&compact).contains("文件"));
+    }
+
+    #[test]
+    fn markdown_lists_keep_nesting_and_task_markers_readable() {
+        let mut state = MarkdownRenderState::default();
+        let nested = render_markdown_spans(
+            "  - child",
+            Style::default(),
+            &mut state,
+            MarkdownRenderOptions::timeline(80),
+        );
+        let task = render_markdown_spans(
+            "    - [x] done",
+            Style::default(),
+            &mut MarkdownRenderState::default(),
+            MarkdownRenderOptions::timeline(80),
+        );
+
+        assert_eq!(nested[0].content.as_ref(), "  • ");
+        assert_eq!(task[0].content.as_ref(), "    [x] ");
+    }
+
+    #[test]
+    fn markdown_timeline_wraps_list_continuations_with_hanging_indent() {
+        let lines = render_markdown_timeline_lines(
+            Color::Cyan,
+            Style::default(),
+            "- abcdefghijklmnopqrstuvwxyz",
+            MarkdownRenderOptions::timeline(12),
+        );
+        let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+
+        assert!(rows.len() > 1);
+        assert!(rows[0].starts_with("  • "));
+        assert!(rows[1].starts_with("    "));
+        assert!(!rows[1].starts_with("  ij"));
+    }
+
+    #[test]
+    fn markdown_timeline_wraps_quote_continuations_with_quote_prefix() {
+        let lines = render_markdown_timeline_lines(
+            Color::Cyan,
+            Style::default(),
+            "> abcdefghijklmnopqrstuvwxyz",
+            MarkdownRenderOptions::timeline(12),
+        );
+        let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+
+        assert!(rows.len() > 2);
+        assert!(rows[1..].iter().all(|row| row.starts_with("  ▌ ")));
+    }
+
+    #[test]
+    fn markdown_timeline_wraps_code_block_rows_with_code_prefix() {
+        let lines = render_markdown_timeline_lines(
+            Color::Cyan,
+            Style::default(),
+            "```plain\nabcdefghijklmnopqrstuvwxyz\n```",
+            MarkdownRenderOptions::timeline(12),
+        );
+        let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+        let code_rows = rows
+            .iter()
+            .filter(|row| row.starts_with("  │ "))
+            .collect::<Vec<_>>();
+
+        assert!(code_rows.len() > 1);
+        assert!(code_rows.iter().all(|row| row.starts_with("  │ ")));
+    }
+
+    #[test]
+    fn markdown_links_can_hide_or_truncate_urls() {
+        let visible = render_inline_markdown_spans_with_options(
+            "[docs](https://example.com/very/long/path)",
+            Style::default(),
+            MarkdownRenderOptions::timeline(24),
+        );
+        let hidden = render_inline_markdown_spans_with_options(
+            "[docs](https://example.com/very/long/path)",
+            Style::default(),
+            MarkdownRenderOptions {
+                show_link_urls: false,
+                ..MarkdownRenderOptions::timeline(24)
+            },
+        );
+
+        let visible_text = visible
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let hidden_text = hidden
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(visible_text.contains("docs <https://"));
+        assert!(visible_text.contains("..."));
+        assert_eq!(hidden_text, "docs");
+    }
+
+    #[test]
+    fn markdown_emphasis_does_not_split_intraword_underscores() {
+        let spans = render_inline_markdown_spans_with_options(
+            "src/my_file_name.rs",
+            Style::default(),
+            MarkdownRenderOptions::timeline(80),
+        );
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, "src/my_file_name.rs");
+        assert_eq!(spans.len(), 1);
+    }
+
+    #[test]
+    fn markdown_plain_text_strips_inline_markup() {
+        assert_eq!(
+            markdown_plain_text("**Phase 3** [doc](https://example.com)"),
+            "Phase 3 doc"
+        );
+    }
+}

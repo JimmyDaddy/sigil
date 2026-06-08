@@ -11,7 +11,8 @@ use crate::app::{
 };
 
 use super::{
-    approval_block_title, centered_rect, halo_rect, render_inline_markdown_spans, shadow_rect,
+    geometry::{centered_rect, halo_rect, shadow_rect},
+    markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_options},
 };
 
 pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
@@ -76,7 +77,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
         return;
     }
 
-    let header_lines = approval_header_lines(&view);
+    let header_lines = approval_header_lines(&view, inner_width);
     let footer_lines = approval_footer_lines(&view);
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -186,7 +187,11 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     );
 }
 
-fn approval_header_lines(view: &ApprovalModalView) -> Vec<Line<'static>> {
+fn approval_block_title(_app: &AppState) -> &'static str {
+    " Review Tool Call "
+}
+
+fn approval_header_lines(view: &ApprovalModalView, max_content_width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(vec![
             approval_badge(
@@ -229,10 +234,12 @@ fn approval_header_lines(view: &ApprovalModalView) -> Vec<Line<'static>> {
             Style::default().fg(Color::DarkGray),
         ));
     } else {
+        let markdown_options = MarkdownRenderOptions::modal(max_content_width);
         lines.extend(view.preview_summary.lines().take(2).map(|line| {
-            Line::from(render_inline_markdown_spans(
+            Line::from(render_inline_markdown_spans_with_options(
                 line,
                 Style::default().fg(Color::Gray),
+                markdown_options,
             ))
         }));
     }

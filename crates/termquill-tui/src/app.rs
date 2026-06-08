@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     env, fs,
+    io::{BufRead, BufReader},
     ops::Range,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
@@ -8,15 +9,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use termquill_kernel::{
     AgentConfig, ApprovalMode, CompactionConfig, CompactionPreview, CompactionRecord,
-    CompactionThresholdStatus, ControlEntry, EventHandler, JsonlSessionStore, McpServerConfig,
-    MemoryConfig, ModelMessage, PermissionConfig, ReasoningEffort, RootConfig, RunEvent, Session,
-    SessionConfig, SessionLogEntry, SessionStats, ToolCall, ToolResult, ToolResultMeta, UsageStats,
-    WorkspaceConfig, inspect_memory_documents, latest_compaction_record, resolve_workspace_root,
+    CompactionThresholdStatus, ControlEntry, EventHandler, JsonlSessionStore, MemoryConfig,
+    ModelMessage, PermissionConfig, ReasoningEffort, RootConfig, RunEvent, Session, SessionConfig,
+    SessionLogEntry, SessionStats, ToolResult, ToolResultMeta, WorkspaceConfig,
+    inspect_memory_documents, latest_compaction_record, resolve_workspace_root,
     session_stats_from_entries,
 };
 use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQUILL_API_KEY_ENV};
@@ -27,6 +28,15 @@ pub(crate) use crate::approval::{
     ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
 };
 pub use crate::approval::{ApprovalDiffMode, PendingApproval};
+use crate::commands::{
+    UiCommand, command_for_key_event, keyboard_help_lines, metadata_slash_commands,
+    metadata_slash_help_lines,
+};
+pub(crate) use crate::config_panel::{
+    ConfigDraft, ConfigField, ConfigFieldMove, ConfigFooterAction, ConfigSection, ConfigState,
+    config_field_accepts_char, default_deepseek_provider_config, load_deepseek_provider_config,
+    render_config_value_row, serialize_deepseek_provider_value,
+};
 use crate::context_window::{
     ContextWindowSource, effective_compaction_config, resolve_context_window_tokens,
 };
@@ -37,24 +47,18 @@ use crate::provider_status::{
 };
 use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
+pub(crate) use crate::setup::{SetupField, SetupState};
 use crate::slash::{
     EFFORT_SELECTOR_OPTIONS, KNOWN_MODEL_IDS, MODEL_SELECTOR_OPTIONS, ResolvedSlashCommand,
     SLASH_COMMANDS, SlashArgumentOption, SlashCommandSpec, SlashSelectorEntry,
-    TOOL_CARD_SELECTOR_OPTIONS, TOOL_PREVIEW_SELECTOR_OPTIONS,
-};
-pub(crate) use crate::timeline::{
-    ActivityPanelMode, ActivityPanelRow, LiveActivitySummary, RunPhase, SidebarAgentRow,
-    SidebarCard, ThinkingBlockMode, ToolPreviewMode,
 };
 pub use crate::timeline::{EventEntry, TimelineEntry, TimelineRole};
+pub(crate) use crate::timeline::{
+    LiveActivitySummary, RunPhase, SessionHistoryRow, SidebarAgentRow, SidebarCard,
+    ThinkingBlockMode,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SetupField {
-    TrustCurrentFolder,
-    Model,
-    ApiKey,
-    Save,
-}
+const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModelPickerTarget {
@@ -85,6 +89,14 @@ struct ModelPickerState {
     current: String,
     options: Vec<String>,
     selected: usize,
+}
+
+#[derive(Debug)]
+struct ModelPickerRefresh {
+    target: ModelPickerTarget,
+    current: String,
+    base_url: String,
+    result: Result<Vec<String>, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +179,7 @@ enum ModalState {
     ModelPicker(ModelPickerState),
     SecretInput(SecretInputState),
     TextInput(TextInputState),
+    KeyboardHelp,
 }
 
 #[derive(Debug, Clone)]
@@ -185,804 +198,6 @@ enum ModalOutcome {
         target: TextInputTarget,
         value: String,
     },
-}
-
-impl SetupField {
-    const ORDER: [Self; 4] = [
-        Self::TrustCurrentFolder,
-        Self::Model,
-        Self::ApiKey,
-        Self::Save,
-    ];
-
-    fn next(self) -> Self {
-        let index = Self::ORDER
-            .iter()
-            .position(|field| *field == self)
-            .expect("setup field must exist in the ordered list");
-        Self::ORDER[(index + 1) % Self::ORDER.len()]
-    }
-
-    fn previous(self) -> Self {
-        let index = Self::ORDER
-            .iter()
-            .position(|field| *field == self)
-            .expect("setup field must exist in the ordered list");
-        if index == 0 {
-            *Self::ORDER.last().expect("setup fields are non-empty")
-        } else {
-            Self::ORDER[index - 1]
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigSection {
-    Provider,
-    Permissions,
-    Memory,
-    Compaction,
-    Mcp,
-}
-
-impl ConfigSection {
-    const FLOW: [Self; 5] = [
-        Self::Provider,
-        Self::Permissions,
-        Self::Memory,
-        Self::Compaction,
-        Self::Mcp,
-    ];
-
-    fn title(self) -> &'static str {
-        match self {
-            Self::Provider => "Provider",
-            Self::Permissions => "Permissions",
-            Self::Memory => "Memory",
-            Self::Compaction => "Compaction",
-            Self::Mcp => "MCP",
-        }
-    }
-
-    fn summary(self) -> &'static str {
-        match self {
-            Self::Provider => "provider settings",
-            Self::Permissions => "approval rules",
-            Self::Memory => "memory status",
-            Self::Compaction => "thresholds",
-            Self::Mcp => "MCP servers",
-        }
-    }
-
-    fn next_flow(self) -> Self {
-        let index = Self::FLOW
-            .iter()
-            .position(|section| *section == self)
-            .unwrap_or(0);
-        Self::FLOW[(index + 1) % Self::FLOW.len()]
-    }
-
-    fn previous_flow(self) -> Self {
-        let index = Self::FLOW
-            .iter()
-            .position(|section| *section == self)
-            .unwrap_or(0);
-        if index == 0 {
-            *Self::FLOW
-                .last()
-                .expect("config flow sections are non-empty")
-        } else {
-            Self::FLOW[index - 1]
-        }
-    }
-
-    fn flow_index(self) -> Option<usize> {
-        Self::FLOW.iter().position(|section| *section == self)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigField {
-    ProviderModel,
-    ProviderApiKey,
-    ProviderBaseUrl,
-    ProviderFimModel,
-    PermissionsWriteMode,
-    MemoryEnabled,
-    CompactionEnabled,
-    CompactionSoftThresholdRatio,
-    CompactionHardThresholdRatio,
-    CompactionContextWindowTokens,
-    CompactionTailMessages,
-    McpName,
-    McpCommand,
-    McpArgsCsv,
-    McpStartupTimeoutSecs,
-}
-
-impl ConfigField {
-    const PROVIDER_FIELDS: [Self; 4] = [
-        Self::ProviderModel,
-        Self::ProviderApiKey,
-        Self::ProviderBaseUrl,
-        Self::ProviderFimModel,
-    ];
-    const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionsWriteMode];
-    const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
-    const COMPACTION_FIELDS: [Self; 5] = [
-        Self::CompactionEnabled,
-        Self::CompactionSoftThresholdRatio,
-        Self::CompactionHardThresholdRatio,
-        Self::CompactionContextWindowTokens,
-        Self::CompactionTailMessages,
-    ];
-    const MCP_FIELDS: [Self; 4] = [
-        Self::McpName,
-        Self::McpCommand,
-        Self::McpArgsCsv,
-        Self::McpStartupTimeoutSecs,
-    ];
-
-    fn fields_for_section(section: ConfigSection) -> &'static [Self] {
-        match section {
-            ConfigSection::Provider => &Self::PROVIDER_FIELDS,
-            ConfigSection::Permissions => &Self::PERMISSION_FIELDS,
-            ConfigSection::Memory => &Self::MEMORY_FIELDS,
-            ConfigSection::Compaction => &Self::COMPACTION_FIELDS,
-            ConfigSection::Mcp => &Self::MCP_FIELDS,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::ProviderModel => "model",
-            Self::ProviderApiKey => "api_key",
-            Self::ProviderBaseUrl => "base_url",
-            Self::ProviderFimModel => "fim_model",
-            Self::PermissionsWriteMode => "write_mode",
-            Self::MemoryEnabled => "enabled",
-            Self::CompactionEnabled => "enabled",
-            Self::CompactionSoftThresholdRatio => "soft_threshold_ratio",
-            Self::CompactionHardThresholdRatio => "hard_threshold_ratio",
-            Self::CompactionContextWindowTokens => "context_window_tokens",
-            Self::CompactionTailMessages => "tail_messages",
-            Self::McpName => "name",
-            Self::McpCommand => "command",
-            Self::McpArgsCsv => "args_csv",
-            Self::McpStartupTimeoutSecs => "startup_timeout_secs",
-        }
-    }
-
-    fn accepts_text_input(self) -> bool {
-        matches!(
-            self,
-            Self::ProviderModel
-                | Self::ProviderBaseUrl
-                | Self::ProviderFimModel
-                | Self::CompactionSoftThresholdRatio
-                | Self::CompactionHardThresholdRatio
-                | Self::CompactionContextWindowTokens
-                | Self::CompactionTailMessages
-                | Self::McpName
-                | Self::McpCommand
-                | Self::McpArgsCsv
-                | Self::McpStartupTimeoutSecs
-        )
-    }
-
-    fn action_label(self) -> &'static str {
-        match self {
-            Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
-            Self::ProviderApiKey => "Enter input",
-            Self::PermissionsWriteMode => "Enter cycle",
-            Self::MemoryEnabled | Self::CompactionEnabled => "Enter toggle",
-            _ if self.accepts_text_input() => "Enter input",
-            _ => "",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigFooterAction {
-    Save,
-    SaveAndClose,
-    Close,
-}
-
-impl ConfigFooterAction {
-    const ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
-
-    fn button_label(self) -> &'static str {
-        match self {
-            Self::Save => "save",
-            Self::SaveAndClose => "save+close",
-            Self::Close => "close",
-        }
-    }
-
-    fn field_label(self) -> &'static str {
-        match self {
-            Self::Save => "save",
-            Self::SaveAndClose => "save_and_close",
-            Self::Close => "close",
-        }
-    }
-
-    fn next(self) -> Self {
-        let index = Self::ORDER
-            .iter()
-            .position(|action| *action == self)
-            .expect("footer action must exist in order");
-        Self::ORDER[(index + 1) % Self::ORDER.len()]
-    }
-
-    fn previous(self) -> Self {
-        let index = Self::ORDER
-            .iter()
-            .position(|action| *action == self)
-            .expect("footer action must exist in order");
-        if index == 0 {
-            *Self::ORDER.last().expect("footer actions are non-empty")
-        } else {
-            Self::ORDER[index - 1]
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConfigFieldMove {
-    Moved,
-    Boundary,
-    Unavailable,
-}
-
-#[derive(Debug, Clone)]
-struct McpServerDraft {
-    name: String,
-    command: String,
-    args_csv: String,
-    startup_timeout_secs: String,
-}
-
-impl McpServerDraft {
-    fn from_config(config: &McpServerConfig) -> Self {
-        Self {
-            name: config.name.clone(),
-            command: config.command.clone(),
-            args_csv: config.args.join(", "),
-            startup_timeout_secs: config.startup_timeout_secs.to_string(),
-        }
-    }
-
-    fn to_config(&self, index: usize) -> Result<McpServerConfig> {
-        let name = self.name.trim();
-        if name.is_empty() {
-            bail!("mcp server {} name cannot be empty", index + 1);
-        }
-        let command = self.command.trim();
-        if command.is_empty() {
-            bail!("mcp server {} command cannot be empty", index + 1);
-        }
-        let startup_timeout_secs =
-            self.startup_timeout_secs
-                .trim()
-                .parse::<u64>()
-                .map_err(|error| {
-                    anyhow!(
-                        "mcp server {} startup_timeout_secs must be a positive integer: {error}",
-                        index + 1
-                    )
-                })?;
-        if startup_timeout_secs == 0 {
-            bail!(
-                "mcp server {} startup_timeout_secs must be greater than 0",
-                index + 1
-            );
-        }
-
-        Ok(McpServerConfig {
-            name: name.to_owned(),
-            command: command.to_owned(),
-            args: self
-                .args_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect(),
-            startup_timeout_secs,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ConfigDraft {
-    base_root_config: RootConfig,
-    provider_model: String,
-    provider_api_key: String,
-    provider_base_url: String,
-    provider_beta_base_url: String,
-    provider_anthropic_base_url: String,
-    provider_user_id_strategy: String,
-    provider_strict_tools_mode: StrictToolsMode,
-    provider_fim_model: String,
-    provider_request_timeout_secs: String,
-    permission_write_mode: ApprovalMode,
-    memory_enabled: bool,
-    compaction_enabled: bool,
-    compaction_soft_threshold_ratio: String,
-    compaction_hard_threshold_ratio: String,
-    compaction_context_window_tokens: String,
-    compaction_tail_messages: String,
-    mcp_servers: Vec<McpServerDraft>,
-}
-
-impl ConfigDraft {
-    fn from_root_config(root_config: &RootConfig) -> Self {
-        let provider = load_deepseek_provider_config(root_config)
-            .unwrap_or_else(|| default_deepseek_provider_config(&root_config.agent.model));
-        Self {
-            base_root_config: root_config.clone(),
-            provider_model: provider.model,
-            provider_api_key: provider.api_key.unwrap_or_default(),
-            provider_base_url: provider.base_url,
-            provider_beta_base_url: provider.beta_base_url,
-            provider_anthropic_base_url: provider.anthropic_base_url,
-            provider_user_id_strategy: provider.user_id_strategy.unwrap_or_default(),
-            provider_strict_tools_mode: provider.strict_tools_mode,
-            provider_fim_model: provider.fim_model,
-            provider_request_timeout_secs: provider.request_timeout_secs.to_string(),
-            permission_write_mode: root_config.permission.write_mode,
-            memory_enabled: root_config.memory.enabled,
-            compaction_enabled: root_config.compaction.enabled,
-            compaction_soft_threshold_ratio: root_config
-                .compaction
-                .soft_threshold_ratio
-                .to_string(),
-            compaction_hard_threshold_ratio: root_config
-                .compaction
-                .hard_threshold_ratio
-                .to_string(),
-            compaction_context_window_tokens: root_config
-                .compaction
-                .context_window_tokens
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            compaction_tail_messages: root_config.compaction.tail_messages.to_string(),
-            mcp_servers: root_config
-                .mcp_servers
-                .iter()
-                .map(McpServerDraft::from_config)
-                .collect(),
-        }
-    }
-
-    fn to_root_config(&self) -> Result<RootConfig> {
-        let model = self.provider_model.trim();
-        if model.is_empty() {
-            bail!("model cannot be empty");
-        }
-        let api_key = self.provider_api_key.trim();
-        let base_url = self.provider_base_url.trim();
-        if base_url.is_empty() {
-            bail!("base_url cannot be empty");
-        }
-        let beta_base_url = self.provider_beta_base_url.trim();
-        if beta_base_url.is_empty() {
-            bail!("beta_base_url cannot be empty");
-        }
-        let anthropic_base_url = self.provider_anthropic_base_url.trim();
-        if anthropic_base_url.is_empty() {
-            bail!("anthropic_base_url cannot be empty");
-        }
-        let fim_model = self.provider_fim_model.trim();
-        if fim_model.is_empty() {
-            bail!("fim_model cannot be empty");
-        }
-
-        let request_timeout_secs = self
-            .provider_request_timeout_secs
-            .trim()
-            .parse::<u64>()
-            .map_err(|error| anyhow!("request_timeout_secs must be a positive integer: {error}"))?;
-        if request_timeout_secs == 0 {
-            bail!("request_timeout_secs must be greater than 0");
-        }
-
-        let soft_threshold_ratio = self
-            .compaction_soft_threshold_ratio
-            .trim()
-            .parse::<f32>()
-            .map_err(|error| anyhow!("soft_threshold_ratio must be a decimal number: {error}"))?;
-        let hard_threshold_ratio = self
-            .compaction_hard_threshold_ratio
-            .trim()
-            .parse::<f32>()
-            .map_err(|error| anyhow!("hard_threshold_ratio must be a decimal number: {error}"))?;
-        if !(0.0..=1.0).contains(&soft_threshold_ratio) {
-            bail!("soft_threshold_ratio must be between 0.0 and 1.0");
-        }
-        if !(0.0..=1.0).contains(&hard_threshold_ratio) {
-            bail!("hard_threshold_ratio must be between 0.0 and 1.0");
-        }
-        if hard_threshold_ratio < soft_threshold_ratio {
-            bail!("hard_threshold_ratio must be greater than or equal to soft_threshold_ratio");
-        }
-
-        let context_window_tokens = if self.compaction_context_window_tokens.trim().is_empty() {
-            None
-        } else {
-            let parsed = self
-                .compaction_context_window_tokens
-                .trim()
-                .parse::<u32>()
-                .map_err(|error| {
-                    anyhow!("context_window_tokens must be a positive integer: {error}")
-                })?;
-            if parsed == 0 {
-                bail!("context_window_tokens must be greater than 0");
-            }
-            Some(parsed)
-        };
-
-        let tail_messages = self
-            .compaction_tail_messages
-            .trim()
-            .parse::<usize>()
-            .map_err(|error| anyhow!("tail_messages must be a positive integer: {error}"))?;
-        if tail_messages == 0 {
-            bail!("tail_messages must be greater than 0");
-        }
-
-        let mut root_config = self.base_root_config.clone();
-        root_config.agent.model = model.to_owned();
-        root_config.permission.write_mode = self.permission_write_mode;
-        root_config.memory.enabled = self.memory_enabled;
-        root_config.compaction.enabled = self.compaction_enabled;
-        root_config.compaction.soft_threshold_ratio = soft_threshold_ratio;
-        root_config.compaction.hard_threshold_ratio = hard_threshold_ratio;
-        root_config.compaction.context_window_tokens = context_window_tokens;
-        root_config.compaction.tail_messages = tail_messages;
-        root_config.mcp_servers = self
-            .mcp_servers
-            .iter()
-            .enumerate()
-            .map(|(index, server)| server.to_config(index))
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut provider_config = load_deepseek_provider_config(&root_config)
-            .unwrap_or_else(|| default_deepseek_provider_config(model));
-        provider_config.model = model.to_owned();
-        provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
-        provider_config.base_url = base_url.to_owned();
-        provider_config.beta_base_url = beta_base_url.to_owned();
-        provider_config.anthropic_base_url = anthropic_base_url.to_owned();
-        provider_config.user_id_strategy = (!self.provider_user_id_strategy.trim().is_empty())
-            .then(|| self.provider_user_id_strategy.trim().to_owned());
-        provider_config.strict_tools_mode = self.provider_strict_tools_mode;
-        provider_config.fim_model = fim_model.to_owned();
-        provider_config.request_timeout_secs = request_timeout_secs;
-
-        let provider_value = serialize_deepseek_provider_value(&provider_config)?;
-        root_config
-            .providers
-            .insert("deepseek".to_owned(), provider_value);
-        Ok(root_config)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ConfigState {
-    selected_section: ConfigSection,
-    selected_field: Option<ConfigField>,
-    footer_selected: bool,
-    selected_footer_action: ConfigFooterAction,
-    selected_mcp_server_index: usize,
-    draft: ConfigDraft,
-    dirty: bool,
-    close_guard_armed: bool,
-}
-
-impl ConfigState {
-    fn from_root_config(root_config: &RootConfig) -> Self {
-        let selected_section = ConfigSection::Provider;
-        Self {
-            selected_section,
-            selected_field: ConfigField::fields_for_section(selected_section)
-                .first()
-                .copied(),
-            footer_selected: false,
-            selected_footer_action: ConfigFooterAction::Save,
-            selected_mcp_server_index: 0,
-            draft: ConfigDraft::from_root_config(root_config),
-            dirty: false,
-            close_guard_armed: false,
-        }
-    }
-
-    fn set_section(&mut self, section: ConfigSection) {
-        self.selected_section = section;
-        self.sync_mcp_selection();
-        self.footer_selected = false;
-        self.selected_field = self.first_field_for_section(section);
-    }
-
-    fn first_field_for_section(&self, section: ConfigSection) -> Option<ConfigField> {
-        if section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
-            None
-        } else {
-            ConfigField::fields_for_section(section).first().copied()
-        }
-    }
-
-    fn last_field_for_current_section(&self) -> Option<ConfigField> {
-        if self.selected_section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
-            None
-        } else {
-            ConfigField::fields_for_section(self.selected_section)
-                .last()
-                .copied()
-        }
-    }
-
-    fn move_field(&mut self, forward: bool) -> ConfigFieldMove {
-        if self.selected_section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
-            return ConfigFieldMove::Unavailable;
-        }
-        let fields = ConfigField::fields_for_section(self.selected_section);
-        if fields.is_empty() {
-            return ConfigFieldMove::Unavailable;
-        }
-
-        let current_index = self
-            .selected_field
-            .and_then(|field| fields.iter().position(|candidate| *candidate == field))
-            .unwrap_or(0);
-        let next_index = if forward {
-            if current_index + 1 >= fields.len() {
-                return ConfigFieldMove::Boundary;
-            }
-            current_index + 1
-        } else {
-            if current_index == 0 {
-                return ConfigFieldMove::Boundary;
-            }
-            current_index - 1
-        };
-        self.selected_field = Some(fields[next_index]);
-        self.footer_selected = false;
-        ConfigFieldMove::Moved
-    }
-
-    fn focus_footer(&mut self, action: ConfigFooterAction) {
-        self.footer_selected = true;
-        self.selected_footer_action = action;
-    }
-
-    fn focus_last_field(&mut self) -> bool {
-        let Some(field) = self.last_field_for_current_section() else {
-            return false;
-        };
-        self.selected_field = Some(field);
-        self.footer_selected = false;
-        true
-    }
-
-    fn move_footer_action(&mut self, forward: bool) {
-        self.footer_selected = true;
-        self.selected_footer_action = if forward {
-            self.selected_footer_action.next()
-        } else {
-            self.selected_footer_action.previous()
-        };
-    }
-
-    fn sync_mcp_selection(&mut self) {
-        if self.draft.mcp_servers.is_empty() {
-            self.selected_mcp_server_index = 0;
-            if self.selected_section == ConfigSection::Mcp {
-                self.selected_field = None;
-            }
-            return;
-        }
-        self.selected_mcp_server_index = self
-            .selected_mcp_server_index
-            .min(self.draft.mcp_servers.len().saturating_sub(1));
-    }
-
-    fn selected_mcp_server(&self) -> Option<&McpServerDraft> {
-        self.draft.mcp_servers.get(self.selected_mcp_server_index)
-    }
-
-    fn selected_mcp_server_mut(&mut self) -> Option<&mut McpServerDraft> {
-        self.draft
-            .mcp_servers
-            .get_mut(self.selected_mcp_server_index)
-    }
-
-    fn editing_field(&self) -> Option<ConfigField> {
-        None
-    }
-
-    fn add_mcp_server(&mut self) {
-        let next_index = self.draft.mcp_servers.len() + 1;
-        self.draft.mcp_servers.push(McpServerDraft {
-            name: format!("server-{next_index}"),
-            command: "npx".to_owned(),
-            args_csv: String::new(),
-            startup_timeout_secs: "10".to_owned(),
-        });
-        self.selected_mcp_server_index = self.draft.mcp_servers.len() - 1;
-        if self.selected_section == ConfigSection::Mcp {
-            self.footer_selected = false;
-            self.selected_field = Some(ConfigField::McpName);
-        }
-        self.dirty = true;
-    }
-
-    fn remove_selected_mcp_server(&mut self) -> bool {
-        if self.draft.mcp_servers.is_empty() {
-            return false;
-        }
-        self.draft
-            .mcp_servers
-            .remove(self.selected_mcp_server_index);
-        self.sync_mcp_selection();
-        if self.selected_section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
-            self.selected_field = None;
-        }
-        self.dirty = true;
-        true
-    }
-
-    fn cycle_mcp_server(&mut self, forward: bool) -> bool {
-        if self.draft.mcp_servers.is_empty() {
-            return false;
-        }
-        let len = self.draft.mcp_servers.len();
-        if forward {
-            self.selected_mcp_server_index = (self.selected_mcp_server_index + 1) % len;
-        } else if self.selected_mcp_server_index == 0 {
-            self.selected_mcp_server_index = len - 1;
-        } else {
-            self.selected_mcp_server_index -= 1;
-        }
-        true
-    }
-
-    fn field_text_value(&self, field: ConfigField) -> Option<&str> {
-        match field {
-            ConfigField::ProviderModel => Some(&self.draft.provider_model),
-            ConfigField::ProviderApiKey => Some(&self.draft.provider_api_key),
-            ConfigField::ProviderBaseUrl => Some(&self.draft.provider_base_url),
-            ConfigField::ProviderFimModel => Some(&self.draft.provider_fim_model),
-            ConfigField::CompactionSoftThresholdRatio => {
-                Some(&self.draft.compaction_soft_threshold_ratio)
-            }
-            ConfigField::CompactionHardThresholdRatio => {
-                Some(&self.draft.compaction_hard_threshold_ratio)
-            }
-            ConfigField::CompactionContextWindowTokens => {
-                Some(&self.draft.compaction_context_window_tokens)
-            }
-            ConfigField::CompactionTailMessages => Some(&self.draft.compaction_tail_messages),
-            ConfigField::McpName => self
-                .selected_mcp_server()
-                .map(|server| server.name.as_str()),
-            ConfigField::McpCommand => self
-                .selected_mcp_server()
-                .map(|server| server.command.as_str()),
-            ConfigField::McpArgsCsv => self
-                .selected_mcp_server()
-                .map(|server| server.args_csv.as_str()),
-            ConfigField::McpStartupTimeoutSecs => self
-                .selected_mcp_server()
-                .map(|server| server.startup_timeout_secs.as_str()),
-            ConfigField::PermissionsWriteMode
-            | ConfigField::MemoryEnabled
-            | ConfigField::CompactionEnabled => None,
-        }
-    }
-
-    fn field_text_value_mut(&mut self, field: ConfigField) -> Option<&mut String> {
-        match field {
-            ConfigField::ProviderModel => Some(&mut self.draft.provider_model),
-            ConfigField::ProviderApiKey => Some(&mut self.draft.provider_api_key),
-            ConfigField::ProviderBaseUrl => Some(&mut self.draft.provider_base_url),
-            ConfigField::ProviderFimModel => Some(&mut self.draft.provider_fim_model),
-            ConfigField::CompactionSoftThresholdRatio => {
-                Some(&mut self.draft.compaction_soft_threshold_ratio)
-            }
-            ConfigField::CompactionHardThresholdRatio => {
-                Some(&mut self.draft.compaction_hard_threshold_ratio)
-            }
-            ConfigField::CompactionContextWindowTokens => {
-                Some(&mut self.draft.compaction_context_window_tokens)
-            }
-            ConfigField::CompactionTailMessages => Some(&mut self.draft.compaction_tail_messages),
-            ConfigField::McpName => self
-                .selected_mcp_server_mut()
-                .map(|server| &mut server.name),
-            ConfigField::McpCommand => self
-                .selected_mcp_server_mut()
-                .map(|server| &mut server.command),
-            ConfigField::McpArgsCsv => self
-                .selected_mcp_server_mut()
-                .map(|server| &mut server.args_csv),
-            ConfigField::McpStartupTimeoutSecs => self
-                .selected_mcp_server_mut()
-                .map(|server| &mut server.startup_timeout_secs),
-            ConfigField::PermissionsWriteMode
-            | ConfigField::MemoryEnabled
-            | ConfigField::CompactionEnabled => None,
-        }
-    }
-
-    fn display_value(&self, field: ConfigField) -> String {
-        let text_value = match field {
-            ConfigField::ProviderApiKey => return mask_secret(&self.draft.provider_api_key),
-            ConfigField::PermissionsWriteMode => {
-                return self.draft.permission_write_mode.as_str().to_owned();
-            }
-            ConfigField::MemoryEnabled => {
-                return setup_bool_label(self.draft.memory_enabled).to_owned();
-            }
-            ConfigField::CompactionEnabled => {
-                return setup_bool_label(self.draft.compaction_enabled).to_owned();
-            }
-            _ => self.field_text_value(field).unwrap_or_default(),
-        };
-
-        match field {
-            ConfigField::McpArgsCsv if text_value.trim().is_empty() => "<empty>".to_owned(),
-            ConfigField::CompactionContextWindowTokens if text_value.trim().is_empty() => {
-                "<empty = n/a>".to_owned()
-            }
-            _ => text_value.to_owned(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SetupState {
-    config_path: PathBuf,
-    selected_field: SetupField,
-    model: String,
-    api_key: String,
-    trusted_current_folder: bool,
-    startup_error: Option<String>,
-}
-
-impl SetupState {
-    fn new(config_path: PathBuf, startup_error: Option<String>) -> Self {
-        Self {
-            config_path,
-            selected_field: SetupField::TrustCurrentFolder,
-            model: "deepseek-v4-flash".to_owned(),
-            api_key: String::new(),
-            trusted_current_folder: false,
-            startup_error,
-        }
-    }
-
-    fn masked_api_key(&self) -> String {
-        if self.api_key.is_empty() {
-            "<empty>".to_owned()
-        } else {
-            "*".repeat(self.api_key.chars().count().max(8))
-        }
-    }
-
-    fn auth_summary(&self) -> String {
-        if !self.api_key.trim().is_empty() {
-            return "inline api_key pending save".to_owned();
-        }
-        if env::var(TERMQUILL_API_KEY_ENV).is_ok() {
-            return format!("env {TERMQUILL_API_KEY_ENV}");
-        }
-
-        "missing".to_owned()
-    }
 }
 
 #[derive(Debug)]
@@ -1020,12 +235,10 @@ pub struct AppState {
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
     session_view_mode: SessionViewMode,
-    activity_panel_mode: ActivityPanelMode,
     current_session_entries: Vec<SessionLogEntry>,
     latest_compaction_record: Option<CompactionRecord>,
     compaction_config: CompactionConfig,
     memory_config: MemoryConfig,
-    tool_preview_mode: ToolPreviewMode,
     thinking_block_mode: ThinkingBlockMode,
     selected_tool_timeline_entry: Option<usize>,
     expanded_tool_timeline_entries: BTreeSet<usize>,
@@ -1045,6 +258,7 @@ pub struct AppState {
     sidebar_agent_selected: usize,
     balance_snapshot: BalanceSnapshot,
     balance_refresh_rx: Option<Receiver<BalanceSnapshot>>,
+    model_picker_refresh_rx: Option<Receiver<ModelPickerRefresh>>,
     terminal_width: u16,
     terminal_height: u16,
     input_cursor: usize,
@@ -1132,12 +346,10 @@ impl AppState {
             config_state: None,
             modal_state: None,
             session_view_mode: SessionViewMode::Provider,
-            activity_panel_mode: ActivityPanelMode::Events,
             current_session_entries: Vec::new(),
             latest_compaction_record: None,
             compaction_config: root_config.compaction.clone(),
             memory_config: root_config.memory.clone(),
-            tool_preview_mode: ToolPreviewMode::Brief,
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             selected_tool_timeline_entry: None,
             expanded_tool_timeline_entries: BTreeSet::new(),
@@ -1160,6 +372,7 @@ impl AppState {
                 ..BalanceSnapshot::default()
             },
             balance_refresh_rx: None,
+            model_picker_refresh_rx: None,
             terminal_width: 120,
             terminal_height: 32,
             input_cursor: 0,
@@ -1224,12 +437,10 @@ impl AppState {
             config_state: None,
             modal_state: None,
             session_view_mode: SessionViewMode::Provider,
-            activity_panel_mode: ActivityPanelMode::Events,
             current_session_entries: Vec::new(),
             latest_compaction_record: None,
             compaction_config: CompactionConfig::default(),
             memory_config: MemoryConfig::default(),
-            tool_preview_mode: ToolPreviewMode::Brief,
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             selected_tool_timeline_entry: None,
             expanded_tool_timeline_entries: BTreeSet::new(),
@@ -1252,6 +463,7 @@ impl AppState {
                 ..BalanceSnapshot::default()
             },
             balance_refresh_rx: None,
+            model_picker_refresh_rx: None,
             terminal_width: 120,
             terminal_height: 32,
             input_cursor: 0,
@@ -1340,6 +552,8 @@ impl AppState {
         self.approval_selected_file_index = 0;
         self.approval_selected_hunk_index = 0;
         self.approval_diff_mode = ApprovalDiffMode::Full;
+        self.selected_tool_timeline_entry = None;
+        self.expanded_tool_timeline_entries.clear();
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
@@ -1353,6 +567,27 @@ impl AppState {
         }
         if self.is_config_mode() {
             return self.handle_config_key_event(key);
+        }
+
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.modal_state = None;
+            if self.is_busy {
+                self.last_notice = Some("cancellation requested".to_owned());
+                self.push_timeline(TimelineRole::Notice, "cancel requested");
+                return Ok(Some(AppAction::CancelRun));
+            }
+            self.should_quit = true;
+            return Ok(None);
+        }
+
+        if self.has_modal() {
+            let outcome = if key.code == KeyCode::Enter {
+                self.submit_modal()
+            } else {
+                self.handle_modal_key_event(key)
+            };
+            self.apply_modal_outcome(outcome);
+            return Ok(None);
         }
 
         if let Some(pending) = &self.pending_approval {
@@ -1513,6 +748,11 @@ impl AppState {
             }
         }
 
+        if let Some(command) = command_for_key_event(key) {
+            self.handle_ui_command(command);
+            return Ok(None);
+        }
+
         match key.code {
             KeyCode::Char('u')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1556,14 +796,7 @@ impl AppState {
             {
                 self.toggle_thinking_block_mode();
             }
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if self.is_busy {
-                    self.last_notice = Some("cancellation requested".to_owned());
-                    self.push_timeline(TimelineRole::Notice, "cancel requested");
-                    return Ok(Some(AppAction::CancelRun));
-                }
-                self.should_quit = true;
-            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
             KeyCode::Tab
                 if self.active_pane == PaneFocus::Composer && self.has_slash_selector() =>
             {
@@ -1615,6 +848,9 @@ impl AppState {
             KeyCode::Home => self.scroll_timeline_to_top(),
             KeyCode::End => self.unscroll_timeline(usize::MAX / 2),
             KeyCode::Esc => {
+                if self.input.is_empty() && self.handle_ui_command(UiCommand::ClearToolCardFocus) {
+                    return Ok(None);
+                }
                 self.input.clear();
                 self.input_cursor = 0;
                 self.reset_input_history_navigation();
@@ -1668,6 +904,33 @@ impl AppState {
         Ok(None)
     }
 
+    fn handle_ui_command(&mut self, command: UiCommand) -> bool {
+        if command == UiCommand::OpenKeyboardHelp {
+            self.open_keyboard_help();
+            return true;
+        }
+        if self.pending_approval.is_some()
+            || (self.active_pane == PaneFocus::Composer && !self.input.is_empty())
+        {
+            return false;
+        }
+
+        match command {
+            UiCommand::FocusLatestToolCard => self.focus_latest_tool_card(),
+            UiCommand::SelectNextToolCard => self.select_adjacent_tool_card(true),
+            UiCommand::SelectPreviousToolCard => self.select_adjacent_tool_card(false),
+            UiCommand::ToggleSelectedToolCard => self.toggle_selected_tool_card(),
+            UiCommand::ClearToolCardFocus => self.clear_tool_card_focus(),
+            UiCommand::SubmitPrompt
+            | UiCommand::CancelOrQuit
+            | UiCommand::ToggleWriteMode
+            | UiCommand::ToggleThinking
+            | UiCommand::OpenKeyboardHelp
+            | UiCommand::OpenConfig
+            | UiCommand::CompactNow => false,
+        }
+    }
+
     pub fn cache_hit_ratio(&self) -> f64 {
         let total = self.stats.cache_hit_tokens + self.stats.cache_miss_tokens;
         if total == 0 {
@@ -1718,6 +981,10 @@ impl AppState {
             .find(|spec| spec.canonical == token || spec.aliases.contains(&token))
     }
 
+    fn executable_slash_command(token: &str) -> Option<&'static SlashCommandSpec> {
+        Self::exact_slash_command(token)
+    }
+
     fn slash_option_matches(option: &SlashArgumentOption, query: &str) -> bool {
         if query.is_empty() {
             return true;
@@ -1765,8 +1032,7 @@ impl AppState {
         match spec.canonical {
             "/effort" => Some(self.effort_selector_entries(arg)),
             "/model" => Some(self.model_selector_entries(arg)),
-            "/tool" => Some(self.tool_card_selector_entries(arg)),
-            "/tools" => Some(self.tool_preview_selector_entries(arg)),
+            "/resume" => Some(self.resume_selector_entries(arg)),
             _ => None,
         }
     }
@@ -1851,44 +1117,40 @@ impl AppState {
         entries
     }
 
-    fn tool_preview_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
+    fn resume_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
         let query = arg.trim().to_ascii_lowercase();
-        let current = self.tool_preview_mode.as_str();
-        let mut options = TOOL_PREVIEW_SELECTOR_OPTIONS
-            .iter()
-            .copied()
-            .filter(|option| Self::slash_option_matches(option, &query))
-            .collect::<Vec<_>>();
-        options.sort_by_key(|option| option.value != current);
-
-        options
+        self.resume_candidate_indices()
             .into_iter()
-            .map(|option| SlashSelectorEntry {
-                fill: format!("/tools {}", option.value),
-                label: option.label.to_owned(),
-                description: format!("{}  {}", option.value, option.description),
-                resolved: ResolvedSlashCommand {
-                    canonical: "/tools",
-                    arg: option.value.to_owned(),
-                },
-            })
-            .collect()
-    }
-
-    fn tool_card_selector_entries(&self, arg: &str) -> Vec<SlashSelectorEntry> {
-        let query = arg.trim().to_ascii_lowercase();
-        TOOL_CARD_SELECTOR_OPTIONS
-            .iter()
-            .copied()
-            .filter(|option| Self::slash_option_matches(option, &query))
-            .map(|option| SlashSelectorEntry {
-                fill: format!("/tool {}", option.value),
-                label: option.label.to_owned(),
-                description: format!("{}  {}", option.value, option.description),
-                resolved: ResolvedSlashCommand {
-                    canonical: "/tool",
-                    arg: option.value.to_owned(),
-                },
+            .enumerate()
+            .filter_map(|(candidate_index, entry_index)| {
+                let entry = self.session_history.get(entry_index)?;
+                let ordinal = candidate_index + 1;
+                let label = session_history_display_label(entry);
+                let current = entry.path == self.session_log_path;
+                let search_text = format!(
+                    "{} {} {} {}",
+                    ordinal,
+                    entry.label.to_ascii_lowercase(),
+                    entry.title.clone().unwrap_or_default().to_ascii_lowercase(),
+                    entry.path.display().to_string().to_ascii_lowercase()
+                );
+                let latest_match = query == "latest" && candidate_index == 0;
+                let include = query.is_empty() || latest_match || search_text.contains(&query);
+                include.then(|| SlashSelectorEntry {
+                    fill: format!("/resume {ordinal}"),
+                    label: ordinal.to_string(),
+                    description: format!(
+                        "{}{}  {} · {}",
+                        label,
+                        if current { "  current" } else { "" },
+                        human_file_size(entry.bytes),
+                        relative_age_label(entry.modified_epoch_secs)
+                    ),
+                    resolved: ResolvedSlashCommand {
+                        canonical: "/resume",
+                        arg: entry.path.display().to_string(),
+                    },
+                })
             })
             .collect()
     }
@@ -1923,7 +1185,7 @@ impl AppState {
             return Some(entry.resolved);
         }
 
-        Self::exact_slash_command(token).map(|spec| ResolvedSlashCommand {
+        Self::executable_slash_command(token).map(|spec| ResolvedSlashCommand {
             canonical: spec.canonical,
             arg,
         })
@@ -1931,6 +1193,16 @@ impl AppState {
 
     fn reset_slash_selector(&mut self) {
         self.slash_selector_index = 0;
+        self.refresh_slash_selector_context();
+    }
+
+    fn refresh_slash_selector_context(&mut self) {
+        let Some((token, _)) = Self::slash_query(&self.input) else {
+            return;
+        };
+        if token == "/resume" {
+            self.refresh_session_history();
+        }
     }
 
     fn move_slash_selector(&mut self, forward: bool) {
@@ -2002,8 +1274,8 @@ impl AppState {
 
         match Self::exact_slash_command(token).map(|spec| spec.canonical) {
             Some("/effort") => Some("pick effort: low | medium | high | max"),
-            Some("/tool") => Some("pick tool card: latest | next | prev | open | close | toggle"),
-            Some("/tools") => Some("pick tool preview: brief | full"),
+            Some("/resume") if self.session_history.is_empty() => Some("no saved sessions"),
+            Some("/resume") => Some("no matching session"),
             _ => Some("no slash match"),
         }
     }
@@ -2037,14 +1309,15 @@ impl AppState {
 
     pub(crate) fn slash_selector_visible_rows(&self) -> u16 {
         if self.has_slash_selector() {
-            self.slash_selector_rows().len().clamp(1, 8) as u16
+            let title_rows = u16::from(self.slash_selector_title().is_some());
+            title_rows.saturating_add(self.slash_selector_rows().len().clamp(1, 8) as u16)
         } else {
             0
         }
     }
 
     pub fn composer_height(&self) -> u16 {
-        self.composer_input_rows().saturating_add(3).max(4)
+        self.composer_input_rows().saturating_add(4).max(5)
     }
 
     pub fn restore_latest_session_from_disk(&mut self, root_config: &RootConfig) -> bool {
@@ -2094,11 +1367,19 @@ impl AppState {
         hints
     }
 
+    pub(crate) fn slash_selector_title(&self) -> Option<&'static str> {
+        let (token, _) = Self::slash_query(&self.input)?;
+        match Self::exact_slash_command(token).map(|spec| spec.canonical) {
+            Some("/resume") => Some("Resume session"),
+            _ => None,
+        }
+    }
+
     fn composer_wrap_width(&self) -> usize {
         let total_width = self.terminal_width.max(24) as usize;
         let sidebar_width = sidebar_width_for_terminal(total_width);
         let composer_width = total_width.saturating_sub(sidebar_width).max(12);
-        composer_width.saturating_sub(8).max(1)
+        composer_width.saturating_sub(6).max(1)
     }
 
     pub(crate) fn footer_strip_height(&self) -> u16 {
@@ -2134,18 +1415,22 @@ impl AppState {
     }
 
     fn scrollback_cutoff_line(&self) -> usize {
-        let cutoff_entry = match self.streaming_assistant_index {
+        let durable_cutoff_entry = match self.streaming_assistant_index {
             Some(index) if index + 1 == self.timeline.len() && self.is_busy => index,
             _ => self.timeline.len(),
         };
-        if cutoff_entry == 0 {
+        let durable_cutoff_line = if durable_cutoff_entry == 0 {
             0
         } else {
             self.timeline_render_ranges
-                .get(cutoff_entry - 1)
+                .get(durable_cutoff_entry - 1)
                 .map(|range| range.end)
                 .unwrap_or(self.timeline_render_cache.len())
-        }
+        };
+        let live_tail_start = self
+            .effective_timeline_render_len()
+            .saturating_sub(self.timeline_viewport_rows().max(1));
+        durable_cutoff_line.min(live_tail_start)
     }
 
     fn transcript_page_step(&self) -> usize {
@@ -2315,14 +1600,8 @@ impl AppState {
                     self.open_config_panel();
                     Ok(None)
                 }
-                "/demo" => {
-                    self.inject_demo_run()?;
-                    Ok(None)
-                }
                 "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
                 "/model" => self.set_runtime_model_from_command(&command.arg),
-                "/tool" => self.set_tool_card_view_from_command(&command.arg),
-                "/tools" => self.set_tool_preview_mode_from_command(&command.arg),
                 "/quit" => {
                     self.should_quit = true;
                     self.push_timeline(TimelineRole::Notice, "quitting");
@@ -2344,12 +1623,6 @@ impl AppState {
                             Ok(None)
                         }
                     }
-                }
-                "/sessions" => {
-                    self.activity_panel_mode = ActivityPanelMode::Sessions;
-                    self.refresh_session_history();
-                    self.emit_session_history();
-                    Ok(None)
                 }
                 _ => {
                     self.push_timeline(TimelineRole::Notice, "unknown slash command");
@@ -2381,55 +1654,6 @@ impl AppState {
         self.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
         Ok(Some(AppAction::SubmitPrompt(prompt)))
-    }
-
-    fn inject_demo_run(&mut self) -> Result<()> {
-        self.push_timeline(TimelineRole::Notice, "rendering demo run...");
-        self.handle(RunEvent::Notice("demo run started".to_owned()))?;
-        self.handle(RunEvent::ReasoningDelta("scanning workspace...".to_owned()))?;
-        self.handle(RunEvent::TextDelta(
-            "inspecting workspace first.".to_owned(),
-        ))?;
-        self.handle(RunEvent::ToolCallStarted(ToolCall {
-            id: "demo-call-1".to_owned(),
-            name: "ls".to_owned(),
-            args_json: r#"{"path":"."}"#.to_owned(),
-        }))?;
-        self.handle(RunEvent::ToolCallArgsDelta {
-            id: "demo-call-1".to_owned(),
-            delta: r#"{"path":"."}"#.to_owned(),
-        })?;
-        self.handle(RunEvent::ToolCallCompleted(ToolCall {
-            id: "demo-call-1".to_owned(),
-            name: "ls".to_owned(),
-            args_json: r#"{"path":"."}"#.to_owned(),
-        }))?;
-        self.handle(RunEvent::ToolResult(ToolResult {
-            call_id: "demo-call-1".to_owned(),
-            tool_name: "ls".to_owned(),
-            content: "Cargo.toml\ncrates/\ndev/\ntermquill.toml".to_owned(),
-            is_error: false,
-            metadata: Default::default(),
-        }))?;
-        self.handle(RunEvent::Usage(UsageStats {
-            prompt_tokens: 1200,
-            completion_tokens: 180,
-            cache_hit_tokens: 900,
-            cache_miss_tokens: 300,
-            input_cost: 0.0,
-            output_cost: 0.0,
-            cache_savings: 0.0,
-            system_fingerprint: Some("demo-fingerprint".to_owned()),
-        }))?;
-        self.handle(RunEvent::Control(ControlEntry::Note {
-            kind: "demo".to_owned(),
-            data: serde_json::json!({"status":"ok"}),
-        }))?;
-        self.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
-            Some("Demo run finished. The next milestone is binding this shell to the actual controller and agent loop.".to_owned()),
-            Vec::new(),
-        )))?;
-        Ok(())
     }
 
     fn push_timeline(&mut self, role: TimelineRole, text: impl Into<String>) {
@@ -2622,6 +1846,7 @@ impl AppState {
     }
 
     pub fn poll_background_tasks(&mut self) -> bool {
+        let mut dirty = false;
         let mut latest_balance = None;
         if let Some(receiver) = &self.balance_refresh_rx {
             while let Ok(snapshot) = receiver.try_recv() {
@@ -2633,9 +1858,19 @@ impl AppState {
             self.balance_refresh_rx = None;
             self.push_event("balance", snapshot.status);
             self.refresh_usage_sidebar_cache();
-            return true;
+            dirty = true;
         }
-        false
+        let mut latest_model_picker = None;
+        if let Some(receiver) = &self.model_picker_refresh_rx {
+            while let Ok(refresh) = receiver.try_recv() {
+                latest_model_picker = Some(refresh);
+            }
+        }
+        if let Some(refresh) = latest_model_picker {
+            self.model_picker_refresh_rx = None;
+            dirty |= self.apply_model_picker_refresh(refresh);
+        }
+        dirty
     }
 
     fn schedule_balance_refresh(&mut self) {
@@ -3123,7 +2358,7 @@ impl AppState {
 
     fn timeline_render_options(&self) -> crate::ui::TimelineRenderOptions {
         crate::ui::TimelineRenderOptions {
-            expand_tool_previews: matches!(self.tool_preview_mode, ToolPreviewMode::Full),
+            expand_tool_previews: false,
             expand_thinking_blocks: matches!(self.thinking_block_mode, ThinkingBlockMode::Expanded),
             selected_tool_entry: self.selected_tool_timeline_entry,
             expanded_tool_entries: self.expanded_tool_timeline_entries.clone(),
@@ -3318,7 +2553,7 @@ impl AppState {
             self.context_usage_line(),
             format!("compact: {}", self.compaction_status),
             self.compaction_policy_line(),
-            format!("tools: {}", self.tool_preview_mode.as_str()),
+            self.tool_card_status_line(),
             format!(
                 "cache: {:.0}% · save ${saved:.4}",
                 self.cache_hit_ratio() * 100.0
@@ -3412,49 +2647,6 @@ impl AppState {
         ((self.stats.last_prompt_tokens as f64 / cap as f64) * 100.0)
             .round()
             .clamp(0.0, 999.0) as u64
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn activity_panel_lines(&self) -> Vec<String> {
-        self.activity_panel_rows()
-            .into_iter()
-            .map(|row| match row {
-                ActivityPanelRow::Event { label, detail } => format!("{label} {detail}"),
-                ActivityPanelRow::SessionHeader { filter, total } => {
-                    format!("filter={filter} total={total}")
-                }
-                ActivityPanelRow::SessionItem {
-                    index,
-                    label,
-                    current,
-                    selected,
-                    meta,
-                } => format!(
-                    "{} {}. {}{} {}",
-                    if selected { ">" } else { " " },
-                    index,
-                    label,
-                    if current { " (current)" } else { "" },
-                    meta
-                ),
-                ActivityPanelRow::Empty { text } => text,
-            })
-            .collect()
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn activity_panel_rows(&self) -> Vec<ActivityPanelRow> {
-        match self.activity_panel_mode {
-            ActivityPanelMode::Events => self
-                .events
-                .iter()
-                .map(|event| ActivityPanelRow::Event {
-                    label: event.label.clone(),
-                    detail: truncate_session_view_text(&event.detail, 72),
-                })
-                .collect(),
-            ActivityPanelMode::Sessions => self.recent_session_rows(),
-        }
     }
 
     pub fn is_setup_mode(&self) -> bool {
@@ -3576,6 +2768,7 @@ impl AppState {
             ModalState::ModelPicker(state) => Some(state.target.title()),
             ModalState::SecretInput(state) => Some(state.target.title()),
             ModalState::TextInput(state) => Some(state.target.title()),
+            ModalState::KeyboardHelp => Some("Keyboard Help"),
         }
     }
 
@@ -3610,6 +2803,31 @@ impl AppState {
                 String::new(),
                 format!("{}: {}|", state.target.prompt_label(), state.buffer),
             ],
+            Some(ModalState::KeyboardHelp) => {
+                let mut lines = keyboard_help_lines(self.has_tool_cards());
+                lines.push(String::new());
+                lines.push("Slash commands".to_owned());
+                lines.extend(metadata_slash_help_lines());
+                let metadata_slash_commands = metadata_slash_commands().collect::<Vec<_>>();
+                lines.extend(SLASH_COMMANDS.iter().filter_map(|spec| {
+                    if metadata_slash_commands.contains(&spec.canonical) {
+                        return None;
+                    }
+                    let suffix = if spec.aliases.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (aliases: {})", spec.aliases.join(", "))
+                    };
+                    Some(format!(
+                        "{}: {}{}",
+                        spec.canonical, spec.description, suffix
+                    ))
+                }));
+                lines.push(String::new());
+                lines.push("Use / or 、 to open the command palette.".to_owned());
+                lines.push("Enter or Esc closes this help.".to_owned());
+                lines
+            }
             None => Vec::new(),
         }
     }
@@ -3621,6 +2839,7 @@ impl AppState {
                 Some((state.target.prompt_label(), state.buffer.chars().count(), 3))
             }
             ModalState::ModelPicker(_) => None,
+            ModalState::KeyboardHelp => None,
         }
     }
 
@@ -3816,7 +3035,7 @@ impl AppState {
     }
 
     fn open_model_picker(&mut self, target: ModelPickerTarget, current: &str) {
-        let (options, notice) = self.model_picker_options(target, current);
+        let options = build_model_picker_options(current, Vec::new());
         let selected = options
             .iter()
             .position(|option| option == current)
@@ -3827,42 +3046,85 @@ impl AppState {
             options,
             selected,
         }));
+        let notice = self.schedule_model_picker_refresh(target, current);
         self.last_notice = Some(notice);
     }
 
-    fn model_picker_options(
-        &self,
+    fn schedule_model_picker_refresh(
+        &mut self,
         target: ModelPickerTarget,
         current: &str,
-    ) -> (Vec<String>, String) {
+    ) -> String {
+        self.model_picker_refresh_rx = None;
         if cfg!(test) {
-            return (
-                build_model_picker_options(current, Vec::new()),
-                "using local model list".to_owned(),
-            );
+            return "using local model list".to_owned();
         }
         let provider_config = match self
             .provider_config_for_model_picker(target, current)
             .resolved()
         {
             Ok(config) => config,
-            Err(error) => {
-                return (
-                    build_model_picker_options(current, Vec::new()),
-                    format!("model list unavailable: {error}"),
-                );
-            }
+            Err(error) => return format!("model list unavailable: {error}"),
         };
-        match fetch_remote_model_ids(&provider_config) {
-            Ok(remote) if !remote.is_empty() => (
-                build_model_picker_options(current, remote),
-                format!("loaded provider model list ({})", provider_config.base_url),
-            ),
-            _ => (
-                build_model_picker_options(current, Vec::new()),
-                "using local model list".to_owned(),
-            ),
+        let base_url = provider_config.base_url.clone();
+        let (tx, rx) = mpsc::channel();
+        self.model_picker_refresh_rx = Some(rx);
+        let current = current.to_owned();
+        let notice = format!("loading provider model list ({base_url})");
+        thread::spawn(move || {
+            let result =
+                fetch_remote_model_ids(&provider_config).map_err(|error| format!("{error:#}"));
+            let _ = tx.send(ModelPickerRefresh {
+                target,
+                current,
+                base_url,
+                result,
+            });
+        });
+        notice
+    }
+
+    fn apply_model_picker_refresh(&mut self, refresh: ModelPickerRefresh) -> bool {
+        let mut notice = None;
+        if let Some(ModalState::ModelPicker(state)) = self.modal_state.as_mut() {
+            if state.target != refresh.target || state.current != refresh.current {
+                return false;
+            }
+            match refresh.result {
+                Ok(remote) if !remote.is_empty() => {
+                    let selected_value = state
+                        .options
+                        .get(state.selected)
+                        .cloned()
+                        .unwrap_or_else(|| state.current.clone());
+                    state.options = build_model_picker_options(&state.current, remote);
+                    state.selected = state
+                        .options
+                        .iter()
+                        .position(|option| option == &selected_value)
+                        .or_else(|| {
+                            state
+                                .options
+                                .iter()
+                                .position(|option| option == &state.current)
+                        })
+                        .unwrap_or(0);
+                    notice = Some(format!("loaded provider model list ({})", refresh.base_url));
+                }
+                Ok(_) => {
+                    notice = Some("using local model list".to_owned());
+                }
+                Err(error) => {
+                    notice = Some(format!("using local model list: {error}"));
+                }
+            }
         }
+        if let Some(notice) = notice {
+            self.last_notice = Some(notice.clone());
+            self.push_event("model_list", notice);
+            return true;
+        }
+        false
     }
 
     fn provider_config_for_model_picker(
@@ -3949,6 +3211,11 @@ impl AppState {
             buffer: character.to_string(),
         }));
         self.last_notice = Some(format!("editing {}", target.prompt_label()));
+    }
+
+    fn open_keyboard_help(&mut self) {
+        self.modal_state = Some(ModalState::KeyboardHelp);
+        self.last_notice = Some("keyboard help".to_owned());
     }
 
     fn handle_modal_key_event(&mut self, key: KeyEvent) -> ModalOutcome {
@@ -4058,6 +3325,13 @@ impl AppState {
                 }
                 _ => ModalOutcome::None,
             },
+            ModalState::KeyboardHelp => match key.code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    self.modal_state = None;
+                    ModalOutcome::Dismissed("closed keyboard help".to_owned())
+                }
+                _ => ModalOutcome::None,
+            },
         }
     }
 
@@ -4087,6 +3361,10 @@ impl AppState {
                 let value = state.buffer.clone();
                 self.modal_state = None;
                 ModalOutcome::TextSubmitted { target, value }
+            }
+            ModalState::KeyboardHelp => {
+                self.modal_state = None;
+                ModalOutcome::Dismissed("closed keyboard help".to_owned())
             }
         }
     }
@@ -4771,10 +4049,10 @@ impl AppState {
         self.recent_session_rows()
             .into_iter()
             .map(|row| match row {
-                ActivityPanelRow::SessionHeader { filter, total } => {
+                SessionHistoryRow::SessionHeader { filter, total } => {
                     format!("filter={filter} total={total}")
                 }
-                ActivityPanelRow::SessionItem {
+                SessionHistoryRow::SessionItem {
                     index,
                     label,
                     current,
@@ -4788,15 +4066,14 @@ impl AppState {
                     if current { " (current)" } else { "" },
                     meta
                 ),
-                ActivityPanelRow::Empty { text } => text,
-                ActivityPanelRow::Event { label, detail } => format!("{label} {detail}"),
+                SessionHistoryRow::Empty { text } => text,
             })
             .collect()
     }
 
-    fn recent_session_rows(&self) -> Vec<ActivityPanelRow> {
+    fn recent_session_rows(&self) -> Vec<SessionHistoryRow> {
         let filtered_indices = self.filtered_session_indices();
-        let mut rows = vec![ActivityPanelRow::SessionHeader {
+        let mut rows = vec![SessionHistoryRow::SessionHeader {
             filter: if self.session_history_filter.is_empty() {
                 "-".to_owned()
             } else {
@@ -4805,7 +4082,7 @@ impl AppState {
             total: filtered_indices.len(),
         }];
         if filtered_indices.is_empty() {
-            rows.push(ActivityPanelRow::Empty {
+            rows.push(SessionHistoryRow::Empty {
                 text: "no matches".to_owned(),
             });
             return rows;
@@ -4823,9 +4100,9 @@ impl AppState {
             .take(end.saturating_sub(start))
         {
             let entry = &self.session_history[*entry_index];
-            rows.push(ActivityPanelRow::SessionItem {
+            rows.push(SessionHistoryRow::SessionItem {
                 index: filtered_index + 1,
-                label: session_history_label(&entry.label),
+                label: session_history_display_label(entry),
                 current: entry.path == self.session_log_path,
                 selected: filtered_index == self.session_history_selected,
                 meta: format!(
@@ -4872,11 +4149,13 @@ impl AppState {
                     .map(|duration| duration.as_secs())
                     .unwrap_or(0);
                 let bytes = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                let title = session_history_title_from_log(&path);
                 sessions.push((
                     modified,
                     SessionHistoryEntry {
                         path,
                         label,
+                        title,
                         modified_epoch_secs,
                         bytes,
                     },
@@ -4913,38 +4192,6 @@ impl AppState {
         }
     }
 
-    fn emit_session_history(&mut self) {
-        self.push_timeline(
-            TimelineRole::Notice,
-            format!("Sessions in {}:", self.session_log_dir.display()),
-        );
-        if self.session_history.is_empty() {
-            self.push_timeline(TimelineRole::Notice, "No saved sessions.");
-            return;
-        }
-        let session_lines = self
-            .session_history
-            .iter()
-            .take(10)
-            .enumerate()
-            .map(|(index, entry)| {
-                format!(
-                    "{}. {}{}",
-                    index + 1,
-                    entry.label,
-                    if entry.path == self.session_log_path {
-                        " (current)"
-                    } else {
-                        ""
-                    }
-                )
-            })
-            .collect::<Vec<_>>();
-        for line in session_lines {
-            self.push_timeline(TimelineRole::Notice, line);
-        }
-    }
-
     fn resolve_resume_target(&self, selector: &str) -> Option<PathBuf> {
         if self.session_history.is_empty() {
             return None;
@@ -4955,22 +4202,67 @@ impl AppState {
         } else {
             selector
         };
+        let candidate_indices = self.resume_candidate_indices();
         if normalized.eq_ignore_ascii_case("latest") {
-            return self
-                .session_history
-                .iter()
-                .find(|entry| entry.path != self.session_log_path)
-                .or_else(|| self.session_history.first())
+            return candidate_indices
+                .first()
+                .and_then(|index| self.session_history.get(*index))
                 .map(|entry| entry.path.clone());
         }
 
-        normalized
+        if let Some(path) = normalized
             .parse::<usize>()
             .ok()
             .and_then(|index| index.checked_sub(1))
-            .and_then(|index| self.filtered_session_indices().get(index).copied())
+            .and_then(|index| candidate_indices.get(index).copied())
             .and_then(|index| self.session_history.get(index))
             .map(|entry| entry.path.clone())
+        {
+            return Some(path);
+        }
+
+        let path = PathBuf::from(normalized);
+        if self.session_history.iter().any(|entry| entry.path == path) {
+            return Some(path);
+        }
+
+        let query = normalized.to_ascii_lowercase();
+        let mut matches = candidate_indices
+            .into_iter()
+            .filter_map(|index| self.session_history.get(index))
+            .filter(|entry| {
+                entry.label.to_ascii_lowercase().contains(&query)
+                    || entry
+                        .title
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_ascii_lowercase()
+                        .contains(&query)
+                    || entry
+                        .path
+                        .display()
+                        .to_string()
+                        .to_ascii_lowercase()
+                        .contains(&query)
+            });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first.path.clone())
+    }
+
+    fn resume_candidate_indices(&self) -> Vec<usize> {
+        let non_current = self
+            .session_history
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| (entry.path != self.session_log_path).then_some(index))
+            .collect::<Vec<_>>();
+        if non_current.is_empty() {
+            return (0..self.session_history.len()).collect();
+        }
+        non_current
     }
 
     fn restore_session_view(
@@ -5248,101 +4540,66 @@ impl AppState {
         }))
     }
 
-    fn set_tool_preview_mode_from_command(&mut self, argument: &str) -> Result<Option<AppAction>> {
-        let mode = match argument.trim().to_ascii_lowercase().as_str() {
-            "" => self.tool_preview_mode,
-            "brief" => ToolPreviewMode::Brief,
-            "full" => ToolPreviewMode::Full,
-            _ => {
-                self.last_notice = Some("usage: /tools <brief|full>".to_owned());
-                self.push_timeline(TimelineRole::Notice, "usage: /tools <brief|full>");
-                return Ok(None);
-            }
-        };
-
-        if mode == self.tool_preview_mode {
-            self.last_notice = Some(format!("tool preview already {}", mode.as_str()));
-            self.push_timeline(
-                TimelineRole::Notice,
-                format!("tool preview already {}", mode.as_str()),
-            );
-            return Ok(None);
-        }
-
-        self.tool_preview_mode = mode;
-        self.rebuild_timeline_render_cache();
-        self.refresh_usage_sidebar_cache();
-        self.last_notice = Some(format!("tool preview = {}", mode.as_str()));
-        self.push_event("tool:view", mode.as_str());
-        self.push_timeline(
-            TimelineRole::Notice,
-            format!("tool preview -> {}", mode.as_str()),
-        );
-        Ok(None)
+    pub(crate) fn has_tool_cards(&self) -> bool {
+        self.tool_timeline_entry_indices().is_some()
     }
 
-    fn set_tool_card_view_from_command(&mut self, argument: &str) -> Result<Option<AppAction>> {
-        let command = argument.trim().to_ascii_lowercase();
-        let action = if command.is_empty() {
-            "latest"
-        } else {
-            command.as_str()
-        };
+    fn focus_latest_tool_card(&mut self) -> bool {
         let Some(indices) = self.tool_timeline_entry_indices() else {
             self.last_notice = Some("no tool cards yet".to_owned());
-            self.push_timeline(TimelineRole::Notice, "no tool cards yet");
-            return Ok(None);
+            return false;
         };
+        let selected = *indices.last().expect("tool entry indices are non-empty");
+        self.selected_tool_timeline_entry = Some(selected);
+        self.rebuild_timeline_render_cache();
+        self.reveal_timeline_entry(selected);
+        self.refresh_usage_sidebar_cache();
+        self.push_event("tool:focus", "latest");
+        self.last_notice = Some(self.tool_card_status_line());
+        true
+    }
 
-        match action {
-            "latest" => {
-                self.selected_tool_timeline_entry = indices.last().copied();
-                self.push_event("tool:select", "latest");
-                self.last_notice = Some(self.tool_card_status_line());
-            }
-            "next" => {
-                self.selected_tool_timeline_entry = Some(self.next_tool_entry(&indices, true));
-                self.push_event("tool:select", "next");
-                self.last_notice = Some(self.tool_card_status_line());
-            }
-            "prev" => {
-                self.selected_tool_timeline_entry = Some(self.next_tool_entry(&indices, false));
-                self.push_event("tool:select", "prev");
-                self.last_notice = Some(self.tool_card_status_line());
-            }
-            "open" => {
-                let selected = self.ensure_selected_tool_entry(&indices);
-                self.expanded_tool_timeline_entries.insert(selected);
-                self.rebuild_timeline_render_cache();
-                self.push_event("tool:view", "open");
-                self.last_notice = Some(self.tool_card_status_line());
-            }
-            "close" => {
-                let selected = self.ensure_selected_tool_entry(&indices);
-                self.expanded_tool_timeline_entries.remove(&selected);
-                self.rebuild_timeline_render_cache();
-                self.push_event("tool:view", "close");
-                self.last_notice = Some(self.tool_card_status_line());
-            }
-            "toggle" => {
-                let selected = self.ensure_selected_tool_entry(&indices);
-                if !self.expanded_tool_timeline_entries.insert(selected) {
-                    self.expanded_tool_timeline_entries.remove(&selected);
-                }
-                self.rebuild_timeline_render_cache();
-                self.push_event("tool:view", "toggle");
-                self.last_notice = Some(self.tool_card_status_line());
-            }
-            _ => {
-                self.last_notice =
-                    Some("usage: /tool <latest|next|prev|open|close|toggle>".to_owned());
-                self.push_timeline(
-                    TimelineRole::Notice,
-                    "usage: /tool <latest|next|prev|open|close|toggle>",
-                );
-            }
+    fn select_adjacent_tool_card(&mut self, forward: bool) -> bool {
+        let Some(indices) = self.tool_timeline_entry_indices() else {
+            self.last_notice = Some("no tool cards yet".to_owned());
+            return false;
+        };
+        let selected = self.next_tool_entry(&indices, forward);
+        self.selected_tool_timeline_entry = Some(selected);
+        self.rebuild_timeline_render_cache();
+        self.reveal_timeline_entry(selected);
+        self.refresh_usage_sidebar_cache();
+        self.push_event("tool:focus", if forward { "next" } else { "previous" });
+        self.last_notice = Some(self.tool_card_status_line());
+        true
+    }
+
+    fn toggle_selected_tool_card(&mut self) -> bool {
+        let Some(indices) = self.tool_timeline_entry_indices() else {
+            self.last_notice = Some("no tool cards yet".to_owned());
+            return false;
+        };
+        let selected = self.ensure_selected_tool_entry(&indices);
+        if !self.expanded_tool_timeline_entries.insert(selected) {
+            self.expanded_tool_timeline_entries.remove(&selected);
         }
-        Ok(None)
+        self.rebuild_timeline_render_cache();
+        self.reveal_timeline_entry(selected);
+        self.refresh_usage_sidebar_cache();
+        self.push_event("tool:view", "toggle");
+        self.last_notice = Some(self.tool_card_status_line());
+        true
+    }
+
+    fn clear_tool_card_focus(&mut self) -> bool {
+        if self.selected_tool_timeline_entry.take().is_none() {
+            return false;
+        }
+        self.rebuild_timeline_render_cache();
+        self.refresh_usage_sidebar_cache();
+        self.push_event("tool:focus", "clear");
+        self.last_notice = Some("tool focus cleared".to_owned());
+        true
     }
 
     fn tool_timeline_entry_indices(&self) -> Option<Vec<usize>> {
@@ -5381,6 +4638,20 @@ impl AppState {
             position - 1
         };
         indices[next_position]
+    }
+
+    fn reveal_timeline_entry(&mut self, entry_index: usize) {
+        let Some(range) = self.timeline_render_ranges.get(entry_index) else {
+            return;
+        };
+        let effective_len = self.effective_timeline_render_len();
+        if effective_len == 0 {
+            return;
+        }
+        let entry_end = range.end.min(effective_len).max(1);
+        self.timeline_scroll_back = effective_len
+            .saturating_sub(entry_end)
+            .min(self.max_timeline_scroll_back());
     }
 
     fn tool_card_status_line(&self) -> String {
@@ -5771,6 +5042,37 @@ fn session_history_label(label: &str) -> String {
         .unwrap_or_else(|| truncate_session_view_text(label, 24))
 }
 
+fn session_history_display_label(entry: &SessionHistoryEntry) -> String {
+    entry
+        .title
+        .as_deref()
+        .map(|title| truncate_session_view_text(title, 48))
+        .unwrap_or_else(|| session_history_label(&entry.label))
+}
+
+fn session_history_title_from_log(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines().take(SESSION_HISTORY_TITLE_SCAN_LIMIT) {
+        let Ok(line) = line else {
+            break;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<SessionLogEntry>(&line) else {
+            continue;
+        };
+        if let SessionLogEntry::User(message) = entry
+            && let Some(content) = message.content.as_deref().map(str::trim)
+            && !content.is_empty()
+        {
+            return Some(truncate_session_view_text(content, 96));
+        }
+    }
+    None
+}
+
 fn short_session_token(token: &str) -> String {
     token.chars().take(8).collect()
 }
@@ -6068,39 +5370,6 @@ fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
         providers: std::collections::BTreeMap::from([("deepseek".to_owned(), provider_value)]),
         mcp_servers: Vec::new(),
     })
-}
-
-fn load_deepseek_provider_config(root_config: &RootConfig) -> Option<DeepSeekProviderConfig> {
-    root_config
-        .providers
-        .get("deepseek")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-}
-
-fn default_deepseek_provider_config(model: &str) -> DeepSeekProviderConfig {
-    DeepSeekProviderConfig {
-        base_url: "https://api.deepseek.com".to_owned(),
-        beta_base_url: "https://api.deepseek.com/beta".to_owned(),
-        anthropic_base_url: "https://api.deepseek.com/anthropic".to_owned(),
-        model: model.to_owned(),
-        api_key: None,
-        user_id_strategy: Some("stable_per_end_user".to_owned()),
-        strict_tools_mode: StrictToolsMode::Auto,
-        fim_model: "deepseek-v4-pro".to_owned(),
-        request_timeout_secs: 120,
-    }
-}
-
-fn serialize_deepseek_provider_value(
-    provider_config: &DeepSeekProviderConfig,
-) -> Result<serde_json::Value> {
-    let mut value = serde_json::to_value(provider_config)
-        .map_err(|error| anyhow!("failed to serialize deepseek provider config: {error}"))?;
-    if let Some(object) = value.as_object_mut() {
-        object.retain(|_, entry| !entry.is_null());
-    }
-    Ok(value)
 }
 
 fn cycle_approval_mode(mode: ApprovalMode) -> ApprovalMode {
@@ -6470,31 +5739,6 @@ fn render_tool_metadata_summary(metadata: &ToolResultMeta) -> Option<String> {
     Some(parts.join(" · "))
 }
 
-fn render_config_value_row(state: &ConfigState, field: ConfigField) -> String {
-    let selected = !state.footer_selected && state.selected_field == Some(field);
-    let marker = if selected { ">" } else { " " };
-    let action = if selected && state.editing_field() != Some(field) {
-        field.action_label()
-    } else {
-        ""
-    };
-
-    if action.is_empty() {
-        format!(
-            "{marker} {:<22}: {}",
-            field.label(),
-            state.display_value(field)
-        )
-    } else {
-        format!(
-            "{marker} {:<22}: {}  [{}]",
-            field.label(),
-            state.display_value(field),
-            action
-        )
-    }
-}
-
 fn build_model_picker_options(current: &str, remote: Vec<String>) -> Vec<String> {
     let mut options = if remote.is_empty() {
         KNOWN_MODEL_IDS
@@ -6520,41 +5764,12 @@ fn non_empty_or(value: &str, fallback: &str) -> String {
     }
 }
 
-fn mask_secret(value: &str) -> String {
-    if value.is_empty() {
-        "<empty>".to_owned()
-    } else {
-        "*".repeat(value.chars().count().max(8))
-    }
-}
-
 fn char_to_byte_index(value: &str, char_index: usize) -> usize {
     value
         .char_indices()
         .nth(char_index)
         .map(|(byte_index, _)| byte_index)
         .unwrap_or(value.len())
-}
-
-fn config_field_accepts_char(field: ConfigField, character: char) -> bool {
-    match field {
-        ConfigField::CompactionContextWindowTokens
-        | ConfigField::CompactionTailMessages
-        | ConfigField::McpStartupTimeoutSecs => character.is_ascii_digit(),
-        ConfigField::CompactionSoftThresholdRatio | ConfigField::CompactionHardThresholdRatio => {
-            character.is_ascii_digit() || character == '.'
-        }
-        ConfigField::ProviderModel
-        | ConfigField::ProviderBaseUrl
-        | ConfigField::ProviderFimModel
-        | ConfigField::McpName
-        | ConfigField::McpCommand
-        | ConfigField::McpArgsCsv => !character.is_control(),
-        ConfigField::ProviderApiKey
-        | ConfigField::PermissionsWriteMode
-        | ConfigField::MemoryEnabled
-        | ConfigField::CompactionEnabled => false,
-    }
 }
 
 fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> bool {
@@ -6586,8 +5801,8 @@ mod tests {
     use crate::runner::{CompactionTrigger, WorkerCommand};
 
     use super::{
-        AppAction, AppState, ConfigField, ConfigSection, PaneFocus, RunPhase, SetupField,
-        TimelineRole, WorkerMessage,
+        AppAction, AppState, ConfigField, ConfigSection, ModalState, ModelPickerRefresh,
+        ModelPickerTarget, PaneFocus, RunPhase, SetupField, TimelineRole, WorkerMessage,
     };
 
     fn test_config() -> RootConfig {
@@ -6625,6 +5840,18 @@ mod tests {
                 Vec::new(),
             )),
         ]
+    }
+
+    fn select_root_slash_command(app: &mut AppState, command: &str) -> Result<()> {
+        let index = app
+            .slash_selector_rows()
+            .iter()
+            .position(|(label, _)| label == command)
+            .ok_or_else(|| anyhow::anyhow!("slash command {command} not found"))?;
+        for _ in 0..index {
+            let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+        }
+        Ok(())
     }
 
     fn write_session_log(path: &Path, entries: &[SessionLogEntry]) -> Result<()> {
@@ -6685,20 +5912,6 @@ mod tests {
     }
 
     #[test]
-    fn demo_command_populates_timeline_and_events() -> Result<()> {
-        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
-        app.input = "/demo".to_owned();
-        assert!(app.submit_input()?.is_none());
-        assert!(app.events.iter().any(|event| event.label == "tool:start"));
-        assert!(
-            app.timeline
-                .iter()
-                .any(|entry| entry.role == TimelineRole::Tool)
-        );
-        Ok(())
-    }
-
-    #[test]
     fn normal_input_creates_user_and_running_state() -> Result<()> {
         let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
         app.input = "hello".to_owned();
@@ -6711,7 +5924,7 @@ mod tests {
         assert!(matches!(action, Some(AppAction::SubmitPrompt(prompt)) if prompt == "hello"));
         assert!(app.is_busy);
         assert_eq!(app.active_pane, PaneFocus::Composer);
-        assert_eq!(app.composer_height(), 4);
+        assert_eq!(app.composer_height(), 5);
         assert!(
             !app.timeline
                 .iter()
@@ -6723,6 +5936,24 @@ mod tests {
         assert_eq!(app.run_phase(), RunPhase::Thinking);
         assert_eq!(app.last_notice(), Some("thinking"));
         Ok(())
+    }
+
+    #[test]
+    fn short_transcript_stays_in_live_panel_instead_of_terminal_scrollback() {
+        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+        app.set_terminal_size(120, 32);
+        app.push_timeline(TimelineRole::User, "hello");
+        app.push_timeline(TimelineRole::Assistant, "latest answer");
+
+        assert_eq!(app.scrollback_line_count(), 0);
+        let live = app
+            .transcript_lines(app.timeline_viewport_rows())
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(live.contains("hello"));
+        assert!(live.contains("latest answer"));
     }
 
     #[test]
@@ -7151,14 +6382,24 @@ mod tests {
     }
 
     #[test]
-    fn slash_selector_offers_tool_preview_candidates() {
+    fn slash_selector_does_not_register_tool_commands() {
         let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
-        app.input = "/tools".to_owned();
+        app.input = "/".to_owned();
 
         let rows = app.slash_selector_rows();
+        assert!(!rows.iter().any(|(label, _)| label == "/tool"));
+        assert!(!rows.iter().any(|(label, _)| label == "/tools"));
 
-        assert!(rows.iter().any(|(label, _)| label == "brief"));
-        assert!(rows.iter().any(|(label, _)| label == "full"));
+        app.input = "/tools".to_owned();
+        assert!(app.slash_selector_rows().is_empty());
+        assert_eq!(app.slash_selector_empty_message(), Some("no slash match"));
+
+        app.input = "/tool".to_owned();
+        assert!(app.slash_selector_rows().is_empty());
+        assert_eq!(app.slash_selector_empty_message(), Some("no slash match"));
+
+        assert!(app.resolve_slash_command("/tool latest").is_none());
+        assert!(app.resolve_slash_command("/tools full").is_none());
     }
 
     #[test]
@@ -7210,9 +6451,7 @@ mod tests {
         let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
         app.input = "/".to_owned();
 
-        for _ in 0..4 {
-            let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-        }
+        select_root_slash_command(&mut app, "/model")?;
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
         assert_eq!(app.input, "/model ");
@@ -7227,9 +6466,7 @@ mod tests {
         let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
         app.input = "/".to_owned();
 
-        for _ in 0..3 {
-            let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-        }
+        select_root_slash_command(&mut app, "/effort")?;
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
         assert_eq!(app.input, "/effort ");
@@ -7279,58 +6516,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_command_switches_between_brief_and_full_preview() -> Result<()> {
-        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
-        app.push_timeline(
-            TimelineRole::Tool,
-            r##"{
-  "tool_name": "read_file",
-  "status": "ok",
-  "preview_kind": "markdown",
-  "summary": "first 2/2 lines · 24 B",
-  "preview_lines": ["# Title", "- Cargo.toml"],
-  "hidden_lines": 0
-}"##,
-        );
-
-        let collapsed = app.transcript_lines(20);
-        assert!(collapsed.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|span| span.content.as_ref().contains("preview hidden"))
-        }));
-        assert!(!collapsed.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|span| span.content.as_ref().contains("Cargo.toml"))
-        }));
-
-        app.input = "/tools full".to_owned();
-        assert!(app.submit_input()?.is_none());
-        assert_eq!(app.tool_preview_mode, super::ToolPreviewMode::Full);
-
-        let expanded = app.transcript_lines(20);
-        assert!(expanded.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|span| span.content.as_ref().contains("Cargo.toml"))
-        }));
-
-        app.input = "/tools brief".to_owned();
-        assert!(app.submit_input()?.is_none());
-        assert_eq!(app.tool_preview_mode, super::ToolPreviewMode::Brief);
-
-        let recollapsed = app.transcript_lines(20);
-        assert!(recollapsed.iter().any(|line| {
-            line.spans
-                .iter()
-                .any(|span| span.content.as_ref().contains("preview hidden"))
-        }));
-        Ok(())
-    }
-
-    #[test]
-    fn tool_command_selects_and_opens_one_card_without_expanding_all() -> Result<()> {
+    fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
         let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
         app.push_timeline(
             TimelineRole::Tool,
@@ -7356,17 +6542,30 @@ mod tests {
   "hidden_lines": 0
 }"##,
         );
+        let tool_indices = app
+            .tool_timeline_entry_indices()
+            .expect("test app should contain two tool timeline entries");
+        let first_tool = tool_indices[0];
+        let second_tool = tool_indices[1];
 
-        assert_eq!(app.selected_tool_timeline_entry, Some(2));
+        assert_eq!(app.selected_tool_timeline_entry, Some(second_tool));
 
-        app.input = "/tool prev".to_owned();
-        assert!(app.submit_input()?.is_none());
-        assert_eq!(app.selected_tool_timeline_entry, Some(1));
+        app.selected_tool_timeline_entry = None;
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))?;
+        assert_eq!(app.selected_tool_timeline_entry, Some(second_tool));
 
-        app.input = "/tool open".to_owned();
-        assert!(app.submit_input()?.is_none());
-        assert!(app.expanded_tool_timeline_entries.contains(&1));
-        assert!(!app.expanded_tool_timeline_entries.contains(&2));
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))?;
+        assert_eq!(app.selected_tool_timeline_entry, Some(first_tool));
+
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))?;
+        assert_eq!(app.selected_tool_timeline_entry, Some(second_tool));
+
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))?;
+        assert_eq!(app.selected_tool_timeline_entry, Some(first_tool));
+
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+        assert!(app.expanded_tool_timeline_entries.contains(&first_tool));
+        assert!(!app.expanded_tool_timeline_entries.contains(&second_tool));
 
         let lines = app.transcript_lines(40);
         assert!(lines.iter().any(|line| {
@@ -7379,6 +6578,64 @@ mod tests {
                 .iter()
                 .any(|span| span.content.as_ref().contains("hidden"))
         }));
+
+        app.input = "draft".to_owned();
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT))?;
+        assert_eq!(app.input, "draft");
+        assert_eq!(app.selected_tool_timeline_entry, Some(first_tool));
+
+        app.input.clear();
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+        assert_eq!(app.selected_tool_timeline_entry, None);
+        assert_eq!(app.last_notice(), Some("tool focus cleared"));
+        Ok(())
+    }
+
+    #[test]
+    fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
+        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+        app.input = "draft".to_owned();
+        app.push_timeline(
+            TimelineRole::Tool,
+            r##"{
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "first 1/1 lines · 8 B",
+  "preview_lines": ["[\".git\"]"],
+  "preview_value": [".git"],
+  "hidden_lines": 0
+}"##,
+        );
+
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+
+        assert_eq!(app.input, "draft");
+        assert_eq!(app.modal_title(), Some("Keyboard Help"));
+        let lines = app.modal_lines();
+        assert!(lines.iter().any(|line| line.contains("F1:")));
+        assert!(lines.iter().any(|line| line.contains("Ctrl-G:")));
+        assert!(lines.iter().any(|line| line.starts_with("/model:")));
+        assert!(!lines.iter().any(|line| line.starts_with("/tool:")));
+
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+        assert!(!app.has_modal());
+        assert_eq!(app.last_notice(), Some("closed keyboard help"));
+        Ok(())
+    }
+
+    #[test]
+    fn ctrl_c_quits_while_keyboard_help_modal_is_open() -> Result<()> {
+        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+        let action =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
+
+        assert!(action.is_none());
+        assert!(!app.has_modal());
+        assert!(app.should_quit);
         Ok(())
     }
 
@@ -7406,6 +6663,48 @@ mod tests {
         assert!(app.is_config_mode());
         assert_eq!(app.config_section_title(), Some("Provider"));
         assert_eq!(app.config_selected_field_label(), Some("model"));
+        Ok(())
+    }
+
+    #[test]
+    fn model_picker_opens_with_local_options_before_remote_refresh() -> Result<()> {
+        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+
+        app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+
+        assert!(matches!(app.modal_state, Some(ModalState::ModelPicker(_))));
+        assert!(app.model_picker_refresh_rx.is_none());
+        assert_eq!(app.last_notice(), Some("using local model list"));
+        let lines = app.modal_lines().join("\n");
+        assert!(lines.contains("deepseek-v4-flash"));
+        assert!(lines.contains("custom-model"));
+        Ok(())
+    }
+
+    #[test]
+    fn model_picker_remote_refresh_updates_open_modal_options() -> Result<()> {
+        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+        app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+
+        let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
+            target: ModelPickerTarget::Provider,
+            current: "custom-model".to_owned(),
+            base_url: "https://example.com".to_owned(),
+            result: Ok(vec![
+                "remote-model-a".to_owned(),
+                "remote-model-b".to_owned(),
+            ]),
+        });
+
+        assert!(changed);
+        assert_eq!(
+            app.last_notice(),
+            Some("loaded provider model list (https://example.com)")
+        );
+        let lines = app.modal_lines().join("\n");
+        assert!(lines.contains("remote-model-a"));
+        assert!(lines.contains("remote-model-b"));
+        assert!(lines.contains("custom-model"));
         Ok(())
     }
 
@@ -8562,31 +7861,6 @@ mod tests {
     }
 
     #[test]
-    fn sessions_command_lists_recent_logs() -> Result<()> {
-        let temp = tempdir()?;
-        let config = RootConfig {
-            workspace: WorkspaceConfig {
-                root: temp.path().display().to_string(),
-            },
-            ..test_config()
-        };
-        let session_dir = temp.path().join(".termquill/sessions");
-        std::fs::create_dir_all(&session_dir)?;
-        std::fs::write(session_dir.join("session-a.jsonl"), "")?;
-        std::fs::write(session_dir.join("session-b.jsonl"), "")?;
-
-        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
-        app.input = "/sessions".to_owned();
-        assert!(app.submit_input()?.is_none());
-        assert!(
-            app.timeline
-                .iter()
-                .any(|entry| entry.text.contains("session-a"))
-        );
-        Ok(())
-    }
-
-    #[test]
     fn composer_up_down_navigates_input_history() -> Result<()> {
         let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
         app.input = "first".to_owned();
@@ -8628,12 +7902,12 @@ mod tests {
 
         app.active_pane = PaneFocus::Composer;
         app.set_terminal_size(6, 20);
-        app.input = "draft123".to_owned();
-        app.input_cursor = 5;
+        app.input = "draft123456".to_owned();
+        app.input_cursor = 7;
 
         app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
 
-        assert_eq!(app.input, "draft123");
+        assert_eq!(app.input, "draft123456");
         assert_eq!(app.input_cursor, 1);
         assert_eq!(app.input_history_index, None);
         Ok(())
@@ -8671,31 +7945,6 @@ mod tests {
     }
 
     #[test]
-    fn sessions_command_marks_sessions_mode_for_diagnostics() -> Result<()> {
-        let temp = tempdir()?;
-        let config = RootConfig {
-            workspace: WorkspaceConfig {
-                root: temp.path().display().to_string(),
-            },
-            ..test_config()
-        };
-        let session_dir = temp.path().join(".termquill/sessions");
-        std::fs::create_dir_all(&session_dir)?;
-        std::fs::write(session_dir.join("session-a.jsonl"), "")?;
-        std::fs::write(session_dir.join("session-b.jsonl"), "")?;
-
-        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
-        app.input = "/sessions".to_owned();
-
-        assert!(app.submit_input()?.is_none());
-        assert!(matches!(
-            app.activity_panel_mode,
-            super::ActivityPanelMode::Sessions
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn sessions_filter_narrows_sidebar_results() -> Result<()> {
         let temp = tempdir()?;
         let config = RootConfig {
@@ -8710,10 +7959,9 @@ mod tests {
         std::fs::write(session_dir.join("session-beta.jsonl"), "")?;
 
         let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
-        app.activity_panel_mode = super::ActivityPanelMode::Sessions;
         app.refresh_session_history();
         app.session_history_filter = "b".to_owned();
-        let lines = app.activity_panel_lines().join("\n");
+        let lines = app.recent_session_lines().join("\n");
         assert!(lines.contains("beta"));
         assert!(!lines.contains("alpha"));
         Ok(())
@@ -8738,13 +7986,12 @@ mod tests {
         let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
         app.session_log_path = beta.clone();
         app.refresh_session_history();
-        app.activity_panel_mode = super::ActivityPanelMode::Sessions;
 
-        let rows = app.activity_panel_rows();
+        let rows = app.recent_session_rows();
         assert!(rows.iter().any(|row| {
             matches!(
                 row,
-                super::ActivityPanelRow::SessionItem {
+                super::SessionHistoryRow::SessionItem {
                     label,
                     current: true,
                     selected: true,
@@ -8752,6 +7999,82 @@ mod tests {
                 } if label.contains("beta")
             )
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
+        let temp = tempdir()?;
+        let config = RootConfig {
+            workspace: WorkspaceConfig {
+                root: temp.path().display().to_string(),
+            },
+            ..test_config()
+        };
+        let session_dir = temp.path().join(".termquill/sessions");
+        std::fs::create_dir_all(&session_dir)?;
+        let session_path = session_dir.join("session-title.jsonl");
+        write_session_log(
+            &session_path,
+            &[
+                SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                    provider_name: "deepseek".to_owned(),
+                    model_name: "deepseek-v4-pro".to_owned(),
+                }),
+                SessionLogEntry::User(ModelMessage::user("Investigate selector title display")),
+            ],
+        )?;
+
+        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
+        app.refresh_session_history();
+
+        assert_eq!(
+            app.session_history
+                .iter()
+                .find(|entry| entry.path == session_path)
+                .and_then(|entry| entry.title.as_deref()),
+            Some("Investigate selector title display")
+        );
+
+        app.input = "/resume".to_owned();
+        assert!(app.slash_selector_rows().iter().any(|(_, description)| {
+            description.contains("Investigate selector title display")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn resume_command_shows_session_selector_and_enter_switches_selected_session() -> Result<()> {
+        let temp = tempdir()?;
+        let config = RootConfig {
+            workspace: WorkspaceConfig {
+                root: temp.path().display().to_string(),
+            },
+            ..test_config()
+        };
+        let session_dir = temp.path().join(".termquill/sessions");
+        std::fs::create_dir_all(&session_dir)?;
+        let restored_path = session_dir.join("session-restored.jsonl");
+        let restored = restored_entries("restored-provider", "restored-model");
+        write_session_log(&restored_path, &restored)?;
+
+        let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
+        app.input = "/resume".to_owned();
+
+        let selector_rows = app.slash_selector_rows();
+        assert_eq!(app.slash_selector_title(), Some("Resume session"));
+        assert_eq!(app.slash_selector_visible_rows(), 2);
+        assert!(
+            selector_rows
+                .iter()
+                .any(|(_, description)| description.contains("restored"))
+        );
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        assert!(matches!(
+            action,
+            Some(AppAction::SwitchSession { session_log_path }) if session_log_path == restored_path
+        ));
         Ok(())
     }
 

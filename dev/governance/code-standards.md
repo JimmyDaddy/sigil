@@ -91,8 +91,14 @@
 
 - 优先分离“状态模型”和“渲染”
 - `app.rs` 保持 `AppState` façade 和行为编排；输入、审批、session、slash、timeline、provider status 等独立状态类型优先拆到同 crate 模块
-- `ui.rs` 保持顶层 layout / theme / shared renderer；审批、timeline、tool card、config 等独立渲染块优先拆到 `ui/*`
-- 改键位时必须同步更新界面提示
+- renderer 优先读取 ViewModel 或明确 render options，不要为了展示逻辑直接扩散完整 `AppState` 依赖
+- setup/config 状态模型维护在 `setup.rs` / `config_panel.rs`，`app.rs` 只保留入口协调、持久化和跨状态行为
+- `ui.rs` 只作为 `ui/*` 模块入口和必要 re-export；顶层 shell layout 放在 `ui/shell.rs`
+- theme、geometry、text、primitives 等共享 renderer 底座分别维护在 `ui/theme.rs`、`ui/geometry.rs`、`ui/text.rs`、`ui/primitives.rs`
+- markdown、timeline、tool card、approval、main screen、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，不再回填到 `ui.rs`
+- markdown 功能增强只能落在 `ui/markdown.rs` 和 `MarkdownRenderOptions`；assistant timeline、tool preview、approval modal 不应各自维护解析分支
+- 新增或修改快捷键 / slash command 时必须同步 `commands.rs` metadata、info rail controls、README 和状态转换测试
+- 能用 TUI 焦点和快捷键自然表达的能力，不优先新增 slash command；hidden command 必须有明确退场计划和删除条件
 
 ### 3.5 `termquill-runtime`
 

@@ -315,6 +315,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_stream_ends_after_done_without_waiting_for_socket_close() -> Result<()> {
+        let server = spawn_done_then_hanging_streaming_server().await?;
+        let config = crate::DeepSeekProviderConfig {
+            base_url: server.clone(),
+            beta_base_url: server.clone(),
+            anthropic_base_url: server,
+            model: "deepseek-v4-flash".to_owned(),
+            fim_model: "deepseek-v4-pro".to_owned(),
+            api_key: Some("test".to_owned()),
+            user_id_strategy: None,
+            strict_tools_mode: crate::StrictToolsMode::Auto,
+            request_timeout_secs: 10,
+        };
+        let provider = DeepSeekProvider::new(config.clone())?;
+        let request = termquill_kernel::CompletionRequest {
+            provider_name: "deepseek".to_owned(),
+            model_name: config.model.clone(),
+            messages: vec![termquill_kernel::ModelMessage::user("hi")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+        };
+        let mut stream = provider.stream(request).await?;
+
+        let first = timeout(Duration::from_millis(500), stream.next())
+            .await
+            .expect("first delta should arrive")
+            .expect("stream should yield text")?;
+        assert!(matches!(first, ProviderChunk::TextDelta(text) if text == "hello"));
+
+        let done = timeout(Duration::from_millis(500), stream.next())
+            .await
+            .expect("done should arrive")
+            .expect("stream should yield done")?;
+        assert!(matches!(done, ProviderChunk::Done));
+
+        let finished = timeout(Duration::from_millis(500), stream.next())
+            .await
+            .expect("stream should end after done without waiting for socket close");
+        assert!(finished.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn prefix_completion_uses_beta_chat_path() -> Result<()> {
         let requests = Arc::new(Mutex::new(VecDeque::new()));
         let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
@@ -487,6 +538,25 @@ mod tests {
             sleep(Duration::from_secs(1)).await;
             let done = "data: [DONE]\n\n";
             let _ = socket.write_all(done.as_bytes()).await;
+        });
+        Ok(format!("http://{}", address))
+    }
+
+    async fn spawn_done_then_hanging_streaming_server() -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = vec![0u8; 8192];
+            let _ = socket.read(&mut buffer).await;
+            let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n";
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
+            let _ = socket.write_all(header.as_bytes()).await;
+            let _ = socket.write_all(body.as_bytes()).await;
+            let _ = socket.flush().await;
+            sleep(Duration::from_secs(5)).await;
         });
         Ok(format!("http://{}", address))
     }
@@ -790,6 +860,9 @@ fn chat_response_stream(
                     match enqueue_chat_frames(&mut state.1, &mut state.2, &mut state.3, &raw) {
                         Ok(done_seen) => {
                             state.5 |= done_seen;
+                            if done_seen {
+                                state.4 = true;
+                            }
                         }
                         Err(error) => {
                             state.4 = true;

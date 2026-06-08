@@ -115,6 +115,10 @@ cargo clippy --all-targets -- -D warnings
 - 审批体验优先级很高：写工具要尽量有 preview / diff / 导航
 - session 体验要可持续使用，而不只是“一次性跑完一轮”
 - `AppState` 应保持 façade；可独立演进的输入、审批、session、slash、timeline、provider status 和渲染块应拆入独立模块，避免 `app.rs` / `ui.rs` 重新膨胀
+- TUI renderer 变更必须同时确认状态模型、事件流、键位提示和 README/governance 文档是否需要同步；纯 renderer 拆分也要跑对应 TUI renderer/state tests
+- UI 快捷键变更必须覆盖 key mapping 与 `AppState` state transition tests，并确认 info rail / keyboard help / README 与真实 metadata 一致
+- markdown renderer 变更必须覆盖 assistant timeline、tool preview 或 approval modal 的至少一个调用面，避免 options 增强只在单测中成立
+- setup/config 状态模型拆分必须保留保存、关闭、dirty guard 和 modal 输入的持久化/状态机测试
 
 ## 8. Provider 与工具工程规范
 

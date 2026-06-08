@@ -42,12 +42,6 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         completes_with_space: false,
     },
     SlashCommandSpec {
-        canonical: "/demo",
-        aliases: &[],
-        description: "demo run",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
         canonical: "/effort",
         aliases: &["/e"],
         description: "set effort <low|medium|high|max>",
@@ -68,25 +62,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         canonical: "/resume",
         aliases: &[],
-        description: "resume latest or <n>",
-        completes_with_space: true,
-    },
-    SlashCommandSpec {
-        canonical: "/sessions",
-        aliases: &[],
-        description: "list sessions",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
-        canonical: "/tool",
-        aliases: &[],
-        description: "tool card <latest|next|prev|open|close|toggle>",
-        completes_with_space: true,
-    },
-    SlashCommandSpec {
-        canonical: "/tools",
-        aliases: &[],
-        description: "tool preview <brief|full>",
+        description: "choose a saved session",
         completes_with_space: true,
     },
 ];
@@ -132,59 +108,5 @@ pub(crate) const MODEL_SELECTOR_OPTIONS: &[SlashArgumentOption] = &[
         value: "deepseek-v4-pro",
         description: "stronger reasoning model",
         keywords: &["pro", "v4-pro", "deepseek-v4-pro"],
-    },
-];
-
-pub(crate) const TOOL_PREVIEW_SELECTOR_OPTIONS: &[SlashArgumentOption] = &[
-    SlashArgumentOption {
-        label: "brief",
-        value: "brief",
-        description: "summary only",
-        keywords: &["brief", "compact", "summary"],
-    },
-    SlashArgumentOption {
-        label: "full",
-        value: "full",
-        description: "show full preview body",
-        keywords: &["full", "expand", "expanded"],
-    },
-];
-
-pub(crate) const TOOL_CARD_SELECTOR_OPTIONS: &[SlashArgumentOption] = &[
-    SlashArgumentOption {
-        label: "latest",
-        value: "latest",
-        description: "jump to newest tool card",
-        keywords: &["latest", "last", "newest"],
-    },
-    SlashArgumentOption {
-        label: "next",
-        value: "next",
-        description: "select next tool card",
-        keywords: &["next", "down", "forward"],
-    },
-    SlashArgumentOption {
-        label: "prev",
-        value: "prev",
-        description: "select previous tool card",
-        keywords: &["prev", "previous", "back"],
-    },
-    SlashArgumentOption {
-        label: "open",
-        value: "open",
-        description: "expand selected card",
-        keywords: &["open", "expand", "show"],
-    },
-    SlashArgumentOption {
-        label: "close",
-        value: "close",
-        description: "collapse selected card",
-        keywords: &["close", "collapse", "hide"],
-    },
-    SlashArgumentOption {
-        label: "toggle",
-        value: "toggle",
-        description: "toggle selected card",
-        keywords: &["toggle", "switch"],
     },
 ];

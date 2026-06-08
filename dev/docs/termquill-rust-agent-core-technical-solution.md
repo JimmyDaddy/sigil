@@ -1012,7 +1012,7 @@ pub struct ProviderCapabilities {
 
 这意味着 `kernel` 事件流在 phase 1 就要按 TUI 消费习惯设计，而不是先按“stdout 打印一堆日志”来塑形。
 
-当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛行为编排，输入焦点、approval state、session history、slash selector、timeline state、provider status 等纯状态放在独立模块；`ui.rs` 保留顶层 layout 和共享 theme，approval modal 等复杂渲染块拆到 `ui/*`。
+当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛行为编排，输入焦点、approval state、session history、slash selector、timeline state、provider status 等纯状态放在独立模块；setup/config 状态模型维护在 `setup.rs` / `config_panel.rs`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
 
 ### 15.2 TUI-first 下的能力暴露规则
 

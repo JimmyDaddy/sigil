@@ -205,7 +205,28 @@ where
                 };
                 for call in completed_calls {
                     if let Some(spec) = self.tools.spec_for(&call.name) {
-                        let subject = self.tools.permission_subject(&call)?;
+                        let subject = match self.tools.permission_subject(&call) {
+                            Ok(subject) => subject,
+                            Err(error) => {
+                                let result = crate::tool::ToolResult {
+                                    call_id: call.id.clone(),
+                                    tool_name: call.name.clone(),
+                                    content: format!(
+                                        "invalid tool arguments for {}: {error}",
+                                        call.name
+                                    ),
+                                    is_error: true,
+                                    metadata: ToolResultMeta::default(),
+                                };
+                                let tool_message = ModelMessage::tool(
+                                    result.call_id.clone(),
+                                    result.content.clone(),
+                                );
+                                session.append_tool_message(tool_message)?;
+                                handler.handle(RunEvent::ToolResult(result))?;
+                                continue;
+                            }
+                        };
                         let decision = PermissionPolicy::new(&options.permission_config).decide(
                             &spec,
                             &call.name,
@@ -501,10 +522,11 @@ mod tests {
         }
 
         fn permission_subject(&self, args: &serde_json::Value) -> Result<Option<String>> {
-            Ok(args
+            let path = args
                 .get("path")
                 .and_then(serde_json::Value::as_str)
-                .map(ToOwned::to_owned))
+                .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+            Ok(Some(path.to_owned()))
         }
 
         async fn execute(
@@ -826,6 +848,7 @@ mod tests {
     }
 
     struct WriteMockProvider;
+    struct InvalidWriteArgsProvider;
 
     #[async_trait]
     impl Provider for WriteMockProvider {
@@ -884,6 +907,63 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Provider for InvalidWriteArgsProvider {
+        fn name(&self) -> &str {
+            "mock-invalid-write"
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                exact_prefix_cache: false,
+                reports_cache_tokens: false,
+                supports_reasoning_stream: true,
+                supports_tool_stream: true,
+                supports_background_tasks: false,
+                supports_response_handles: false,
+                supports_reasoning_artifacts: false,
+                supports_structured_output: false,
+                supports_assistant_prefix_seed: false,
+                supports_schema_constrained_tools: false,
+                supports_infill_completion: false,
+                supports_system_fingerprint: false,
+            }
+        }
+
+        async fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+            let tool_used = request
+                .messages
+                .iter()
+                .any(|message| matches!(message.role, MessageRole::Tool));
+            if tool_used {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderChunk::TextDelta("done".to_owned())),
+                    Ok(ProviderChunk::Done),
+                ])))
+            } else {
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderChunk::ToolCallStart {
+                        id: "call-write-1".to_owned(),
+                        name: "write_file".to_owned(),
+                    }),
+                    Ok(ProviderChunk::ToolCallArgsDelta {
+                        id: "call-write-1".to_owned(),
+                        delta: r#"{"content":"missing path"}"#.to_owned(),
+                    }),
+                    Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                        id: "call-write-1".to_owned(),
+                        name: "write_file".to_owned(),
+                        args_json: r#"{"content":"missing path"}"#.to_owned(),
+                    })),
+                    Ok(ProviderChunk::Done),
+                ])))
+            }
+        }
+    }
+
     #[tokio::test]
     async fn agent_respects_denied_write_approval() -> Result<()> {
         let executed = Arc::new(AtomicBool::new(false));
@@ -916,6 +996,53 @@ mod tests {
             .await?;
         assert_eq!(result.final_text, "done");
         assert!(!executed.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_returns_tool_error_when_permission_subject_is_invalid() -> Result<()> {
+        let executed = Arc::new(AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(WriteTool {
+            executed: Arc::clone(&executed),
+        }));
+        let agent = Agent::new(InvalidWriteArgsProvider, registry);
+        let mut session = Session::new("mock-invalid-write", "mock-model");
+        let mut handler = RecordingEventHandler::default();
+        let mut approval_handler = PanicApprovalHandler;
+        let result = agent
+            .run_with_approval(
+                &mut session,
+                "write without a path",
+                AgentRunOptions {
+                    workspace_root: std::env::temp_dir(),
+                    max_turns: 4,
+                    tool_timeout_secs: 5,
+                    reasoning_effort: Some(ReasoningEffort::Medium),
+                    traffic_partition_key: None,
+                    interaction_mode: InteractionMode::Interactive,
+                    permission_config: PermissionConfig::default(),
+                    memory_config: MemoryConfig { enabled: false },
+                    compaction_config: CompactionConfig::default(),
+                },
+                &mut handler,
+                &mut approval_handler,
+            )
+            .await?;
+
+        assert_eq!(result.final_text, "done");
+        assert!(!executed.load(Ordering::SeqCst));
+        assert!(session.messages().iter().any(|message| {
+            matches!(message.role, MessageRole::Tool)
+                && message.content.as_deref().is_some_and(|content| {
+                    content.contains("invalid tool arguments for write_file")
+                        && content.contains("missing string field path")
+                })
+        }));
+        assert!(handler.events.iter().any(|event| {
+            matches!(event, RunEvent::ToolResult(result)
+                if result.is_error && result.content.contains("missing string field path"))
+        }));
         Ok(())
     }
 

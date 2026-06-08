@@ -29,11 +29,7 @@ pub(crate) struct LiveActivitySummary {
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
-pub(crate) enum ActivityPanelRow {
-    Event {
-        label: String,
-        detail: String,
-    },
+pub(crate) enum SessionHistoryRow {
     SessionHeader {
         filter: String,
         total: usize,
@@ -101,21 +97,6 @@ pub(crate) enum RunPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolPreviewMode {
-    Brief,
-    Full,
-}
-
-impl ToolPreviewMode {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Brief => "brief",
-            Self::Full => "full",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThinkingBlockMode {
     Collapsed,
     Expanded,
@@ -128,11 +109,4 @@ impl ThinkingBlockMode {
             Self::Expanded => "expanded",
         }
     }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ActivityPanelMode {
-    Events,
-    Sessions,
 }

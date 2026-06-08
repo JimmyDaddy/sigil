@@ -457,12 +457,12 @@ impl Session {
     fn projected_messages(&self) -> Vec<ModelMessage> {
         let raw_messages = self.raw_messages();
         let Some(record) = latest_compaction_record(&self.entries) else {
-            return raw_messages;
+            return repair_orphan_tool_results(&raw_messages);
         };
         if record.compacted_message_count == 0 || record.summary.trim().is_empty() {
-            return raw_messages;
+            return repair_orphan_tool_results(&raw_messages);
         }
-        projected_messages_with_record(&raw_messages, &record)
+        repair_orphan_tool_results(&projected_messages_with_record(&raw_messages, &record))
     }
 }
 
@@ -496,6 +496,57 @@ fn projected_messages_with_record(
         );
     }
     projected
+}
+
+fn repair_orphan_tool_results(messages: &[ModelMessage]) -> Vec<ModelMessage> {
+    let mut repaired = Vec::with_capacity(messages.len());
+    let mut index = 0usize;
+
+    while index < messages.len() {
+        let message = &messages[index];
+        repaired.push(message.clone());
+
+        if !matches!(message.role, crate::MessageRole::Assistant) || message.tool_calls.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        let mut satisfied_call_ids = Vec::new();
+        while index < messages.len() && matches!(messages[index].role, crate::MessageRole::Tool) {
+            if let Some(tool_call_id) = &messages[index].tool_call_id
+                && message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.id == *tool_call_id)
+            {
+                satisfied_call_ids.push(tool_call_id.clone());
+            }
+            repaired.push(messages[index].clone());
+            index += 1;
+        }
+
+        for call in &message.tool_calls {
+            if !satisfied_call_ids.iter().any(|call_id| call_id == &call.id) {
+                repaired.push(synthetic_orphan_tool_result(call));
+            }
+        }
+    }
+
+    repaired
+}
+
+fn synthetic_orphan_tool_result(call: &crate::ToolCall) -> ModelMessage {
+    ModelMessage {
+        id: format!("local_repair:missing_tool_result:{}", call.id),
+        role: crate::MessageRole::Tool,
+        content: Some(format!(
+            "tool call {} did not return a result before the previous run stopped; retry the tool call with valid arguments if it is still needed",
+            call.name
+        )),
+        tool_calls: Vec::new(),
+        tool_call_id: Some(call.id.clone()),
+    }
 }
 
 pub fn latest_compaction_record(entries: &[SessionLogEntry]) -> Option<CompactionRecord> {
@@ -732,6 +783,33 @@ mod tests {
                 SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(_))
             )
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn messages_repair_orphan_tool_call_projection() -> Result<()> {
+        let mut session = Session::new("deepseek", "deepseek-v4-flash");
+        session.append_assistant_message(ModelMessage::assistant(
+            None,
+            vec![crate::ToolCall {
+                id: "call-1".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: "{}".to_owned(),
+            }],
+        ))?;
+        session.append_user_message(ModelMessage::user("continue"))?;
+
+        let projected = session.messages();
+
+        assert_eq!(projected.len(), 3);
+        assert!(matches!(projected[0].role, crate::MessageRole::Assistant));
+        assert!(matches!(projected[1].role, crate::MessageRole::Tool));
+        assert_eq!(projected[1].id, "local_repair:missing_tool_result:call-1");
+        assert_eq!(projected[1].tool_call_id.as_deref(), Some("call-1"));
+        assert!(projected[1].content.as_deref().is_some_and(|content| {
+            content.contains("did not return a result before the previous run stopped")
+        }));
+        assert!(matches!(projected[2].role, crate::MessageRole::User));
         Ok(())
     }
 

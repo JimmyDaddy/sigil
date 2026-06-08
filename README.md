@@ -45,7 +45,8 @@ TUI 当前支持：
 
 - 提交 prompt 并流式查看输出
 - prompt 提交后 composer 会清空并保持可见；主聊天区改为 app-owned transcript，可用 `Up/Down`、`PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` 和滚轮持续回溯到会话最顶，同时最近一段历史仍会同步进终端原生 scrollback
-- 输入 `/` 时弹出 slash command selector，支持 `Up/Down` 选中、`Tab` 接受、`Enter` 执行；`/model`、`/effort`、`/tool`、`/tools` 会继续下钻参数候选，当前内置 `/compact`、`/config`、`/model`、`/effort`、`/resume`、`/sessions`、`/tool`、`/tools`
+- 输入 `/` 时弹出 slash command selector，支持 `Up/Down` 选中、`Tab` 接受、`Enter` 执行；`/model`、`/effort`、`/resume` 会继续下钻参数候选，其中 `/resume` 展示可恢复 session 标题，当前内置 `/compact`、`/config`、`/effort`、`/model`、`/quit`、`/resume`
+- `F1` 打开 keyboard help；核心快捷键、tool card 快捷键和公开 slash command 列表都从真实命令面生成，不依赖隐藏兼容入口
 - composer 的历史输入只响应键盘：仅在 composer 聚焦且光标位于首行或末行时，`Up/Down` 才切换历史
 - `/config` 打开 TUI guided config flow；provider 主流程只保留 `model / api_key / base_url / fim_model`，文本项统一走弹窗输入，底部固定 `Actions` 栏可用 `Down` 聚焦，再用 `Left/Right` 选 `save / save+close / close`
 - 主屏默认走 chat-first：inline viewport 会占满当前终端可视区，左侧主区域展示 live transcript + 底部 composer，右侧保留独立的 full-height `info rail`；启动恢复旧会话时只 seed 最近一段 transcript 到 terminal scrollback，避免长会话整屏重放
@@ -55,7 +56,7 @@ TUI 当前支持：
 - `ctx`、compaction status 和 auto-compaction 统一按同一个 effective context window 计算：已知模型窗口优先，其次才回退到 `compaction.context_window_tokens`
 - assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成卡片式展示；`read_file / ls / glob / grep / bash / write_file / edit_file` 走专用 renderer，其他结构化 payload 走树形 fallback，不再直接 dump 原始 JSON
 - live phase 只保留在运行态和事件流里，不再固化成 chat transcript；completed thinking 默认折叠成一行摘要，用 `Ctrl-T` 展开或收起
-- `/tool <latest|next|prev|open|close|toggle>` 选择并展开单个 tool card；`/tools <brief|full>` 继续控制全局 brief/full 视图
+- tool result 默认以 brief card 展示，避免工具预览控制继续扩张成主命令面；存在 tool card 后可用 `Ctrl-G` 聚焦最新卡片、`Alt-J` / `Alt-K` 切换卡片、`Ctrl-O` 展开/收起聚焦卡片，composer 为空时 `Esc` 清除 tool card focus
 - 工具调用审批改为居中 review card：固定 `Summary / Files / Diff / Actions` 四区，composer 不会因为审批而消失
 - `write_file` / `edit_file` diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换
 - `/compact` 手动压缩当前会话的 provider 可见上下文
