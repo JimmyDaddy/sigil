@@ -1,3 +1,4 @@
+use super::session_flow::session_history_display_label;
 use super::*;
 use crate::slash::{
     EFFORT_SELECTOR_OPTIONS, MODEL_SELECTOR_OPTIONS, ResolvedSlashCommand, SLASH_COMMANDS,
