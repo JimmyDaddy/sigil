@@ -95,6 +95,7 @@
 - `app/formatting.rs` 只放跨 flow 复用的无副作用格式化 helper，单 flow 私有 helper 优先留在对应 flow 模块
 - renderer 优先读取 ViewModel 或明确 render options，不要为了展示逻辑直接扩散完整 `AppState` 依赖
 - setup/config 状态模型维护在 `setup.rs` / `config_panel.rs`，`app.rs` 只保留入口协调、持久化和跨状态行为
+- `runner.rs` 只作为 worker façade 和必要 re-export；worker protocol、spawn 装配、运行 loop、event/approval bridge、session/compaction flow 分别维护在 `runner/*`，runner 状态机测试维护在 `runner/tests/*`
 - `ui.rs` 只作为 `ui/*` 模块入口和必要 re-export；顶层 shell layout 放在 `ui/shell.rs`
 - theme、geometry、text、primitives 等共享 renderer 底座分别维护在 `ui/theme.rs`、`ui/geometry.rs`、`ui/text.rs`、`ui/primitives.rs`
 - markdown、timeline、tool card、approval、main screen、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，不再回填到 `ui.rs`

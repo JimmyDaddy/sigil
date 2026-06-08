@@ -1,2 +1,36 @@
+# Keep signatures explicit, but allow a small amount of TUI/runtime plumbing before
+# requiring an options struct.
 too-many-arguments-threshold = 10
 
+# These only take effect when the corresponding opt-in lints are enabled. They
+# document the project boundary for future stricter Clippy profiles.
+too-many-lines-threshold = 120
+cognitive-complexity-threshold = 25
+type-complexity-threshold = 250
+
+# Production code stays strict through workspace lint levels; tests may use
+# expectation-style assertions without forcing low-signal error plumbing.
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = false
+
+# Append repo-specific terms to Clippy's default doc-markdown allowlist.
+doc-valid-idents = [
+  "Termquill",
+  "DeepSeek",
+  "OpenAI",
+  "MCP",
+  "JSONL",
+  "TUI",
+  "CLI",
+  "API",
+  "FIM",
+  "MSRV",
+  "AGENTS",
+  "TERMQUILL",
+  "..",
+]
+
+# App flow modules and test fixtures intentionally share private AppState context
+# through parent-module imports without widening production visibility.
+allowed-wildcard-imports = ["super", "common"]

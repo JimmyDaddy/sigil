@@ -116,6 +116,7 @@ cargo clippy --all-targets -- -D warnings
 - session 体验要可持续使用，而不只是“一次性跑完一轮”
 - `AppState` 应保持 façade；输入、slash、modal、setup/config、session/resume、timeline/scrollback、tool focus、approval、worker bridge 和 command dispatch 维护在 `crates/termquill-tui/src/app/*`，避免 `app.rs` / `ui.rs` 重新膨胀
 - TUI 状态流测试维护在 `crates/termquill-tui/src/app/tests/*_tests.rs`；新增或修复某个 flow 时必须优先补同域状态转换测试
+- TUI worker runner 维护在 `crates/termquill-tui/src/runner/*`；协议、启动装配、运行 loop、审批桥接、事件桥接和 session/compaction flow 不要回填到 `runner.rs` 单文件
 - TUI renderer 变更必须同时确认状态模型、事件流、键位提示和 README/governance 文档是否需要同步；纯 renderer 拆分也要跑对应 TUI renderer/state tests
 - UI 快捷键变更必须覆盖 key mapping 与 `AppState` state transition tests，并确认 info rail / keyboard help / README 与真实 metadata 一致
 - markdown renderer 变更必须覆盖 assistant timeline、tool preview 或 approval modal 的至少一个调用面，避免 options 增强只在单测中成立

@@ -1,4 +1,7 @@
+use std::{sync::mpsc, thread};
+
 use super::*;
+use crate::provider_status::fetch_remote_model_ids;
 use crate::slash::SLASH_COMMANDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

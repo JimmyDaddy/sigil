@@ -3,8 +3,7 @@ use std::{
     env,
     ops::Range,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
-    thread,
+    sync::mpsc::Receiver,
 };
 
 mod approval_flow;
@@ -24,8 +23,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use termquill_kernel::{
     AgentConfig, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
-    EventHandler, MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig, RunEvent, Session,
-    SessionConfig, SessionLogEntry, SessionStats, WorkspaceConfig, resolve_workspace_root,
+    MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig, Session, SessionConfig,
+    SessionLogEntry, SessionStats, WorkspaceConfig, resolve_workspace_root,
 };
 use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQUILL_API_KEY_ENV};
 use uuid::Uuid;
@@ -47,11 +46,7 @@ use crate::context_window::{
     ContextWindowSource, effective_compaction_config, resolve_context_window_tokens,
 };
 pub use crate::input::PaneFocus;
-use crate::provider_status::{
-    BalanceSnapshot, fetch_provider_balance_snapshot, fetch_remote_model_ids,
-    resolve_provider_api_key,
-};
-use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
+use crate::provider_status::BalanceSnapshot;
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
 pub(crate) use crate::setup::{SetupField, SetupState};
 pub use crate::timeline::{EventEntry, TimelineEntry, TimelineRole};

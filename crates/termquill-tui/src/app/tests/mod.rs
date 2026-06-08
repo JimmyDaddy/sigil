@@ -22,13 +22,13 @@ use termquill_kernel::{
     WorkspaceConfig,
 };
 
-use crate::runner::{CompactionTrigger, WorkerCommand};
+use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
 use crate::slash::SLASH_COMMANDS;
 
 use super::{
     AppAction, AppState, ApprovalDiffLineKind, ConfigField, ConfigSection, ModalState,
     ModelPickerRefresh, ModelPickerTarget, PaneFocus, RunPhase, SessionHistoryRow, SessionViewMode,
-    SetupField, TimelineRole, WorkerMessage,
+    SetupField, TimelineRole,
 };
 
 use common::*;
