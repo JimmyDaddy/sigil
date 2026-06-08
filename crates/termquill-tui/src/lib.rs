@@ -1,4 +1,10 @@
 pub mod app;
+pub(crate) mod approval;
 pub(crate) mod context_window;
+pub(crate) mod input;
+pub(crate) mod provider_status;
 pub mod runner;
+pub(crate) mod sessions;
+pub(crate) mod slash;
+pub(crate) mod timeline;
 pub mod ui;

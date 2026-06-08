@@ -1,0 +1,72 @@
+use termquill_kernel::{ToolCall, ToolPreview, ToolSpec};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalDiffLineKind {
+    Header,
+    Hunk,
+    Added,
+    Removed,
+    Context,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ApprovalDiffLine {
+    pub text: String,
+    pub kind: ApprovalDiffLineKind,
+    pub active_hunk: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ApprovalFileRow {
+    pub path: String,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ApprovalModalView {
+    pub tool_name: String,
+    pub call_id: String,
+    pub access_label: &'static str,
+    pub preview_title: String,
+    pub preview_summary: String,
+    pub metadata_collapsed: bool,
+    pub file_rows: Vec<ApprovalFileRow>,
+    pub changed_files: Vec<String>,
+    pub diff_mode_label: &'static str,
+    pub active_hunk_index: usize,
+    pub hunk_total: usize,
+    pub diff_label: String,
+    pub diff_lines: Vec<ApprovalDiffLine>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    pub call: ToolCall,
+    pub spec: ToolSpec,
+    pub preview: Option<ToolPreview>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalDiffMode {
+    Full,
+    CurrentHunk,
+    ChangedOnly,
+}
+
+impl ApprovalDiffMode {
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Full => Self::CurrentHunk,
+            Self::CurrentHunk => Self::ChangedOnly,
+            Self::ChangedOnly => Self::Full,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::CurrentHunk => "current-hunk",
+            Self::ChangedOnly => "changed-only",
+        }
+    }
+}
