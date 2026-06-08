@@ -249,6 +249,27 @@ pub trait Provider: Send + Sync {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>>;
 }
 
+#[async_trait]
+impl<P> Provider for Box<P>
+where
+    P: Provider + ?Sized,
+{
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        (**self).capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        (**self).stream(request).await
+    }
+}
+
 impl ModelMessage {
     /// Creates a system-role message.
     pub fn system(content: impl Into<String>) -> Self {

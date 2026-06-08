@@ -1710,11 +1710,9 @@ dependencies = [
  "anyhow",
  "clap",
  "futures",
- "serde_json",
  "termquill-kernel",
- "termquill-mcp",
  "termquill-provider-deepseek",
- "termquill-tools-builtin",
+ "termquill-runtime",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1773,6 +1771,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "termquill-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "termquill-kernel",
+ "termquill-mcp",
+ "termquill-provider-deepseek",
+ "termquill-tools-builtin",
+ "tokio",
+]
+
+[[package]]
 name = "termquill-tools-builtin"
 version = "0.1.0"
 dependencies = [
@@ -1804,9 +1815,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "termquill-kernel",
- "termquill-mcp",
  "termquill-provider-deepseek",
- "termquill-tools-builtin",
+ "termquill-runtime",
  "tokio",
  "toml",
  "unicode-segmentation",

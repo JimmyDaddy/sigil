@@ -10,9 +10,8 @@ use anyhow::{Context, Result, anyhow};
 use termquill_kernel::{
     Agent, AgentRunOptions, AgentRunResult, ApprovalHandler, CompactionConfig, CompactionRecord,
     CompactionThresholdStatus, EventHandler, InteractionMode, JsonlSessionStore, ReasoningEffort,
-    RootConfig, RunEvent, Session, SessionLogEntry, ToolApproval, ToolCall, ToolRegistry, ToolSpec,
+    RootConfig, RunEvent, Session, SessionLogEntry, ToolApproval, ToolCall, ToolSpec,
 };
-use termquill_provider_deepseek::{DeepSeekProvider, DeepSeekProviderConfig};
 
 use crate::context_window::effective_compaction_config;
 
@@ -82,8 +81,11 @@ pub fn spawn_agent_worker(
     let (command_tx, command_rx) = mpsc::channel();
     let (message_tx, message_rx) = mpsc::channel();
 
-    let options = build_run_options(&root_config, workspace_root.clone());
-    let provider_config = load_deepseek_config(&root_config)?;
+    let options = termquill_runtime::build_run_options(
+        &root_config,
+        workspace_root.clone(),
+        InteractionMode::Interactive,
+    );
 
     thread::Builder::new()
         .name("termquill-agent-worker".to_owned())
@@ -100,17 +102,16 @@ pub fn spawn_agent_worker(
                 }
             };
 
-            let mut registry = ToolRegistry::new();
-            termquill_tools_builtin::register_builtin_tools(&mut registry);
-            if let Err(error) = runtime.block_on(termquill_mcp::register_mcp_tools(
-                &mut registry,
-                &root_config.mcp_servers,
-            )) {
-                let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                return;
-            }
+            let registry =
+                match runtime.block_on(termquill_runtime::build_tool_registry(&root_config)) {
+                    Ok(registry) => registry,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        return;
+                    }
+                };
 
-            let provider = match DeepSeekProvider::new(provider_config) {
+            let provider = match termquill_runtime::build_provider(&root_config) {
                 Ok(provider) => provider,
                 Err(error) => {
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
@@ -479,29 +480,6 @@ impl ApprovalHandler for ChannelApprovalHandler {
     }
 }
 
-fn build_run_options(root_config: &RootConfig, workspace_root: PathBuf) -> AgentRunOptions {
-    AgentRunOptions {
-        workspace_root,
-        max_turns: root_config.agent.max_turns,
-        tool_timeout_secs: root_config.agent.tool_timeout_secs,
-        reasoning_effort: Some(termquill_kernel::ReasoningEffort::Max),
-        traffic_partition_key: Some("local-user".to_owned()),
-        interaction_mode: InteractionMode::Interactive,
-        permission_config: root_config.permission.clone(),
-        memory_config: root_config.memory.clone(),
-        compaction_config: root_config.compaction.clone(),
-    }
-}
-
-fn load_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProviderConfig> {
-    let provider_config_value = root_config
-        .providers
-        .get("deepseek")
-        .cloned()
-        .ok_or_else(|| anyhow!("missing [providers.deepseek] in termquill.toml"))?;
-    serde_json::from_value(provider_config_value).context("invalid deepseek provider config")
-}
-
 fn load_session(provider_name: &str, model_name: &str, session_log_path: &Path) -> Result<Session> {
     let store = JsonlSessionStore::new(session_log_path)?;
     Session::load_from_store(provider_name.to_owned(), model_name.to_owned(), store)
@@ -561,9 +539,7 @@ mod tests {
         ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, UsageStats, WorkspaceConfig,
     };
 
-    use super::{
-        CompactionTrigger, WorkerCommand, WorkerMessage, build_run_options, run_worker_loop,
-    };
+    use super::{CompactionTrigger, WorkerCommand, WorkerMessage, run_worker_loop};
 
     fn test_root_config(workspace_root: &Path, provider: &str, model: &str) -> RootConfig {
         RootConfig {
@@ -649,7 +625,11 @@ mod tests {
     {
         let (command_tx, command_rx) = mpsc::channel();
         let (message_tx, message_rx) = mpsc::channel();
-        let options = build_run_options(&root_config, workspace_root);
+        let options = termquill_runtime::build_run_options(
+            &root_config,
+            workspace_root,
+            termquill_kernel::InteractionMode::Interactive,
+        );
         let agent = Arc::new(agent);
         let handle = thread::Builder::new()
             .name("termquill-test-agent-worker".to_owned())

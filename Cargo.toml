@@ -4,6 +4,7 @@ members = [
     "crates/termquill-provider-deepseek",
     "crates/termquill-tools-builtin",
     "crates/termquill-mcp",
+    "crates/termquill-runtime",
     "crates/termquill-cli",
     "crates/termquill-tui",
 ]

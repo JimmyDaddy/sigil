@@ -3,16 +3,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
 use termquill_kernel::{
-    Agent, AgentRunOptions, EventHandler, InteractionMode, JsonlSessionStore, ProviderChunk,
-    RootConfig, RunEvent, Session, preferred_config_path, resolve_workspace_root,
+    Agent, EventHandler, InteractionMode, JsonlSessionStore, ProviderChunk, RootConfig, RunEvent,
+    Session, preferred_config_path, resolve_workspace_root,
 };
 use termquill_provider_deepseek::{
     DeepSeekFimCompletionRequest, DeepSeekPrefixCompletionRequest, DeepSeekProvider,
-    DeepSeekProviderConfig,
 };
 
 #[derive(Parser)]
@@ -82,12 +81,9 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
     let root_config = RootConfig::load(config_path)?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
-    let mut registry = termquill_kernel::ToolRegistry::new();
-    termquill_tools_builtin::register_builtin_tools(&mut registry);
-    termquill_mcp::register_mcp_tools(&mut registry, &root_config.mcp_servers).await?;
 
-    let provider_config = load_deepseek_config(&root_config)?;
-    let provider = DeepSeekProvider::new(provider_config)?;
+    let registry = termquill_runtime::build_tool_registry(&root_config).await?;
+    let provider = termquill_runtime::build_provider(&root_config)?;
     let agent = Agent::new(provider, registry);
 
     let session_store = JsonlSessionStore::new(default_session_path(
@@ -104,7 +100,11 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
         .run(
             &mut session,
             prompt,
-            build_run_options(&root_config, workspace_root),
+            termquill_runtime::build_run_options(
+                &root_config,
+                workspace_root,
+                InteractionMode::Headless,
+            ),
             &mut handler,
         )
         .await?;
@@ -125,7 +125,7 @@ async fn prefix_command(
     model: Option<String>,
 ) -> Result<()> {
     let root_config = RootConfig::load(config_path)?;
-    let provider = DeepSeekProvider::new(load_deepseek_config(&root_config)?)?;
+    let provider = DeepSeekProvider::new(termquill_runtime::load_deepseek_config(&root_config)?)?;
     let mut stream = provider
         .stream_prefix_completion(DeepSeekPrefixCompletionRequest {
             model,
@@ -148,7 +148,7 @@ async fn fim_command(
     max_tokens: Option<u32>,
 ) -> Result<()> {
     let root_config = RootConfig::load(config_path)?;
-    let provider = DeepSeekProvider::new(load_deepseek_config(&root_config)?)?;
+    let provider = DeepSeekProvider::new(termquill_runtime::load_deepseek_config(&root_config)?)?;
     let mut stream = provider
         .stream_fim_completion(DeepSeekFimCompletionRequest {
             model,
@@ -161,33 +161,10 @@ async fn fim_command(
     drain_provider_stream(&mut stream).await
 }
 
-fn build_run_options(root_config: &RootConfig, workspace_root: PathBuf) -> AgentRunOptions {
-    AgentRunOptions {
-        workspace_root,
-        max_turns: root_config.agent.max_turns,
-        tool_timeout_secs: root_config.agent.tool_timeout_secs,
-        reasoning_effort: Some(termquill_kernel::ReasoningEffort::Max),
-        traffic_partition_key: Some("local-user".to_owned()),
-        interaction_mode: InteractionMode::Headless,
-        permission_config: root_config.permission.clone(),
-        memory_config: root_config.memory.clone(),
-        compaction_config: root_config.compaction.clone(),
-    }
-}
-
 fn default_session_path(workspace_root: &Path, configured_log_dir: &str) -> PathBuf {
     workspace_root
         .join(configured_log_dir)
         .join(format!("session-{}.jsonl", uuid::Uuid::new_v4()))
-}
-
-fn load_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProviderConfig> {
-    let provider_config_value = root_config
-        .providers
-        .get("deepseek")
-        .cloned()
-        .ok_or_else(|| anyhow!("missing [providers.deepseek] in termquill.toml"))?;
-    serde_json::from_value(provider_config_value).context("invalid deepseek provider config")
 }
 
 async fn drain_provider_stream(
@@ -288,77 +265,9 @@ impl EventHandler for StdoutEventHandler {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use anyhow::Result;
-    use serde_json::json;
-    use termquill_kernel::{AgentConfig, RootConfig, SessionConfig, WorkspaceConfig};
 
-    use super::{
-        build_run_options, default_session_path, load_deepseek_config, resolve_workspace_root,
-    };
-
-    fn test_root_config() -> RootConfig {
-        RootConfig {
-            workspace: WorkspaceConfig {
-                root: ".".to_owned(),
-            },
-            session: SessionConfig {
-                log_dir: ".termquill/sessions".to_owned(),
-            },
-            agent: AgentConfig {
-                provider: "deepseek".to_owned(),
-                model: "deepseek-v4-flash".to_owned(),
-                max_turns: 8,
-                tool_timeout_secs: 30,
-            },
-            permission: termquill_kernel::PermissionConfig::default(),
-            memory: termquill_kernel::MemoryConfig { enabled: true },
-            compaction: termquill_kernel::CompactionConfig::default(),
-            providers: BTreeMap::new(),
-            mcp_servers: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn build_run_options_carries_agent_limits_and_local_partition() {
-        let workspace_root = std::env::temp_dir().join("termquill-cli-test");
-        let options = build_run_options(
-            &RootConfig {
-                workspace: WorkspaceConfig {
-                    root: ".".to_owned(),
-                },
-                session: SessionConfig {
-                    log_dir: ".termquill/sessions".to_owned(),
-                },
-                agent: AgentConfig {
-                    provider: "deepseek".to_owned(),
-                    model: "deepseek-v4-flash".to_owned(),
-                    max_turns: 12,
-                    tool_timeout_secs: 45,
-                },
-                permission: termquill_kernel::PermissionConfig::default(),
-                memory: termquill_kernel::MemoryConfig { enabled: true },
-                compaction: termquill_kernel::CompactionConfig::default(),
-                providers: BTreeMap::new(),
-                mcp_servers: Vec::new(),
-            },
-            workspace_root.clone(),
-        );
-
-        assert_eq!(options.workspace_root, workspace_root);
-        assert_eq!(options.max_turns, 12);
-        assert_eq!(options.tool_timeout_secs, 45);
-        assert_eq!(
-            options.reasoning_effort,
-            Some(termquill_kernel::ReasoningEffort::Max)
-        );
-        assert_eq!(options.traffic_partition_key.as_deref(), Some("local-user"));
-        assert_eq!(
-            options.interaction_mode,
-            termquill_kernel::InteractionMode::Headless
-        );
-    }
+    use super::{default_session_path, resolve_workspace_root};
 
     #[test]
     fn resolve_workspace_root_uses_config_parent() -> Result<()> {
@@ -405,51 +314,6 @@ mod tests {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with("session-"))
-        );
-    }
-
-    #[test]
-    fn load_deepseek_config_reads_provider_block() -> Result<()> {
-        let mut root_config = test_root_config();
-        root_config.providers.insert(
-            "deepseek".to_owned(),
-            json!({
-                "base_url": "https://example.com",
-                "beta_base_url": "https://example.com/beta",
-                "anthropic_base_url": "https://example.com/anthropic",
-                "model": "deepseek-v4-pro",
-                "fim_model": "deepseek-v4-fim",
-                "api_key": "test-key",
-                "strict_tools_mode": "always",
-                "request_timeout_secs": 15
-            }),
-        );
-
-        let config = load_deepseek_config(&root_config)?;
-        assert_eq!(config.base_url, "https://example.com");
-        assert_eq!(config.beta_base_url, "https://example.com/beta");
-        assert_eq!(config.anthropic_base_url, "https://example.com/anthropic");
-        assert_eq!(config.model, "deepseek-v4-pro");
-        assert_eq!(config.fim_model, "deepseek-v4-fim");
-        assert_eq!(config.api_key.as_deref(), Some("test-key"));
-        assert_eq!(
-            config.strict_tools_mode,
-            termquill_provider_deepseek::StrictToolsMode::Always
-        );
-        assert_eq!(config.request_timeout_secs, 15);
-        Ok(())
-    }
-
-    #[test]
-    fn load_deepseek_config_errors_when_provider_block_is_missing() {
-        let root_config = test_root_config();
-        let error =
-            load_deepseek_config(&root_config).expect_err("expected missing provider error");
-
-        assert!(
-            error
-                .to_string()
-                .contains("missing [providers.deepseek] in termquill.toml")
         );
     }
 }
