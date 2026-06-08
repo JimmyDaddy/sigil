@@ -1,4 +1,4 @@
-use std::pin::Pin;
+use std::{collections::VecDeque, pin::Pin};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -139,6 +139,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        time::{Duration, sleep, timeout},
     };
 
     use crate::{
@@ -269,6 +270,47 @@ mod tests {
                 .iter()
                 .any(|chunk| matches!(chunk, ProviderChunk::TextDelta(text) if text == "hello"))
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_yields_first_delta_before_stream_finishes() -> Result<()> {
+        let server = spawn_slow_streaming_server().await?;
+        let config = crate::DeepSeekProviderConfig {
+            base_url: server.clone(),
+            beta_base_url: server.clone(),
+            anthropic_base_url: server,
+            model: "deepseek-v4-flash".to_owned(),
+            fim_model: "deepseek-v4-pro".to_owned(),
+            api_key: Some("test".to_owned()),
+            user_id_strategy: None,
+            strict_tools_mode: crate::StrictToolsMode::Auto,
+            request_timeout_secs: 10,
+        };
+        let provider = DeepSeekProvider::new(config.clone())?;
+        let request = termquill_kernel::CompletionRequest {
+            provider_name: "deepseek".to_owned(),
+            model_name: config.model.clone(),
+            messages: vec![termquill_kernel::ModelMessage::user("hi")],
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            reasoning_effort: None,
+            previous_response_handle: None,
+            continuation_states: Vec::new(),
+            traffic_partition_key: None,
+            background: false,
+            store: false,
+            deterministic_materialization: true,
+        };
+        let mut stream = provider.stream(request).await?;
+
+        let first = timeout(Duration::from_millis(500), stream.next())
+            .await
+            .expect("first delta should arrive before the server closes the stream")
+            .expect("stream should yield one chunk")?;
+
+        assert!(matches!(first, ProviderChunk::TextDelta(text) if text == "hello"));
         Ok(())
     }
 
@@ -427,6 +469,28 @@ mod tests {
         Ok(format!("http://{}", address))
     }
 
+    async fn spawn_slow_streaming_server() -> Result<String> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = vec![0u8; 8192];
+            let _ = socket.read(&mut buffer).await;
+            let header =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let first = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n";
+            let _ = socket.write_all(header.as_bytes()).await;
+            let _ = socket.write_all(first.as_bytes()).await;
+            let _ = socket.flush().await;
+            sleep(Duration::from_secs(1)).await;
+            let done = "data: [DONE]\n\n";
+            let _ = socket.write_all(done.as_bytes()).await;
+        });
+        Ok(format!("http://{}", address))
+    }
+
     fn http_response(status: u16, content_type: &str, body: &str) -> Vec<u8> {
         let status_line = match status {
             200 => "HTTP/1.1 200 OK",
@@ -457,15 +521,15 @@ impl Provider for DeepSeekProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
-        let chunks = self.collect_chunks(request).await?;
-        Ok(Box::pin(stream::iter(
-            chunks.into_iter().map(Ok::<ProviderChunk, anyhow::Error>),
-        )))
+        self.stream_chunks(request).await
     }
 }
 
 impl DeepSeekProvider {
-    async fn collect_chunks(&self, request: CompletionRequest) -> Result<Vec<ProviderChunk>> {
+    async fn stream_chunks(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let user_id = extract_user_id(&request, self.config.user_id_strategy.as_deref())?;
         let prepared = build_chat_request(
             &request,
@@ -473,7 +537,7 @@ impl DeepSeekProvider {
             self.config.strict_tools_mode,
             &self.profile.quirks,
         )?;
-        self.collect_chat_chunks(
+        self.stream_chat_chunks(
             prepared.endpoint,
             "/chat/completions",
             &request.model_name,
@@ -491,6 +555,24 @@ impl DeepSeekProvider {
         body: &T,
         retry_on_reasoning_400: bool,
     ) -> Result<Vec<ProviderChunk>> {
+        let mut stream = self
+            .stream_chat_chunks(endpoint, path, model_name, body, retry_on_reasoning_400)
+            .await?;
+        let mut chunks = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            chunks.push(chunk?);
+        }
+        Ok(chunks)
+    }
+
+    async fn stream_chat_chunks<T: Serialize>(
+        &self,
+        endpoint: DeepSeekEndpointClass,
+        path: &str,
+        model_name: &str,
+        body: &T,
+        retry_on_reasoning_400: bool,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let mut attempts = 0usize;
         loop {
             attempts += 1;
@@ -522,52 +604,7 @@ impl DeepSeekProvider {
                 return Err(classified.into());
             }
 
-            let mut mapper = StreamMapper::new(model_name.to_owned());
-            let mut chunks = Vec::new();
-            let mut decoder = DeepSeekSseDecoder::default();
-            let mut byte_stream = response.bytes_stream();
-            while let Some(next) = byte_stream.next().await {
-                let bytes = next.context("failed to read response chunk")?;
-                let raw = String::from_utf8(bytes.to_vec()).context("invalid UTF-8 SSE chunk")?;
-                for frame in decoder.push(&raw)? {
-                    match frame {
-                        crate::response::DeepSeekSseFrame::Blank
-                        | crate::response::DeepSeekSseFrame::Comment => {}
-                        crate::response::DeepSeekSseFrame::Done => chunks.push(ProviderChunk::Done),
-                        crate::response::DeepSeekSseFrame::Data(data) => {
-                            let envelope: DeepSeekStreamEnvelope = serde_json::from_str(&data)
-                                .with_context(|| {
-                                    format!(
-                                        "invalid DeepSeek event {}",
-                                        truncate_event_payload(&data)
-                                    )
-                                })?;
-                            chunks.extend(mapper.map_envelope(envelope)?);
-                        }
-                    }
-                }
-            }
-            for frame in decoder.finish()? {
-                match frame {
-                    crate::response::DeepSeekSseFrame::Blank
-                    | crate::response::DeepSeekSseFrame::Comment => {}
-                    crate::response::DeepSeekSseFrame::Done => chunks.push(ProviderChunk::Done),
-                    crate::response::DeepSeekSseFrame::Data(data) => {
-                        let envelope: DeepSeekStreamEnvelope = serde_json::from_str(&data)
-                            .with_context(|| {
-                                format!("invalid DeepSeek event {}", truncate_event_payload(&data))
-                            })?;
-                        chunks.extend(mapper.map_envelope(envelope)?);
-                    }
-                }
-            }
-            if !chunks
-                .iter()
-                .any(|chunk| matches!(chunk, ProviderChunk::Done))
-            {
-                chunks.push(ProviderChunk::Done);
-            }
-            return Ok(chunks);
+            return Ok(chat_response_stream(response, model_name.to_owned()));
         }
     }
 
@@ -717,5 +754,119 @@ fn truncate_event_payload(payload: &str) -> String {
         format!("{truncated}...")
     } else {
         truncated
+    }
+}
+
+fn chat_response_stream(
+    response: reqwest::Response,
+    model_name: String,
+) -> Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> {
+    let byte_stream = response.bytes_stream();
+    let decoder = DeepSeekSseDecoder::default();
+    let mapper = StreamMapper::new(model_name);
+    let pending = VecDeque::<ProviderChunk>::new();
+    let finished = false;
+    let saw_done = false;
+    let state = (byte_stream, decoder, mapper, pending, finished, saw_done);
+
+    Box::pin(stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(chunk) = state.3.pop_front() {
+                return Some((Ok(chunk), state));
+            }
+            if state.4 {
+                return None;
+            }
+
+            match state.0.next().await {
+                Some(Ok(bytes)) => {
+                    let raw = match String::from_utf8(bytes.to_vec()) {
+                        Ok(raw) => raw,
+                        Err(error) => {
+                            state.4 = true;
+                            return Some((Err(error).context("invalid UTF-8 SSE chunk"), state));
+                        }
+                    };
+                    match enqueue_chat_frames(&mut state.1, &mut state.2, &mut state.3, &raw) {
+                        Ok(done_seen) => {
+                            state.5 |= done_seen;
+                        }
+                        Err(error) => {
+                            state.4 = true;
+                            return Some((Err(error), state));
+                        }
+                    }
+                }
+                Some(Err(error)) => {
+                    state.4 = true;
+                    return Some((Err(error).context("failed to read response chunk"), state));
+                }
+                None => {
+                    match enqueue_finished_chat_frames(&mut state.1, &mut state.2, &mut state.3) {
+                        Ok(done_seen) => {
+                            state.5 |= done_seen;
+                            if !state.5 {
+                                state.3.push_back(ProviderChunk::Done);
+                                state.5 = true;
+                            }
+                            state.4 = true;
+                        }
+                        Err(error) => {
+                            state.4 = true;
+                            return Some((Err(error), state));
+                        }
+                    }
+                }
+            }
+        }
+    }))
+}
+
+fn enqueue_chat_frames(
+    decoder: &mut DeepSeekSseDecoder,
+    mapper: &mut StreamMapper,
+    pending: &mut VecDeque<ProviderChunk>,
+    raw: &str,
+) -> Result<bool> {
+    let mut done_seen = false;
+    for frame in decoder.push(raw)? {
+        done_seen |= enqueue_chat_frame(mapper, pending, frame)?;
+    }
+    Ok(done_seen)
+}
+
+fn enqueue_finished_chat_frames(
+    decoder: &mut DeepSeekSseDecoder,
+    mapper: &mut StreamMapper,
+    pending: &mut VecDeque<ProviderChunk>,
+) -> Result<bool> {
+    let mut done_seen = false;
+    for frame in decoder.finish()? {
+        done_seen |= enqueue_chat_frame(mapper, pending, frame)?;
+    }
+    Ok(done_seen)
+}
+
+fn enqueue_chat_frame(
+    mapper: &mut StreamMapper,
+    pending: &mut VecDeque<ProviderChunk>,
+    frame: crate::response::DeepSeekSseFrame,
+) -> Result<bool> {
+    match frame {
+        crate::response::DeepSeekSseFrame::Blank | crate::response::DeepSeekSseFrame::Comment => {
+            Ok(false)
+        }
+        crate::response::DeepSeekSseFrame::Done => {
+            pending.push_back(ProviderChunk::Done);
+            Ok(true)
+        }
+        crate::response::DeepSeekSseFrame::Data(data) => {
+            let envelope: DeepSeekStreamEnvelope =
+                serde_json::from_str(&data).with_context(|| {
+                    format!("invalid DeepSeek event {}", truncate_event_payload(&data))
+                })?;
+            pending.extend(mapper.map_envelope(envelope)?);
+            Ok(false)
+        }
     }
 }
