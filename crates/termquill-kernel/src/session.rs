@@ -13,8 +13,8 @@ use crate::{
     CompactionConfig, MemoryConfig,
     memory::{apply_memory_report, materialize_memory},
     provider::{
-        CompletionRequest, ModelMessage, PrefixSnapshot, ProviderContinuationState, SessionStats,
-        UsageStats,
+        CompletionRequest, ModelMessage, PrefixSnapshot, ProviderContinuationState, ResponseHandle,
+        SessionStats, UsageStats,
     },
     tool::ToolSpec,
 };
@@ -257,6 +257,30 @@ impl Session {
             }
         }
         latest_by_key.into_values().collect()
+    }
+
+    pub fn latest_response_handle(&self, provider_name: &str) -> Option<ResponseHandle> {
+        self.entries.iter().rev().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ResponseHandleTracked(handle))
+                if handle.provider_name == provider_name =>
+            {
+                Some(handle.clone())
+            }
+            _ => None,
+        })
+    }
+
+    pub fn latest_prefix_snapshot(&self) -> Option<PrefixSnapshot> {
+        self.entries.iter().rev().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot)) => {
+                Some(snapshot.clone())
+            }
+            _ => None,
+        })
+    }
+
+    pub fn latest_compaction_record(&self) -> Option<CompactionRecord> {
+        latest_compaction_record(&self.entries)
     }
 
     /// Builds one provider request from stable system memory, projected session history, and tools.
@@ -608,7 +632,10 @@ mod tests {
 
     use anyhow::Result;
 
-    use crate::{CompactionRecord, MemoryConfig, UsageStats, provider::ModelMessage};
+    use crate::{
+        CompactionRecord, MemoryConfig, ProviderContinuationState, ResponseHandle, UsageStats,
+        provider::ModelMessage,
+    };
 
     use super::{
         CompactionConfig, ControlEntry, JsonlSessionStore, PrefixSnapshot, Session,
@@ -705,6 +732,92 @@ mod tests {
                 SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(_))
             )
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
+        let mut session = Session::new("deepseek", "deepseek-v4-flash");
+        session.append_control(ControlEntry::ResponseHandleTracked(ResponseHandle {
+            provider_name: "deepseek".to_owned(),
+            response_id: "response-old".to_owned(),
+            continuation_cursor: Some("cursor-old".to_owned()),
+        }))?;
+        session.append_control(ControlEntry::ResponseHandleTracked(ResponseHandle {
+            provider_name: "other".to_owned(),
+            response_id: "response-other".to_owned(),
+            continuation_cursor: None,
+        }))?;
+        session.append_control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
+            materialized_text: "prefix-old".to_owned(),
+            sha256: "old".to_owned(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+            memory_fingerprint: "memory-old".to_owned(),
+            tool_schema_fingerprint: "tools-old".to_owned(),
+            skill_index_fingerprint: "skills-old".to_owned(),
+        }))?;
+        session.append_control(ControlEntry::ContinuationStateSaved(
+            ProviderContinuationState {
+                provider_name: "deepseek".to_owned(),
+                state_kind: "reasoning".to_owned(),
+                message_id: Some("message-1".to_owned()),
+                opaque_blob: serde_json::json!({"cursor":"old"}),
+            },
+        ))?;
+        session.append_control(ControlEntry::ContinuationStateSaved(
+            ProviderContinuationState {
+                provider_name: "deepseek".to_owned(),
+                state_kind: "reasoning".to_owned(),
+                message_id: Some("message-1".to_owned()),
+                opaque_blob: serde_json::json!({"cursor":"new"}),
+            },
+        ))?;
+        session.append_control(ControlEntry::CompactionApplied(CompactionRecord {
+            summary: "summary-old".to_owned(),
+            compacted_message_count: 1,
+            retained_tail_message_count: 2,
+        }))?;
+        session.append_control(ControlEntry::ResponseHandleTracked(ResponseHandle {
+            provider_name: "deepseek".to_owned(),
+            response_id: "response-new".to_owned(),
+            continuation_cursor: Some("cursor-new".to_owned()),
+        }))?;
+        session.append_control(ControlEntry::PrefixSnapshotCaptured(PrefixSnapshot {
+            materialized_text: "prefix-new".to_owned(),
+            sha256: "new".to_owned(),
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+            memory_fingerprint: "memory-new".to_owned(),
+            tool_schema_fingerprint: "tools-new".to_owned(),
+            skill_index_fingerprint: "skills-new".to_owned(),
+        }))?;
+        session.append_control(ControlEntry::CompactionApplied(CompactionRecord {
+            summary: "summary-new".to_owned(),
+            compacted_message_count: 3,
+            retained_tail_message_count: 2,
+        }))?;
+
+        assert!(matches!(
+            session.latest_response_handle("deepseek"),
+            Some(handle) if handle.response_id == "response-new"
+                && handle.continuation_cursor.as_deref() == Some("cursor-new")
+        ));
+        assert!(matches!(
+            session.latest_response_handle("other"),
+            Some(handle) if handle.response_id == "response-other"
+        ));
+        assert!(matches!(
+            session.latest_prefix_snapshot(),
+            Some(snapshot) if snapshot.sha256 == "new"
+        ));
+        assert!(matches!(
+            session.latest_compaction_record(),
+            Some(record) if record.summary == "summary-new"
+        ));
+        let states = session.continuation_states("deepseek");
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].opaque_blob, serde_json::json!({"cursor":"new"}));
         Ok(())
     }
 

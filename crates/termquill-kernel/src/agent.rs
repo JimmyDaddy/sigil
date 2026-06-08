@@ -96,7 +96,7 @@ where
     {
         session.append_user_message(ModelMessage::user(prompt.into()))?;
 
-        let mut previous_response_handle = None;
+        let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
 
         for _ in 0..options.max_turns {
@@ -365,7 +365,7 @@ mod tests {
         collections::BTreeMap,
         pin::Pin,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         },
     };
@@ -378,10 +378,10 @@ mod tests {
     use crate::{
         ApprovalHandler, ApprovalMode, AutoApproveHandler, BackgroundTaskHandle,
         BackgroundTaskStatus, CompactionConfig, CompletionRequest, ControlEntry, EventHandler,
-        InteractionMode, MemoryConfig, MessageRole, PermissionConfig, Provider,
+        InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, PermissionConfig, Provider,
         ProviderCapabilities, ProviderChunk, ProviderContinuationState, ReasoningEffort,
-        ResponseHandle, RunEvent, Session, Tool, ToolApproval, ToolCall, ToolContext, ToolRegistry,
-        ToolResult, ToolResultMeta,
+        ResponseHandle, RunEvent, Session, SessionLogEntry, Tool, ToolApproval, ToolCall,
+        ToolContext, ToolRegistry, ToolResult, ToolResultMeta,
     };
 
     use super::{Agent, AgentRunOptions};
@@ -619,6 +619,57 @@ mod tests {
                     },
                 )),
                 Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])))
+        }
+    }
+
+    #[derive(Clone)]
+    struct PreviousHandleRecordingProvider {
+        requests: Arc<Mutex<Vec<Option<ResponseHandle>>>>,
+    }
+
+    impl PreviousHandleRecordingProvider {
+        fn new() -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for PreviousHandleRecordingProvider {
+        fn name(&self) -> &str {
+            "mock-resume"
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                exact_prefix_cache: false,
+                reports_cache_tokens: false,
+                supports_reasoning_stream: true,
+                supports_tool_stream: false,
+                supports_background_tasks: false,
+                supports_response_handles: true,
+                supports_reasoning_artifacts: false,
+                supports_structured_output: false,
+                supports_assistant_prefix_seed: false,
+                supports_schema_constrained_tools: false,
+                supports_infill_completion: false,
+                supports_system_fingerprint: false,
+            }
+        }
+
+        async fn stream(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+            self.requests
+                .lock()
+                .expect("requests mutex should not be poisoned")
+                .push(request.previous_response_handle);
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("resumed".to_owned())),
                 Ok(ProviderChunk::Done),
             ])))
         }
@@ -1010,6 +1061,71 @@ mod tests {
         assert!(handler.events.iter().any(|event| {
             matches!(event, RunEvent::Notice(note) if note.contains("background task task-1 status running"))
         }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_restores_previous_response_handle_from_durable_control_state() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let session_path = temp.path().join("session.jsonl");
+        let store = JsonlSessionStore::new(&session_path)?;
+        store.append(&SessionLogEntry::Control(
+            ControlEntry::ResponseHandleTracked(ResponseHandle {
+                provider_name: "mock-resume".to_owned(),
+                response_id: "response-old".to_owned(),
+                continuation_cursor: Some("cursor-old".to_owned()),
+            }),
+        ))?;
+        store.append(&SessionLogEntry::Control(
+            ControlEntry::ResponseHandleTracked(ResponseHandle {
+                provider_name: "other-provider".to_owned(),
+                response_id: "response-other".to_owned(),
+                continuation_cursor: None,
+            }),
+        ))?;
+        store.append(&SessionLogEntry::Control(
+            ControlEntry::ResponseHandleTracked(ResponseHandle {
+                provider_name: "mock-resume".to_owned(),
+                response_id: "response-new".to_owned(),
+                continuation_cursor: Some("cursor-new".to_owned()),
+            }),
+        ))?;
+        let mut session = Session::load_from_store("mock-resume", "mock-model", store)?;
+        let provider = PreviousHandleRecordingProvider::new();
+        let requests = Arc::clone(&provider.requests);
+        let agent = Agent::new(provider, ToolRegistry::new());
+        let mut handler = crate::event::NoopEventHandler;
+
+        let result = agent
+            .run(
+                &mut session,
+                "resume from control state",
+                AgentRunOptions {
+                    workspace_root: temp.path().to_path_buf(),
+                    max_turns: 1,
+                    tool_timeout_secs: 5,
+                    reasoning_effort: Some(ReasoningEffort::Medium),
+                    traffic_partition_key: None,
+                    interaction_mode: InteractionMode::Interactive,
+                    permission_config: PermissionConfig::default(),
+                    memory_config: MemoryConfig { enabled: false },
+                    compaction_config: CompactionConfig::default(),
+                },
+                &mut handler,
+            )
+            .await?;
+
+        assert_eq!(result.final_text, "resumed");
+        let seen_requests = requests
+            .lock()
+            .expect("requests mutex should not be poisoned");
+        assert_eq!(seen_requests.len(), 1);
+        assert!(matches!(
+            seen_requests[0].as_ref(),
+            Some(handle) if handle.provider_name == "mock-resume"
+                && handle.response_id == "response-new"
+                && handle.continuation_cursor.as_deref() == Some("cursor-new")
+        ));
         Ok(())
     }
 
