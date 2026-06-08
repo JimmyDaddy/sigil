@@ -31,6 +31,8 @@ termquill/
   termquill.toml                   # 本地配置示例
 ```
 
+`termquill-tui` 当前保持 `src/app.rs` 作为 `AppState` façade；具体状态流拆在 `src/app/*_flow.rs`、`tool_focus.rs`、`worker_bridge.rs` 和 `formatting.rs`，对应测试拆在 `src/app/tests/*_tests.rs`。新增 TUI 行为时优先落到对应 flow 和同域测试，不要把状态机重新堆回 `app.rs`。
+
 ## 当前入口
 
 ### 1. TUI

@@ -90,7 +90,9 @@
 ### 3.4 `termquill-tui`
 
 - 优先分离“状态模型”和“渲染”
-- `app.rs` 保持 `AppState` façade 和行为编排；输入、审批、session、slash、timeline、provider status 等独立状态类型优先拆到同 crate 模块
+- `app.rs` 保持 `AppState` façade、字段定义、bootstrap、顶层 key routing 和跨状态编排；具体状态流维护在 `app/input_flow.rs`、`app/slash_flow.rs`、`app/modal_flow.rs`、`app/config_flow.rs`、`app/session_flow.rs`、`app/timeline_flow.rs`、`app/tool_focus.rs`、`app/approval_flow.rs`、`app/worker_bridge.rs`、`app/command_dispatch.rs`
+- `app/tests/*_tests.rs` 必须和对应 flow 同域维护；新增 TUI 状态机测试不要再回填到 `app.rs` 的 inline test module
+- `app/formatting.rs` 只放跨 flow 复用的无副作用格式化 helper，单 flow 私有 helper 优先留在对应 flow 模块
 - renderer 优先读取 ViewModel 或明确 render options，不要为了展示逻辑直接扩散完整 `AppState` 依赖
 - setup/config 状态模型维护在 `setup.rs` / `config_panel.rs`，`app.rs` 只保留入口协调、持久化和跨状态行为
 - `ui.rs` 只作为 `ui/*` 模块入口和必要 re-export；顶层 shell layout 放在 `ui/shell.rs`
