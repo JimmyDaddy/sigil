@@ -1,0 +1,296 @@
+use super::*;
+
+#[test]
+fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.input = "draft".to_owned();
+    app.push_timeline(
+        TimelineRole::Tool,
+        r##"{
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "first 1/1 lines · 8 B",
+  "preview_lines": ["[\".git\"]"],
+  "preview_value": [".git"],
+  "hidden_lines": 0
+}"##,
+    );
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.modal_title(), Some("Keyboard Help"));
+    let lines = app.modal_lines();
+    assert!(lines.iter().any(|line| line.contains("F1:")));
+    assert!(lines.iter().any(|line| line.contains("Ctrl-G:")));
+    assert!(lines.iter().any(|line| line.starts_with("/model:")));
+    assert!(!lines.iter().any(|line| line.starts_with("/tool:")));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(!app.has_modal());
+    assert_eq!(app.last_notice(), Some("closed keyboard help"));
+    Ok(())
+}
+
+#[test]
+fn ctrl_c_quits_while_keyboard_help_modal_is_open() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert!(!app.has_modal());
+    assert!(app.should_quit);
+    Ok(())
+}
+
+#[test]
+fn model_picker_opens_with_local_options_before_remote_refresh() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+
+    assert!(matches!(app.modal_state, Some(ModalState::ModelPicker(_))));
+    assert!(app.model_picker_refresh_rx.is_none());
+    assert_eq!(app.last_notice(), Some("using local model list"));
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("deepseek-v4-flash"));
+    assert!(lines.contains("custom-model"));
+    Ok(())
+}
+
+#[test]
+fn model_picker_remote_refresh_updates_open_modal_options() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+
+    let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
+        target: ModelPickerTarget::Provider,
+        current: "custom-model".to_owned(),
+        base_url: "https://example.com".to_owned(),
+        result: Ok(vec![
+            "remote-model-a".to_owned(),
+            "remote-model-b".to_owned(),
+        ]),
+    });
+
+    assert!(changed);
+    assert_eq!(
+        app.last_notice(),
+        Some("loaded provider model list (https://example.com)")
+    );
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("remote-model-a"));
+    assert!(lines.contains("remote-model-b"));
+    assert!(lines.contains("custom-model"));
+    Ok(())
+}
+
+#[test]
+fn config_text_field_uses_modal_and_applies_value() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .selected_field = Some(ConfigField::ProviderBaseUrl);
+
+    assert!(!app.config_is_editing());
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.config_is_editing());
+    assert_eq!(app.modal_title(), Some("Base URL"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    let detail = app.modal_lines().join("\n");
+    assert!(detail.contains("base_url: https://api.deepseek.comx|"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(!app.config_is_editing());
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should still exist");
+    assert_eq!(state.draft.provider_base_url, "https://api.deepseek.comx");
+    assert!(state.dirty);
+    Ok(())
+}
+
+#[test]
+fn config_escape_cancels_text_modal_before_closing_panel() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .selected_field = Some(ConfigField::ProviderBaseUrl);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    assert!(app.config_is_editing());
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(app.is_config_mode());
+    assert!(!app.config_is_editing());
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should still exist");
+    assert_eq!(state.draft.provider_base_url, "https://api.deepseek.com");
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(!app.is_config_mode());
+    Ok(())
+}
+
+#[test]
+fn config_inline_api_key_uses_secret_modal_and_persists_to_disk() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("termquill.toml");
+    test_config().save(&config_path)?;
+
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.config_path = config_path.clone();
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist after opening /config")
+        .selected_field = Some(ConfigField::ProviderApiKey);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.has_modal());
+    assert_eq!(app.modal_title(), Some("API Key"));
+
+    for character in "runtime-secret".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("expected config save action");
+    };
+    assert_eq!(
+        root_config
+            .providers
+            .get("deepseek")
+            .and_then(|value| value.get("api_key"))
+            .and_then(|value| value.as_str()),
+        Some("runtime-secret")
+    );
+
+    let saved = RootConfig::load(&config_path)?;
+    assert_eq!(
+        saved
+            .providers
+            .get("deepseek")
+            .and_then(|value| value.get("api_key"))
+            .and_then(|value| value.as_str()),
+        Some("runtime-secret")
+    );
+    Ok(())
+}
+
+#[test]
+fn config_modal_ctrl_s_applies_field_and_saves() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("termquill.toml");
+    test_config().save(&config_path)?;
+
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.config_path = config_path.clone();
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist after opening /config")
+        .selected_field = Some(ConfigField::ProviderApiKey);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    for character in "saved-from-modal".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("expected config save action");
+    };
+    assert!(!app.has_modal());
+    assert_eq!(
+        root_config
+            .providers
+            .get("deepseek")
+            .and_then(|value| value.get("api_key"))
+            .and_then(|value| value.as_str()),
+        Some("saved-from-modal")
+    );
+    let saved = RootConfig::load(&config_path)?;
+    assert_eq!(
+        saved
+            .providers
+            .get("deepseek")
+            .and_then(|value| value.get("api_key"))
+            .and_then(|value| value.as_str()),
+        Some("saved-from-modal")
+    );
+    Ok(())
+}
+
+#[test]
+fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("config").join("termquill.toml");
+    let workspace_root = temp.path().join("workspace");
+    let mut app = AppState::from_setup(config_path.clone(), workspace_root, None);
+    {
+        let state = app
+            .setup_state
+            .as_mut()
+            .expect("setup state should exist in setup mode");
+        state.trusted_current_folder = true;
+        state.selected_field = SetupField::ApiKey;
+    }
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    for character in "setup-saved-key".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    let Some(AppAction::SetupCompleted {
+        config_path: saved_path,
+        root_config,
+    }) = action
+    else {
+        panic!("expected setup completion action");
+    };
+    assert_eq!(saved_path, config_path);
+    assert!(!app.has_modal());
+    assert_eq!(
+        root_config
+            .providers
+            .get("deepseek")
+            .and_then(|value| value.get("api_key"))
+            .and_then(|value| value.as_str()),
+        Some("setup-saved-key")
+    );
+
+    let saved = RootConfig::load(&saved_path)?;
+    assert_eq!(
+        saved
+            .providers
+            .get("deepseek")
+            .and_then(|value| value.get("api_key"))
+            .and_then(|value| value.as_str()),
+        Some("setup-saved-key")
+    );
+    Ok(())
+}
