@@ -1,4 +1,5 @@
 use super::*;
+use crate::slash::SLASH_COMMANDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ModelPickerTarget {
