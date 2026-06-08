@@ -1,5 +1,7 @@
 use std::{
+    ffi::OsString,
     fs,
+    io::ErrorKind,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -297,7 +299,7 @@ impl Tool for ListTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
-        let workspace_root = ctx.workspace_root.clone();
+        let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
         let mut entries = run_blocking_io("ls", move || {
             let mut entries = Vec::new();
             if recursive {
@@ -345,7 +347,7 @@ impl Tool for GlobTool {
         let mut builder = GlobSetBuilder::new();
         builder.add(Glob::new(&pattern)?);
         let matcher = builder.build()?;
-        let workspace_root = ctx.workspace_root.clone();
+        let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
         let mut matches = run_blocking_io("glob", move || {
             let mut matches = Vec::new();
             for entry in WalkBuilder::new(&workspace_root).build() {
@@ -397,7 +399,7 @@ impl Tool for GrepTool {
         let root = optional_string(&args, "path").unwrap_or(".").to_owned();
         let resolved = resolve_workspace_path(&ctx.workspace_root, &root)?;
         let regex = Regex::new(&pattern)?;
-        let workspace_root = ctx.workspace_root.clone();
+        let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
         let matches = run_blocking_io("grep", move || {
             let mut matches = Vec::new();
             for entry in WalkBuilder::new(&resolved).build() {
@@ -454,6 +456,11 @@ impl Tool for BashTool {
         }
     }
 
+    fn permission_subject(&self, args: &Value) -> Result<Option<String>> {
+        let command = required_string(args, "command")?;
+        Ok(Some(command_permission_subject(command)))
+    }
+
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let command = required_string(&args, "command")?;
         let timeout_secs = args
@@ -502,7 +509,9 @@ fn optional_string<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn resolve_workspace_path(workspace_root: &Path, requested: &str) -> Result<PathBuf> {
-    Ok(workspace_root.join(normalize_workspace_relative_path(requested)?))
+    let relative = normalize_workspace_relative_path(requested)?;
+    let workspace_root = canonical_workspace_root(workspace_root)?;
+    resolve_confined_path(&workspace_root, &relative)
 }
 
 fn normalize_workspace_relative_path(requested: &str) -> Result<PathBuf> {
@@ -536,12 +545,87 @@ fn normalized_relative_path_string(requested: &str) -> Result<String> {
         .to_string())
 }
 
+fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf> {
+    fs::canonicalize(workspace_root).with_context(|| {
+        format!(
+            "failed to resolve workspace root {}",
+            workspace_root.display()
+        )
+    })
+}
+
+fn resolve_confined_path(workspace_root: &Path, relative: &Path) -> Result<PathBuf> {
+    if relative == Path::new(".") {
+        return Ok(workspace_root.to_path_buf());
+    }
+
+    let mut resolved = workspace_root.to_path_buf();
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_os_string()),
+            Component::CurDir => None,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<OsString>>();
+
+    for (index, component) in components.iter().enumerate() {
+        let candidate = resolved.join(component);
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                let canonical = fs::canonicalize(&candidate)
+                    .with_context(|| format!("failed to resolve {}", candidate.display()))?;
+                ensure_inside_workspace(workspace_root, &canonical)?;
+                resolved = canonical;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                resolved = candidate;
+                for remaining in components.iter().skip(index + 1) {
+                    resolved.push(remaining);
+                }
+                ensure_inside_workspace(workspace_root, &resolved)?;
+                return Ok(resolved);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", candidate.display()));
+            }
+        }
+    }
+
+    ensure_inside_workspace(workspace_root, &resolved)?;
+    Ok(resolved)
+}
+
+fn ensure_inside_workspace(workspace_root: &Path, path: &Path) -> Result<()> {
+    if path.starts_with(workspace_root) {
+        Ok(())
+    } else {
+        bail!(
+            "path {} escapes workspace {}",
+            path.display(),
+            workspace_root.display()
+        );
+    }
+}
+
 fn relativize(workspace_root: &Path, path: &Path) -> Result<String> {
     Ok(path
         .strip_prefix(workspace_root)
         .unwrap_or(path)
         .to_string_lossy()
         .to_string())
+}
+
+fn command_permission_subject(command: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let normalized = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let char_count = normalized.chars().count();
+    if char_count <= MAX_CHARS {
+        return normalized;
+    }
+    let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
+    format!("{truncated}...")
 }
 
 fn render_unified_diff(
@@ -581,7 +665,13 @@ mod tests {
     use serde_json::json;
     use termquill_kernel::{Tool, ToolContext, ToolRegistry};
 
-    use super::{EditFileTool, ReadFileTool, WriteFileTool, register_builtin_tools};
+    use super::{
+        BashTool, EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool, WriteFileTool,
+        register_builtin_tools,
+    };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     #[tokio::test]
     async fn read_and_edit_file_tool_work() -> Result<()> {
@@ -675,5 +765,183 @@ mod tests {
         let mut registry = ToolRegistry::new();
         register_builtin_tools(&mut registry);
         assert!(registry.specs().len() >= 7);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_rejects_symlink_escape() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "secret")?;
+        symlink(&outside_file, workspace.path().join("leak.txt"))?;
+        let ctx = ToolContext {
+            workspace_root: workspace.path().to_path_buf(),
+            timeout_secs: 5,
+        };
+
+        let error = ReadFileTool
+            .execute(ctx, "read".to_owned(), json!({ "path": "leak.txt" }))
+            .await
+            .expect_err("expected symlink escape to be rejected");
+
+        assert!(error.to_string().contains("escapes workspace"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_rejects_existing_symlink_escape() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "secret")?;
+        symlink(&outside_file, workspace.path().join("leak.txt"))?;
+        let ctx = ToolContext {
+            workspace_root: workspace.path().to_path_buf(),
+            timeout_secs: 5,
+        };
+
+        let error = WriteFileTool
+            .execute(
+                ctx,
+                "write".to_owned(),
+                json!({ "path": "leak.txt", "content": "changed" }),
+            )
+            .await
+            .expect_err("expected symlink escape to be rejected");
+
+        assert!(error.to_string().contains("escapes workspace"));
+        assert_eq!(fs::read_to_string(outside_file)?, "secret");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_rejects_symlink_parent_escape_for_new_file() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        symlink(outside.path(), workspace.path().join("outside-dir"))?;
+        let ctx = ToolContext {
+            workspace_root: workspace.path().to_path_buf(),
+            timeout_secs: 5,
+        };
+
+        let error = WriteFileTool
+            .execute(
+                ctx,
+                "write".to_owned(),
+                json!({ "path": "outside-dir/new.txt", "content": "changed" }),
+            )
+            .await
+            .expect_err("expected symlink parent escape to be rejected");
+
+        assert!(error.to_string().contains("escapes workspace"));
+        assert!(!outside.path().join("new.txt").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_file_rejects_symlink_escape() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let outside_file = outside.path().join("secret.txt");
+        fs::write(&outside_file, "hello old")?;
+        symlink(&outside_file, workspace.path().join("leak.txt"))?;
+        let ctx = ToolContext {
+            workspace_root: workspace.path().to_path_buf(),
+            timeout_secs: 5,
+        };
+
+        let error = EditFileTool
+            .execute(
+                ctx,
+                "edit".to_owned(),
+                json!({ "path": "leak.txt", "old_text": "old", "new_text": "new" }),
+            )
+            .await
+            .expect_err("expected symlink escape to be rejected");
+
+        assert!(error.to_string().contains("escapes workspace"));
+        assert_eq!(fs::read_to_string(outside_file)?, "hello old");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_and_grep_reject_external_symlink_roots() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        fs::write(outside.path().join("secret.txt"), "secret")?;
+        symlink(outside.path(), workspace.path().join("outside-dir"))?;
+        let ctx = ToolContext {
+            workspace_root: workspace.path().to_path_buf(),
+            timeout_secs: 5,
+        };
+
+        let list_error = ListTool
+            .execute(
+                ctx.clone(),
+                "list".to_owned(),
+                json!({ "path": "outside-dir", "recursive": true }),
+            )
+            .await
+            .expect_err("expected list symlink root to be rejected");
+        let grep_error = GrepTool
+            .execute(
+                ctx,
+                "grep".to_owned(),
+                json!({ "path": "outside-dir", "pattern": "secret" }),
+            )
+            .await
+            .expect_err("expected grep symlink root to be rejected");
+
+        assert!(list_error.to_string().contains("escapes workspace"));
+        assert!(grep_error.to_string().contains("escapes workspace"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn glob_does_not_traverse_external_symlink_targets() -> Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        fs::write(outside.path().join("secret.txt"), "secret")?;
+        symlink(outside.path(), workspace.path().join("outside-dir"))?;
+        fs::write(workspace.path().join("visible.txt"), "visible")?;
+        let ctx = ToolContext {
+            workspace_root: workspace.path().to_path_buf(),
+            timeout_secs: 5,
+        };
+
+        let result = GlobTool
+            .execute(ctx, "glob".to_owned(), json!({ "pattern": "**/*.txt" }))
+            .await?;
+
+        assert!(result.content.contains("visible.txt"));
+        assert!(!result.content.contains("secret.txt"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bash_tool_timeout_surfaces_structured_error() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let ctx = ToolContext {
+            workspace_root: temp.path().to_path_buf(),
+            timeout_secs: 5,
+        };
+
+        let error = BashTool
+            .execute(
+                ctx,
+                "bash".to_owned(),
+                json!({ "command": "sleep 2", "timeout_secs": 1 }),
+            )
+            .await
+            .expect_err("expected timeout to be surfaced");
+
+        assert!(error.to_string().contains("bash command timed out"));
+        Ok(())
     }
 }
