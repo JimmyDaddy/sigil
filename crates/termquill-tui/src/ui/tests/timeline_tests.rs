@@ -16,6 +16,10 @@ fn rendered_plain_lines(lines: &[Line<'static>]) -> Vec<String> {
         .collect()
 }
 
+fn render_timeline_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
+    render_timeline_entry_lines_with_options(entry, &TimelineRenderOptions::default(), 0)
+}
+
 #[test]
 fn render_timeline_entry_lines_preserves_multiline_blocks() {
     let entry = TimelineEntry {
@@ -242,6 +246,23 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
 }
 
 #[test]
+fn render_timeline_entry_lines_extends_collapsed_thinking_code_preview() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: "Runtime has 4 tests.\nActually, looking at my earlier output:\n```plain\nrunning 1 test\nok\n```\nThe rest is hidden."
+            .to_owned(),
+    };
+
+    let plain = rendered_plain_lines(&render_timeline_entry_lines(&entry)).join("\n");
+
+    assert!(plain.contains("code"));
+    assert!(plain.contains("plain"));
+    assert!(plain.contains("running 1 test"));
+    assert!(plain.contains("ok"));
+    assert!(plain.contains("more lines hidden"));
+}
+
+#[test]
 fn render_timeline_entry_lines_make_user_and_assistant_distinct() {
     let user = TimelineEntry {
         role: TimelineRole::User,
@@ -429,7 +450,12 @@ fn render_timeline_entry_lines_formats_tool_cards() {
   "preview_lines": ["[", "  \".git\",", "  \"Cargo.toml\"", "]"],
   "preview_value": [".git", "Cargo.toml"],
   "hidden_lines": 0,
-  "metadata": {"bytes": 64}
+  "metadata": {
+    "bytes": 64,
+    "details": {
+      "call": {"summary": "path=crates"}
+    }
+  }
 }"#
         .to_owned(),
     };
@@ -443,24 +469,29 @@ fn render_timeline_entry_lines_formats_tool_cards() {
         0,
     );
 
+    let first_line = rendered_plain_lines(&lines)[0].clone();
+
+    assert!(first_line.contains("Listed crates"));
+    assert!(
+        !lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("tool"))
+    );
     assert!(
         lines[0]
             .spans
             .iter()
-            .any(|span| span.content.as_ref().contains("ls"))
-    );
-    assert!(
-        lines[1]
-            .spans
-            .iter()
             .any(|span| span.content.as_ref().contains("OK"))
     );
-    assert!(
-        lines[1]
-            .spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("64 B"))
-    );
+    let summary_span = lines[1]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref().contains("64 B"))
+        .expect("expected execution summary span");
+    assert_eq!(summary_span.style.fg, Some(dim()));
+    assert!(summary_span.style.add_modifier.contains(Modifier::ITALIC));
+    assert!(!summary_span.style.add_modifier.contains(Modifier::BOLD));
     assert!(!lines.iter().any(|line| {
         line.spans
             .iter()
@@ -476,6 +507,403 @@ fn render_timeline_entry_lines_formats_tool_cards() {
             .iter()
             .any(|span| span.content.as_ref().contains("Cargo.toml"))
     }));
+}
+
+#[test]
+fn render_timeline_entry_lines_uses_action_first_tool_headers() {
+    let cases = [
+        (
+            r#"{
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "1 line · 3 B",
+  "preview_lines": ["ok"],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "command=cargo test -p termquill-tui"}}
+  }
+}"#,
+            "Ran cargo test -p termquill-tui",
+        ),
+        (
+            r#"{
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "2 lines · 118 B",
+  "preview_lines": ["src/main.rs:needle"],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "command=grep -n 'needle' src/main.rs"}}
+  }
+}"#,
+            "Searched needle in src/main.rs",
+        ),
+        (
+            r#"{
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "1 line · 24 B",
+  "preview_lines": ["src/main.rs"],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "command=rg --glob '*.rs' needle src"}}
+  }
+}"#,
+            "Searched needle in src",
+        ),
+        (
+            r#"{
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "1 line · 24 B",
+  "preview_lines": ["src/main.rs"],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "command=grep needle src/main.rs | head"}}
+  }
+}"#,
+            "Ran grep needle src/main.rs | head",
+        ),
+        (
+            r##"{
+  "tool_name": "read_file",
+  "status": "ok",
+  "preview_kind": "markdown",
+  "summary": "first 1/1 lines · 8 B",
+  "preview_lines": ["# Title"],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "path=README.md"}}
+  }
+}"##,
+            "Read README.md",
+        ),
+        (
+            r#"{
+  "tool_name": "write_file",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "1 line · 12 B",
+  "preview_lines": ["wrote note.txt"],
+  "hidden_lines": 0,
+  "metadata": {
+    "changed_files": ["note.txt"],
+    "details": {"call": {"summary": "path=note.txt"}}
+  }
+}"#,
+            "Wrote note.txt",
+        ),
+        (
+            r#"{
+  "tool_name": "edit_file",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "1 line · 13 B",
+  "preview_lines": ["edited note.txt"],
+  "hidden_lines": 0,
+  "metadata": {
+    "changed_files": ["note.txt"],
+    "details": {"call": {"summary": "path=note.txt"}}
+  }
+}"#,
+            "Edited note.txt",
+        ),
+        (
+            r#"{
+  "tool_name": "delete_file",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "1 line · 15 B",
+  "preview_lines": ["deleted note.txt"],
+  "hidden_lines": 0,
+  "metadata": {
+    "changed_files": ["note.txt"],
+    "details": {"call": {"summary": "path=note.txt"}}
+  }
+}"#,
+            "Deleted note.txt",
+        ),
+        (
+            r#"{
+  "tool_name": "grep",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "1 line · 2 B",
+  "preview_lines": ["[]"],
+  "preview_value": [],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "path=src pattern=needle"}}
+  }
+}"#,
+            "Searched needle in src",
+        ),
+        (
+            r#"{
+  "tool_name": "glob",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "1 line · 2 B",
+  "preview_lines": ["[]"],
+  "preview_value": [],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "pattern=**/*.rs"}}
+  }
+}"#,
+            "Searched **/*.rs",
+        ),
+        (
+            r#"{
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "1 line · 2 B",
+  "preview_lines": ["[]"],
+  "preview_value": [],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "path=crates/termquill-tui"}}
+  }
+}"#,
+            "Listed crates/termquill-tui",
+        ),
+        (
+            r#"{
+  "tool_name": "mcp__filesystem__stat",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "1 line · 15 B",
+  "preview_lines": ["{}"],
+  "preview_value": {"ok": true},
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "path=README.md id=call_123"}}
+  }
+}"#,
+            "Called mcp__filesystem__stat path=README.md",
+        ),
+    ];
+
+    for (payload, expected_title) in cases {
+        let entry = TimelineEntry {
+            role: TimelineRole::Tool,
+            text: payload.to_owned(),
+        };
+        let lines = render_timeline_entry_lines(&entry);
+        let first_line = rendered_plain_lines(&lines)
+            .into_iter()
+            .next()
+            .expect("expected header line");
+
+        assert!(
+            first_line.contains(expected_title),
+            "expected {first_line:?} to contain {expected_title:?}"
+        );
+        assert!(
+            !first_line.contains("path=") || expected_title.contains("Called"),
+            "builtin action titles should not expose raw key-value call summaries: {first_line}"
+        );
+        assert!(
+            !first_line.contains("call_123"),
+            "tool call ids should stay hidden: {first_line}"
+        );
+    }
+}
+
+#[test]
+fn render_timeline_entry_lines_styles_tool_header_segments() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "1 line · 3 B",
+  "preview_lines": ["ok"],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "command=cargo test --workspace"}}
+  }
+}"#
+        .to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines(&entry);
+    let action = lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "Ran")
+        .expect("expected action span");
+    let subject = lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "cargo")
+        .expect("expected command span");
+    let args = lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref().contains("--workspace"))
+        .expect("expected args span");
+
+    assert_eq!(action.style.fg, Some(accent_gold()));
+    assert!(action.style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(subject.style.fg, Some(accent_blue()));
+    assert!(subject.style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(args.style.fg, Some(ink()));
+    assert!(!args.style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn render_timeline_entry_lines_simplifies_bash_no_output() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "0 lines · 0 B",
+  "preview_lines": [],
+  "hidden_lines": 0,
+  "metadata": {
+    "exit_code": 0,
+    "stdout_bytes": 0,
+    "stderr_bytes": 0,
+    "details": {"call": {"summary": "command=cargo fmt --all --check"}}
+  }
+}"#
+        .to_owned(),
+    };
+
+    let plain = rendered_plain_lines(&render_timeline_entry_lines(&entry)).join("\n");
+
+    assert!(plain.contains("Ran cargo fmt --all --check"));
+    assert!(plain.contains("OK"));
+    assert!(plain.contains("exit 0"));
+    assert!(plain.contains("(no output)"));
+    assert!(!plain.contains("terminal tail"));
+}
+
+#[test]
+fn render_timeline_entry_lines_prioritizes_bash_failure_output() {
+    let stderr_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "bash",
+  "status": "error",
+  "error_kind": "exit_status",
+  "preview_kind": "text",
+  "summary": "last 1/1 lines · 21 B",
+  "preview_lines": ["error: clippy failed"],
+  "hidden_lines": 0,
+  "metadata": {
+    "exit_code": 101,
+    "stdout_bytes": 0,
+    "stderr_bytes": 21,
+    "details": {"call": {"summary": "command=cargo clippy"}}
+  }
+}"#
+        .to_owned(),
+    };
+    let stdout_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "bash",
+  "status": "error",
+  "error_kind": "exit_status",
+  "preview_kind": "text",
+  "summary": "last 1/1 lines · 16 B",
+  "preview_lines": ["failed on stdout"],
+  "hidden_lines": 0,
+  "metadata": {
+    "exit_code": 1,
+    "stdout_bytes": 16,
+    "stderr_bytes": 0,
+    "details": {"call": {"summary": "command=./script"}}
+  }
+}"#
+        .to_owned(),
+    };
+
+    let stderr_plain = rendered_plain_lines(&render_timeline_entry_lines_with_options(
+        &stderr_entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    ))
+    .join("\n");
+    let stdout_plain = rendered_plain_lines(&render_timeline_entry_lines_with_options(
+        &stdout_entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    ))
+    .join("\n");
+
+    assert!(stderr_plain.contains("ERROR"));
+    assert!(stderr_plain.contains("exit 101"));
+    assert!(stderr_plain.contains("stderr"));
+    assert!(stderr_plain.contains("exit 101"));
+    assert!(stderr_plain.contains("error: clippy failed"));
+    assert!(stdout_plain.contains("ERROR"));
+    assert!(stdout_plain.contains("exit 1"));
+    assert!(stdout_plain.contains("stdout"));
+    assert!(stdout_plain.contains("exit 1"));
+    assert!(stdout_plain.contains("failed on stdout"));
+}
+
+#[test]
+fn render_timeline_entry_lines_labels_denied_and_interrupted_errors() {
+    let denied_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "write_file",
+  "status": "error",
+  "error_kind": "approval_denied",
+  "preview_kind": "text",
+  "summary": "1 line · 37 B",
+  "preview_lines": ["tool execution denied by user"],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "path=note.txt"}}
+  }
+}"#
+        .to_owned(),
+    };
+    let interrupted_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "bash",
+  "status": "error",
+  "error_kind": "interrupted",
+  "preview_kind": "text",
+  "summary": "1 line · 28 B",
+  "preview_lines": ["tool execution interrupted"],
+  "hidden_lines": 0,
+  "metadata": {
+    "details": {"call": {"summary": "command=cargo test"}}
+  }
+}"#
+        .to_owned(),
+    };
+
+    let denied_plain = rendered_plain_lines(&render_timeline_entry_lines(&denied_entry)).join("\n");
+    let interrupted_plain =
+        rendered_plain_lines(&render_timeline_entry_lines(&interrupted_entry)).join("\n");
+
+    assert!(denied_plain.contains("Wrote note.txt"));
+    assert!(denied_plain.contains("DENIED"));
+    assert!(!denied_plain.contains("path=note.txt"));
+    assert!(interrupted_plain.contains("Ran cargo test"));
+    assert!(interrupted_plain.contains("INTERRUPTED"));
 }
 
 #[test]
@@ -629,6 +1057,8 @@ fn render_timeline_entry_lines_expands_tool_diff_by_default() {
 
     assert!(plain.contains("diff +1 -1"));
     assert!(plain.contains("--- current/note.txt"));
+    assert!(plain.contains("1 hunk"));
+    assert!(!plain.contains("@@ -1 +1 @@"));
     assert!(
         visible_lines
             .iter()
@@ -683,8 +1113,9 @@ fn render_timeline_entry_lines_renders_delete_file_diff_as_file_change() {
     let visible_lines = rendered_plain_lines(&lines);
     let plain = visible_lines.join("\n");
 
-    assert!(plain.contains("delete_file"));
-    assert!(plain.contains("path=note.txt"));
+    assert!(plain.contains("Deleted note.txt"));
+    assert!(!plain.contains("delete_file"));
+    assert!(!plain.contains("path=note.txt"));
     assert!(plain.contains("1 deleted"));
     assert!(plain.contains("deleted"));
     assert!(plain.contains("--- current/note.txt"));
@@ -703,6 +1134,63 @@ fn render_timeline_entry_lines_renders_delete_file_diff_as_file_change() {
     assert!(plain.contains("result"));
     assert!(plain.contains("delete summary"));
     assert!(!plain.contains("tree"));
+}
+
+#[test]
+fn render_timeline_entry_lines_summarizes_tool_diff_hunks_in_file_header() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "write_file",
+  "status": "ok",
+  "summary": "1 line · 18 B · diff +2 -2 · 1 file",
+  "metadata": {"changed_files": ["note.txt"]},
+  "preview_kind": "text",
+  "preview_lines": ["wrote note.txt"],
+  "hidden_lines": 0,
+  "diff": {
+    "summary": "+2 -2 · 1 file",
+    "truncated": false,
+    "original_line_count": 9,
+    "rendered_line_count": 9,
+    "files": [{
+      "path": "note.txt",
+      "lines": ["--- current/note.txt", "+++ proposed/note.txt", "@@ -1 +1 @@", "-old one", "+new one", "@@ -20 +20 @@", "-old two", "+new two"],
+      "truncated": false,
+      "original_line_count": 8,
+      "rendered_line_count": 8
+    }]
+  }
+}"#
+        .to_owned(),
+    };
+
+    let visible_lines = rendered_plain_lines(&render_timeline_entry_lines(&entry));
+    let plain = visible_lines.join("\n");
+
+    assert!(plain.contains("2 hunks"));
+    assert!(!plain.contains("@@ -1 +1 @@"));
+    assert!(!plain.contains("@@ -20 +20 @@"));
+    assert!(
+        visible_lines
+            .iter()
+            .any(|line| line.contains("│ 1   │ -old one"))
+    );
+    assert!(
+        visible_lines
+            .iter()
+            .any(|line| line.contains("│    1│ +new one"))
+    );
+    assert!(
+        visible_lines
+            .iter()
+            .any(|line| line.contains("│20   │ -old two"))
+    );
+    assert!(
+        visible_lines
+            .iter()
+            .any(|line| line.contains("│   20│ +new two"))
+    );
 }
 
 #[test]
@@ -802,7 +1290,63 @@ fn render_timeline_entry_lines_renders_expanded_tool_diff() {
     assert!(plain.contains("-old"));
     assert!(plain.contains("+new"));
     assert!(plain.contains("diff truncated"));
+    assert!(plain.contains("3 lines hidden"));
     assert!(plain.contains("result"));
+}
+
+#[test]
+fn tool_activity_view_marks_read_list_and_simple_searches_as_inspection() {
+    let read_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "call_id": "call-read",
+  "tool_name": "read_file",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["hello"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "path=README.md"}}}
+}"#
+        .to_owned(),
+    };
+    let bash_search_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "call_id": "call-search",
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["src/main.rs:needle"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "command=grep -n needle src/main.rs"}}}
+}"#
+        .to_owned(),
+    };
+    let complex_bash_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "call_id": "call-complex",
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["src/main.rs:needle"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "command=grep needle src/main.rs | head"}}}
+}"#
+        .to_owned(),
+    };
+
+    let read_activity = crate::ui::tool_activity_view(&read_entry, 0).unwrap();
+    let search_activity = crate::ui::tool_activity_view(&bash_search_entry, 1).unwrap();
+    let complex_activity = crate::ui::tool_activity_view(&complex_bash_entry, 2).unwrap();
+
+    assert_eq!(read_activity.key, "call:call-read");
+    assert_eq!(read_activity.title, "Read README.md");
+    assert!(read_activity.is_inspection);
+    assert_eq!(search_activity.title, "Searched needle in src/main.rs");
+    assert!(search_activity.is_inspection);
+    assert_eq!(complex_activity.title, "Ran grep needle src/main.rs | head");
+    assert!(!complex_activity.is_inspection);
 }
 
 #[test]
@@ -856,7 +1400,11 @@ fn render_timeline_entry_lines_show_tool_call_context_when_collapsed() {
     let bash_lines = render_timeline_entry_lines_with_options(&bash_entry, &options, 0);
     let read_lines = render_timeline_entry_lines_with_options(&read_entry, &options, 0);
 
-    assert!(bash_lines[0].spans.iter().any(|span| {
+    let bash_header = rendered_plain_lines(&bash_lines)[0].clone();
+    let read_header = rendered_plain_lines(&read_lines)[0].clone();
+
+    assert!(bash_header.contains("Ran cargo test -p termquill-tui"));
+    assert!(!bash_lines[0].spans.iter().any(|span| {
         span.content
             .as_ref()
             .contains("command=cargo test -p termquill-tui")
@@ -866,11 +1414,7 @@ fn render_timeline_entry_lines_show_tool_call_context_when_collapsed() {
             .iter()
             .any(|span| span.content.as_ref().contains("call-1"))
     }));
-    assert!(read_lines[0].spans.iter().any(|span| {
-        span.content
-            .as_ref()
-            .contains("path=crates/termquill-tui/src/runner/worker_loop.rs")
-    }));
+    assert!(read_header.contains("Read crates/termquill-tui/src/runner/worker_loop.rs"));
     assert!(
         !read_lines[0]
             .spans

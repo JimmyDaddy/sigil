@@ -20,36 +20,55 @@ use super::{
     theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, badge_bg, dim, ink},
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolActivityView {
+    pub(crate) key: String,
+    pub(crate) title: String,
+    pub(crate) is_inspection: bool,
+    pub(crate) defaults_expanded: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn tool_activity_view(
+    entry: &TimelineEntry,
+    _entry_index: usize,
+) -> Option<ToolActivityView> {
+    let summary = parse_tool_summary(&entry.text);
+    if summary.tool_name == "result" && summary.preview_value.is_none() && summary.diff.is_none() {
+        return None;
+    }
+    Some(build_tool_activity_view(&summary, &entry.text))
+}
+
 pub(crate) fn render_tool_entry_lines(
     entry: &TimelineEntry,
     options: &TimelineRenderOptions,
     entry_index: usize,
 ) -> Vec<Line<'static>> {
     let summary = parse_tool_summary(&entry.text);
+    let display = build_tool_card_display(&summary);
+    let activity = build_tool_activity_view(&summary, &entry.text);
     let accent = accent_rose();
     let selected = options.selected_tool_entry == Some(entry_index);
-    let default_expanded = summary.diff.is_some();
+    let default_expanded = activity.defaults_expanded;
     let expanded = options.expand_tool_previews
         || options.expanded_tool_entries.contains(&entry_index)
         || (default_expanded && !options.collapsed_tool_entries.contains(&entry_index));
     let mut lines = vec![tool_card_header_line(
-        &summary,
+        &display,
         selected,
         expanded,
         options.max_content_width,
     )];
-    let mut status_line = vec![Span::styled(
-        summary.status.clone(),
-        tool_status_style(summary.is_error),
-    )];
-    if let Some(ref summary_line) = summary.summary {
-        status_line.push(Span::raw(" "));
-        status_line.push(Span::styled(
-            summary_line.clone(),
-            Style::default().fg(ink()),
+    if let Some(summary_line) = display.summary.clone() {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                summary_line,
+                Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
+            )],
         ));
     }
-    lines.push(timeline_content_line(accent, status_line));
     if !summary.preview_lines.is_empty()
         || summary.preview_value.is_some()
         || summary.diff.is_some()
@@ -113,7 +132,7 @@ fn tool_available_preview_lines(summary: &ToolCardRender) -> usize {
 }
 
 fn tool_card_header_line(
-    summary: &ToolCardRender,
+    display: &ToolCardDisplay,
     selected: bool,
     expanded: bool,
     max_content_width: usize,
@@ -125,39 +144,49 @@ fn tool_card_header_line(
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        timeline_badge("tool", accent),
-        Span::raw(" "),
-        Span::styled(
-            summary.tool_name.clone(),
-            Style::default().fg(ink()).add_modifier(Modifier::BOLD),
-        ),
     ];
-    if let Some(call_summary) = &summary.metadata.call_summary {
+    spans.extend(tool_title_spans(
+        &display.title,
+        tool_title_width(display, max_content_width),
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        format!(" {} ", display.status.label),
+        tool_status_style(display.status.is_error),
+    ));
+    if let Some(detail) = &display.status.detail {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
-            truncate_inline_text(
-                call_summary,
-                tool_call_summary_width(summary, max_content_width),
-            ),
-            Style::default()
-                .fg(accent_gold())
-                .add_modifier(Modifier::BOLD),
+            detail.clone(),
+            Style::default().fg(if display.status.is_error {
+                accent_rose()
+            } else {
+                dim()
+            }),
         ));
     }
     if selected {
         spans.push(Span::raw(" "));
-        spans.push(section_badge("focus", accent_blue()));
+        spans.push(Span::styled(
+            "●",
+            Style::default()
+                .fg(accent_blue())
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     if expanded {
         spans.push(Span::raw(" "));
-        spans.push(section_badge("open", accent_lime()));
+        spans.push(Span::styled("▾", Style::default().fg(accent_lime())));
     }
     Line::from(spans)
 }
 
-fn tool_call_summary_width(summary: &ToolCardRender, max_content_width: usize) -> usize {
+fn tool_title_width(display: &ToolCardDisplay, max_content_width: usize) -> usize {
+    if max_content_width == 0 {
+        return 160;
+    }
     max_content_width
-        .saturating_sub(summary.tool_name.chars().count() + 12)
+        .saturating_sub(display.status.label.chars().count() + 10)
         .clamp(32, 160)
 }
 
@@ -334,14 +363,16 @@ fn render_grep_preview(summary: &ToolCardRender, accent: Color) -> Option<Vec<Li
 }
 
 fn render_bash_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'static>> {
-    let subtitle = match summary.metadata.exit_code {
-        Some(code) if code != 0 => format!("exit {code} · terminal tail"),
-        Some(code) => format!("exit {code} · terminal tail"),
-        None => "terminal tail".to_owned(),
+    let section = bash_preview_section_label(summary);
+    let subtitle = match (&summary.summary, summary.metadata.exit_code) {
+        (Some(summary), Some(code)) => format!("exit {code} · {summary}"),
+        (Some(summary), None) => summary.clone(),
+        (None, Some(code)) => format!("exit {code}"),
+        (None, None) => "terminal tail".to_owned(),
     };
     let mut lines = vec![timeline_section_line(
         accent,
-        "tail",
+        section,
         accent_gold(),
         vec![Span::styled(subtitle, Style::default().fg(dim()))],
     )];
@@ -362,6 +393,18 @@ fn render_bash_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'sta
     }
     lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
     lines
+}
+
+fn bash_preview_section_label(summary: &ToolCardRender) -> &'static str {
+    if summary.is_error {
+        if summary.metadata.stderr_bytes.unwrap_or(0) > 0 {
+            return "stderr";
+        }
+        if summary.metadata.stdout_bytes.unwrap_or(0) > 0 {
+            return "stdout";
+        }
+    }
+    "output"
 }
 
 fn render_file_change_preview(
@@ -468,21 +511,26 @@ fn render_tool_diff_preview(
                 timeline_badge(tool_diff_file_label(summary, file), accent_blue()),
                 Span::raw(" "),
                 Span::styled(file.path.clone(), Style::default().fg(ink())),
+                Span::raw(" "),
+                Span::styled(diff_hunk_summary(file), Style::default().fg(dim())),
             ],
         ));
         let numbered_lines = number_unified_diff_lines(file.lines.iter().map(String::as_str));
         let line_number_width = diff_line_number_width(&numbered_lines);
         for line in numbered_lines {
+            if matches!(line.kind, DiffLineKind::Hunk) {
+                continue;
+            }
             lines.push(render_tool_diff_line(accent, line, line_number_width));
         }
         if file.truncated {
+            let hidden = file
+                .original_line_count
+                .saturating_sub(file.rendered_line_count);
             lines.push(timeline_content_line(
                 accent,
                 vec![Span::styled(
-                    format!(
-                        "... diff truncated · showing {}/{} lines",
-                        file.rendered_line_count, file.original_line_count
-                    ),
+                    format!("diff truncated · {hidden} lines hidden"),
                     Style::default()
                         .fg(accent_gold())
                         .add_modifier(Modifier::BOLD),
@@ -491,13 +539,13 @@ fn render_tool_diff_preview(
         }
     }
     if diff.truncated && diff.files.iter().all(|file| !file.truncated) {
+        let hidden = diff
+            .original_line_count
+            .saturating_sub(diff.rendered_line_count);
         lines.push(timeline_content_line(
             accent,
             vec![Span::styled(
-                format!(
-                    "... diff truncated · showing {}/{} lines",
-                    diff.rendered_line_count, diff.original_line_count
-                ),
+                format!("diff truncated · {hidden} lines hidden"),
                 Style::default()
                     .fg(accent_gold())
                     .add_modifier(Modifier::BOLD),
@@ -505,6 +553,19 @@ fn render_tool_diff_preview(
         ));
     }
     lines
+}
+
+fn diff_hunk_summary(file: &ToolCardDiffFile) -> String {
+    let count = file
+        .lines
+        .iter()
+        .filter(|line| matches!(diff_line_kind(line), DiffLineKind::Hunk))
+        .count();
+    match count {
+        0 => "0 hunks".to_owned(),
+        1 => "1 hunk".to_owned(),
+        count => format!("{count} hunks"),
+    }
 }
 
 fn tool_diff_file_label(summary: &ToolCardRender, file: &ToolCardDiffFile) -> &'static str {
@@ -825,9 +886,10 @@ fn tool_name_matches(tool_name: &str, expected: &str) -> bool {
 }
 
 struct ToolCardRender {
+    call_id: Option<String>,
     tool_name: String,
-    status: String,
     is_error: bool,
+    error_kind: Option<String>,
     summary: Option<String>,
     metadata: ToolCardMetadata,
     preview_kind: ToolPreviewKind,
@@ -840,9 +902,440 @@ struct ToolCardRender {
 #[derive(Default)]
 struct ToolCardMetadata {
     exit_code: Option<i64>,
+    stdout_bytes: Option<u64>,
+    stderr_bytes: Option<u64>,
     changed_files: Vec<String>,
     call_summary: Option<String>,
     action: Option<String>,
+}
+
+struct ToolCardDisplay {
+    title: ToolCardTitle,
+    status: ToolCardDisplayStatus,
+    summary: Option<String>,
+}
+
+struct ToolCardTitle {
+    action: String,
+    subject: String,
+    args: Option<String>,
+}
+
+impl ToolCardTitle {
+    fn new(action: impl Into<String>, subject: impl Into<String>, args: Option<String>) -> Self {
+        Self {
+            action: action.into(),
+            subject: subject.into(),
+            args,
+        }
+    }
+
+    fn plain(&self) -> String {
+        match &self.args {
+            Some(args) if !args.is_empty() => {
+                format!("{} {} {}", self.action, self.subject, args)
+            }
+            _ => format!("{} {}", self.action, self.subject),
+        }
+    }
+}
+
+struct ToolCardDisplayStatus {
+    label: &'static str,
+    detail: Option<String>,
+    is_error: bool,
+}
+
+fn build_tool_card_display(summary: &ToolCardRender) -> ToolCardDisplay {
+    ToolCardDisplay {
+        title: tool_action_title(summary),
+        status: tool_display_status(summary),
+        summary: tool_display_summary(summary),
+    }
+}
+
+fn build_tool_activity_view(summary: &ToolCardRender, source: &str) -> ToolActivityView {
+    let display = build_tool_card_display(summary);
+    ToolActivityView {
+        key: tool_activity_key(summary, source),
+        title: display.title.plain(),
+        is_inspection: tool_activity_is_inspection_summary(summary),
+        defaults_expanded: summary.diff.is_some(),
+    }
+}
+
+fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
+    let label = if summary.is_error {
+        match summary.error_kind.as_deref() {
+            Some("approval_denied") | Some("permission_denied") => "DENIED",
+            Some("interrupted") => "INTERRUPTED",
+            _ => "ERROR",
+        }
+    } else {
+        "OK"
+    };
+    let detail = if tool_name_matches(&summary.tool_name, "bash") {
+        summary
+            .metadata
+            .exit_code
+            .map(|code| format!("exit {code}"))
+    } else {
+        None
+    };
+    ToolCardDisplayStatus {
+        label,
+        detail,
+        is_error: summary.is_error,
+    }
+}
+
+fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {
+    if tool_name_matches(&summary.tool_name, "bash")
+        && !summary.is_error
+        && summary.preview_lines.is_empty()
+        && summary.preview_value.is_none()
+        && summary.hidden_lines == 0
+    {
+        return Some("(no output)".to_owned());
+    }
+    if let Some(diff) = &summary.diff {
+        return Some(format!("diff {}", diff.summary));
+    }
+    summary.summary.clone()
+}
+
+fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
+    if tool_name_matches(&summary.tool_name, "bash") {
+        let command = call_argument(summary, "command")
+            .or_else(|| summary.metadata.call_summary.clone())
+            .unwrap_or_else(|| summary.tool_name.clone());
+        if !summary.is_error
+            && let Some(search) = classify_simple_shell_search(&command)
+        {
+            return ToolCardTitle::new(
+                "Searched",
+                search.pattern,
+                search.location.map(|location| format!("in {location}")),
+            );
+        }
+        return shell_command_title("Ran", &command);
+    }
+    if tool_name_matches(&summary.tool_name, "read_file") {
+        return ToolCardTitle::new("Read", primary_path(summary), None);
+    }
+    if tool_name_matches(&summary.tool_name, "write_file") {
+        return ToolCardTitle::new(write_file_action(summary), primary_path(summary), None);
+    }
+    if tool_name_matches(&summary.tool_name, "edit_file") {
+        return ToolCardTitle::new("Edited", primary_path(summary), None);
+    }
+    if tool_name_matches(&summary.tool_name, "delete_file") {
+        return ToolCardTitle::new("Deleted", primary_path(summary), None);
+    }
+    if tool_name_matches(&summary.tool_name, "grep") {
+        let pattern = call_argument(summary, "pattern").unwrap_or_else(|| "pattern".to_owned());
+        let path = call_argument(summary, "path").unwrap_or_else(|| "workspace".to_owned());
+        return ToolCardTitle::new("Searched", pattern, Some(format!("in {path}")));
+    }
+    if tool_name_matches(&summary.tool_name, "glob") {
+        return ToolCardTitle::new(
+            "Searched",
+            call_argument(summary, "pattern").unwrap_or_else(|| summary.tool_name.clone()),
+            None,
+        );
+    }
+    if tool_name_matches(&summary.tool_name, "ls") {
+        return ToolCardTitle::new("Listed", primary_path(summary), None);
+    }
+    match &summary.metadata.call_summary {
+        Some(call_summary) => ToolCardTitle::new(
+            "Called",
+            summary.tool_name.clone(),
+            Some(sanitize_call_summary(call_summary)),
+        ),
+        None => ToolCardTitle::new("Called", summary.tool_name.clone(), None),
+    }
+}
+
+fn tool_title_spans(title: &ToolCardTitle, max_chars: usize) -> Vec<Span<'static>> {
+    let action_style = Style::default()
+        .fg(accent_gold())
+        .add_modifier(Modifier::BOLD);
+    let subject_style = Style::default()
+        .fg(accent_blue())
+        .add_modifier(Modifier::BOLD);
+    let args_style = Style::default().fg(ink());
+    let segments = title_segments(title, action_style, subject_style, args_style);
+    let plain_len = title.plain().chars().count();
+    if plain_len <= max_chars {
+        return segments
+            .into_iter()
+            .map(|(segment, style)| Span::styled(segment, style))
+            .collect();
+    }
+
+    let mut remaining = max_chars.saturating_sub(3).max(1);
+    let mut spans = Vec::new();
+    for (segment, style) in segments {
+        let segment_len = segment.chars().count();
+        if segment_len <= remaining {
+            spans.push(Span::styled(segment, style));
+            remaining -= segment_len;
+            if remaining == 0 {
+                spans.push(Span::styled("...", style));
+                break;
+            }
+            continue;
+        }
+        let truncated = segment.chars().take(remaining).collect::<String>();
+        spans.push(Span::styled(format!("{truncated}..."), style));
+        break;
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled("...", args_style));
+    }
+    spans
+}
+
+fn title_segments(
+    title: &ToolCardTitle,
+    action_style: Style,
+    subject_style: Style,
+    args_style: Style,
+) -> Vec<(String, Style)> {
+    let mut segments = vec![
+        (title.action.clone(), action_style),
+        (" ".to_owned(), Style::default()),
+        (title.subject.clone(), subject_style),
+    ];
+    if let Some(args) = &title.args
+        && !args.is_empty()
+    {
+        segments.push((" ".to_owned(), Style::default()));
+        segments.push((args.clone(), args_style));
+    }
+    segments
+}
+
+fn shell_command_title(action: &'static str, command: &str) -> ToolCardTitle {
+    let command = command.trim();
+    let mut parts = command.splitn(2, char::is_whitespace);
+    let subject = parts
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(command);
+    let args = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    ToolCardTitle::new(action, subject, args)
+}
+
+struct ShellSearch {
+    pattern: String,
+    location: Option<String>,
+}
+
+fn classify_simple_shell_search(command: &str) -> Option<ShellSearch> {
+    if command_contains_shell_control(command) {
+        return None;
+    }
+    let tokens = simple_shell_tokens(command)?;
+    let (program, args) = tokens.split_first()?;
+    if program.contains('=') {
+        return None;
+    }
+    let program = program.rsplit('/').next().unwrap_or(program.as_str());
+    match program {
+        "rg" => classify_pattern_search_args(args, &["-e", "--regexp", "-g", "--glob"]),
+        "grep" => classify_pattern_search_args(args, &["-e", "--regexp", "-f", "--file"]),
+        "fd" => classify_pattern_search_args(args, &["-e", "--extension", "-t", "--type"]),
+        "find" => classify_find_search_args(args),
+        _ => None,
+    }
+}
+
+fn command_contains_shell_control(command: &str) -> bool {
+    command
+        .chars()
+        .any(|character| matches!(character, '|' | '>' | '<' | ';' | '&' | '`' | '$'))
+}
+
+fn simple_shell_tokens(command: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for character in command.trim().chars() {
+        match quote {
+            Some(active) if character == active => quote = None,
+            Some(_) => current.push(character),
+            None if character == '\'' || character == '"' => quote = Some(character),
+            None if character.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(character),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    (!tokens.is_empty()).then_some(tokens)
+}
+
+fn classify_pattern_search_args(
+    args: &[String],
+    options_with_values: &[&str],
+) -> Option<ShellSearch> {
+    let mut positional = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let token = &args[index];
+        if token == "--" {
+            positional.extend(args[index + 1..].iter().cloned());
+            break;
+        }
+        if options_with_values.iter().any(|option| token == option) {
+            index += 2;
+            continue;
+        }
+        if token.starts_with("--") && token.contains('=') {
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        positional.push(token.clone());
+        index += 1;
+    }
+    let pattern = positional.first()?.clone();
+    Some(ShellSearch {
+        pattern,
+        location: positional.get(1).cloned(),
+    })
+}
+
+fn classify_find_search_args(args: &[String]) -> Option<ShellSearch> {
+    let location = args
+        .iter()
+        .find(|token| !token.starts_with('-') && token.as_str() != ".")
+        .cloned()
+        .or_else(|| args.first().cloned());
+    let pattern = args
+        .windows(2)
+        .find_map(|window| {
+            matches!(
+                window[0].as_str(),
+                "-name" | "-iname" | "-path" | "-ipath" | "-regex"
+            )
+            .then(|| window[1].clone())
+        })
+        .or_else(|| {
+            args.iter()
+                .find(|token| token.contains('*') || token.contains('?'))
+                .cloned()
+        })?;
+    Some(ShellSearch { pattern, location })
+}
+
+fn tool_activity_is_inspection_summary(summary: &ToolCardRender) -> bool {
+    if tool_name_matches(&summary.tool_name, "read_file")
+        || tool_name_matches(&summary.tool_name, "grep")
+        || tool_name_matches(&summary.tool_name, "glob")
+        || tool_name_matches(&summary.tool_name, "ls")
+    {
+        return true;
+    }
+    tool_name_matches(&summary.tool_name, "bash")
+        && !summary.is_error
+        && call_argument(summary, "command")
+            .or_else(|| summary.metadata.call_summary.clone())
+            .and_then(|command| classify_simple_shell_search(&command))
+            .is_some()
+}
+
+fn tool_activity_key(summary: &ToolCardRender, source: &str) -> String {
+    summary
+        .call_id
+        .as_ref()
+        .map(|call_id| format!("call:{call_id}"))
+        .unwrap_or_else(|| format!("hash:{:016x}", stable_tool_activity_hash(source)))
+}
+
+fn stable_tool_activity_hash(source: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in source.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn write_file_action(summary: &ToolCardRender) -> &'static str {
+    if summary
+        .diff
+        .as_ref()
+        .is_some_and(|diff| diff.files.iter().all(diff_file_is_create))
+    {
+        "Created"
+    } else {
+        "Wrote"
+    }
+}
+
+fn diff_file_is_create(file: &ToolCardDiffFile) -> bool {
+    let (added, removed) = file_diff_line_stats(file);
+    added > 0 && removed == 0
+}
+
+fn primary_path(summary: &ToolCardRender) -> String {
+    call_argument(summary, "path")
+        .or_else(|| summary.metadata.changed_files.first().cloned())
+        .or_else(|| {
+            summary
+                .diff
+                .as_ref()?
+                .files
+                .first()
+                .map(|file| file.path.clone())
+        })
+        .unwrap_or_else(|| "workspace".to_owned())
+}
+
+fn call_argument(summary: &ToolCardRender, key: &str) -> Option<String> {
+    let call_summary = summary.metadata.call_summary.as_deref()?;
+    call_summary_argument(call_summary, key)
+}
+
+fn call_summary_argument(call_summary: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    let start = call_summary.find(&prefix)? + prefix.len();
+    if key == "command" {
+        return Some(call_summary[start..].trim().to_owned());
+    }
+    let tail = &call_summary[start..];
+    let end = tail
+        .find(|character: char| character.is_whitespace())
+        .unwrap_or(tail.len());
+    Some(tail[..end].trim().to_owned()).filter(|value| !value.is_empty())
+}
+
+fn sanitize_call_summary(call_summary: &str) -> String {
+    truncate_inline_text(
+        &call_summary
+            .split_whitespace()
+            .filter(|part| !part.starts_with("call_") && !part.starts_with("id="))
+            .collect::<Vec<_>>()
+            .join(" "),
+        120,
+    )
 }
 
 struct ToolCardDiff {
@@ -897,9 +1390,10 @@ impl ToolPreviewKind {
 
 fn parse_tool_summary(text: &str) -> ToolCardRender {
     let fallback = ToolCardRender {
+        call_id: None,
         tool_name: "result".to_owned(),
-        status: " OK ".to_owned(),
         is_error: false,
+        error_kind: None,
         summary: None,
         metadata: ToolCardMetadata::default(),
         preview_kind: ToolPreviewKind::Text,
@@ -927,6 +1421,16 @@ fn parse_tool_summary(text: &str) -> ToolCardRender {
         .unwrap_or("ok")
         .to_uppercase();
     let is_error = status == "ERROR";
+    let error_kind = object
+        .get("error_kind")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .get("error")
+                .and_then(|error| error.get("kind"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned);
     let metadata = object
         .get("metadata")
         .map(parse_tool_metadata)
@@ -966,9 +1470,13 @@ fn parse_tool_summary(text: &str) -> ToolCardRender {
     let diff = object.get("diff").and_then(parse_tool_diff);
 
     ToolCardRender {
+        call_id: object
+            .get("call_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         tool_name,
-        status: format!(" {status} "),
         is_error,
+        error_kind,
         summary,
         metadata,
         preview_kind,
@@ -1095,6 +1603,8 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
     };
     ToolCardMetadata {
         exit_code: object.get("exit_code").and_then(Value::as_i64),
+        stdout_bytes: object.get("stdout_bytes").and_then(Value::as_u64),
+        stderr_bytes: object.get("stderr_bytes").and_then(Value::as_u64),
         changed_files: object
             .get("changed_files")
             .and_then(Value::as_array)

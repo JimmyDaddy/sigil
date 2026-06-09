@@ -18,6 +18,5 @@ mod tool_card;
 pub use shell::render;
 
 pub(crate) use timeline::{TimelineRenderOptions, render_timeline_entry_lines_with_options};
-// Compatibility re-export for callers that do not need custom timeline options.
-#[allow(unused_imports)]
-pub(crate) use timeline::render_timeline_entry_lines;
+#[cfg(test)]
+pub(crate) use tool_card::tool_activity_view;
