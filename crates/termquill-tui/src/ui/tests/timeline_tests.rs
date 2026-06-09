@@ -1338,9 +1338,12 @@ fn tool_activity_view_marks_read_list_and_simple_searches_as_inspection() {
         .to_owned(),
     };
 
-    let read_activity = crate::ui::tool_activity_view(&read_entry, 0).unwrap();
-    let search_activity = crate::ui::tool_activity_view(&bash_search_entry, 1).unwrap();
-    let complex_activity = crate::ui::tool_activity_view(&complex_bash_entry, 2).unwrap();
+    let read_activity =
+        crate::ui::tool_activity_view(&read_entry, 0).expect("read activity should parse");
+    let search_activity =
+        crate::ui::tool_activity_view(&bash_search_entry, 1).expect("search activity should parse");
+    let complex_activity = crate::ui::tool_activity_view(&complex_bash_entry, 2)
+        .expect("complex activity should parse");
 
     assert_eq!(read_activity.key, "call:call-read");
     assert_eq!(read_activity.title, "Read README.md");
