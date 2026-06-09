@@ -2,11 +2,6 @@ use ratatui::text::Line;
 
 use super::*;
 
-struct InspectionGroupProjection {
-    end: usize,
-    tool_indices: Vec<usize>,
-}
-
 impl AppState {
     pub(super) fn live_panel_height(&self) -> u16 {
         self.terminal_height
@@ -171,19 +166,22 @@ impl AppState {
         self.timeline_render_cache.clear();
         self.timeline_plain_cache.clear();
         self.timeline_prefix_hashes.clear();
-        let (rendered, ranges) =
-            self.render_timeline_projection_range(0..self.timeline.len(), &options);
-        self.timeline_render_ranges = ranges;
-        self.extend_timeline_render_buffers(rendered);
+        self.timeline_render_ranges.clear();
+        for index in 0..self.timeline.len() {
+            let start = self.timeline_render_cache.len();
+            let rendered = {
+                let entry = &self.timeline[index];
+                crate::ui::render_timeline_entry_lines_with_options(entry, &options, index)
+            };
+            self.extend_timeline_render_buffers(rendered);
+            let end = self.timeline_render_cache.len();
+            self.timeline_render_ranges.push(start..end);
+        }
         self.trim_trailing_timeline_blanks();
         self.timeline_revision = self.timeline_revision.saturating_add(1);
     }
 
     pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
-        if let Some(source_range) = self.timeline_inspection_projection_bounds(index) {
-            self.rerender_timeline_projection_range(source_range);
-            return;
-        }
         let Some(existing_range) = self.timeline_render_ranges.get(index).cloned() else {
             self.rebuild_timeline_render_cache();
             return;
@@ -216,12 +214,6 @@ impl AppState {
     }
 
     fn append_timeline_render_cache_entry(&mut self, index: usize) {
-        if let Some(source_range) = self.timeline_inspection_projection_bounds(index)
-            && source_range.start < index
-        {
-            self.rerender_timeline_projection_range(source_range);
-            return;
-        }
         if index != self.timeline_render_ranges.len() {
             self.rebuild_timeline_render_cache();
             return;
@@ -242,151 +234,6 @@ impl AppState {
         self.timeline_render_ranges.push(start..end);
         self.trim_trailing_timeline_blanks();
         self.timeline_revision = self.timeline_revision.saturating_add(1);
-    }
-
-    fn render_timeline_projection_range(
-        &self,
-        source_range: Range<usize>,
-        options: &crate::ui::TimelineRenderOptions,
-    ) -> (Vec<Line<'static>>, Vec<Range<usize>>) {
-        let mut lines = Vec::new();
-        let mut ranges = Vec::new();
-        let mut index = source_range.start;
-        while index < source_range.end {
-            let start = lines.len();
-            if let Some(group) = self.inspection_group_projection_before(index, source_range.end) {
-                let entries = group
-                    .tool_indices
-                    .iter()
-                    .filter_map(|entry_index| {
-                        self.timeline
-                            .get(*entry_index)
-                            .map(|entry| (*entry_index, entry))
-                    })
-                    .collect::<Vec<_>>();
-                lines.extend(crate::ui::render_inspected_group_lines(&entries, options));
-                let end = lines.len();
-                for _ in index..group.end {
-                    ranges.push(start..end);
-                }
-                index = group.end;
-                continue;
-            }
-            if let Some(entry) = self.timeline.get(index) {
-                lines.extend(crate::ui::render_timeline_entry_lines_with_options(
-                    entry, options, index,
-                ));
-            }
-            let end = lines.len();
-            ranges.push(start..end);
-            index += 1;
-        }
-        (lines, ranges)
-    }
-
-    fn rerender_timeline_projection_range(&mut self, source_range: Range<usize>) {
-        if source_range.is_empty() {
-            return;
-        }
-        let rendered_source_end = source_range.end.min(self.timeline_render_ranges.len());
-        let existing_start = self
-            .timeline_render_ranges
-            .get(source_range.start)
-            .map(|range| range.start)
-            .unwrap_or(self.timeline_render_cache.len());
-        let existing_end = if rendered_source_end > source_range.start {
-            self.timeline_render_ranges[rendered_source_end - 1].end
-        } else {
-            existing_start
-        };
-        let options = self.timeline_render_options();
-        let (new_lines, relative_ranges) =
-            self.render_timeline_projection_range(source_range.clone(), &options);
-        let new_plain = new_lines.iter().map(plain_line_text).collect::<Vec<_>>();
-        let old_len = existing_end.saturating_sub(existing_start);
-        let new_len = new_lines.len();
-        self.timeline_render_cache
-            .splice(existing_start..existing_end, new_lines);
-        self.timeline_plain_cache
-            .splice(existing_start..existing_end, new_plain);
-        let absolute_ranges = relative_ranges
-            .into_iter()
-            .map(|range| existing_start + range.start..existing_start + range.end)
-            .collect::<Vec<_>>();
-        self.timeline_render_ranges
-            .splice(source_range.start..rendered_source_end, absolute_ranges);
-        if new_len != old_len {
-            let delta = new_len as isize - old_len as isize;
-            for range in self
-                .timeline_render_ranges
-                .iter_mut()
-                .skip(source_range.end)
-            {
-                range.start = range.start.saturating_add_signed(delta);
-                range.end = range.end.saturating_add_signed(delta);
-            }
-        }
-        self.rebuild_timeline_prefix_hashes_from(existing_start);
-        self.trim_trailing_timeline_blanks();
-        self.timeline_revision = self.timeline_revision.saturating_add(1);
-    }
-
-    fn timeline_inspection_projection_bounds(&self, index: usize) -> Option<Range<usize>> {
-        if !self.timeline_entry_can_participate_in_inspection_projection(index) {
-            return None;
-        }
-        let mut start = index;
-        while start > 0 && self.timeline_entry_can_participate_in_inspection_projection(start - 1) {
-            start -= 1;
-        }
-        let mut end = index + 1;
-        while self.timeline_entry_can_participate_in_inspection_projection(end) {
-            end += 1;
-        }
-        Some(start..end)
-    }
-
-    fn inspection_group_projection_before(
-        &self,
-        start: usize,
-        limit: usize,
-    ) -> Option<InspectionGroupProjection> {
-        let mut index = start;
-        let mut end = start;
-        let mut tool_indices = Vec::new();
-        while index < limit {
-            if self.timeline_entry_is_inspection_tool(index) {
-                tool_indices.push(index);
-                end = index + 1;
-                index += 1;
-                continue;
-            }
-            if self.timeline_entry_is_inspection_bridge_notice(index) {
-                index += 1;
-                continue;
-            }
-            break;
-        }
-        (tool_indices.len() > 1).then_some(InspectionGroupProjection { end, tool_indices })
-    }
-
-    fn timeline_entry_can_participate_in_inspection_projection(&self, index: usize) -> bool {
-        self.timeline_entry_is_inspection_tool(index)
-            || self.timeline_entry_is_inspection_bridge_notice(index)
-    }
-
-    fn timeline_entry_is_inspection_bridge_notice(&self, index: usize) -> bool {
-        self.timeline
-            .get(index)
-            .is_some_and(is_inspection_bridge_notice)
-    }
-
-    fn timeline_entry_is_inspection_tool(&self, index: usize) -> bool {
-        self.timeline
-            .get(index)
-            .filter(|entry| entry.role == TimelineRole::Tool)
-            .and_then(|entry| crate::ui::tool_activity_view(entry, index))
-            .is_some_and(|activity| activity.is_inspection)
     }
 
     fn extend_last_render_block_range_by_one_line(&mut self) {
@@ -618,10 +465,4 @@ impl AppState {
             detail,
         })
     }
-}
-
-fn is_inspection_bridge_notice(entry: &TimelineEntry) -> bool {
-    entry.role == TimelineRole::Notice
-        && entry.text.starts_with("permission ")
-        && entry.text.contains(" mode=allow")
 }
