@@ -121,6 +121,7 @@ cargo clippy --all-targets -- -D warnings
 - UI 快捷键变更必须覆盖 key mapping 与 `AppState` state transition tests，并确认 info rail / keyboard help / README 与真实 metadata 一致
 - markdown renderer 变更必须覆盖 assistant timeline、tool preview 或 approval modal 的至少一个调用面，避免 options 增强只在单测中成立
 - setup/config 状态模型拆分必须保留保存、关闭、dirty guard 和 modal 输入的持久化/状态机测试
+- 新增或迁移单元测试时，必须遵守 `dev/governance/code-standards.md` 的测试目录规范：默认使用同层 `tests/<module>_tests.rs`，业务文件只保留 `#[path = "tests/<module>_tests.rs"] mod tests;` 声明；不要新增 inline tests、`module/tests.rs`、`module/test_support.rs` 或裸 `src/tests.rs`
 
 ## 8. Provider 与工具工程规范
 

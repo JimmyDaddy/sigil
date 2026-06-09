@@ -172,6 +172,35 @@
 - 跨层链路再补集成测试
 - 对 TUI，优先测状态转换，而不是只测渲染文本
 
+### 5.3 测试目录规范
+
+单元测试必须和业务代码物理分离。业务文件中只保留测试模块声明，不再回填 inline `mod tests { ... }` 测试实现。
+
+默认布局：
+
+- `src/foo.rs` 的测试放在 `src/tests/foo_tests.rs`，父文件声明 `#[path = "tests/foo_tests.rs"] mod tests;`
+- `src/ui/foo.rs` 的测试放在 `src/ui/tests/foo_tests.rs`，父文件声明 `#[path = "tests/foo_tests.rs"] mod tests;`
+- `src/lib.rs` 的测试放在 `src/tests/lib_tests.rs`，父文件声明 `#[path = "tests/lib_tests.rs"] mod tests;`
+- `src/main.rs` 的测试放在 `src/tests/main_tests.rs`，父文件声明 `#[path = "tests/main_tests.rs"] mod tests;`
+
+已按状态域拆分的 façade 模块继续使用专属目录：
+
+- `crates/termquill-tui/src/app/tests/*_tests.rs`
+- `crates/termquill-tui/src/runner/tests/*_tests.rs`
+
+测试共享代码放置规则：
+
+- 同一个状态域共享 fixture 使用 `tests/common.rs`
+- 单个模块专用 test helper 使用 `tests/<module>_test_support.rs`
+- 业务文件不要保留 test-only helper 实现；只能保留 `#[cfg(test)]` 下的测试模块声明
+
+禁止新增：
+
+- inline `mod tests { ... }`
+- `module/tests.rs`
+- `module/test_support.rs`
+- crate root 下的裸 `src/tests.rs`
+
 ## 6. 配置与兼容性
 
 - 新增配置项时，必须考虑默认值、旧配置兼容性和 README 更新
