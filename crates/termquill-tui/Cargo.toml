@@ -11,11 +11,13 @@ crossterm.workspace = true
 ratatui.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 serde_json.workspace = true
+syntect.workspace = true
 toml.workspace = true
 tokio.workspace = true
 termquill-kernel = { path = "../termquill-kernel" }
 termquill-provider-deepseek = { path = "../termquill-provider-deepseek" }
 termquill-runtime = { path = "../termquill-runtime" }
+two-face.workspace = true
 unicode-segmentation.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true

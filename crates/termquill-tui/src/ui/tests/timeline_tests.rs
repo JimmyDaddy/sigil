@@ -364,11 +364,8 @@ fn render_timeline_entry_lines_groups_paragraphs_and_code_blocks() {
             .iter()
             .any(|span| span.content.as_ref().contains("rust"))
     }));
-    assert!(lines.iter().any(|line| {
-        line.spans
-            .iter()
-            .any(|span| span.content.as_ref().contains("fn main() {}"))
-    }));
+    let plain_lines = rendered_plain_lines(&lines);
+    assert!(plain_lines.iter().any(|line| line.contains("fn main() {}")));
 }
 
 #[test]

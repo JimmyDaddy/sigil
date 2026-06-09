@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::{
     primitives::{timeline_content_line, timeline_section_line},
+    syntax_highlight::highlight_code_to_spans,
     text::{pad_display_width, truncate_display_width, wrap_display_width},
     theme::{accent_blue, accent_gold, accent_lime, accent_teal, dim, ink, muted},
 };
@@ -101,10 +102,11 @@ pub(crate) fn render_markdown_timeline_lines(
             continue;
         }
         if let Some(language) = fenced_code_language(line) {
-            let label = if language.is_empty() {
+            let language_token = markdown_code_language_token(language);
+            let label = if language_token.is_empty() {
                 "plain"
             } else {
-                language
+                language_token
             };
             index += 1;
             let mut block_lines = Vec::new();
@@ -133,18 +135,17 @@ pub(crate) fn render_markdown_timeline_lines(
                     ),
                 ));
             } else {
-                for block_line in block_lines {
-                    for code_row in code_block_render_rows(block_line, options) {
-                        rendered.push(timeline_content_line(
-                            accent,
-                            render_code_line_spans_with_bg(
-                                &code_row,
-                                accent_blue(),
-                                Style::default().fg(ink()),
-                                Color::Rgb(28, 33, 41),
-                            ),
-                        ));
-                    }
+                let highlighted = highlight_code_block_lines(&block_lines, language_token);
+                for (line_index, block_line) in block_lines.iter().enumerate() {
+                    rendered.extend(render_code_block_line_rows(
+                        accent,
+                        block_line,
+                        highlighted
+                            .as_ref()
+                            .and_then(|highlighted| highlighted.get(line_index))
+                            .map(Vec::as_slice),
+                        options,
+                    ));
                 }
             }
             continue;
@@ -213,6 +214,50 @@ fn code_block_render_rows(line: &str, options: MarkdownRenderOptions) -> Vec<Str
         #[cfg(test)]
         CodeWrapMode::Truncate => vec![truncate_display_width(line, width)],
     }
+}
+
+fn highlight_code_block_lines(
+    block_lines: &[&str],
+    language: &str,
+) -> Option<Vec<Vec<Span<'static>>>> {
+    highlight_code_to_spans(&block_lines.join("\n"), language)
+}
+
+fn render_code_block_line_rows(
+    accent: Color,
+    block_line: &str,
+    highlighted_spans: Option<&[Span<'static>]>,
+    options: MarkdownRenderOptions,
+) -> Vec<Line<'static>> {
+    let rows = code_block_render_rows(block_line, options);
+    if rows.len() == 1
+        && rows.first().is_some_and(|row| row == block_line)
+        && let Some(spans) = highlighted_spans
+    {
+        return vec![timeline_content_line(
+            accent,
+            render_highlighted_code_line_spans(
+                spans,
+                accent_blue(),
+                Style::default().fg(ink()),
+                Color::Rgb(28, 33, 41),
+            ),
+        )];
+    }
+
+    rows.into_iter()
+        .map(|code_row| {
+            timeline_content_line(
+                accent,
+                render_code_line_spans_with_bg(
+                    &code_row,
+                    accent_blue(),
+                    Style::default().fg(ink()),
+                    Color::Rgb(28, 33, 41),
+                ),
+            )
+        })
+        .collect()
 }
 
 fn render_wrapped_markdown_line(
@@ -904,9 +949,34 @@ pub(crate) fn render_code_line_spans_with_bg(
     ]
 }
 
+fn render_highlighted_code_line_spans(
+    spans: &[Span<'static>],
+    accent: Color,
+    base_style: Style,
+    bg: Color,
+) -> Vec<Span<'static>> {
+    let mut rendered = vec![Span::styled(
+        "│ ",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    )];
+    if spans.is_empty() {
+        rendered.push(Span::styled(" ", base_style.bg(bg)));
+        return rendered;
+    }
+    for span in spans {
+        let style = base_style.bg(bg).patch(span.style);
+        rendered.push(Span::styled(span.content.to_string(), style));
+    }
+    rendered
+}
+
 fn fenced_code_language(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
     trimmed.strip_prefix("```").map(str::trim)
+}
+
+fn markdown_code_language_token(language: &str) -> &str {
+    language.split_whitespace().next().unwrap_or(language)
 }
 
 fn markdown_heading(line: &str) -> Option<(usize, &str)> {

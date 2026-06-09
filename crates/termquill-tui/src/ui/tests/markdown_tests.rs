@@ -31,6 +31,26 @@ fn markdown_timeline_lines_render_code_blocks() {
 }
 
 #[test]
+fn markdown_timeline_lines_highlight_fenced_code_blocks() {
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        "```rust\nfn main() {}\n```",
+        MarkdownRenderOptions::timeline(80),
+    );
+    let highlighted_fn = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "fn")
+        .expect("expected rust keyword span");
+
+    assert_ne!(
+        highlighted_fn.style,
+        Style::default().fg(ink()).bg(Color::Rgb(28, 33, 41))
+    );
+}
+
+#[test]
 fn markdown_timeline_lines_apply_code_wrap_options() {
     let source = "```text\nabcdefghijklmnopqrstuvwxyz\n```";
     let wrapped = render_markdown_timeline_lines(

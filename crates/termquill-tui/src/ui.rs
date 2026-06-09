@@ -10,6 +10,7 @@ mod primitives;
 mod setup_config;
 mod shell;
 mod slash_overlay;
+mod syntax_highlight;
 mod text;
 mod theme;
 mod timeline;
