@@ -2,6 +2,11 @@ use ratatui::text::Line;
 
 use super::*;
 
+struct InspectionGroupProjection {
+    end: usize,
+    tool_indices: Vec<usize>,
+}
+
 impl AppState {
     pub(super) fn live_panel_height(&self) -> u16 {
         self.terminal_height
@@ -175,7 +180,7 @@ impl AppState {
     }
 
     pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
-        if let Some(source_range) = self.timeline_tool_run_bounds(index) {
+        if let Some(source_range) = self.timeline_inspection_projection_bounds(index) {
             self.rerender_timeline_projection_range(source_range);
             return;
         }
@@ -211,7 +216,7 @@ impl AppState {
     }
 
     fn append_timeline_render_cache_entry(&mut self, index: usize) {
-        if let Some(source_range) = self.timeline_tool_run_bounds(index)
+        if let Some(source_range) = self.timeline_inspection_projection_bounds(index)
             && source_range.start < index
         {
             self.rerender_timeline_projection_range(source_range);
@@ -249,20 +254,22 @@ impl AppState {
         let mut index = source_range.start;
         while index < source_range.end {
             let start = lines.len();
-            if let Some(group_end) = self.inspection_group_end_before(index, source_range.end) {
-                let entries = (index..group_end)
+            if let Some(group) = self.inspection_group_projection_before(index, source_range.end) {
+                let entries = group
+                    .tool_indices
+                    .iter()
                     .filter_map(|entry_index| {
                         self.timeline
-                            .get(entry_index)
-                            .map(|entry| (entry_index, entry))
+                            .get(*entry_index)
+                            .map(|entry| (*entry_index, entry))
                     })
                     .collect::<Vec<_>>();
                 lines.extend(crate::ui::render_inspected_group_lines(&entries, options));
                 let end = lines.len();
-                for _ in index..group_end {
+                for _ in index..group.end {
                     ranges.push(start..end);
                 }
-                index = group_end;
+                index = group.end;
                 continue;
             }
             if let Some(entry) = self.timeline.get(index) {
@@ -324,43 +331,54 @@ impl AppState {
         self.timeline_revision = self.timeline_revision.saturating_add(1);
     }
 
-    fn timeline_tool_run_bounds(&self, index: usize) -> Option<Range<usize>> {
-        if !self
-            .timeline
-            .get(index)
-            .is_some_and(|entry| entry.role == TimelineRole::Tool)
-        {
+    fn timeline_inspection_projection_bounds(&self, index: usize) -> Option<Range<usize>> {
+        if !self.timeline_entry_can_participate_in_inspection_projection(index) {
             return None;
         }
         let mut start = index;
-        while start > 0
-            && self
-                .timeline
-                .get(start - 1)
-                .is_some_and(|entry| entry.role == TimelineRole::Tool)
-        {
+        while start > 0 && self.timeline_entry_can_participate_in_inspection_projection(start - 1) {
             start -= 1;
         }
         let mut end = index + 1;
-        while self
-            .timeline
-            .get(end)
-            .is_some_and(|entry| entry.role == TimelineRole::Tool)
-        {
+        while self.timeline_entry_can_participate_in_inspection_projection(end) {
             end += 1;
         }
         Some(start..end)
     }
 
-    fn inspection_group_end_before(&self, start: usize, limit: usize) -> Option<usize> {
-        if !self.timeline_entry_is_inspection_tool(start) {
-            return None;
+    fn inspection_group_projection_before(
+        &self,
+        start: usize,
+        limit: usize,
+    ) -> Option<InspectionGroupProjection> {
+        let mut index = start;
+        let mut end = start;
+        let mut tool_indices = Vec::new();
+        while index < limit {
+            if self.timeline_entry_is_inspection_tool(index) {
+                tool_indices.push(index);
+                end = index + 1;
+                index += 1;
+                continue;
+            }
+            if self.timeline_entry_is_inspection_bridge_notice(index) {
+                index += 1;
+                continue;
+            }
+            break;
         }
-        let mut end = start + 1;
-        while end < limit && self.timeline_entry_is_inspection_tool(end) {
-            end += 1;
-        }
-        (end > start + 1).then_some(end)
+        (tool_indices.len() > 1).then_some(InspectionGroupProjection { end, tool_indices })
+    }
+
+    fn timeline_entry_can_participate_in_inspection_projection(&self, index: usize) -> bool {
+        self.timeline_entry_is_inspection_tool(index)
+            || self.timeline_entry_is_inspection_bridge_notice(index)
+    }
+
+    fn timeline_entry_is_inspection_bridge_notice(&self, index: usize) -> bool {
+        self.timeline
+            .get(index)
+            .is_some_and(is_inspection_bridge_notice)
     }
 
     fn timeline_entry_is_inspection_tool(&self, index: usize) -> bool {
@@ -600,4 +618,10 @@ impl AppState {
             detail,
         })
     }
+}
+
+fn is_inspection_bridge_notice(entry: &TimelineEntry) -> bool {
+    entry.role == TimelineRole::Notice
+        && entry.text.starts_with("permission ")
+        && entry.text.contains(" mode=allow")
 }

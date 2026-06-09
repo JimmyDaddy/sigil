@@ -428,6 +428,57 @@ fn inspection_tool_entries_render_as_group_with_shared_ranges() {
 }
 
 #[test]
+fn inspection_group_skips_allow_permission_notices_between_tools() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.push_timeline(
+        TimelineRole::Notice,
+        "permission ls subject=crates mode=allow",
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-ls",
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "preview_lines": ["[\"src/main.rs\"]"],
+  "preview_value": ["src/main.rs"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "path=crates"}}}
+}"#,
+    );
+    app.push_timeline(
+        TimelineRole::Notice,
+        "permission read_file subject=README.md mode=allow",
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-read",
+  "tool_name": "read_file",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["hello"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "path=README.md"}}}
+}"#,
+    );
+
+    let rendered = app.timeline_plain_cache.join("\n");
+    let ranges = (1..5)
+        .map(|index| app.timeline_render_ranges[index].clone())
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered.matches("Inspected").count(), 1);
+    assert!(rendered.contains("Listed crates"));
+    assert!(rendered.contains("Read README.md"));
+    assert!(!rendered.contains("permission "));
+    assert_eq!(ranges[0], ranges[1]);
+    assert_eq!(ranges[1], ranges[2]);
+    assert_eq!(ranges[2], ranges[3]);
+}
+
+#[test]
 fn appending_after_inspection_group_preserves_shared_member_ranges() {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.push_timeline(
