@@ -18,5 +18,4 @@ mod tool_card;
 pub use shell::render;
 
 pub(crate) use timeline::{TimelineRenderOptions, render_timeline_entry_lines_with_options};
-#[cfg(test)]
 pub(crate) use tool_card::tool_activity_view;

@@ -31,9 +31,9 @@ const COLLAPSED_THINKING_PREVIEW_LINES: usize = 3;
 pub(crate) struct TimelineRenderOptions {
     pub expand_tool_previews: bool,
     pub expand_thinking_blocks: bool,
-    pub selected_tool_entry: Option<usize>,
-    pub expanded_tool_entries: BTreeSet<usize>,
-    pub collapsed_tool_entries: BTreeSet<usize>,
+    pub selected_tool_activity_key: Option<String>,
+    pub expanded_tool_activity_keys: BTreeSet<String>,
+    pub collapsed_tool_activity_keys: BTreeSet<String>,
     pub max_content_width: usize,
 }
 

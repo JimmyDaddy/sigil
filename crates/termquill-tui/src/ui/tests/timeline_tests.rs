@@ -1027,6 +1027,7 @@ fn render_timeline_entry_lines_expands_tool_diff_by_default() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
         text: r#"{
+  "call_id": "call-diff",
   "tool_name": "write_file",
   "status": "ok",
   "summary": "1 line · 14 B · diff +1 -1 · 1 file",
@@ -1198,6 +1199,7 @@ fn render_timeline_entry_lines_can_collapse_default_expanded_tool_diff() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
         text: r#"{
+  "call_id": "call-diff",
   "tool_name": "write_file",
   "status": "ok",
   "summary": "1 line · 14 B · diff +1 -1 · 1 file",
@@ -1225,7 +1227,7 @@ fn render_timeline_entry_lines_can_collapse_default_expanded_tool_diff() {
     let lines = render_timeline_entry_lines_with_options(
         &entry,
         &TimelineRenderOptions {
-            collapsed_tool_entries: BTreeSet::from([0]),
+            collapsed_tool_activity_keys: BTreeSet::from(["call:call-diff".to_owned()]),
             ..TimelineRenderOptions::default()
         },
         0,

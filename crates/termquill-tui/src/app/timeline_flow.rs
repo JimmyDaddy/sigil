@@ -55,7 +55,7 @@ impl AppState {
 
     pub(super) fn push_timeline(&mut self, role: TimelineRole, text: impl Into<String>) {
         let is_tool = role == TimelineRole::Tool;
-        let previous_selected_tool = self.selected_tool_timeline_entry;
+        let previous_selected_tool = self.selected_tool_activity_key.clone();
         self.timeline.push(TimelineEntry {
             role,
             text: text.into(),
@@ -67,15 +67,24 @@ impl AppState {
             trimmed_front = true;
         }
         if is_tool {
-            self.selected_tool_timeline_entry = self.timeline.len().checked_sub(1);
+            self.selected_tool_activity_key = self
+                .timeline
+                .last()
+                .and_then(|entry| {
+                    let index = self.timeline.len().saturating_sub(1);
+                    self.tool_activity_key_at(index, entry)
+                })
+                .map(|(_, key)| key);
         }
         if trimmed_front {
             self.rebuild_timeline_render_cache();
             return;
         }
         if is_tool
+            && previous_selected_tool != self.selected_tool_activity_key
             && let Some(previous_index) = previous_selected_tool
-            && Some(previous_index) != self.selected_tool_timeline_entry
+                .as_deref()
+                .and_then(|key| self.timeline_entry_index_for_activity_key(key))
             && previous_index < self.timeline.len().saturating_sub(1)
         {
             self.rerender_timeline_entry(previous_index);
@@ -92,19 +101,7 @@ impl AppState {
         self.streaming_reasoning_index = self
             .streaming_reasoning_index
             .and_then(|index| index.checked_sub(1));
-        self.selected_tool_timeline_entry = self
-            .selected_tool_timeline_entry
-            .and_then(|index| index.checked_sub(1));
-        self.expanded_tool_timeline_entries = self
-            .expanded_tool_timeline_entries
-            .iter()
-            .filter_map(|index| index.checked_sub(1))
-            .collect();
-        self.collapsed_tool_timeline_entries = self
-            .collapsed_tool_timeline_entries
-            .iter()
-            .filter_map(|index| index.checked_sub(1))
-            .collect();
+        self.retain_existing_tool_activity_state();
     }
 
     pub(super) fn push_event(&mut self, label: impl Into<String>, detail: impl Into<String>) {
@@ -425,9 +422,9 @@ impl AppState {
         crate::ui::TimelineRenderOptions {
             expand_tool_previews: false,
             expand_thinking_blocks: matches!(self.thinking_block_mode, ThinkingBlockMode::Expanded),
-            selected_tool_entry: self.selected_tool_timeline_entry,
-            expanded_tool_entries: self.expanded_tool_timeline_entries.clone(),
-            collapsed_tool_entries: self.collapsed_tool_timeline_entries.clone(),
+            selected_tool_activity_key: self.selected_tool_activity_key.clone(),
+            expanded_tool_activity_keys: self.expanded_tool_activity_keys.clone(),
+            collapsed_tool_activity_keys: self.collapsed_tool_activity_keys.clone(),
             max_content_width: self.timeline_content_width(),
         }
     }

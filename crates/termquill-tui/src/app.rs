@@ -106,9 +106,9 @@ pub struct AppState {
     compaction_config: CompactionConfig,
     memory_config: MemoryConfig,
     thinking_block_mode: ThinkingBlockMode,
-    selected_tool_timeline_entry: Option<usize>,
-    expanded_tool_timeline_entries: BTreeSet<usize>,
-    collapsed_tool_timeline_entries: BTreeSet<usize>,
+    selected_tool_activity_key: Option<String>,
+    expanded_tool_activity_keys: BTreeSet<String>,
+    collapsed_tool_activity_keys: BTreeSet<String>,
     last_notice: Option<String>,
     reasoning_effort: ReasoningEffort,
     run_phase: RunPhase,
@@ -219,9 +219,9 @@ impl AppState {
             compaction_config: root_config.compaction.clone(),
             memory_config: root_config.memory.clone(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
-            selected_tool_timeline_entry: None,
-            expanded_tool_timeline_entries: BTreeSet::new(),
-            collapsed_tool_timeline_entries: BTreeSet::new(),
+            selected_tool_activity_key: None,
+            expanded_tool_activity_keys: BTreeSet::new(),
+            collapsed_tool_activity_keys: BTreeSet::new(),
             last_notice: None,
             reasoning_effort: ReasoningEffort::Max,
             run_phase: RunPhase::Idle,
@@ -312,9 +312,9 @@ impl AppState {
             compaction_config: CompactionConfig::default(),
             memory_config: MemoryConfig::default(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
-            selected_tool_timeline_entry: None,
-            expanded_tool_timeline_entries: BTreeSet::new(),
-            collapsed_tool_timeline_entries: BTreeSet::new(),
+            selected_tool_activity_key: None,
+            expanded_tool_activity_keys: BTreeSet::new(),
+            collapsed_tool_activity_keys: BTreeSet::new(),
             last_notice: startup_error,
             reasoning_effort: ReasoningEffort::Max,
             run_phase: RunPhase::Idle,
@@ -424,9 +424,9 @@ impl AppState {
         self.approval_selected_file_index = 0;
         self.approval_selected_hunk_index = 0;
         self.approval_diff_mode = ApprovalDiffMode::Full;
-        self.selected_tool_timeline_entry = None;
-        self.expanded_tool_timeline_entries.clear();
-        self.collapsed_tool_timeline_entries.clear();
+        self.selected_tool_activity_key = None;
+        self.expanded_tool_activity_keys.clear();
+        self.collapsed_tool_activity_keys.clear();
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);

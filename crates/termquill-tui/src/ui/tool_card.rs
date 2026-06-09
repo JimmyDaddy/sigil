@@ -28,32 +28,31 @@ pub(crate) struct ToolActivityView {
     pub(crate) defaults_expanded: bool,
 }
 
-#[cfg(test)]
 pub(crate) fn tool_activity_view(
     entry: &TimelineEntry,
     _entry_index: usize,
 ) -> Option<ToolActivityView> {
     let summary = parse_tool_summary(&entry.text);
-    if summary.tool_name == "result" && summary.preview_value.is_none() && summary.diff.is_none() {
-        return None;
-    }
     Some(build_tool_activity_view(&summary, &entry.text))
 }
 
 pub(crate) fn render_tool_entry_lines(
     entry: &TimelineEntry,
     options: &TimelineRenderOptions,
-    entry_index: usize,
+    _entry_index: usize,
 ) -> Vec<Line<'static>> {
     let summary = parse_tool_summary(&entry.text);
     let display = build_tool_card_display(&summary);
     let activity = build_tool_activity_view(&summary, &entry.text);
     let accent = accent_rose();
-    let selected = options.selected_tool_entry == Some(entry_index);
+    let selected = options
+        .selected_tool_activity_key
+        .as_deref()
+        .is_some_and(|selected| selected == activity.key.as_str());
     let default_expanded = activity.defaults_expanded;
     let expanded = options.expand_tool_previews
-        || options.expanded_tool_entries.contains(&entry_index)
-        || (default_expanded && !options.collapsed_tool_entries.contains(&entry_index));
+        || options.expanded_tool_activity_keys.contains(&activity.key)
+        || (default_expanded && !options.collapsed_tool_activity_keys.contains(&activity.key));
     let mut lines = vec![tool_card_header_line(
         &display,
         selected,
