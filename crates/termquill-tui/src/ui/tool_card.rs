@@ -9,8 +9,8 @@ use crate::app::TimelineEntry;
 use super::{
     TimelineRenderOptions,
     diff::{
-        DiffLineKind, NumberedDiffLine, diff_line_kind, diff_line_number_gutter, diff_line_style,
-        number_unified_diff_lines,
+        DiffLineKind, NumberedDiffLine, diff_line_kind, diff_line_number_text,
+        diff_line_number_width, diff_line_style, number_unified_diff_lines,
     },
     markdown::{
         MarkdownRenderOptions, render_code_line_spans_with_bg, render_markdown_timeline_lines,
@@ -470,8 +470,10 @@ fn render_tool_diff_preview(
                 Span::styled(file.path.clone(), Style::default().fg(ink())),
             ],
         ));
-        for line in number_unified_diff_lines(file.lines.iter().map(String::as_str)) {
-            lines.push(render_tool_diff_line(accent, line));
+        let numbered_lines = number_unified_diff_lines(file.lines.iter().map(String::as_str));
+        let line_number_width = diff_line_number_width(&numbered_lines);
+        for line in numbered_lines {
+            lines.push(render_tool_diff_line(accent, line, line_number_width));
         }
         if file.truncated {
             lines.push(timeline_content_line(
@@ -530,16 +532,26 @@ fn file_diff_line_stats(file: &ToolCardDiffFile) -> (usize, usize) {
     })
 }
 
-fn render_tool_diff_line(accent: Color, line: NumberedDiffLine<'_>) -> Line<'static> {
+fn render_tool_diff_line(
+    accent: Color,
+    line: NumberedDiffLine<'_>,
+    line_number_width: usize,
+) -> Line<'static> {
     let (marker_color, body_style) = diff_line_style(line.kind);
     timeline_content_line(
         accent,
         vec![
-            Span::styled("│ ", Style::default().fg(marker_color)),
+            Span::styled("│", Style::default().fg(marker_color)),
             Span::styled(
-                diff_line_number_gutter(line.old_line, line.new_line),
-                Style::default().fg(dim()),
+                diff_line_number_text(line.old_line, line_number_width),
+                tool_diff_old_line_number_style(line),
             ),
+            Span::styled(" ", Style::default().fg(dim())),
+            Span::styled(
+                diff_line_number_text(line.new_line, line_number_width),
+                tool_diff_new_line_number_style(line),
+            ),
+            Span::styled("│ ", Style::default().fg(dim())),
             Span::styled(
                 if line.text.is_empty() {
                     " ".to_owned()
@@ -550,6 +562,30 @@ fn render_tool_diff_line(accent: Color, line: NumberedDiffLine<'_>) -> Line<'sta
             ),
         ],
     )
+}
+
+fn tool_diff_old_line_number_style(line: NumberedDiffLine<'_>) -> Style {
+    if line.old_line.is_none() {
+        return Style::default().fg(dim());
+    }
+    let style = Style::default().fg(accent_rose());
+    if matches!(line.kind, DiffLineKind::Removed) {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn tool_diff_new_line_number_style(line: NumberedDiffLine<'_>) -> Style {
+    if line.new_line.is_none() {
+        return Style::default().fg(dim());
+    }
+    let style = Style::default().fg(accent_lime());
+    if matches!(line.kind, DiffLineKind::Added) {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn render_generic_tool_preview(

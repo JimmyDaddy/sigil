@@ -1,6 +1,20 @@
+use ratatui::text::Line;
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
+
+fn rendered_plain_lines(lines: &[Line<'static>]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .collect()
+}
 
 #[test]
 fn render_timeline_entry_lines_preserves_multiline_blocks() {
@@ -610,16 +624,21 @@ fn render_timeline_entry_lines_expands_tool_diff_by_default() {
     };
 
     let lines = render_timeline_entry_lines(&entry);
-    let plain = lines
-        .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let visible_lines = rendered_plain_lines(&lines);
+    let plain = visible_lines.join("\n");
 
     assert!(plain.contains("diff +1 -1"));
     assert!(plain.contains("--- current/note.txt"));
-    assert!(plain.contains("   1      │ "));
-    assert!(plain.contains("        1 │ "));
+    assert!(
+        visible_lines
+            .iter()
+            .any(|line| line.contains("│ 1   │ -old"))
+    );
+    assert!(
+        visible_lines
+            .iter()
+            .any(|line| line.contains("│    1│ +new"))
+    );
     assert!(plain.contains("-old"));
     assert!(plain.contains("+new"));
     assert!(!plain.contains("diff hidden"));
@@ -661,19 +680,24 @@ fn render_timeline_entry_lines_renders_delete_file_diff_as_file_change() {
     };
 
     let lines = render_timeline_entry_lines(&entry);
-    let plain = lines
-        .iter()
-        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let visible_lines = rendered_plain_lines(&lines);
+    let plain = visible_lines.join("\n");
 
     assert!(plain.contains("delete_file"));
     assert!(plain.contains("path=note.txt"));
     assert!(plain.contains("1 deleted"));
     assert!(plain.contains("deleted"));
     assert!(plain.contains("--- current/note.txt"));
-    assert!(plain.contains("   1      │ "));
-    assert!(plain.contains("   2      │ "));
+    assert!(
+        visible_lines
+            .iter()
+            .any(|line| line.contains("│ 1   │ -alpha"))
+    );
+    assert!(
+        visible_lines
+            .iter()
+            .any(|line| line.contains("│ 2   │ -beta"))
+    );
     assert!(plain.contains("-alpha"));
     assert!(plain.contains("-beta"));
     assert!(plain.contains("result"));

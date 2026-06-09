@@ -99,14 +99,36 @@ pub(crate) fn number_unified_diff_lines<'a>(
     numbered
 }
 
+#[cfg(test)]
 pub(crate) fn diff_line_number_gutter(old_line: Option<usize>, new_line: Option<usize>) -> String {
-    let old = old_line
-        .map(|line| format!("{line:>4}"))
-        .unwrap_or_else(|| "    ".to_owned());
-    let new = new_line
-        .map(|line| format!("{line:>4}"))
-        .unwrap_or_else(|| "    ".to_owned());
-    format!("{old} {new} │ ")
+    let width = [old_line, new_line]
+        .into_iter()
+        .flatten()
+        .map(line_number_digits)
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    format!(
+        "{} {}│ ",
+        diff_line_number_text(old_line, width),
+        diff_line_number_text(new_line, width)
+    )
+}
+
+pub(crate) fn diff_line_number_width(lines: &[NumberedDiffLine<'_>]) -> usize {
+    lines
+        .iter()
+        .flat_map(|line| [line.old_line, line.new_line])
+        .flatten()
+        .map(line_number_digits)
+        .max()
+        .unwrap_or(2)
+        .max(2)
+}
+
+pub(crate) fn diff_line_number_text(line: Option<usize>, width: usize) -> String {
+    line.map(|line| format!("{line:>width$}"))
+        .unwrap_or_else(|| " ".repeat(width))
 }
 
 pub(crate) fn diff_line_style(kind: DiffLineKind) -> (Color, Style) {
@@ -147,13 +169,20 @@ fn parse_range_start(range: &str) -> Option<usize> {
     range.split(',').next()?.parse().ok()
 }
 
+fn line_number_digits(line: usize) -> usize {
+    line.to_string().len()
+}
+
 fn is_no_newline_marker(line: &str) -> bool {
     line.starts_with("\\ No newline at end of file")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_line_number_gutter, number_unified_diff_lines};
+    use super::{
+        diff_line_number_gutter, diff_line_number_text, diff_line_number_width,
+        number_unified_diff_lines,
+    };
 
     #[test]
     fn number_unified_diff_lines_tracks_old_and_new_columns() {
@@ -185,8 +214,18 @@ mod tests {
 
     #[test]
     fn diff_line_number_gutter_uses_stable_columns() {
-        assert_eq!(diff_line_number_gutter(Some(12), None), "  12      │ ");
-        assert_eq!(diff_line_number_gutter(None, Some(3)), "        3 │ ");
-        assert_eq!(diff_line_number_gutter(Some(4), Some(5)), "   4    5 │ ");
+        assert_eq!(diff_line_number_gutter(Some(12), None), "12   │ ");
+        assert_eq!(diff_line_number_gutter(None, Some(3)), "    3│ ");
+        assert_eq!(diff_line_number_gutter(Some(4), Some(5)), " 4  5│ ");
+    }
+
+    #[test]
+    fn diff_line_number_width_uses_current_diff_max_digits() {
+        let lines =
+            number_unified_diff_lines(["@@ -98,4 +98,4 @@", " context", "-old", "+new", " tail"]);
+
+        assert_eq!(diff_line_number_width(&lines), 3);
+        assert_eq!(diff_line_number_text(Some(9), 3), "  9");
+        assert_eq!(diff_line_number_text(None, 3), "   ");
     }
 }

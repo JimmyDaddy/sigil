@@ -11,7 +11,10 @@ use crate::app::{
 };
 
 use super::{
-    diff::{DiffLineKind, diff_line_number_gutter, diff_line_style, number_unified_diff_lines},
+    diff::{
+        DiffLineKind, diff_line_number_text, diff_line_number_width, diff_line_style,
+        number_unified_diff_lines,
+    },
     geometry::{centered_rect, halo_rect, shadow_rect},
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_options},
 };
@@ -163,13 +166,19 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
         );
         let numbered =
             number_unified_diff_lines(view.diff_lines.iter().map(|line| line.text.as_str()));
+        let line_number_width = diff_line_number_width(&numbered);
         let diff_lines = view
             .diff_lines
             .iter()
             .cloned()
             .zip(numbered)
             .map(|(line, numbered)| {
-                render_approval_diff_line(line, numbered.old_line, numbered.new_line)
+                render_approval_diff_line(
+                    line,
+                    numbered.old_line,
+                    numbered.new_line,
+                    line_number_width,
+                )
             })
             .collect::<Vec<_>>();
         frame.render_widget(
@@ -335,6 +344,7 @@ fn render_approval_diff_line(
     line: ApprovalDiffLine,
     old_line: Option<usize>,
     new_line: Option<usize>,
+    line_number_width: usize,
 ) -> Line<'static> {
     let (accent, body_style) = diff_line_style(approval_diff_line_kind(line.kind));
     let marker = if line.active_hunk { ">" } else { "│" };
@@ -352,11 +362,17 @@ fn render_approval_diff_line(
         body_style
     };
     Line::from(vec![
-        Span::styled(format!("{marker} "), marker_style),
+        Span::styled(marker.to_owned(), marker_style),
         Span::styled(
-            diff_line_number_gutter(old_line, new_line),
-            Style::default().fg(Color::DarkGray),
+            diff_line_number_text(old_line, line_number_width),
+            approval_old_line_number_style(old_line, line.kind),
         ),
+        Span::styled(" ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            diff_line_number_text(new_line, line_number_width),
+            approval_new_line_number_style(new_line, line.kind),
+        ),
+        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             if line.text.is_empty() {
                 " ".to_owned()
@@ -366,6 +382,30 @@ fn render_approval_diff_line(
             body_style,
         ),
     ])
+}
+
+fn approval_old_line_number_style(old_line: Option<usize>, kind: ApprovalDiffLineKind) -> Style {
+    if old_line.is_none() {
+        return Style::default().fg(Color::DarkGray);
+    }
+    let style = Style::default().fg(Color::Rgb(226, 103, 110));
+    if kind == ApprovalDiffLineKind::Removed {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn approval_new_line_number_style(new_line: Option<usize>, kind: ApprovalDiffLineKind) -> Style {
+    if new_line.is_none() {
+        return Style::default().fg(Color::DarkGray);
+    }
+    let style = Style::default().fg(Color::Rgb(80, 200, 132));
+    if kind == ApprovalDiffLineKind::Added {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn approval_diff_line_kind(kind: ApprovalDiffLineKind) -> DiffLineKind {
