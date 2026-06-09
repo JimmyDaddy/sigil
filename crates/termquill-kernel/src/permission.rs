@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use globset::Glob;
+use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize};
 
 use crate::tool::{ToolAccess, ToolSpec, ToolSubject, ToolSubjectScope};
@@ -156,12 +156,27 @@ pub struct PermissionDecision {
 /// Policy evaluator that resolves allow/ask/deny for one tool call.
 pub struct PermissionPolicy<'a> {
     config: &'a PermissionConfig,
+    rules: Vec<CompiledPermissionRule<'a>>,
+    external_rules: Vec<CompiledExternalDirectoryRule<'a>>,
 }
 
 impl<'a> PermissionPolicy<'a> {
     /// Creates a policy evaluator from shared configuration.
     pub fn new(config: &'a PermissionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            rules: config
+                .rules
+                .iter()
+                .map(CompiledPermissionRule::new)
+                .collect(),
+            external_rules: config
+                .external_directory
+                .rules
+                .iter()
+                .map(CompiledExternalDirectoryRule::new)
+                .collect(),
+        }
     }
 
     /// Resolves one tool call decision from the tool spec, stable name, and subjects.
@@ -227,17 +242,18 @@ impl<'a> PermissionPolicy<'a> {
         }
 
         let matching_rule_modes = self
-            .config
             .rules
             .iter()
-            .filter(|rule| {
-                rule.tool_name
+            .filter(|compiled| {
+                compiled
+                    .rule
+                    .tool_name
                     .as_deref()
                     .is_none_or(|configured| configured == tool_name)
             })
             .filter_map(
-                |rule| match rule_matches_subject(rule, tool_name, subject) {
-                    Ok(true) => Some(Ok(rule.mode)),
+                |compiled| match compiled.matches_subject(tool_name, subject) {
+                    Ok(true) => Some(Ok(compiled.rule.mode)),
                     Ok(false) => None,
                     Err(error) => Some(Err(error)),
                 },
@@ -269,11 +285,11 @@ impl<'a> PermissionPolicy<'a> {
             return Ok(ApprovalMode::Deny);
         }
 
-        let matching_rule_modes = config
-            .rules
+        let matching_rule_modes = self
+            .external_rules
             .iter()
-            .filter_map(|rule| match external_rule_matches_subject(rule, subject) {
-                Ok(true) => Some(Ok(rule.mode)),
+            .filter_map(|compiled| match compiled.matches_subject(subject) {
+                Ok(true) => Some(Ok(compiled.rule.mode)),
                 Ok(false) => None,
                 Err(error) => Some(Err(error)),
             })
@@ -287,40 +303,87 @@ impl<'a> PermissionPolicy<'a> {
     }
 }
 
-fn rule_matches_subject(
-    rule: &PermissionRule,
-    tool_name: &str,
-    subject: Option<&ToolSubject>,
-) -> Result<bool> {
-    let Some(subject_glob) = &rule.subject_glob else {
-        return Ok(true);
-    };
-    let subject_ref = subject
-        .map(|subject| subject.normalized.as_str())
-        .ok_or_else(|| anyhow!("permission rule requires a subject for {tool_name}"))?;
-    let matcher = Glob::new(subject_glob)
-        .map_err(|error| anyhow!("invalid permission glob {subject_glob}: {error}"))?
-        .compile_matcher();
-    Ok(matcher.is_match(subject_ref))
+struct CompiledPermissionRule<'a> {
+    rule: &'a PermissionRule,
+    subject_matcher: CompiledMatcher,
 }
 
-fn external_rule_matches_subject(
-    rule: &ExternalDirectoryRule,
-    subject: &ToolSubject,
-) -> Result<bool> {
-    let Some(canonical_path) = subject.canonical_path.as_ref() else {
-        return Ok(false);
-    };
-    let pattern = canonical_external_rule_pattern(&rule.path_glob)?;
-    let matcher = Glob::new(&pattern)
-        .map_err(|error| {
-            anyhow!(
-                "invalid external directory glob {}: {error}",
-                rule.path_glob
-            )
-        })?
-        .compile_matcher();
-    Ok(matcher.is_match(canonical_path))
+impl<'a> CompiledPermissionRule<'a> {
+    fn new(rule: &'a PermissionRule) -> Self {
+        let subject_matcher = match rule.subject_glob.as_deref() {
+            Some(subject_glob) => compile_permission_glob(subject_glob),
+            None => CompiledMatcher::Any,
+        };
+        Self {
+            rule,
+            subject_matcher,
+        }
+    }
+
+    fn matches_subject(&self, tool_name: &str, subject: Option<&ToolSubject>) -> Result<bool> {
+        let CompiledMatcher::Any = &self.subject_matcher else {
+            let subject_ref = subject
+                .map(|subject| subject.normalized.as_str())
+                .ok_or_else(|| anyhow!("permission rule requires a subject for {tool_name}"))?;
+            return self.subject_matcher.is_match(subject_ref);
+        };
+        Ok(true)
+    }
+}
+
+struct CompiledExternalDirectoryRule<'a> {
+    rule: &'a ExternalDirectoryRule,
+    matcher: CompiledMatcher,
+}
+
+impl<'a> CompiledExternalDirectoryRule<'a> {
+    fn new(rule: &'a ExternalDirectoryRule) -> Self {
+        let matcher = canonical_external_rule_pattern(&rule.path_glob)
+            .and_then(|pattern| compile_external_glob(&rule.path_glob, &pattern))
+            .map_or_else(
+                |error| CompiledMatcher::Invalid(error.to_string()),
+                CompiledMatcher::Glob,
+            );
+        Self { rule, matcher }
+    }
+
+    fn matches_subject(&self, subject: &ToolSubject) -> Result<bool> {
+        let Some(canonical_path) = subject.canonical_path.as_ref() else {
+            return Ok(false);
+        };
+        self.matcher.is_match(canonical_path)
+    }
+}
+
+enum CompiledMatcher {
+    Any,
+    Glob(GlobMatcher),
+    Invalid(String),
+}
+
+impl CompiledMatcher {
+    fn is_match(&self, value: impl AsRef<Path>) -> Result<bool> {
+        match self {
+            Self::Any => Ok(true),
+            Self::Glob(matcher) => Ok(matcher.is_match(value)),
+            Self::Invalid(message) => Err(anyhow!("{message}")),
+        }
+    }
+}
+
+fn compile_permission_glob(subject_glob: &str) -> CompiledMatcher {
+    Glob::new(subject_glob).map_or_else(
+        |error| {
+            CompiledMatcher::Invalid(format!("invalid permission glob {subject_glob}: {error}"))
+        },
+        |glob| CompiledMatcher::Glob(glob.compile_matcher()),
+    )
+}
+
+fn compile_external_glob(path_glob: &str, pattern: &str) -> Result<GlobMatcher> {
+    Glob::new(pattern)
+        .map_err(|error| anyhow!("invalid external directory glob {path_glob}: {error}"))
+        .map(|glob| glob.compile_matcher())
 }
 
 fn canonical_external_rule_pattern(path_glob: &str) -> Result<String> {

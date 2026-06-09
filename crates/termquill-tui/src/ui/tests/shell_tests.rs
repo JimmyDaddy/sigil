@@ -50,3 +50,105 @@ fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
     assert!(rendered.contains("Core shortcuts"));
     Ok(())
 }
+
+#[test]
+fn render_main_screen_collapses_info_rail_on_narrow_terminals() -> anyhow::Result<()> {
+    let app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(!rendered.contains("info"));
+    assert!(rendered.contains("Build"));
+    assert!(rendered.contains("ctx"));
+    Ok(())
+}
+
+#[test]
+fn render_main_screen_keeps_info_rail_on_wide_terminals() -> anyhow::Result<()> {
+    let app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let backend = TestBackend::new(140, 24);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("info"));
+    assert!(rendered.contains("session"));
+    Ok(())
+}
+
+#[test]
+fn render_main_screen_places_cursor_on_new_composer_line() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT))?;
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    terminal.backend_mut().assert_cursor_position((3, 9));
+    Ok(())
+}
+
+#[test]
+fn render_main_screen_keeps_composer_text_visible() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    for character in "visible text".chars() {
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("visible text"));
+    Ok(())
+}
+
+#[test]
+fn render_main_screen_shows_esc_interrupt_for_running_turn() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))?;
+    let _ = app.submit_input()?;
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Esc interrupt"));
+    assert!(rendered.contains("reasoning with deepseek-v4-flash"));
+    Ok(())
+}

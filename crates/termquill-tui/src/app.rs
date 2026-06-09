@@ -13,6 +13,7 @@ mod formatting;
 mod input_flow;
 mod modal_flow;
 mod session_flow;
+mod setup_flow;
 mod slash_flow;
 mod timeline_flow;
 mod tool_focus;
@@ -30,7 +31,7 @@ use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQ
 use uuid::Uuid;
 
 pub(crate) use crate::approval::{
-    ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
+    ApprovalAction, ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
 };
 pub use crate::approval::{ApprovalDiffMode, PendingApproval};
 use crate::commands::{
@@ -135,6 +136,7 @@ pub struct AppState {
     approval_selected_file_index: usize,
     approval_selected_hunk_index: usize,
     approval_diff_mode: ApprovalDiffMode,
+    approval_selected_action: ApprovalAction,
     slash_selector_index: usize,
 }
 
@@ -251,6 +253,7 @@ impl AppState {
             approval_selected_file_index: 0,
             approval_selected_hunk_index: 0,
             approval_diff_mode: ApprovalDiffMode::Full,
+            approval_selected_action: ApprovalAction::Deny,
             slash_selector_index: 0,
         };
         app.session_log_path = app
@@ -344,6 +347,7 @@ impl AppState {
             approval_selected_file_index: 0,
             approval_selected_hunk_index: 0,
             approval_diff_mode: ApprovalDiffMode::Full,
+            approval_selected_action: ApprovalAction::Deny,
             slash_selector_index: 0,
         };
         app.session_log_path = app
@@ -424,6 +428,7 @@ impl AppState {
         self.approval_selected_file_index = 0;
         self.approval_selected_hunk_index = 0;
         self.approval_diff_mode = ApprovalDiffMode::Full;
+        self.approval_selected_action = ApprovalAction::Deny;
         self.selected_tool_activity_key = None;
         self.expanded_tool_activity_keys.clear();
         self.collapsed_tool_activity_keys.clear();
@@ -452,7 +457,6 @@ impl AppState {
             self.should_quit = true;
             return Ok(None);
         }
-
         if self.has_modal() {
             let outcome = if key.code == KeyCode::Enter {
                 self.submit_modal()
@@ -463,107 +467,15 @@ impl AppState {
             return Ok(None);
         }
 
-        if let Some(pending) = &self.pending_approval {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    return Ok(Some(AppAction::ApprovalDecision {
-                        call_id: pending.call.id.clone(),
-                        approved: true,
-                    }));
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') => {
-                    return Ok(Some(AppAction::ApprovalDecision {
-                        call_id: pending.call.id.clone(),
-                        approved: false,
-                    }));
-                }
-                _ => {}
-            }
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() && self.is_busy {
+            self.modal_state = None;
+            self.last_notice = Some("cancellation requested".to_owned());
+            self.push_timeline(TimelineRole::Notice, "cancel requested");
+            return Ok(Some(AppAction::CancelRun));
         }
 
-        if self.pending_approval.is_some() && !key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char(character)
-                    if normalize_command_prefix_character(character).is_some() =>
-                {
-                    self.active_pane = PaneFocus::Composer;
-                    self.insert_input_character('/');
-                    self.reset_input_history_navigation();
-                    self.reset_slash_selector();
-                    return Ok(None);
-                }
-                KeyCode::Char('m') | KeyCode::Char('M') => {
-                    self.approval_metadata_collapsed = !self.approval_metadata_collapsed;
-                    self.approval_scroll_back = 0;
-                    self.push_event(
-                        "approval:view",
-                        if self.approval_metadata_collapsed {
-                            "metadata collapsed"
-                        } else {
-                            "metadata expanded"
-                        },
-                    );
-                    return Ok(None);
-                }
-                KeyCode::Char('[') => {
-                    self.jump_approval_hunk(false);
-                    return Ok(None);
-                }
-                KeyCode::Char(']') => {
-                    self.jump_approval_hunk(true);
-                    return Ok(None);
-                }
-                KeyCode::Char(',') => {
-                    self.switch_approval_file(false);
-                    return Ok(None);
-                }
-                KeyCode::Char('.') => {
-                    self.switch_approval_file(true);
-                    return Ok(None);
-                }
-                KeyCode::Char('v') | KeyCode::Char('V') => {
-                    self.approval_diff_mode = self.approval_diff_mode.next();
-                    self.approval_scroll_back = 0;
-                    self.push_event("approval:view", self.approval_diff_mode.label());
-                    return Ok(None);
-                }
-                KeyCode::Up => {
-                    self.scroll_active_pane(1);
-                    return Ok(None);
-                }
-                KeyCode::Down => {
-                    self.unscroll_active_pane(1);
-                    return Ok(None);
-                }
-                KeyCode::PageUp => {
-                    self.scroll_active_pane(8);
-                    return Ok(None);
-                }
-                KeyCode::PageDown => {
-                    self.unscroll_active_pane(8);
-                    return Ok(None);
-                }
-                KeyCode::Home => {
-                    self.scroll_active_pane(usize::MAX / 2);
-                    return Ok(None);
-                }
-                KeyCode::End => {
-                    self.unscroll_active_pane(usize::MAX / 2);
-                    return Ok(None);
-                }
-                KeyCode::Esc => {
-                    self.active_pane = PaneFocus::Activity;
-                    return Ok(None);
-                }
-                KeyCode::Char(_)
-                | KeyCode::Backspace
-                | KeyCode::Left
-                | KeyCode::Right
-                | KeyCode::Enter
-                | KeyCode::Tab
-                | KeyCode::BackTab => return Ok(None),
-                _ => {}
-            }
+        if let Some(outcome) = self.handle_pending_approval_key_event(key) {
+            return Ok(outcome);
         }
 
         if self.active_pane == PaneFocus::Activity
@@ -666,10 +578,10 @@ impl AppState {
             KeyCode::Char('t')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.pending_approval.is_none() =>
+            {
                 if self.selected_tool_activity_key.is_some() && self.toggle_selected_tool_card() {
                     return Ok(None);
                 }
-            {
                 self.toggle_thinking_block_mode();
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
@@ -696,18 +608,14 @@ impl AppState {
                 self.move_slash_selector(true)
             }
             KeyCode::Up if self.active_pane == PaneFocus::Composer => {
-                if self.input.is_empty() {
-                    self.scroll_timeline(1);
-                } else if self.input_cursor_visual_row() == 0 {
+                if self.input_cursor_visual_row() == 0 {
                     self.navigate_input_history(true);
                 } else {
                     self.move_input_cursor_vertical(true);
                 }
             }
             KeyCode::Down if self.active_pane == PaneFocus::Composer => {
-                if self.input.is_empty() {
-                    self.unscroll_timeline(1);
-                } else if self.input_cursor_visual_row() == self.input_last_visual_row() {
+                if self.input_cursor_visual_row() == self.input_last_visual_row() {
                     self.navigate_input_history(false);
                 } else {
                     self.move_input_cursor_vertical(false);
@@ -717,8 +625,6 @@ impl AppState {
                 self.move_input_cursor_home()
             }
             KeyCode::End if self.active_pane == PaneFocus::Composer => self.move_input_cursor_end(),
-            KeyCode::Up => self.scroll_timeline(1),
-            KeyCode::Down => self.unscroll_timeline(1),
             KeyCode::PageUp => self.scroll_timeline(self.transcript_page_step()),
             KeyCode::PageDown => self.unscroll_timeline(self.transcript_page_step()),
             KeyCode::Home => self.scroll_timeline_to_top(),
@@ -745,16 +651,13 @@ impl AppState {
                 self.reset_input_history_navigation();
                 self.reset_slash_selector();
             }
-            KeyCode::Enter
-                if self.active_pane == PaneFocus::Composer
-                    && key.modifiers.contains(KeyModifiers::SHIFT) =>
-            {
+            _ if self.active_pane == PaneFocus::Composer && is_composer_newline_key(key) => {
                 self.active_pane = PaneFocus::Composer;
                 self.insert_input_character('\n');
                 self.reset_input_history_navigation();
                 self.reset_slash_selector();
             }
-            KeyCode::Enter => {
+            _ if is_composer_submit_key(key) => {
                 self.active_pane = PaneFocus::Composer;
                 if self.should_accept_slash_selector_on_enter() {
                     self.accept_slash_selector();
@@ -762,7 +665,7 @@ impl AppState {
                 }
                 return self.submit_input();
             }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(character) if is_composer_text_key(key) => {
                 self.active_pane = PaneFocus::Composer;
                 let normalized = if normalize_command_prefix_character(character).is_some()
                     && self.input.trim().is_empty()
@@ -942,7 +845,7 @@ impl AppState {
             })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn latest_user_prompt_preview(&self) -> Option<String> {
         let entry = self
             .timeline
@@ -963,7 +866,6 @@ impl AppState {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn session_sidebar_lines(&self) -> Vec<String> {
         vec![
             format!("provider: {}", self.provider_name),
@@ -1015,15 +917,14 @@ impl AppState {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn permission_card_lines(&self) -> Vec<String> {
         vec![
             format!("mode: {}", self.permission_default_mode),
-            "Shift-Tab toggle".to_owned(),
+            "Shift-Tab cycle + save".to_owned(),
             if self.is_busy {
                 "busy: locked during run".to_owned()
             } else {
-                "scope: current session".to_owned()
+                "scope: saved default".to_owned()
             },
         ]
     }
@@ -1090,7 +991,6 @@ impl AppState {
         self.usage_sidebar_cache = lines;
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn usage_sidebar_lines(&self) -> &[String] {
         &self.usage_sidebar_cache
     }
@@ -1109,7 +1009,7 @@ impl AppState {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn footer_status_line(&self) -> String {
         let spent = self.stats.input_cost + self.stats.output_cost;
         let token_line = format!(
@@ -1244,6 +1144,7 @@ impl AppState {
         let mut next_config = root_config.clone();
         next_config.permission.default_mode =
             cycle_approval_mode(next_config.permission.default_mode);
+        persisted_root_config(&next_config).save(&self.config_path)?;
         self.apply_runtime_config_snapshot(&next_config);
         self.last_notice = Some(format!(
             "default mode = {}",
@@ -1328,6 +1229,26 @@ impl AppState {
             root_config: Box::new(next_config),
         }))
     }
+}
+
+fn is_composer_newline_key(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
+        )
+}
+
+fn is_composer_submit_key(key: KeyEvent) -> bool {
+    !key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(
+            key.code,
+            KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
+        )
+}
+
+fn is_composer_text_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) && !character.is_control())
 }
 
 #[cfg(test)]

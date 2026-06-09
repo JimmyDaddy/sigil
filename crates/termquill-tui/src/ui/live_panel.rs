@@ -10,7 +10,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::view_model::{LiveActivityViewModel, LivePanelViewModel};
+use crate::view_model::{LivePanelViewModel, LiveProgressViewModel};
 
 use super::{
     geometry::inset_rect,
@@ -42,13 +42,15 @@ pub(crate) fn render_live_panel(frame: &mut Frame, area: Rect, view_model: &Live
             .max(1),
     );
 
-    let activity = view_model
-        .activity
-        .as_ref()
-        .map(|activity| render_live_activity_line(activity, phase_accent(&view_model.phase)));
     let mut lines = view_model.transcript_lines.clone();
-    if let Some(activity_line) = activity {
-        lines.push(activity_line);
+    if let Some(progress) = &view_model.progress {
+        if !lines.is_empty() {
+            lines.push(Line::raw(String::new()));
+        }
+        lines.extend(render_live_progress_lines(
+            progress,
+            phase_accent(&view_model.phase),
+        ));
     }
     let visual_lines = wrap_live_panel_lines(lines, content_frame.width as usize);
     let visual_start = visual_lines
@@ -141,23 +143,32 @@ fn live_panel_wrapped_line(
     }
 }
 
-pub(crate) fn render_live_activity_line(
-    summary: &LiveActivityViewModel,
+pub(crate) fn render_live_progress_lines(
+    progress: &LiveProgressViewModel,
     accent: Color,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let spinner = live_spinner_frame();
-    Line::from(vec![
-        Span::styled(
-            format!("{spinner} {}", summary.label),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(summary.detail.clone(), Style::default().fg(ink())),
-    ])
+    vec![
+        Line::from(vec![
+            Span::styled(
+                spinner,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("{}...", progress.title),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  ↳ ", Style::default().fg(accent)),
+            Span::styled(progress.detail.clone(), Style::default().fg(ink())),
+        ]),
+    ]
 }
 
 pub(crate) fn live_spinner_frame() -> &'static str {
-    const FRAMES: &[&str] = &["◴", "◷", "◶", "◵"];
+    const FRAMES: &[&str] = &["▰▱▱▱", "▰▰▱▱", "▱▰▰▱", "▱▱▰▰", "▱▱▱▰"];
     let tick = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() / 120)

@@ -96,6 +96,126 @@ impl AppState {
         lines
     }
 
+    pub(super) fn handle_pending_approval_key_event(
+        &mut self,
+        key: KeyEvent,
+    ) -> Option<Option<AppAction>> {
+        if let Some(pending) = &self.pending_approval {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    return Some(Some(AppAction::ApprovalDecision {
+                        call_id: pending.call.id.clone(),
+                        approved: true,
+                    }));
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    return Some(Some(AppAction::ApprovalDecision {
+                        call_id: pending.call.id.clone(),
+                        approved: false,
+                    }));
+                }
+                KeyCode::Enter if key.modifiers.is_empty() => {
+                    return Some(Some(AppAction::ApprovalDecision {
+                        call_id: pending.call.id.clone(),
+                        approved: self.approval_selected_action.approved(),
+                    }));
+                }
+                _ => {}
+            }
+        }
+
+        if self.pending_approval.is_none() || key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Char(character) if normalize_command_prefix_character(character).is_some() => {
+                self.active_pane = PaneFocus::Composer;
+                self.insert_input_character('/');
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+                Some(None)
+            }
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                self.approval_metadata_collapsed = !self.approval_metadata_collapsed;
+                self.approval_scroll_back = 0;
+                self.push_event(
+                    "approval:view",
+                    if self.approval_metadata_collapsed {
+                        "metadata collapsed"
+                    } else {
+                        "metadata expanded"
+                    },
+                );
+                Some(None)
+            }
+            KeyCode::Char('[') => {
+                self.jump_approval_hunk(false);
+                Some(None)
+            }
+            KeyCode::Char(']') => {
+                self.jump_approval_hunk(true);
+                Some(None)
+            }
+            KeyCode::Char(',') => {
+                self.switch_approval_file(false);
+                Some(None)
+            }
+            KeyCode::Char('.') => {
+                self.switch_approval_file(true);
+                Some(None)
+            }
+            KeyCode::Char('v') | KeyCode::Char('V') => {
+                self.approval_diff_mode = self.approval_diff_mode.next();
+                self.approval_scroll_back = 0;
+                self.push_event("approval:view", self.approval_diff_mode.label());
+                Some(None)
+            }
+            KeyCode::Left | KeyCode::Right => {
+                self.approval_selected_action = self.approval_selected_action.toggled();
+                self.push_event(
+                    "approval:action",
+                    if self.approval_selected_action.approved() {
+                        "allow"
+                    } else {
+                        "deny"
+                    },
+                );
+                Some(None)
+            }
+            KeyCode::Up => {
+                self.scroll_active_pane(1);
+                Some(None)
+            }
+            KeyCode::Down => {
+                self.unscroll_active_pane(1);
+                Some(None)
+            }
+            KeyCode::PageUp => {
+                self.scroll_active_pane(8);
+                Some(None)
+            }
+            KeyCode::PageDown => {
+                self.unscroll_active_pane(8);
+                Some(None)
+            }
+            KeyCode::Home => {
+                self.scroll_active_pane(usize::MAX / 2);
+                Some(None)
+            }
+            KeyCode::End => {
+                self.unscroll_active_pane(usize::MAX / 2);
+                Some(None)
+            }
+            KeyCode::Esc => {
+                self.active_pane = PaneFocus::Activity;
+                Some(None)
+            }
+            KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Tab | KeyCode::BackTab => Some(None),
+            _ => None,
+        }
+    }
+
     pub(crate) fn approval_modal_view(&self) -> Option<ApprovalModalView> {
         let pending = self.pending_approval.as_ref()?;
         let access_label = approval_access_label(&pending.spec);
@@ -119,6 +239,7 @@ impl AppState {
                     kind: ApprovalDiffLineKind::Context,
                     active_hunk: false,
                 }],
+                selected_action: self.approval_selected_action,
             });
         };
 
@@ -206,6 +327,7 @@ impl AppState {
             hunk_total: hunk_positions.len(),
             diff_label,
             diff_lines,
+            selected_action: self.approval_selected_action,
         })
     }
 

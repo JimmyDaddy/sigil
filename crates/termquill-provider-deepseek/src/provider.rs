@@ -92,12 +92,8 @@ impl DeepSeekProvider {
             user_id,
             &self.profile.quirks,
         );
-        let chunks = self
-            .collect_chat_chunks(endpoint, "/chat/completions", &body.model, &body, false)
-            .await?;
-        Ok(Box::pin(stream::iter(
-            chunks.into_iter().map(Ok::<ProviderChunk, anyhow::Error>),
-        )))
+        self.stream_chat_chunks(endpoint, "/chat/completions", &body.model, &body, false)
+            .await
     }
 
     /// Executes a DeepSeek fill-in-the-middle completion flow and maps it into provider chunks.
@@ -111,17 +107,13 @@ impl DeepSeekProvider {
         request: DeepSeekFimCompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let body = build_fim_completion_request(request, &self.profile.default_fim_model);
-        let chunks = self
-            .collect_completion_chunks(
-                DeepSeekEndpointClass::Beta,
-                "/completions",
-                &body.model,
-                &body,
-            )
-            .await?;
-        Ok(Box::pin(stream::iter(
-            chunks.into_iter().map(Ok::<ProviderChunk, anyhow::Error>),
-        )))
+        self.stream_completion_chunks(
+            DeepSeekEndpointClass::Beta,
+            "/completions",
+            &body.model,
+            &body,
+        )
+        .await
     }
 }
 
@@ -173,24 +165,6 @@ impl DeepSeekProvider {
         .await
     }
 
-    async fn collect_chat_chunks<T: Serialize>(
-        &self,
-        endpoint: DeepSeekEndpointClass,
-        path: &str,
-        model_name: &str,
-        body: &T,
-        retry_on_reasoning_400: bool,
-    ) -> Result<Vec<ProviderChunk>> {
-        let mut stream = self
-            .stream_chat_chunks(endpoint, path, model_name, body, retry_on_reasoning_400)
-            .await?;
-        let mut chunks = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            chunks.push(chunk?);
-        }
-        Ok(chunks)
-    }
-
     async fn stream_chat_chunks<T: Serialize>(
         &self,
         endpoint: DeepSeekEndpointClass,
@@ -234,13 +208,13 @@ impl DeepSeekProvider {
         }
     }
 
-    async fn collect_completion_chunks<T: Serialize>(
+    async fn stream_completion_chunks<T: Serialize>(
         &self,
         endpoint: DeepSeekEndpointClass,
         path: &str,
         model_name: &str,
         body: &T,
-    ) -> Result<Vec<ProviderChunk>> {
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let url = format!("{}{}", self.base_url_for_endpoint(endpoint), path);
         let response = self
             .post_json(&url, body)
@@ -251,106 +225,7 @@ impl DeepSeekProvider {
             let error_body = response.text().await.unwrap_or_default();
             return Err(classify_status(status.as_u16(), &error_body).into());
         }
-
-        let mut chunks = Vec::new();
-        let mut decoder = DeepSeekSseDecoder::default();
-        let mut byte_stream = response.bytes_stream();
-        while let Some(next) = byte_stream.next().await {
-            let bytes = next.context("failed to read completion chunk")?;
-            let raw =
-                String::from_utf8(bytes.to_vec()).context("invalid UTF-8 completion chunk")?;
-            for frame in decoder.push(&raw)? {
-                match frame {
-                    crate::response::DeepSeekSseFrame::Blank
-                    | crate::response::DeepSeekSseFrame::Comment => {}
-                    crate::response::DeepSeekSseFrame::Done => chunks.push(ProviderChunk::Done),
-                    crate::response::DeepSeekSseFrame::Data(data) => {
-                        let envelope: DeepSeekCompletionStreamEnvelope =
-                            serde_json::from_str(&data).with_context(|| {
-                                format!(
-                                    "invalid DeepSeek completion event {}",
-                                    truncate_event_payload(&data)
-                                )
-                            })?;
-                        for choice in envelope.choices {
-                            if let Some(text) = choice.text {
-                                chunks.push(ProviderChunk::TextDelta(text));
-                            }
-                            if matches!(choice.finish_reason.as_deref(), Some("stop")) {
-                                chunks.push(ProviderChunk::Done);
-                            }
-                        }
-                        if let Some(usage) = envelope.usage {
-                            chunks.push(ProviderChunk::Usage(crate::pricing::enrich_usage_costs(
-                                model_name,
-                                termquill_kernel::UsageStats {
-                                    prompt_tokens: usage.prompt_tokens,
-                                    completion_tokens: usage.completion_tokens,
-                                    cache_hit_tokens: usage
-                                        .prompt_cache_hit_tokens
-                                        .unwrap_or_default(),
-                                    cache_miss_tokens: usage
-                                        .prompt_cache_miss_tokens
-                                        .unwrap_or_default(),
-                                    input_cost: 0.0,
-                                    output_cost: 0.0,
-                                    cache_savings: 0.0,
-                                    system_fingerprint: envelope.system_fingerprint.clone(),
-                                },
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-        for frame in decoder.finish()? {
-            match frame {
-                crate::response::DeepSeekSseFrame::Blank
-                | crate::response::DeepSeekSseFrame::Comment => {}
-                crate::response::DeepSeekSseFrame::Done => chunks.push(ProviderChunk::Done),
-                crate::response::DeepSeekSseFrame::Data(data) => {
-                    let envelope: DeepSeekCompletionStreamEnvelope = serde_json::from_str(&data)
-                        .with_context(|| {
-                            format!(
-                                "invalid DeepSeek completion event {}",
-                                truncate_event_payload(&data)
-                            )
-                        })?;
-                    for choice in envelope.choices {
-                        if let Some(text) = choice.text {
-                            chunks.push(ProviderChunk::TextDelta(text));
-                        }
-                        if matches!(choice.finish_reason.as_deref(), Some("stop")) {
-                            chunks.push(ProviderChunk::Done);
-                        }
-                    }
-                    if let Some(usage) = envelope.usage {
-                        chunks.push(ProviderChunk::Usage(crate::pricing::enrich_usage_costs(
-                            model_name,
-                            termquill_kernel::UsageStats {
-                                prompt_tokens: usage.prompt_tokens,
-                                completion_tokens: usage.completion_tokens,
-                                cache_hit_tokens: usage.prompt_cache_hit_tokens.unwrap_or_default(),
-                                cache_miss_tokens: usage
-                                    .prompt_cache_miss_tokens
-                                    .unwrap_or_default(),
-                                input_cost: 0.0,
-                                output_cost: 0.0,
-                                cache_savings: 0.0,
-                                system_fingerprint: envelope.system_fingerprint.clone(),
-                            },
-                        )));
-                    }
-                }
-            }
-        }
-        if !chunks
-            .iter()
-            .any(|chunk| matches!(chunk, ProviderChunk::Done))
-        {
-            chunks.push(ProviderChunk::Done);
-        }
-        Ok(chunks)
+        Ok(completion_response_stream(response, model_name.to_owned()))
     }
 
     async fn post_json<T: Serialize>(&self, url: &str, body: &T) -> Result<reqwest::Response> {
@@ -451,6 +326,83 @@ fn chat_response_stream(
     }))
 }
 
+fn completion_response_stream(
+    response: reqwest::Response,
+    model_name: String,
+) -> Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> {
+    let byte_stream = response.bytes_stream();
+    let decoder = DeepSeekSseDecoder::default();
+    let pending = VecDeque::<ProviderChunk>::new();
+    let finished = false;
+    let saw_done = false;
+    let state = (
+        byte_stream,
+        decoder,
+        pending,
+        finished,
+        saw_done,
+        model_name,
+    );
+
+    Box::pin(stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(chunk) = state.2.pop_front() {
+                return Some((Ok(chunk), state));
+            }
+            if state.3 {
+                return None;
+            }
+
+            match state.0.next().await {
+                Some(Ok(bytes)) => {
+                    let raw = match String::from_utf8(bytes.to_vec()) {
+                        Ok(raw) => raw,
+                        Err(error) => {
+                            state.3 = true;
+                            return Some((
+                                Err(error).context("invalid UTF-8 completion chunk"),
+                                state,
+                            ));
+                        }
+                    };
+                    match enqueue_completion_frames(&mut state.1, &mut state.2, &raw, &state.5) {
+                        Ok(done_seen) => {
+                            state.4 |= done_seen;
+                            if done_seen {
+                                state.3 = true;
+                            }
+                        }
+                        Err(error) => {
+                            state.3 = true;
+                            return Some((Err(error), state));
+                        }
+                    }
+                }
+                Some(Err(error)) => {
+                    state.3 = true;
+                    return Some((Err(error).context("failed to read completion chunk"), state));
+                }
+                None => {
+                    match enqueue_finished_completion_frames(&mut state.1, &mut state.2, &state.5) {
+                        Ok(done_seen) => {
+                            state.4 |= done_seen;
+                            if !state.4 {
+                                state.2.push_back(ProviderChunk::Done);
+                                state.4 = true;
+                            }
+                            state.3 = true;
+                        }
+                        Err(error) => {
+                            state.3 = true;
+                            return Some((Err(error), state));
+                        }
+                    }
+                }
+            }
+        }
+    }))
+}
+
 fn enqueue_chat_frames(
     decoder: &mut DeepSeekSseDecoder,
     mapper: &mut StreamMapper,
@@ -496,6 +448,92 @@ fn enqueue_chat_frame(
                 })?;
             pending.extend(mapper.map_envelope(envelope)?);
             Ok(false)
+        }
+    }
+}
+
+fn enqueue_completion_frames(
+    decoder: &mut DeepSeekSseDecoder,
+    pending: &mut VecDeque<ProviderChunk>,
+    raw: &str,
+    model_name: &str,
+) -> Result<bool> {
+    let mut done_seen = false;
+    for frame in decoder.push(raw)? {
+        done_seen |= enqueue_completion_frame(pending, frame, model_name)?;
+        if done_seen {
+            break;
+        }
+    }
+    Ok(done_seen)
+}
+
+fn enqueue_finished_completion_frames(
+    decoder: &mut DeepSeekSseDecoder,
+    pending: &mut VecDeque<ProviderChunk>,
+    model_name: &str,
+) -> Result<bool> {
+    let mut done_seen = false;
+    for frame in decoder.finish()? {
+        done_seen |= enqueue_completion_frame(pending, frame, model_name)?;
+        if done_seen {
+            break;
+        }
+    }
+    Ok(done_seen)
+}
+
+fn enqueue_completion_frame(
+    pending: &mut VecDeque<ProviderChunk>,
+    frame: crate::response::DeepSeekSseFrame,
+    model_name: &str,
+) -> Result<bool> {
+    match frame {
+        crate::response::DeepSeekSseFrame::Blank | crate::response::DeepSeekSseFrame::Comment => {
+            Ok(false)
+        }
+        crate::response::DeepSeekSseFrame::Done => {
+            pending.push_back(ProviderChunk::Done);
+            Ok(true)
+        }
+        crate::response::DeepSeekSseFrame::Data(data) => {
+            let envelope: DeepSeekCompletionStreamEnvelope = serde_json::from_str(&data)
+                .with_context(|| {
+                    format!(
+                        "invalid DeepSeek completion event {}",
+                        truncate_event_payload(&data)
+                    )
+                })?;
+            let mut done_seen = false;
+            let mut frame_done = false;
+            for choice in envelope.choices {
+                if let Some(text) = choice.text {
+                    pending.push_back(ProviderChunk::TextDelta(text));
+                }
+                if matches!(choice.finish_reason.as_deref(), Some("stop")) {
+                    frame_done = true;
+                }
+            }
+            if let Some(usage) = envelope.usage {
+                pending.push_back(ProviderChunk::Usage(crate::pricing::enrich_usage_costs(
+                    model_name,
+                    termquill_kernel::UsageStats {
+                        prompt_tokens: usage.prompt_tokens,
+                        completion_tokens: usage.completion_tokens,
+                        cache_hit_tokens: usage.prompt_cache_hit_tokens.unwrap_or_default(),
+                        cache_miss_tokens: usage.prompt_cache_miss_tokens.unwrap_or_default(),
+                        input_cost: 0.0,
+                        output_cost: 0.0,
+                        cache_savings: 0.0,
+                        system_fingerprint: envelope.system_fingerprint.clone(),
+                    },
+                )));
+            }
+            if frame_done {
+                pending.push_back(ProviderChunk::Done);
+                done_seen = true;
+            }
+            Ok(done_seen)
         }
     }
 }

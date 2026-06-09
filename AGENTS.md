@@ -39,6 +39,7 @@
 - `crates/termquill-provider-deepseek`：DeepSeek provider 与相关专项行为
 - `crates/termquill-tools-builtin`：内置工具与 preview/diff 预览
 - `crates/termquill-mcp`：stdio MCP client 与工具适配
+- `crates/termquill-runtime`：CLI/TUI 共享的 provider、tool registry 与 run options 装配
 - `crates/termquill-cli`：薄 CLI、调试入口、自动化入口
 - `crates/termquill-tui`：第一用户入口
 - `dev/governance`：开发规范

@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ratatui::text::Line;
 use termquill_kernel::{
     ReasoningEffort, RootConfig, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
-    ToolResult, ToolResultMeta,
+    ToolResult, ToolResultMeta, ToolResultStatus,
 };
 
 use crate::slash::KNOWN_MODEL_IDS;
@@ -75,9 +75,13 @@ pub(super) fn parse_reasoning_effort(value: &str) -> Option<ReasoningEffort> {
 }
 
 pub(super) fn sidebar_width_for_terminal(total_width: usize) -> usize {
-    let min = if total_width < 72 { 16 } else { 24 };
-    let max = if total_width < 72 { 24 } else { 42 };
-    ((total_width * 30) / 100).clamp(min, max)
+    if total_width < 96 {
+        return 0;
+    }
+    if total_width < 132 {
+        return 24;
+    }
+    ((total_width * 28) / 100).clamp(28, 42)
 }
 
 pub(super) fn normalize_runtime_model(value: &str) -> Option<String> {
@@ -159,6 +163,7 @@ pub(super) fn format_tool_result_block(
     preview: Option<&ToolPreviewSnapshot>,
 ) -> String {
     let preview = if result.is_error() { None } else { preview };
+    let error_kind = tool_result_error_kind(result);
     format_tool_preview_payload(
         Some(result.call_id.as_str()),
         result.tool_name.as_str(),
@@ -166,6 +171,7 @@ pub(super) fn format_tool_result_block(
         &result.content,
         Some(&result.metadata),
         preview,
+        error_kind,
     )
 }
 
@@ -192,6 +198,7 @@ pub(super) fn format_tool_content_block(
         .map(|entry| entry.tool_name.as_str())
         .unwrap_or("tool");
     let metadata = restored_tool_metadata(envelope.as_ref(), execution);
+    let error_kind = restored_tool_error_kind(envelope.as_ref(), execution);
     format_tool_preview_payload(
         call_id,
         tool_name,
@@ -199,6 +206,7 @@ pub(super) fn format_tool_content_block(
         display_content,
         metadata.as_ref(),
         preview,
+        error_kind.as_deref(),
     )
 }
 
@@ -209,6 +217,7 @@ fn format_tool_preview_payload(
     content: &str,
     metadata: Option<&ToolResultMeta>,
     preview: Option<&ToolPreviewSnapshot>,
+    error_kind: Option<&str>,
 ) -> String {
     let preview_value = tool_preview_value(content);
     let (preview_kind, preview_source) =
@@ -242,6 +251,12 @@ fn format_tool_preview_payload(
         "status".to_owned(),
         serde_json::Value::String(status.to_owned()),
     );
+    if let Some(error_kind) = error_kind {
+        object.insert(
+            "error_kind".to_owned(),
+            serde_json::Value::String(error_kind.to_owned()),
+        );
+    }
     object.insert(
         "preview_kind".to_owned(),
         serde_json::Value::String(preview_kind.to_owned()),
@@ -289,6 +304,13 @@ fn format_tool_preview_payload(
         object.insert("diff".to_owned(), diff);
     }
     serde_json::to_string(&serde_json::Value::Object(object)).unwrap_or_else(|_| content.to_owned())
+}
+
+fn tool_result_error_kind(result: &ToolResult) -> Option<&str> {
+    match &result.status {
+        ToolResultStatus::Ok => None,
+        ToolResultStatus::Error(error) => Some(error.kind.as_str()),
+    }
 }
 
 fn format_tool_diff_payload(preview: &ToolPreviewSnapshot) -> Option<(String, serde_json::Value)> {
@@ -406,6 +428,22 @@ fn restored_tool_metadata(
     envelope
         .and_then(|value| value.get("meta"))
         .and_then(project_model_meta_to_tool_result_meta)
+}
+
+fn restored_tool_error_kind(
+    envelope: Option<&serde_json::Value>,
+    execution: Option<&ToolExecutionEntry>,
+) -> Option<String> {
+    execution
+        .and_then(|entry| entry.error.as_ref())
+        .map(|error| error.kind.as_str().to_owned())
+        .or_else(|| {
+            envelope
+                .and_then(|value| value.get("error"))
+                .and_then(|error| error.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
 }
 
 fn project_model_meta_to_tool_result_meta(value: &serde_json::Value) -> Option<ToolResultMeta> {

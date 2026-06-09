@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
+use sha2::{Digest, Sha256};
 use termquill_kernel::{
     AgentRunOptions, InteractionMode, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
     ToolRegistry,
@@ -50,12 +51,13 @@ pub fn build_run_options(
     workspace_root: PathBuf,
     interaction_mode: InteractionMode,
 ) -> AgentRunOptions {
+    let workspace_root = canonical_workspace_root(workspace_root);
     AgentRunOptions {
+        traffic_partition_key: Some(workspace_partition_key(&workspace_root)),
         workspace_root,
         max_turns: root_config.agent.max_turns,
         tool_timeout_secs: root_config.agent.tool_timeout_secs,
-        reasoning_effort: Some(ReasoningEffort::Max),
-        traffic_partition_key: Some("local-user".to_owned()),
+        reasoning_effort: Some(default_reasoning_effort(root_config)),
         interaction_mode,
         permission_config: root_config.permission.clone(),
         memory_config: root_config.memory.clone(),
@@ -79,6 +81,22 @@ pub fn load_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProvider
 
 fn canonical_workspace_root(workspace_root: PathBuf) -> PathBuf {
     workspace_root.canonicalize().unwrap_or(workspace_root)
+}
+
+fn default_reasoning_effort(root_config: &RootConfig) -> ReasoningEffort {
+    if root_config.agent.provider == "deepseek"
+        && let Ok(config) = load_deepseek_config(root_config)
+    {
+        return config.profile().default_reasoning_effort;
+    }
+    ReasoningEffort::Max
+}
+
+fn workspace_partition_key(workspace_root: &std::path::Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(workspace_root.to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    format!("workspace-{digest:x}")
 }
 
 #[cfg(test)]

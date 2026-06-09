@@ -57,6 +57,14 @@ fn command_metadata_generates_help_and_control_hints() {
 
     let help = keyboard_help_lines(true);
     assert!(help.iter().any(|line| line.contains("F1:")));
+    assert!(
+        help.iter()
+            .any(|line| line == "Up/Down or Ctrl-P/N: Navigate prompt history.")
+    );
+    assert!(
+        help.iter()
+            .any(|line| line == "PageUp/PageDown or Ctrl-U/D: Scroll transcript by page.")
+    );
     assert!(help.iter().any(|line| line == "Activities"));
     assert!(help.iter().any(|line| line.contains("Ctrl-G:")));
     assert!(

@@ -27,7 +27,6 @@ pub(crate) struct LiveActivitySummary {
     pub detail: String,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub(crate) enum SessionHistoryRow {
     SessionHeader {
@@ -79,7 +78,6 @@ impl SidebarCard {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct SidebarAgentRow {
     pub label: String,

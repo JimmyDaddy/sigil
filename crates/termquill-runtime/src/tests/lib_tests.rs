@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::Result;
 use serde_json::json;
 use termquill_kernel::{
-    AgentConfig, InteractionMode, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
-    WorkspaceConfig,
+    AgentConfig, InteractionMode, MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig,
+    SessionConfig, WorkspaceConfig,
 };
 
 use super::{build_provider, build_run_options, build_tool_registry, load_deepseek_config};
@@ -76,7 +76,13 @@ fn build_run_options_carries_shared_runtime_defaults() {
     assert_eq!(options.workspace_root, workspace_root);
     assert_eq!(options.max_turns, Some(12));
     assert_eq!(options.tool_timeout_secs, 45);
-    assert_eq!(options.traffic_partition_key.as_deref(), Some("local-user"));
+    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::Max));
+    assert!(
+        options
+            .traffic_partition_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("workspace-"))
+    );
     assert_eq!(options.interaction_mode, InteractionMode::Interactive);
 }
 

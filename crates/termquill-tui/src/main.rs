@@ -9,7 +9,8 @@ use clap::Parser;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyEventKind,
-        MouseEventKind,
+        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -62,6 +63,7 @@ fn main() -> Result<()> {
     enable_raw_mode()?;
     let inline_viewport_height = current_inline_viewport_height()?;
     let mut stdout = io::stdout();
+    let keyboard_enhancement_enabled = enable_keyboard_enhancement(&mut stdout)?;
     execute!(stdout, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::with_options(
@@ -74,11 +76,22 @@ fn main() -> Result<()> {
 
     let result = run_app(&mut terminal, &mut app, &mut worker);
 
+    if keyboard_enhancement_enabled {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     execute!(terminal.backend_mut(), DisableMouseCapture)?;
     disable_raw_mode()?;
     terminal.show_cursor()?;
 
     result
+}
+
+fn enable_keyboard_enhancement<W: io::Write>(writer: &mut W) -> io::Result<bool> {
+    execute!(
+        writer,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
+    Ok(true)
 }
 
 fn current_inline_viewport_height() -> Result<u16> {
@@ -404,6 +417,7 @@ fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime
         root_config,
         app.session_log_path.clone(),
         app.workspace_root.clone(),
+        termquill_kernel::InteractionMode::Interactive,
     )?;
     Ok(WorkerRuntime {
         worker_tx,

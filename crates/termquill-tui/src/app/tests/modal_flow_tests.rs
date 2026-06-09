@@ -35,6 +35,33 @@ fn f1_opens_keyboard_help_modal_from_composer() -> Result<()> {
 }
 
 #[test]
+fn esc_closes_keyboard_help_before_interrupting_busy_run() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.input = "long task".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == "long task"
+    ));
+    assert!(app.is_busy);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+    assert!(app.has_modal());
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(!app.has_modal());
+    assert!(app.is_busy);
+    assert_eq!(app.last_notice(), Some("closed keyboard help"));
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("cancel requested"))
+    );
+    Ok(())
+}
+
+#[test]
 fn ctrl_c_quits_while_keyboard_help_modal_is_open() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
 

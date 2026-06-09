@@ -1519,6 +1519,8 @@ DeepSeek 官方文档对 `user_id` 的说明不是装饰字段，而是会影响
 4. 同一真实用户在同一工作区内应尽量复用同一个键，以保留缓存收益
 5. 不要直接上传原始邮箱、用户名等 PII，应先做稳定哈希或内部映射
 
+当前 runtime 默认从 canonical workspace root 派生 `workspace-{sha256}` 形式的 `traffic_partition_key`，避免固定的 `local-user` 跨工作区复用，也避免把原始本地路径直接上传给 provider。DeepSeek adapter 仍只消费通用的 `traffic_partition_key`，并按 `user_id_strategy` 映射为 `user_id`。
+
 建议配置增加：
 
 ```toml

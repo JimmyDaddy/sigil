@@ -1,40 +1,9 @@
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders},
 };
 
-use super::theme::{badge_bg, dim, muted};
-
-#[allow(dead_code)]
-pub(crate) fn themed_block(
-    title: &str,
-    subtitle: Option<&str>,
-    accent: Color,
-    bg: Color,
-) -> Block<'static> {
-    let mut spans = vec![Span::styled(
-        format!(" {title} "),
-        Style::default()
-            .fg(accent)
-            .bg(badge_bg())
-            .add_modifier(Modifier::BOLD),
-    )];
-    if let Some(subtitle) = subtitle {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            subtitle.to_owned(),
-            Style::default().fg(muted()),
-        ));
-    }
-
-    Block::default()
-        .title(Line::from(spans))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(accent))
-        .style(Style::default().bg(bg))
-}
+use super::theme::{badge_bg, dim};
 
 pub(crate) fn section_badge(label: &str, accent: Color) -> Span<'static> {
     Span::styled(

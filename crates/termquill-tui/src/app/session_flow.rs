@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -8,8 +8,8 @@ use std::{
 
 use termquill_kernel::{
     CompactionPreview, ControlEntry, JsonlSessionStore, ModelMessage, RootConfig, Session,
-    SessionLogEntry, ToolExecutionEntry, ToolPreviewSnapshot, inspect_memory_documents,
-    latest_compaction_record, session_stats_from_entries,
+    SessionLogEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
+    inspect_memory_documents, latest_compaction_record, session_stats_from_entries,
 };
 use uuid::Uuid;
 
@@ -398,6 +398,7 @@ impl AppState {
 
         let restored_tool_executions = restored_tool_execution_index(&entries);
         let restored_tool_previews = restored_tool_preview_snapshot_index(&entries);
+        let restored_tool_result_call_ids = restored_tool_result_call_ids(&entries);
         self.tool_preview_snapshots = restored_tool_previews.clone();
         for entry in entries {
             match entry {
@@ -434,14 +435,60 @@ impl AppState {
                         );
                     }
                 }
-                SessionLogEntry::Control(control) => {
-                    self.push_event("control:restore", format!("{control:?}"));
-                }
+                SessionLogEntry::Control(control) => match control {
+                    ControlEntry::Note { kind, data }
+                        if kind == "reasoning_delta" || kind == "reasoning_trace" =>
+                    {
+                        if let Some(delta) = restored_reasoning_note(&kind, &data) {
+                            self.push_restored_reasoning_delta(&delta);
+                        }
+                    }
+                    ControlEntry::ToolExecution(execution)
+                        if should_render_restored_tool_execution(
+                            execution.as_ref(),
+                            &restored_tool_result_call_ids,
+                        ) =>
+                    {
+                        let preview = restored_tool_previews.get(&execution.call_id);
+                        self.push_timeline(
+                            TimelineRole::Tool,
+                            format_tool_content_block(
+                                Some(execution.call_id.as_str()),
+                                &restored_tool_execution_content(execution.as_ref()),
+                                Some(execution.as_ref()),
+                                preview,
+                            ),
+                        );
+                        self.push_event("control:restore", format!("{execution:?}"));
+                    }
+                    other => {
+                        self.push_event("control:restore", format!("{other:?}"));
+                    }
+                },
             }
         }
 
+        self.streaming_reasoning_index = None;
         self.last_notice = Some(notice.to_owned());
         self.refresh_session_history();
+    }
+
+    fn push_restored_reasoning_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        if let Some(index) = self
+            .timeline
+            .len()
+            .checked_sub(1)
+            .filter(|index| self.timeline[*index].role == TimelineRole::Thinking)
+        {
+            self.timeline[index].text.push_str(delta);
+            self.rerender_timeline_entry(index);
+            return;
+        }
+        self.push_phase_marker(format!("thinking|{}", self.model_name));
+        self.push_timeline(TimelineRole::Thinking, delta.to_owned());
     }
 
     pub(super) fn filtered_session_indices(&self) -> Vec<usize> {
@@ -625,6 +672,53 @@ fn restored_tool_preview_snapshot_index(
         }
     }
     snapshots
+}
+
+fn restored_tool_result_call_ids(entries: &[SessionLogEntry]) -> HashSet<String> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::ToolResult(message) => message.tool_call_id.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn should_render_restored_tool_execution(
+    execution: &ToolExecutionEntry,
+    tool_result_call_ids: &HashSet<String>,
+) -> bool {
+    !tool_result_call_ids.contains(&execution.call_id)
+        && matches!(
+            execution.status,
+            ToolExecutionStatus::Failed
+                | ToolExecutionStatus::Cancelled
+                | ToolExecutionStatus::Interrupted
+        )
+}
+
+fn restored_tool_execution_content(execution: &ToolExecutionEntry) -> String {
+    execution
+        .error
+        .as_ref()
+        .map(|error| error.message.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "tool execution ended with status {} before a tool result was written",
+                tool_execution_status_label(execution.status)
+            )
+        })
+}
+
+fn restored_reasoning_note(kind: &str, data: &serde_json::Value) -> Option<String> {
+    let field = if kind == "reasoning_trace" {
+        "text"
+    } else {
+        "delta"
+    };
+    data.get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
 }
 
 fn tool_approval_action_label(action: termquill_kernel::ToolApprovalAuditAction) -> &'static str {

@@ -7,7 +7,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    AppState, ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
+    AppState, ApprovalAction, ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow,
+    ApprovalModalView,
 };
 
 use super::{
@@ -290,19 +291,40 @@ fn approval_footer_lines(view: &ApprovalModalView) -> Vec<Line<'static>> {
     };
     vec![
         Line::from(vec![
-            approval_badge("Y allow", Color::Green),
+            approval_action_badge(
+                "Allow",
+                Color::Green,
+                view.selected_action == ApprovalAction::Allow,
+            ),
             Span::raw(" "),
-            approval_badge("N deny", Color::Red),
+            approval_action_badge(
+                "Deny",
+                Color::Red,
+                view.selected_action == ApprovalAction::Deny,
+            ),
             Span::raw(" "),
-            approval_badge("M meta", Color::Blue),
+            approval_badge("Enter choose", Color::Yellow),
             Span::raw(" "),
-            approval_badge("V view", Color::Cyan),
+            approval_badge("Y/N direct", Color::DarkGray),
         ]),
         Line::styled(
-            format!("[,] hunk{file_hint}  Up/Down scroll"),
+            format!("Left/Right action  M meta  V view  [,] hunk{file_hint}  Up/Down scroll"),
             Style::default().fg(Color::DarkGray),
         ),
     ]
+}
+
+fn approval_action_badge(label: &str, color: Color, selected: bool) -> Span<'static> {
+    if selected {
+        return Span::styled(
+            format!("▶ {label} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(color)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    approval_badge(label, color)
 }
 
 fn render_approval_file_row(index: usize, row: &ApprovalFileRow) -> Line<'static> {

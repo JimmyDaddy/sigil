@@ -10,7 +10,6 @@ use crate::view_model::ComposerViewModel;
 
 use super::{
     geometry::inset_rect,
-    live_panel::live_spinner_frame,
     text::{pad_display_width, wrap_composer_input},
     theme::{accent_gold, composer_bg, composer_input_bg, ink, muted, phase_accent},
 };
@@ -50,27 +49,22 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, view_model: &ComposerV
     let header_area = layout[0];
     let input_area = layout[2];
 
-    let spinner = if view_model.is_busy {
-        live_spinner_frame()
-    } else {
-        "•"
-    };
     let header = Line::from(vec![
         Span::styled(
-            "Composer",
+            view_model.mode_label.clone(),
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
+        Span::raw("  ·  "),
         Span::styled(view_model.model_name.clone(), Style::default().fg(ink())),
+        Span::raw("  ·  "),
+        Span::styled(
+            view_model.provider_name.clone(),
+            Style::default().fg(muted()),
+        ),
         Span::raw("  ·  "),
         Span::styled(
             view_model.reasoning_effort_label.clone(),
             Style::default().fg(accent_gold()),
-        ),
-        Span::raw("  ·  "),
-        Span::styled(
-            format!("{spinner} {}", view_model.run_phase_label),
-            Style::default().fg(muted()),
         ),
     ]);
     frame.render_widget(

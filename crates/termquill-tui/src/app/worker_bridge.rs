@@ -311,6 +311,7 @@ impl EventHandler for AppState {
                 self.approval_metadata_collapsed = false;
                 self.approval_selected_file_index = 0;
                 self.approval_selected_hunk_index = 0;
+                self.approval_selected_action = ApprovalAction::Deny;
                 self.last_notice = Some(format!("approve {}", call.name));
                 self.push_event("approval:request", format!("{} {}", call.name, call.id));
                 self.push_timeline(

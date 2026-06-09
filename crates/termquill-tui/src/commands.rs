@@ -197,8 +197,8 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     );
     lines.extend([
         "Shift-Enter: Insert a newline in the composer.".to_owned(),
-        "Ctrl-U/D: Scroll transcript by page.".to_owned(),
-        "Ctrl-P/N: Navigate prompt history.".to_owned(),
+        "Up/Down or Ctrl-P/N: Navigate prompt history.".to_owned(),
+        "PageUp/PageDown or Ctrl-U/D: Scroll transcript by page.".to_owned(),
         String::new(),
     ]);
     if include_tool_cards {

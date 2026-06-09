@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 termquill-kernel = { path = "../termquill-kernel" }
 termquill-mcp = { path = "../termquill-mcp" }
 termquill-provider-deepseek = { path = "../termquill-provider-deepseek" }

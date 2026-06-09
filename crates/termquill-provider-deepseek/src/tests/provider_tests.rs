@@ -295,7 +295,7 @@ async fn fim_completion_uses_completions_path() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
         200,
         "text/event-stream",
-        "data: {\"choices\":[{\"text\":\"middle\",\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        "data: {\"choices\":[{\"text\":\"middle\",\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"prompt_cache_hit_tokens\":2,\"prompt_cache_miss_tokens\":5},\"system_fingerprint\":\"fp-fim\"}\n\ndata: [DONE]\n\n",
     )])));
     let server = spawn_recording_server(Arc::clone(&requests), Arc::clone(&responses)).await?;
     let provider = DeepSeekProvider::new(crate::DeepSeekProviderConfig {
@@ -328,6 +328,19 @@ async fn fim_completion_uses_completions_path() -> Result<()> {
             .iter()
             .any(|chunk| matches!(chunk, ProviderChunk::TextDelta(text) if text == "middle"))
     );
+    assert!(matches!(
+        chunks.as_slice(),
+        [
+            ProviderChunk::TextDelta(text),
+            ProviderChunk::Usage(usage),
+            ProviderChunk::Done
+        ] if text == "middle"
+            && usage.prompt_tokens == 7
+            && usage.completion_tokens == 3
+            && usage.cache_hit_tokens == 2
+            && usage.cache_miss_tokens == 5
+            && usage.system_fingerprint.as_deref() == Some("fp-fim")
+    ));
     let raw_request = requests
         .lock()
         .expect("requests poisoned")
@@ -335,6 +348,39 @@ async fn fim_completion_uses_completions_path() -> Result<()> {
         .expect("expected recorded fim request");
     assert!(raw_request.contains("POST /completions"));
     assert!(raw_request.contains("\"suffix\":\"\\n}\\n\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fim_completion_yields_first_delta_before_stream_finishes() -> Result<()> {
+    let server = spawn_slow_completion_streaming_server().await?;
+    let provider = DeepSeekProvider::new(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let mut stream = provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {\n".to_owned(),
+            suffix: "\n}\n".to_owned(),
+            max_tokens: Some(32),
+            stop: Vec::new(),
+        })
+        .await?;
+
+    let first = timeout(Duration::from_millis(500), stream.next())
+        .await
+        .expect("first completion delta should arrive before the server closes the stream")
+        .expect("stream should yield one chunk")?;
+
+    assert!(matches!(first, ProviderChunk::TextDelta(text) if text == "middle"));
     Ok(())
 }
 
@@ -433,6 +479,28 @@ async fn spawn_done_then_hanging_streaming_server() -> Result<String> {
         let _ = socket.write_all(body.as_bytes()).await;
         let _ = socket.flush().await;
         sleep(Duration::from_secs(5)).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_slow_completion_streaming_server() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let header =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        let first = "data: {\"choices\":[{\"text\":\"middle\",\"finish_reason\":null}]}\n\n";
+        let _ = socket.write_all(header.as_bytes()).await;
+        let _ = socket.write_all(first.as_bytes()).await;
+        let _ = socket.flush().await;
+        sleep(Duration::from_secs(1)).await;
+        let done = "data: [DONE]\n\n";
+        let _ = socket.write_all(done.as_bytes()).await;
     });
     Ok(format!("http://{}", address))
 }

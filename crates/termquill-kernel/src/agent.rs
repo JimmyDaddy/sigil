@@ -19,7 +19,7 @@ use crate::{
     },
     tool::{
         ToolContext, ToolDiffBudget, ToolErrorKind, ToolPreview, ToolPreviewSnapshot, ToolRegistry,
-        ToolResult, ToolResultStatus, ToolSubject, ToolSubjectScope,
+        ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectScope,
     },
 };
 
@@ -98,6 +98,7 @@ where
     {
         session.append_user_message(ModelMessage::user(prompt.into()))?;
 
+        let permission_policy = PermissionPolicy::new(&options.permission_config);
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
 
@@ -128,6 +129,7 @@ where
             let mut stream = self.provider.stream(request).await?;
             let mut assistant_text = String::new();
             let mut reasoning_buffer = String::new();
+            let mut reasoning_trace_buffer = String::new();
             let mut tool_parts: BTreeMap<String, (String, String)> = BTreeMap::new();
             let mut completed_calls: Vec<ToolCall> = Vec::new();
             let mut pending_states: Vec<ProviderContinuationState> = Vec::new();
@@ -140,9 +142,11 @@ where
                     }
                     ProviderChunk::ReasoningDelta(delta) => {
                         reasoning_buffer.push_str(&delta);
+                        reasoning_trace_buffer.push_str(&delta);
                         handler.handle(RunEvent::ReasoningDelta(delta))?;
                     }
                     ProviderChunk::ReasoningSummaryDelta(delta) => {
+                        reasoning_trace_buffer.push_str(&delta);
                         handler.handle(RunEvent::ReasoningDelta(delta))?;
                     }
                     ProviderChunk::ToolCallStart { id, name } => {
@@ -193,6 +197,8 @@ where
                     ProviderChunk::Done => break,
                 }
             }
+
+            append_reasoning_trace(session, &reasoning_trace_buffer)?;
 
             if !completed_calls.is_empty() {
                 total_tool_calls += completed_calls.len();
@@ -268,8 +274,12 @@ where
                                 continue;
                             }
                         };
-                        let decision = PermissionPolicy::new(&options.permission_config)
-                            .decide_with_access(&spec, &call.name, access, subjects.clone())?;
+                        let decision = permission_policy.decide_with_access(
+                            &spec,
+                            &call.name,
+                            access,
+                            subjects.clone(),
+                        )?;
                         let subject_label = if decision.subjects.is_empty() {
                             "-".to_owned()
                         } else {
@@ -570,6 +580,22 @@ fn has_external_subject(subjects: &[ToolSubject]) -> bool {
         .any(|subject| subject.scope == ToolSubjectScope::External)
 }
 
+fn append_reasoning_trace(session: &mut Session, trace: &str) -> Result<()> {
+    if trace.is_empty() {
+        return Ok(());
+    }
+    session.append_control(reasoning_trace_note(trace.to_owned()))
+}
+
+fn reasoning_trace_note(trace: String) -> ControlEntry {
+    let mut data = Map::new();
+    data.insert("text".to_owned(), Value::String(trace));
+    ControlEntry::Note {
+        kind: "reasoning_trace".to_owned(),
+        data: Value::Object(data),
+    }
+}
+
 fn attach_tool_call_context(result: &mut ToolResult, call: &ToolCall, subjects: &[ToolSubject]) {
     let Some(context) = tool_call_context(call, subjects) else {
         return;
@@ -742,7 +768,13 @@ fn append_tool_execution_audit(
             Some(stable_text_hash(&result.to_model_content())),
         )
     } else {
-        (Vec::new(), Default::default(), None, None)
+        let mut metadata = ToolResultMeta::default();
+        if let Some(context) = tool_call_context(call, subjects) {
+            let mut details = Map::new();
+            details.insert("call".to_owned(), context);
+            metadata.details = Value::Object(details);
+        }
+        (Vec::new(), metadata, None, None)
     };
 
     session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {

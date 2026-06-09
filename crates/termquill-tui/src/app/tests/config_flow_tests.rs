@@ -217,6 +217,30 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
 }
 
 #[test]
+fn runtime_permission_toggle_persists_default_mode_to_config() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("termquill.toml");
+    let root_config = test_config();
+    root_config.save(&config_path)?;
+
+    let mut app = AppState::from_root_config(&config_path, &root_config);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))?;
+
+    let Some(AppAction::RuntimeConfigUpdated { root_config }) = action else {
+        panic!("expected runtime config update action");
+    };
+    assert_eq!(root_config.permission.default_mode, ApprovalMode::Deny);
+    assert_eq!(app.permission_default_mode, "deny");
+
+    let saved = RootConfig::load(&config_path)?;
+    assert_eq!(saved.permission.default_mode, ApprovalMode::Deny);
+    let reopened = AppState::from_root_config(&config_path, &saved);
+    assert_eq!(reopened.permission_default_mode, "deny");
+    Ok(())
+}
+
+#[test]
 fn config_can_add_and_persist_mcp_server() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("termquill.toml");

@@ -272,6 +272,37 @@ fn permission_external_directory_rules_can_allow_matching_paths() -> Result<()> 
 }
 
 #[test]
+fn permission_external_directory_rules_are_compiled_once_per_policy() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_root = temp.path().canonicalize()?;
+    let allowed_dir = external_root.join("allowed");
+    std::fs::create_dir_all(&allowed_dir)?;
+    let external_path = allowed_dir.join("note.txt");
+    let config = PermissionConfig {
+        external_directory: ExternalDirectoryConfig {
+            enabled: true,
+            default_mode: ApprovalMode::Ask,
+            rules: vec![ExternalDirectoryRule {
+                path_glob: format!("{}/allowed/**", external_root.display()),
+                mode: ApprovalMode::Allow,
+            }],
+        },
+        ..PermissionConfig::default()
+    };
+    let policy = PermissionPolicy::new(&config);
+
+    std::fs::remove_dir_all(&allowed_dir)?;
+    let decision = policy.decide(
+        &spec(ToolAccess::Read),
+        "read_file",
+        vec![external_path_subject(external_path)],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Allow);
+    Ok(())
+}
+
+#[test]
 fn permission_external_directory_deny_rule_dominates_allow() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let external_root = temp.path().canonicalize()?;

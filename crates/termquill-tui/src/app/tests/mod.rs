@@ -19,18 +19,18 @@ use termquill_kernel::{
     AgentConfig, ApprovalMode, CompactionConfig, CompactionRecord, ControlEntry, EventHandler,
     JsonlSessionStore, McpServerStartup, McpTrustClass, MemoryConfig, ModelMessage,
     PermissionConfig, ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry,
-    ToolAccess, ToolCall, ToolCategory, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreview, ToolPreviewCapability, ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectScope, UsageStats, WorkspaceConfig,
+    ToolAccess, ToolCall, ToolCategory, ToolError, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewSnapshot, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope, UsageStats, WorkspaceConfig,
 };
 
 use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
 use crate::slash::SLASH_COMMANDS;
 
 use super::{
-    AppAction, AppState, ApprovalDiffLineKind, ConfigField, ConfigSection, ModalState,
-    ModelPickerRefresh, ModelPickerTarget, PaneFocus, RunPhase, SessionHistoryRow, SessionViewMode,
-    SetupField, TimelineRole,
+    AppAction, AppState, ApprovalAction, ApprovalDiffLineKind, ConfigField, ConfigSection,
+    ModalState, ModelPickerRefresh, ModelPickerTarget, PaneFocus, RunPhase, SessionHistoryRow,
+    SessionViewMode, SetupField, TimelineRole,
 };
 
 use common::*;

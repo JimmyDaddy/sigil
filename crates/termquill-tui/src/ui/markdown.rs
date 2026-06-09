@@ -54,18 +54,19 @@ impl MarkdownRenderOptions {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodeWrapMode {
     Preserve,
+    #[cfg(test)]
     Wrap,
+    #[cfg(test)]
     Truncate,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TableRenderMode {
     Compact,
+    #[cfg(test)]
     Preserve,
 }
 
@@ -207,7 +208,9 @@ fn code_block_render_rows(line: &str, options: MarkdownRenderOptions) -> Vec<Str
                 vec![line.to_owned()]
             }
         }
+        #[cfg(test)]
         CodeWrapMode::Wrap => wrap_display_width(line, width),
+        #[cfg(test)]
         CodeWrapMode::Truncate => vec![truncate_display_width(line, width)],
     }
 }
@@ -477,6 +480,7 @@ fn render_markdown_table_block(
         TableRenderMode::Compact => {
             clamp_table_widths(&natural_widths, options.max_content_width.max(24))
         }
+        #[cfg(test)]
         TableRenderMode::Preserve => natural_widths,
     };
 

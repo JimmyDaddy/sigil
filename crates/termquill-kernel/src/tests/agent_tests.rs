@@ -486,6 +486,7 @@ impl Provider for PreviewFallbackProvider {
         } else {
             Ok(Box::pin(stream::iter(vec![
                 Ok(ProviderChunk::ReasoningDelta("planning".to_owned())),
+                Ok(ProviderChunk::ReasoningSummaryDelta(" details".to_owned())),
                 Ok(ProviderChunk::ToolCallStart {
                     id: "call-write-1".to_owned(),
                     name: "write_file".to_owned(),
@@ -1472,6 +1473,42 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
             entry,
             SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))
                 if snapshot.call_id == "call-write-1"
+        )
+    }));
+    let reasoning_trace_entries = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::Note { kind, data })
+                if kind == "reasoning_trace" =>
+            {
+                data.get("text").and_then(serde_json::Value::as_str)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reasoning_trace_entries, vec!["planning details"]);
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::Note { kind, data })
+                if kind == "reasoning_delta"
+                    && data.get("delta").and_then(serde_json::Value::as_str).is_some()
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-write-1"
+                    && execution.status == ToolExecutionStatus::Started
+                    && execution
+                        .metadata
+                        .details
+                        .get("call")
+                        .and_then(|call| call.get("summary"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("path=file.txt")
         )
     }));
 

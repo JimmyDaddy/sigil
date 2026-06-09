@@ -170,3 +170,25 @@ fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn esc_interrupts_active_run() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.input = "long task".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == "long task"
+    ));
+    assert!(app.is_busy);
+
+    let cancel_action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+    assert!(matches!(cancel_action, Some(AppAction::CancelRun)));
+    assert_eq!(app.last_notice(), Some("cancellation requested"));
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("cancel requested"))
+    );
+    Ok(())
+}

@@ -1,6 +1,25 @@
 use termquill_kernel::{ToolCall, ToolPreview, ToolSpec, ToolSubject};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApprovalAction {
+    Allow,
+    Deny,
+}
+
+impl ApprovalAction {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::Allow => Self::Deny,
+            Self::Deny => Self::Allow,
+        }
+    }
+
+    pub(crate) fn approved(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalDiffLineKind {
     Header,
     Hunk,
@@ -37,6 +56,7 @@ pub(crate) struct ApprovalModalView {
     pub hunk_total: usize,
     pub diff_label: String,
     pub diff_lines: Vec<ApprovalDiffLine>,
+    pub selected_action: ApprovalAction,
 }
 
 #[derive(Debug, Clone)]

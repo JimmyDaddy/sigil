@@ -1,5 +1,18 @@
 use super::*;
 
+fn plain_transcript(app: &AppState, max_lines: usize) -> String {
+    app.transcript_lines(max_lines)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[test]
 fn latest_session_can_be_restored_on_launch() -> Result<()> {
     let temp = tempdir()?;
@@ -17,7 +30,6 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
     )?;
 
     let mut app = AppState::from_root_config(temp.path().join("termquill.toml").as_path(), &config);
-
     assert!(app.restore_latest_session_from_disk(&config));
     assert_eq!(app.session_log_path, restored_path);
     assert_eq!(app.provider_name, "restored-provider");
@@ -85,16 +97,94 @@ fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()
         entries,
     })?;
 
-    let rendered = app
-        .transcript_lines(20)
-        .into_iter()
-        .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains("read_file"));
-    assert!(rendered.contains("path=README.md"));
+    let rendered = plain_transcript(&app, 20);
+    assert!(rendered.contains("Read README.md"));
+    assert!(!rendered.contains("path=README.md"));
     assert!(!rendered.contains("tool_result"));
     assert!(!rendered.contains("\"status\":\"ok\""));
+    Ok(())
+}
+
+#[test]
+fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::User(ModelMessage::user("analyze")),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_delta".to_owned(),
+            data: json!({"delta": "step 1\n"}),
+        }),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_delta".to_owned(),
+            data: json!({"delta": "step 2"}),
+        }),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = plain_transcript(&app, 20);
+    assert!(rendered.contains("thought"));
+    assert!(rendered.contains("step 1"));
+    assert!(rendered.contains("step 2"));
+    Ok(())
+}
+
+#[test]
+fn restored_interrupted_tool_execution_renders_user_facing_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::User(ModelMessage::user("run tests")),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "call-bash-1".to_owned(),
+            tool_name: "bash".to_owned(),
+            status: ToolExecutionStatus::Interrupted,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta {
+                details: json!({
+                    "call": {
+                        "summary": "command=cargo test --workspace"
+                    }
+                }),
+                ..ToolResultMeta::default()
+            },
+            error: Some(ToolError {
+                kind: ToolErrorKind::Interrupted,
+                message: "tool execution was interrupted before completion".to_owned(),
+                retryable: true,
+                details: serde_json::Value::Null,
+            }),
+            model_content_hash: None,
+        }))),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = plain_transcript(&app, 20);
+    assert!(rendered.contains("Ran cargo test --workspace"));
+    assert!(rendered.contains("INTERRUPTED"));
+    assert!(!rendered.contains("tool_result"));
     Ok(())
 }
 

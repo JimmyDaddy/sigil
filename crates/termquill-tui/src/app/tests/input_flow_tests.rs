@@ -26,7 +26,85 @@ fn shift_enter_inserts_newline_without_submitting() -> Result<()> {
 }
 
 #[test]
-fn composer_up_down_scroll_transcript_when_input_is_empty() -> Result<()> {
+fn shifted_line_feed_key_inserts_newline_without_submitting() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.input = "hello".to_owned();
+    app.input_cursor = app.input.chars().count();
+    let timeline_len = app.timeline.len();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('\n'), KeyModifiers::SHIFT))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.input, "hello\n");
+    assert_eq!(app.timeline.len(), timeline_len);
+    assert_eq!(app.composer_input_rows(), 2);
+    Ok(())
+}
+
+#[test]
+fn shifted_carriage_return_key_normalizes_to_newline() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.input = "hello".to_owned();
+    app.input_cursor = app.input.chars().count();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::SHIFT))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.input, "hello\n");
+    assert_eq!(app.composer_input_rows(), 2);
+    Ok(())
+}
+
+#[test]
+fn composer_ignores_non_printing_control_characters() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let action =
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('\u{1b}'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.input.is_empty());
+    assert_eq!(app.input_cursor_visual_position(), (0, 0));
+    Ok(())
+}
+
+#[test]
+fn carriage_return_key_submits_instead_of_entering_invisible_text() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.input = "hello".to_owned();
+    app.input_cursor = app.input.chars().count();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == "hello"
+    ));
+    Ok(())
+}
+
+#[test]
+fn composer_up_down_navigates_history_when_input_is_empty_without_scrolling() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    for index in 0..8 {
+        app.push_timeline(TimelineRole::Assistant, format!("message {index}"));
+    }
+    app.input_history = vec!["first".to_owned(), "second".to_owned()];
+    app.input.clear();
+    app.input_cursor = 0;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.input, "second");
+    assert_eq!(app.timeline_scroll_back, 0);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(app.input.is_empty());
+    assert_eq!(app.timeline_scroll_back, 0);
+    Ok(())
+}
+
+#[test]
+fn composer_up_down_without_history_do_not_scroll_transcript() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.set_terminal_size(80, 12);
     for index in 0..8 {
@@ -36,9 +114,9 @@ fn composer_up_down_scroll_transcript_when_input_is_empty() -> Result<()> {
     app.input_cursor = 0;
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert!(app.timeline_scroll_back > 0);
-
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+
+    assert!(app.input.is_empty());
     assert_eq!(app.timeline_scroll_back, 0);
     Ok(())
 }
@@ -99,14 +177,15 @@ fn composer_up_inside_wrapped_input_moves_cursor_before_history() -> Result<()> 
     app.is_busy = false;
 
     app.active_pane = PaneFocus::Composer;
-    app.set_terminal_size(6, 20);
-    app.input = "draft123456".to_owned();
-    app.input_cursor = 7;
+    app.set_terminal_size(96, 20);
+    app.input = "draft".repeat(20);
+    app.input_cursor = 70;
+    assert!(app.input_cursor_visual_position().1 > 0);
 
     app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
 
-    assert_eq!(app.input, "draft123456");
-    assert_eq!(app.input_cursor, 1);
+    assert_eq!(app.input, "draft".repeat(20));
+    assert_eq!(app.input_cursor_visual_position().1, 0);
     assert_eq!(app.input_history_index, None);
     Ok(())
 }

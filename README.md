@@ -46,10 +46,10 @@ cargo run -p termquill-tui
 TUI 当前支持：
 
 - 提交 prompt 并流式查看输出
-- prompt 提交后 composer 会清空并保持可见；主聊天区改为 app-owned transcript，可用 `Up/Down`、`PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` 和滚轮持续回溯到会话最顶，同时最近一段历史仍会同步进终端原生 scrollback
+- prompt 提交后 composer 会清空并保持可见；主聊天区改为 app-owned transcript，可用 `PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` 和滚轮持续回溯到会话最顶，同时最近一段历史仍会同步进终端原生 scrollback
 - 输入 `/` 时弹出 slash command selector，支持 `Up/Down` 选中、`Tab` 接受、`Enter` 执行；`/model`、`/effort`、`/resume` 会继续下钻参数候选，其中 `/resume` 展示可恢复 session 标题，当前内置 `/compact`、`/config`、`/effort`、`/model`、`/quit`、`/resume`
 - `F1` 打开 keyboard help；核心快捷键、activity 快捷键和公开 slash command 列表都从真实命令面生成，不依赖隐藏兼容入口
-- composer 的历史输入只响应键盘：仅在 composer 聚焦且光标位于首行或末行时，`Up/Down` 才切换历史
+- composer 的历史输入只响应键盘：composer 聚焦时 `Up/Down` 显示历史 prompt；多行输入中间行仍按垂直光标移动处理
 - `/config` 打开 TUI guided config flow；provider 主流程只保留 `model / api_key / base_url / fim_model`，文本项统一走弹窗输入，底部固定 `Actions` 栏可用 `Down` 聚焦，再用 `Left/Right` 选 `save / save+close / close`
 - 主屏默认走 chat-first：inline viewport 会占满当前终端可视区，左侧主区域展示 live transcript + 底部 composer，右侧保留独立的 full-height `info rail`，窄终端会自动收起 info rail 给 chat/composer 让出空间；启动恢复旧会话时只 seed 最近一段 transcript 到 terminal scrollback，避免长会话整屏重放
 - 不再要求 `Tab` 在主屏各卡片之间切焦点；`Shift-Tab` 直接轮换并持久化默认 `allow / ask / deny` 权限模式

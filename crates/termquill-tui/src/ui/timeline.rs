@@ -26,6 +26,7 @@ use super::{
 };
 
 const COLLAPSED_THINKING_PREVIEW_LINES: usize = 3;
+const COLLAPSED_THINKING_CODE_PREVIEW_LINES: usize = 2;
 
 #[derive(Clone, Default)]
 pub(crate) struct TimelineRenderOptions {
@@ -35,12 +36,6 @@ pub(crate) struct TimelineRenderOptions {
     pub expanded_tool_activity_keys: BTreeSet<String>,
     pub collapsed_tool_activity_keys: BTreeSet<String>,
     pub max_content_width: usize,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn render_timeline_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
-    let options = TimelineRenderOptions::default();
-    render_timeline_entry_lines_with_options(entry, &options, 0)
 }
 
 pub(crate) fn render_timeline_entry_lines_with_options(
@@ -292,13 +287,52 @@ fn thinking_line_count(text: &str) -> usize {
 }
 
 fn thinking_preview_lines(text: &str, max_lines: usize) -> Vec<String> {
-    text.lines()
+    let lines = text
+        .lines()
         .filter_map(|line| {
             let trimmed = line.trim();
             (!trimmed.is_empty()).then_some(trimmed.to_owned())
         })
-        .take(max_lines)
-        .collect()
+        .collect::<Vec<_>>();
+    let mut preview = lines.iter().take(max_lines).cloned().collect::<Vec<_>>();
+    extend_thinking_preview_code_fence(&lines, &mut preview);
+    preview
+}
+
+fn extend_thinking_preview_code_fence(lines: &[String], preview: &mut Vec<String>) {
+    let Some(fence_index) = preview.iter().rposition(|line| is_markdown_fence(line)) else {
+        return;
+    };
+    if preview
+        .iter()
+        .filter(|line| is_markdown_fence(line))
+        .count()
+        % 2
+        == 0
+    {
+        return;
+    }
+
+    let mut code_lines = preview[fence_index + 1..]
+        .iter()
+        .filter(|line| !is_markdown_fence(line))
+        .count();
+    let mut cursor = preview.len();
+    while code_lines < COLLAPSED_THINKING_CODE_PREVIEW_LINES && cursor < lines.len() {
+        let line = lines[cursor].clone();
+        let is_fence = is_markdown_fence(&line);
+        preview.push(line);
+        cursor += 1;
+        if is_fence {
+            break;
+        }
+        code_lines += 1;
+    }
+}
+
+fn is_markdown_fence(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
 fn render_notice_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {

@@ -16,6 +16,7 @@ pub fn spawn_agent_worker(
     root_config: RootConfig,
     session_log_path: PathBuf,
     workspace_root: PathBuf,
+    interaction_mode: InteractionMode,
 ) -> Result<(mpsc::Sender<WorkerCommand>, mpsc::Receiver<WorkerMessage>)> {
     let (command_tx, command_rx) = mpsc::channel();
     let (message_tx, message_rx) = mpsc::channel();
@@ -23,7 +24,7 @@ pub fn spawn_agent_worker(
     let options = termquill_runtime::build_run_options(
         &root_config,
         workspace_root.clone(),
-        InteractionMode::Interactive,
+        interaction_mode,
     );
 
     thread::Builder::new()

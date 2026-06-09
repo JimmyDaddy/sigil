@@ -680,7 +680,7 @@ fn interrupted_tool_executions(entries: &[SessionLogEntry]) -> Vec<ToolExecution
             execution.status = ToolExecutionStatus::Interrupted;
             execution.duration_ms = None;
             execution.changed_files = Vec::new();
-            execution.metadata = ToolResultMeta::default();
+            execution.metadata.changed_files = Vec::new();
             execution.error = Some(ToolError {
                 kind: ToolErrorKind::Interrupted,
                 message: "tool execution was interrupted before a completion record was written"
@@ -729,7 +729,7 @@ fn compaction_boundary(messages: &[ModelMessage], requested_tail_messages: usize
     let mut boundary = messages.len().saturating_sub(tail_messages);
     while boundary > 0
         && (matches!(messages[boundary].role, crate::MessageRole::Tool)
-            || messages[boundary - 1].tool_calls.is_empty().not()
+            || !messages[boundary - 1].tool_calls.is_empty()
             || matches!(messages[boundary - 1].role, crate::MessageRole::Tool))
     {
         if !messages[boundary - 1].tool_calls.is_empty() {
@@ -810,16 +810,6 @@ fn session_identity_from_entries(entries: &[SessionLogEntry]) -> Option<(String,
         }
         _ => None,
     })
-}
-
-trait BoolExt {
-    fn not(self) -> bool;
-}
-
-impl BoolExt for bool {
-    fn not(self) -> bool {
-        !self
-    }
 }
 
 #[cfg(test)]

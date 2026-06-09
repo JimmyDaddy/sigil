@@ -35,7 +35,7 @@ fn test_config() -> RootConfig {
 }
 
 #[test]
-fn render_live_activity_line_shows_current_phase() -> anyhow::Result<()> {
+fn render_live_progress_lines_shows_current_phase() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
     app.set_terminal_size(120, 30);
     app.handle_key_event(KeyEvent::new(KeyCode::Char('你'), KeyModifiers::NONE))?;
@@ -43,20 +43,21 @@ fn render_live_activity_line_shows_current_phase() -> anyhow::Result<()> {
     let _ = app.submit_input()?;
 
     let view_model = LivePanelViewModel::from_app(&app, 4);
-    let line = render_live_activity_line(
+    let lines = render_live_progress_lines(
         view_model
-            .activity
+            .progress
             .as_ref()
-            .expect("busy run should expose live activity"),
+            .expect("busy run should expose live progress"),
         phase_accent(&view_model.phase),
     );
-    let plain = line
-        .spans
+    let plain = lines
         .iter()
+        .flat_map(|line| line.spans.iter())
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert!(plain.contains("thinking"));
+    assert!(plain.contains("Thinking..."));
+    assert!(!plain.contains("(Thinking)"));
     assert!(plain.contains("reasoning with"));
     Ok(())
 }
@@ -65,7 +66,7 @@ fn render_live_activity_line_shows_current_phase() -> anyhow::Result<()> {
 fn render_live_panel_keeps_wrapped_tail_visible() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
-        activity: None,
+        progress: None,
         transcript_lines: vec![Line::from(
             "prefix words that wrap across rows before visible TAIL",
         )],
@@ -90,7 +91,7 @@ fn render_live_panel_keeps_wrapped_tail_visible() -> anyhow::Result<()> {
 fn render_live_panel_keeps_bottom_padding_clear() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
-        activity: None,
+        progress: None,
         transcript_lines: vec![Line::from("visible tail")],
     };
     let backend = TestBackend::new(16, 4);
@@ -105,4 +106,13 @@ fn render_live_panel_keeps_bottom_padding_clear() -> anyhow::Result<()> {
         .collect::<String>();
     assert!(bottom_row.trim().is_empty());
     Ok(())
+}
+
+#[test]
+fn live_spinner_frame_uses_visible_block_pulse() {
+    let frame = live_spinner_frame();
+
+    assert!(frame.chars().count() >= 4);
+    assert!(frame.contains('▰'));
+    assert!(frame.contains('▱'));
 }

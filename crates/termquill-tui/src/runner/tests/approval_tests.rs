@@ -1,11 +1,17 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use tempfile::tempdir;
-use termquill_kernel::{Agent, ReasoningEffort, RunEvent, SessionLogEntry, ToolRegistry};
+use termquill_kernel::{
+    Agent, ApprovalHandler, ReasoningEffort, RunEvent, SessionLogEntry, ToolApproval, ToolCall,
+    ToolCategory, ToolPreviewCapability, ToolRegistry, ToolSpec,
+};
 
 use super::{
-    super::{WorkerCommand, WorkerMessage},
+    super::{
+        WorkerCommand, WorkerMessage,
+        approval_bridge::{ApprovalSignal, ChannelApprovalHandler},
+    },
     common::{
         ApprovalFlowProvider, PlannedProvider, WriteTool, spawn_test_worker, test_root_config,
     },
@@ -79,6 +85,33 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
     assert_eq!(envelope["content"], "wrote file");
 
     worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn approval_handler_denies_when_decision_channel_stays_idle() -> Result<()> {
+    let (_tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
+    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_millis(1));
+    let approval = handler.approve_tool_call(
+        &ToolCall {
+            id: "call-1".to_owned(),
+            name: "write_file".to_owned(),
+            args_json: "{}".to_owned(),
+        },
+        &ToolSpec {
+            name: "write_file".to_owned(),
+            description: "write".to_owned(),
+            input_schema: serde_json::json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: termquill_kernel::ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        },
+    )?;
+
+    assert!(matches!(
+        approval,
+        ToolApproval::Deny { reason } if reason.contains("approval timed out")
+    ));
     Ok(())
 }
 

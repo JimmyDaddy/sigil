@@ -125,6 +125,41 @@ fn approval_keys_emit_allow_and_deny_actions() -> Result<()> {
 }
 
 #[test]
+fn approval_enter_chooses_selected_action() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    assert_eq!(app.approval_selected_action, ApprovalAction::Deny);
+    assert_eq!(
+        app.approval_modal_view()
+            .expect("approval modal should exist")
+            .selected_action,
+        ApprovalAction::Deny
+    );
+    let deny = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        deny,
+        Some(AppAction::ApprovalDecision { call_id, approved })
+            if call_id == "call-1" && !approved
+    ));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.approval_selected_action, ApprovalAction::Allow);
+    let allow = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        allow,
+        Some(AppAction::ApprovalDecision { call_id, approved })
+            if call_id == "call-1" && approved
+    ));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "approval:action" && event.detail == "allow")
+    );
+    Ok(())
+}
+
+#[test]
 fn approval_metadata_toggle_collapses_and_expands_preview_header() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;

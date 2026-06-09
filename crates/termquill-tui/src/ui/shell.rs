@@ -7,9 +7,10 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{AppState, PaneFocus};
-use crate::view_model::{LivePanelViewModel, UiViewModel};
+use crate::view_model::{FooterViewModel, LivePanelViewModel, UiViewModel};
 
 use super::{
     approval::render_approval_modal,
@@ -59,34 +60,37 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     let live_inner = inset_rect(main[0], 1, 0);
     let live_transcript_rows = live_inner
         .height
-        .saturating_sub(u16::from(app.live_activity_summary().is_some()))
+        .saturating_sub(if app.live_activity_summary().is_some() {
+            3
+        } else {
+            0
+        })
         .max(1) as usize;
     let live_view_model = LivePanelViewModel::from_app(app, live_transcript_rows);
 
     render_live_panel(frame, main[0], &live_view_model);
     render_input(frame, main[1], &view_model.composer);
-    render_footer_status(frame, main[2], app);
+    render_footer_status(frame, main[2], &view_model.footer);
     render_slash_selector_overlay(frame, main[0], main[1], app);
-    render_info_rail(frame, shell[1], &view_model.info_rail);
+    if sidebar_width > 0 {
+        render_info_rail(frame, shell[1], &view_model.info_rail);
+    }
 
     if app.pending_approval.is_some() {
         render_approval_modal(frame, app);
     }
 
     if app.active_pane == PaneFocus::Composer && !app.has_modal() {
-        let (cursor_col, cursor_row) = view_model.composer.cursor_position;
+        let (cursor_col, _) = view_model.composer.cursor_position;
         if let Some((cursor_x, cursor_y)) = composer_cursor_origin(main[1], &view_model.composer) {
-            frame.set_cursor_position((
-                cursor_x.saturating_add(cursor_col),
-                cursor_y.saturating_add(cursor_row),
-            ));
+            frame.set_cursor_position((cursor_x.saturating_add(cursor_col), cursor_y));
         }
     }
 
     render_modal(frame, app);
 }
 
-fn render_footer_status(frame: &mut Frame, area: Rect, app: &AppState) {
+fn render_footer_status(frame: &mut Frame, area: Rect, footer: &FooterViewModel) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -98,17 +102,67 @@ fn render_footer_status(frame: &mut Frame, area: Rect, app: &AppState) {
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let line = truncate_display_width(&app.footer_status_line(), inner.width as usize);
+    let run_prefix = if footer.is_busy {
+        super::live_panel::live_spinner_frame().to_owned()
+    } else {
+        footer.run_label.clone()
+    };
+    let context_width = footer_context_width(footer, inner.width);
+    let left_width = inner
+        .width
+        .saturating_sub(context_width.saturating_add(u16::from(context_width > 0)));
+    let line = footer_left_line(&run_prefix, &footer.hints, left_width as usize);
+    let left_area = Rect::new(inner.x, inner.y, left_width, inner.height);
     frame.render_widget(
         Paragraph::new(Text::from(vec![Line::from(vec![Span::styled(
             line,
-            Style::default().fg(muted()),
+            Style::default().fg(if footer.is_busy {
+                super::theme::phase_accent(&footer.phase)
+            } else {
+                muted()
+            }),
         )])]))
         .style(Style::default().bg(shell_bg()))
-        .alignment(Alignment::Right)
+        .alignment(Alignment::Left)
         .wrap(Wrap { trim: false }),
-        inner,
+        left_area,
     );
+    if context_width > 0 {
+        let context_area = Rect::new(
+            inner.x + inner.width.saturating_sub(context_width),
+            inner.y,
+            context_width,
+            inner.height,
+        );
+        let context = truncate_display_width(&footer.context_label, context_width as usize);
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![Line::from(vec![Span::styled(
+                context,
+                Style::default().fg(muted()),
+            )])]))
+            .style(Style::default().bg(shell_bg()))
+            .alignment(Alignment::Right)
+            .wrap(Wrap { trim: false }),
+            context_area,
+        );
+    }
+}
+
+fn footer_left_line(run_prefix: &str, hints: &str, width: usize) -> String {
+    let line = if hints.is_empty() {
+        run_prefix.to_owned()
+    } else {
+        format!("{run_prefix}    {hints}")
+    };
+    truncate_display_width(&line, width)
+}
+
+fn footer_context_width(footer: &FooterViewModel, available_width: u16) -> u16 {
+    if footer.context_label.is_empty() || available_width < 24 {
+        return 0;
+    }
+    let preferred = UnicodeWidthStr::width(footer.context_label.as_str()) as u16;
+    preferred.min(available_width / 2).min(42)
 }
 
 pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
