@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::permission::PermissionConfig;
+use crate::permission::{ApprovalMode, PermissionConfig};
 
 /// Root runtime configuration shared by the TUI, CLI, kernel, and adapters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,8 +181,8 @@ impl Default for SessionConfig {
 pub struct AgentConfig {
     pub provider: String,
     pub model: String,
-    #[serde(default = "default_max_turns")]
-    pub max_turns: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
     #[serde(default = "default_timeout_secs")]
     pub tool_timeout_secs: u64,
 }
@@ -288,6 +288,92 @@ pub struct McpServerConfig {
     pub args: Vec<String>,
     #[serde(default = "default_startup_timeout_secs")]
     pub startup_timeout_secs: u64,
+    #[serde(default = "default_mcp_server_required")]
+    pub required: bool,
+    #[serde(default)]
+    pub startup: McpServerStartup,
+    #[serde(default)]
+    pub trust: McpServerTrustPolicy,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            startup_timeout_secs: default_startup_timeout_secs(),
+            required: default_mcp_server_required(),
+            startup: McpServerStartup::default(),
+            trust: McpServerTrustPolicy::default(),
+        }
+    }
+}
+
+/// MCP server startup strategy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerStartup {
+    #[default]
+    Eager,
+    Lazy,
+}
+
+impl McpServerStartup {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Eager => "eager",
+            Self::Lazy => "lazy",
+        }
+    }
+}
+
+/// Trust class used to interpret MCP data egress and approval defaults.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpTrustClass {
+    Official,
+    #[default]
+    SelfHosted,
+    ThirdParty,
+}
+
+impl McpTrustClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Official => "official",
+            Self::SelfHosted => "self_hosted",
+            Self::ThirdParty => "third_party",
+        }
+    }
+}
+
+/// Per-server MCP trust policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct McpServerTrustPolicy {
+    #[serde(default)]
+    pub trust_class: McpTrustClass,
+    #[serde(default)]
+    pub approval_default: ApprovalMode,
+    #[serde(default = "default_mcp_egress_logging")]
+    pub egress_logging: bool,
+    #[serde(default)]
+    pub allow_secrets: bool,
+    #[serde(default)]
+    pub pin_version: bool,
+}
+
+impl Default for McpServerTrustPolicy {
+    fn default() -> Self {
+        Self {
+            trust_class: McpTrustClass::default(),
+            approval_default: ApprovalMode::Ask,
+            egress_logging: default_mcp_egress_logging(),
+            allow_secrets: false,
+            pin_version: false,
+        }
+    }
 }
 
 fn default_workspace_root() -> String {
@@ -298,16 +384,20 @@ fn default_log_dir() -> String {
     ".termquill/sessions".to_owned()
 }
 
-fn default_max_turns() -> usize {
-    8
-}
-
 fn default_timeout_secs() -> u64 {
     30
 }
 
 fn default_startup_timeout_secs() -> u64 {
     10
+}
+
+fn default_mcp_server_required() -> bool {
+    true
+}
+
+fn default_mcp_egress_logging() -> bool {
+    true
 }
 
 fn default_memory_enabled() -> bool {

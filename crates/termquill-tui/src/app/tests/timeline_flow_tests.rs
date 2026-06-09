@@ -44,7 +44,7 @@ fn reasoning_delta_creates_collapsed_thinking_block() -> Result<()> {
             .iter()
             .any(|span| span.content.as_ref().contains("Ctrl-T expand"))
     }));
-    assert!(!collapsed.iter().any(|line| {
+    assert!(collapsed.iter().any(|line| {
         line.spans
             .iter()
             .any(|span| span.content.as_ref().contains("planning step 2"))
@@ -58,6 +58,9 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
 
     app.handle(RunEvent::ReasoningDelta("planning step 1".to_owned()))?;
     app.handle(RunEvent::ReasoningDelta("\nplanning step 2".to_owned()))?;
+    app.handle(RunEvent::ReasoningDelta(
+        "\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
 
     let collapsed = app.transcript_lines(20);
     assert!(collapsed.iter().any(|line| {
@@ -65,10 +68,15 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
             .iter()
             .any(|span| span.content.as_ref().contains("Ctrl-T expand"))
     }));
-    assert!(!collapsed.iter().any(|line| {
+    assert!(collapsed.iter().any(|line| {
         line.spans
             .iter()
             .any(|span| span.content.as_ref().contains("planning step 2"))
+    }));
+    assert!(!collapsed.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("planning step 4"))
     }));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
@@ -82,7 +90,7 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     assert!(expanded.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 2"))
+            .any(|span| span.content.as_ref().contains("planning step 4"))
     }));
     assert_eq!(app.last_notice(), Some("thinking expanded"));
 
@@ -97,7 +105,7 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     assert!(!recollapsed.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 2"))
+            .any(|span| span.content.as_ref().contains("planning step 4"))
     }));
     assert_eq!(app.last_notice(), Some("thinking collapsed"));
     Ok(())
@@ -107,13 +115,12 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
 fn tool_result_is_rendered_as_multiline_json_block() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
 
-    app.handle(RunEvent::ToolResult(termquill_kernel::ToolResult {
-        call_id: "call-1".to_owned(),
-        tool_name: "ls".to_owned(),
-        content: "[\".git\",\"Cargo.toml\"]".to_owned(),
-        is_error: false,
-        metadata: termquill_kernel::ToolResultMeta::default(),
-    }))?;
+    app.handle(RunEvent::ToolResult(termquill_kernel::ToolResult::ok(
+        "call-1".to_owned(),
+        "ls".to_owned(),
+        "[\".git\",\"Cargo.toml\"]".to_owned(),
+        termquill_kernel::ToolResultMeta::default(),
+    )))?;
 
     let entry = app.timeline.last().expect("expected tool timeline entry");
     let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
@@ -126,6 +133,166 @@ fn tool_result_is_rendered_as_multiline_json_block() -> Result<()> {
             .iter()
             .any(|line| line.as_str().is_some_and(|text| text.contains(".git")))
     }));
+    Ok(())
+}
+
+#[test]
+fn tool_result_uses_live_approval_preview_snapshot_for_diff_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-1".to_owned(),
+        approved: true,
+        reason: None,
+    })?;
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-1",
+        "write_file",
+        "wrote note.txt",
+        ToolResultMeta {
+            bytes: Some(14),
+            changed_files: vec!["note.txt".to_owned()],
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    let entry = app.timeline.last().expect("expected tool timeline entry");
+    let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
+    assert_eq!(rendered["tool_name"], "write_file");
+    assert!(
+        rendered["summary"].as_str().is_some_and(|summary| {
+            summary.contains("diff +1 -1") && summary.contains("1 file")
+        })
+    );
+    assert_eq!(rendered["diff"]["files"][0]["path"], "note.txt");
+    assert!(
+        rendered["diff"]["files"][0]["lines"]
+            .as_array()
+            .is_some_and(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.as_str().is_some_and(|text| text == "+gamma"))
+            })
+    );
+
+    Ok(())
+}
+
+#[test]
+fn control_preview_snapshot_event_caches_diff_for_tool_result() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let snapshot = ToolPreviewSnapshot::from_preview(
+        "call-1",
+        "write_file",
+        &sample_approval_preview(),
+        Default::default(),
+        Some("preview-hash".to_owned()),
+    );
+
+    app.handle(RunEvent::Control(ControlEntry::ToolPreviewCaptured(
+        snapshot,
+    )))?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-1",
+        "write_file",
+        "wrote note.txt",
+        ToolResultMeta {
+            bytes: Some(14),
+            changed_files: vec!["note.txt".to_owned()],
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    let entry = app.timeline.last().expect("expected tool timeline entry");
+    let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
+    assert_eq!(rendered["diff"]["summary"], "+1 -1 · 1 file");
+    assert!(app.events.iter().any(|event| {
+        event.label == "control"
+            && event
+                .detail
+                .contains("preview call-1 write_file files=1 +1 -1")
+    }));
+    Ok(())
+}
+
+#[test]
+fn delete_file_tool_result_uses_preview_snapshot_for_diff_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let snapshot = ToolPreviewSnapshot::from_preview(
+        "call-delete-1",
+        "delete_file",
+        &sample_delete_approval_preview(),
+        Default::default(),
+        Some("delete-preview-hash".to_owned()),
+    );
+
+    app.handle(RunEvent::Control(ControlEntry::ToolPreviewCaptured(
+        snapshot,
+    )))?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-delete-1",
+        "delete_file",
+        "deleted /workspace/note.txt",
+        ToolResultMeta {
+            bytes: Some(11),
+            changed_files: vec!["note.txt".to_owned()],
+            details: json!({
+                "action": "delete",
+                "call": {
+                    "summary": "path=note.txt"
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    let entry = app.timeline.last().expect("expected tool timeline entry");
+    let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
+    assert_eq!(rendered["tool_name"], "delete_file");
+    assert!(
+        rendered["summary"].as_str().is_some_and(|summary| {
+            summary.contains("diff +0 -2") && summary.contains("1 file")
+        })
+    );
+    assert_eq!(rendered["metadata"]["details"]["action"], "delete");
+    assert!(
+        rendered["diff"]["files"][0]["lines"]
+            .as_array()
+            .is_some_and(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.as_str().is_some_and(|text| text == "-alpha"))
+                    && lines
+                        .iter()
+                        .any(|line| line.as_str().is_some_and(|text| text == "-beta"))
+            })
+    );
+
+    Ok(())
+}
+
+#[test]
+fn error_tool_result_does_not_render_cached_preview_as_applied_diff() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-1".to_owned(),
+        approved: false,
+        reason: Some("denied".to_owned()),
+    })?;
+
+    app.handle(RunEvent::ToolResult(ToolResult::error(
+        "call-1",
+        "write_file",
+        ToolErrorKind::ApprovalDenied,
+        "tool execution denied by user: denied",
+    )))?;
+
+    let entry = app.timeline.last().expect("expected tool timeline entry");
+    let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
+    assert_eq!(rendered["status"], "error");
+    assert!(rendered.get("diff").is_none());
     Ok(())
 }
 
@@ -214,6 +381,54 @@ fn mouse_scroll_moves_transcript() {
 
     app.handle_mouse_scroll(false);
     assert_eq!(app.timeline_scroll_back, 0);
+}
+
+#[test]
+fn default_open_large_diff_stays_stable_when_new_output_arrives() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.set_terminal_size(120, 18);
+    let snapshot = ToolPreviewSnapshot::from_preview(
+        "call-delete-1",
+        "delete_file",
+        &sample_delete_approval_preview(),
+        Default::default(),
+        Some("delete-preview-hash".to_owned()),
+    );
+    app.handle(RunEvent::Control(ControlEntry::ToolPreviewCaptured(
+        snapshot,
+    )))?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-delete-1",
+        "delete_file",
+        "deleted /workspace/note.txt",
+        ToolResultMeta {
+            bytes: Some(11),
+            changed_files: vec!["note.txt".to_owned()],
+            details: json!({
+                "action": "delete",
+                "call": {
+                    "summary": "path=note.txt"
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+    let first_revision = app.timeline_revision();
+
+    for index in 0..5 {
+        app.push_timeline(TimelineRole::Notice, format!("notice {index}"));
+    }
+    app.handle(RunEvent::TextDelta("stream one".to_owned()))?;
+    app.handle(RunEvent::TextDelta("\nstream two".to_owned()))?;
+
+    let rendered = app.timeline_plain_cache.join("\n");
+    assert_eq!(rendered.matches("--- current/note.txt").count(), 1);
+    assert_eq!(rendered.matches("-alpha").count(), 1);
+    assert_eq!(rendered.matches("path=note.txt").count(), 1);
+    assert!(rendered.contains("stream one"));
+    assert!(rendered.contains("stream two"));
+    assert!(app.timeline_revision() > first_revision);
+    Ok(())
 }
 
 #[test]

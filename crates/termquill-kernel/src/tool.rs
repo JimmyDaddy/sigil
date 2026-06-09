@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// JSON-schema-backed tool contract exposed to model providers and UI approvals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -12,7 +12,156 @@ pub struct ToolSpec {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
-    pub read_only: bool,
+    pub category: ToolCategory,
+    pub access: ToolAccess,
+    pub preview: ToolPreviewCapability,
+}
+
+/// Coarse product category for one provider-neutral tool.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCategory {
+    File,
+    Search,
+    Shell,
+    Mcp,
+    Custom,
+}
+
+impl ToolCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Search => "search",
+            Self::Shell => "shell",
+            Self::Mcp => "mcp",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// Provider-neutral access class used by permission policy and UI risk labels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAccess {
+    Read,
+    Write,
+    Execute,
+    Network,
+}
+
+impl ToolAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Execute => "execute",
+            Self::Network => "network",
+        }
+    }
+}
+
+/// Declares whether a tool can or must provide an approval preview.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPreviewCapability {
+    None,
+    Optional,
+    Required,
+}
+
+/// One resource or capability subject touched by a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolSubject {
+    pub kind: ToolSubjectKind,
+    pub original: String,
+    pub normalized: String,
+    #[serde(default)]
+    pub canonical_path: Option<PathBuf>,
+    pub scope: ToolSubjectScope,
+}
+
+impl ToolSubject {
+    pub fn path(original: impl Into<String>, normalized: impl Into<String>) -> Self {
+        Self::path_with_scope(original, normalized, None, ToolSubjectScope::Workspace)
+    }
+
+    pub fn path_with_scope(
+        original: impl Into<String>,
+        normalized: impl Into<String>,
+        canonical_path: Option<PathBuf>,
+        scope: ToolSubjectScope,
+    ) -> Self {
+        Self {
+            kind: ToolSubjectKind::Path,
+            original: original.into(),
+            normalized: normalized.into(),
+            canonical_path,
+            scope,
+        }
+    }
+
+    pub fn command(command: impl Into<String>, normalized: impl Into<String>) -> Self {
+        Self {
+            kind: ToolSubjectKind::Command,
+            original: command.into(),
+            normalized: normalized.into(),
+            canonical_path: None,
+            scope: ToolSubjectScope::Unknown,
+        }
+    }
+
+    pub fn mcp_tool(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            kind: ToolSubjectKind::McpTool,
+            original: name.clone(),
+            normalized: name,
+            canonical_path: None,
+            scope: ToolSubjectScope::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSubjectKind {
+    Path,
+    Command,
+    NetworkEndpoint,
+    McpTool,
+    Other,
+}
+
+impl ToolSubjectKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::Command => "command",
+            Self::NetworkEndpoint => "network_endpoint",
+            Self::McpTool => "mcp_tool",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSubjectScope {
+    Workspace,
+    External,
+    Unknown,
+}
+
+impl ToolSubjectScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::External => "external",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Execution context shared with tools at runtime.
@@ -29,8 +178,205 @@ pub struct ToolResult {
     pub call_id: String,
     pub tool_name: String,
     pub content: String,
-    pub is_error: bool,
+    pub status: ToolResultStatus,
     pub metadata: ToolResultMeta,
+}
+
+impl ToolResult {
+    pub fn ok(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+        metadata: ToolResultMeta,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            content: content.into(),
+            status: ToolResultStatus::Ok,
+            metadata,
+        }
+    }
+
+    pub fn error(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        kind: ToolErrorKind,
+        message: impl Into<String>,
+    ) -> Self {
+        let message = message.into();
+        Self {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            content: message.clone(),
+            status: ToolResultStatus::Error(ToolError {
+                kind,
+                message,
+                retryable: false,
+                details: Value::Null,
+            }),
+            metadata: ToolResultMeta::default(),
+        }
+    }
+
+    pub fn with_error_details(mut self, retryable: bool, details: Value) -> Self {
+        if let ToolResultStatus::Error(error) = &mut self.status {
+            error.retryable = retryable;
+            error.details = details;
+        }
+        self
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self.status, ToolResultStatus::Error(_))
+    }
+
+    pub fn to_model_content(&self) -> String {
+        let mut envelope = Map::new();
+        match &self.status {
+            ToolResultStatus::Ok => {
+                envelope.insert("status".to_owned(), Value::String("ok".to_owned()));
+                envelope.insert("content".to_owned(), Value::String(self.content.clone()));
+            }
+            ToolResultStatus::Error(error) => {
+                envelope.insert("status".to_owned(), Value::String("error".to_owned()));
+                envelope.insert("content".to_owned(), Value::String(self.content.clone()));
+                envelope.insert("error".to_owned(), error.to_model_value());
+            }
+        }
+        if let Some(meta) = self.metadata.to_model_value() {
+            envelope.insert("meta".to_owned(), meta);
+        }
+        serde_json::to_string(&Value::Object(envelope)).unwrap_or_else(|error| {
+            format!(
+                r#"{{"status":"error","error":{{"kind":"internal","message":"failed to serialize tool result: {error}","retryable":false}}}}"#
+            )
+        })
+    }
+
+    pub fn to_model_message(&self) -> crate::provider::ModelMessage {
+        crate::provider::ModelMessage::tool(self.call_id.clone(), self.to_model_content())
+    }
+
+    pub fn summary(&self) -> ToolResultSummary {
+        let (error_kind, error_message) = match &self.status {
+            ToolResultStatus::Ok => (None, None),
+            ToolResultStatus::Error(error) => (Some(error.kind), Some(error.message.clone())),
+        };
+        ToolResultSummary {
+            call_id: self.call_id.clone(),
+            tool_name: self.tool_name.clone(),
+            is_error: self.is_error(),
+            status_label: if self.is_error() {
+                "error".to_owned()
+            } else {
+                "ok".to_owned()
+            },
+            content_preview: self.content.clone(),
+            changed_files: self.metadata.changed_files.clone(),
+            exit_code: self.metadata.exit_code,
+            truncated: self.metadata.truncated,
+            bytes: self.metadata.bytes.or(self.metadata.returned_bytes),
+            error_kind,
+            error_message,
+        }
+    }
+}
+
+/// Structured success/error status for one tool result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResultStatus {
+    Ok,
+    Error(ToolError),
+}
+
+/// Stable structured tool error returned to provider-visible history and UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolError {
+    pub kind: ToolErrorKind,
+    pub message: String,
+    pub retryable: bool,
+    #[serde(default)]
+    pub details: Value,
+}
+
+impl ToolError {
+    fn to_model_value(&self) -> Value {
+        let mut object = Map::new();
+        object.insert(
+            "kind".to_owned(),
+            Value::String(self.kind.as_str().to_owned()),
+        );
+        object.insert("message".to_owned(), Value::String(self.message.clone()));
+        object.insert("retryable".to_owned(), Value::Bool(self.retryable));
+        if !value_is_empty(&self.details) {
+            object.insert("details".to_owned(), self.details.clone());
+        }
+        Value::Object(object)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolErrorKind {
+    InvalidInput,
+    PermissionDenied,
+    ApprovalRequired,
+    ApprovalDenied,
+    PathOutsideWorkspace,
+    ExternalDirectoryRequired,
+    NotFound,
+    Timeout,
+    Interrupted,
+    ExitStatus,
+    Io,
+    Utf8,
+    Network,
+    Protocol,
+    Unsupported,
+    Internal,
+}
+
+impl ToolErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "invalid_input",
+            Self::PermissionDenied => "permission_denied",
+            Self::ApprovalRequired => "approval_required",
+            Self::ApprovalDenied => "approval_denied",
+            Self::PathOutsideWorkspace => "path_outside_workspace",
+            Self::ExternalDirectoryRequired => "external_directory_required",
+            Self::NotFound => "not_found",
+            Self::Timeout => "timeout",
+            Self::Interrupted => "interrupted",
+            Self::ExitStatus => "exit_status",
+            Self::Io => "io",
+            Self::Utf8 => "utf8",
+            Self::Network => "network",
+            Self::Protocol => "protocol",
+            Self::Unsupported => "unsupported",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+/// Shared summary used by TUI, CLI, and future audit surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolResultSummary {
+    pub call_id: String,
+    pub tool_name: String,
+    pub is_error: bool,
+    pub status_label: String,
+    pub content_preview: String,
+    pub changed_files: Vec<String>,
+    pub exit_code: Option<i32>,
+    pub truncated: bool,
+    pub bytes: Option<u64>,
+    pub error_kind: Option<ToolErrorKind>,
+    pub error_message: Option<String>,
 }
 
 /// Human-readable preview shown before a mutating tool is approved.
@@ -53,14 +399,342 @@ pub struct ToolPreviewFile {
     pub diff: String,
 }
 
+/// Bounded, persisted projection of one tool preview for user-facing UI replay.
+///
+/// This snapshot is control-plane data only. It is designed for TUI/session restore surfaces and
+/// must not be injected into provider-visible tool result content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolPreviewSnapshot {
+    pub call_id: String,
+    pub tool_name: String,
+    pub title: String,
+    pub summary: String,
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    #[serde(default)]
+    pub file_diffs: Vec<ToolPreviewFileSnapshot>,
+    pub original_stats: ToolDiffStats,
+    pub rendered_stats: ToolDiffStats,
+    pub original_line_count: usize,
+    pub rendered_line_count: usize,
+    pub original_byte_count: usize,
+    pub rendered_byte_count: usize,
+    pub truncated: bool,
+    #[serde(default)]
+    pub original_preview_hash: Option<String>,
+    pub budget: ToolDiffBudget,
+}
+
+impl ToolPreviewSnapshot {
+    /// Builds a bounded snapshot from an approval preview.
+    ///
+    /// The resulting snapshot keeps enough unified diff context for UI rendering while recording
+    /// the original stats needed to show truncation honestly.
+    pub fn from_preview(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        preview: &ToolPreview,
+        budget: ToolDiffBudget,
+        original_preview_hash: Option<String>,
+    ) -> Self {
+        let mut rendered_files = Vec::new();
+        let mut original_stats = ToolDiffStats::default();
+        let mut rendered_stats = ToolDiffStats::default();
+        let mut original_line_count = 0usize;
+        let mut rendered_line_count = 0usize;
+        let mut original_byte_count = 0usize;
+        let mut rendered_byte_count = 0usize;
+        let mut truncated = preview.file_diffs.len() > budget.max_files;
+
+        for file in preview.file_diffs.iter().take(budget.max_files) {
+            let file_original_line_count = diff_line_count(&file.diff);
+            let file_original_byte_count = file.diff.len();
+            let file_original_stats = ToolDiffStats::from_unified_diff(&file.diff);
+            original_stats += file_original_stats;
+            original_line_count += file_original_line_count;
+            original_byte_count += file_original_byte_count;
+
+            let remaining_lines = budget.max_lines_total.saturating_sub(rendered_line_count);
+            let remaining_bytes = budget.max_bytes_total.saturating_sub(rendered_byte_count);
+            let line_budget = budget.max_lines_per_file.min(remaining_lines);
+            let byte_budget = budget.max_bytes_per_file.min(remaining_bytes);
+            let bounded = bounded_diff_text(&file.diff, line_budget, byte_budget);
+            let file_rendered_stats = ToolDiffStats::from_unified_diff(&bounded.diff);
+            let file_rendered_line_count = diff_line_count(&bounded.diff);
+            let file_rendered_byte_count = bounded.diff.len();
+
+            truncated |= bounded.truncated;
+            rendered_stats += file_rendered_stats;
+            rendered_line_count += file_rendered_line_count;
+            rendered_byte_count += file_rendered_byte_count;
+
+            rendered_files.push(ToolPreviewFileSnapshot {
+                path: file.path.clone(),
+                diff: bounded.diff,
+                original_stats: file_original_stats,
+                rendered_stats: file_rendered_stats,
+                original_line_count: file_original_line_count,
+                rendered_line_count: file_rendered_line_count,
+                original_byte_count: file_original_byte_count,
+                rendered_byte_count: file_rendered_byte_count,
+                truncated: bounded.truncated,
+            });
+        }
+
+        for file in preview.file_diffs.iter().skip(budget.max_files) {
+            original_stats += ToolDiffStats::from_unified_diff(&file.diff);
+            original_line_count += diff_line_count(&file.diff);
+            original_byte_count += file.diff.len();
+        }
+
+        Self {
+            call_id: call_id.into(),
+            tool_name: tool_name.into(),
+            title: preview.title.clone(),
+            summary: preview.summary.clone(),
+            changed_files: preview.changed_files.clone(),
+            file_diffs: rendered_files,
+            original_stats,
+            rendered_stats,
+            original_line_count,
+            rendered_line_count,
+            original_byte_count,
+            rendered_byte_count,
+            truncated,
+            original_preview_hash,
+            budget,
+        }
+    }
+}
+
+/// Per-file bounded diff captured for one tool preview.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolPreviewFileSnapshot {
+    pub path: String,
+    pub diff: String,
+    pub original_stats: ToolDiffStats,
+    pub rendered_stats: ToolDiffStats,
+    pub original_line_count: usize,
+    pub rendered_line_count: usize,
+    pub original_byte_count: usize,
+    pub rendered_byte_count: usize,
+    pub truncated: bool,
+}
+
+/// Unified diff statistics used by approval and historical tool-card surfaces.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolDiffStats {
+    pub added: usize,
+    pub removed: usize,
+    pub hunks: usize,
+}
+
+impl ToolDiffStats {
+    /// Counts added, removed, and hunk header lines in unified diff text.
+    pub fn from_unified_diff(diff: &str) -> Self {
+        let mut stats = Self::default();
+        for line in diff.lines() {
+            if line.starts_with("@@") {
+                stats.hunks += 1;
+            } else if line.starts_with('+') && !line.starts_with("+++") {
+                stats.added += 1;
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                stats.removed += 1;
+            }
+        }
+        stats
+    }
+}
+
+impl std::ops::AddAssign for ToolDiffStats {
+    fn add_assign(&mut self, rhs: Self) {
+        self.added += rhs.added;
+        self.removed += rhs.removed;
+        self.hunks += rhs.hunks;
+    }
+}
+
+/// Budget used when persisting tool preview diffs into the append-only control log.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolDiffBudget {
+    pub max_files: usize,
+    pub max_lines_total: usize,
+    pub max_lines_per_file: usize,
+    pub max_bytes_total: usize,
+    pub max_bytes_per_file: usize,
+}
+
+impl Default for ToolDiffBudget {
+    fn default() -> Self {
+        Self {
+            max_files: 12,
+            max_lines_total: 320,
+            max_lines_per_file: 160,
+            max_bytes_total: 96 * 1024,
+            max_bytes_per_file: 48 * 1024,
+        }
+    }
+}
+
+struct BoundedDiffText {
+    diff: String,
+    truncated: bool,
+}
+
+fn bounded_diff_text(diff: &str, max_lines: usize, max_bytes: usize) -> BoundedDiffText {
+    let original_line_count = diff_line_count(diff);
+    if max_lines == 0 || max_bytes == 0 {
+        return BoundedDiffText {
+            diff: String::new(),
+            truncated: !diff.is_empty(),
+        };
+    }
+
+    let mut rendered = String::new();
+    let mut rendered_lines = 0usize;
+    for line in diff.lines().take(max_lines) {
+        let separator_bytes = usize::from(!rendered.is_empty());
+        if rendered.len() + separator_bytes + line.len() > max_bytes {
+            break;
+        }
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str(line);
+        rendered_lines += 1;
+    }
+
+    BoundedDiffText {
+        truncated: rendered_lines < original_line_count || rendered.len() < diff.len(),
+        diff: rendered,
+    }
+}
+
+fn diff_line_count(diff: &str) -> usize {
+    if diff.is_empty() {
+        0
+    } else {
+        diff.lines().count()
+    }
+}
+
 /// Additional structured metadata emitted by a tool execution.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ToolResultMeta {
+    pub duration_ms: Option<u64>,
     pub exit_code: Option<i32>,
-    pub changed_files: Vec<String>,
-    pub truncated: bool,
+    pub stdout_bytes: Option<u64>,
+    pub stderr_bytes: Option<u64>,
     pub bytes: Option<u64>,
+    pub truncated: bool,
+    pub omitted_bytes: Option<u64>,
+    pub limit_bytes: Option<u64>,
+    pub limit_lines: Option<u64>,
+    pub returned_bytes: Option<u64>,
+    pub returned_lines: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub total_lines: Option<u64>,
+    pub returned_matches: Option<u64>,
+    pub total_matches: Option<u64>,
+    pub returned_entries: Option<u64>,
+    pub total_entries: Option<u64>,
+    pub changed_files: Vec<String>,
+    #[serde(default)]
+    pub details: Value,
+}
+
+impl Default for ToolResultMeta {
+    fn default() -> Self {
+        Self {
+            duration_ms: None,
+            exit_code: None,
+            stdout_bytes: None,
+            stderr_bytes: None,
+            bytes: None,
+            truncated: false,
+            omitted_bytes: None,
+            limit_bytes: None,
+            limit_lines: None,
+            returned_bytes: None,
+            returned_lines: None,
+            total_bytes: None,
+            total_lines: None,
+            returned_matches: None,
+            total_matches: None,
+            returned_entries: None,
+            total_entries: None,
+            changed_files: Vec::new(),
+            details: Value::Null,
+        }
+    }
+}
+
+impl ToolResultMeta {
+    fn to_model_value(&self) -> Option<Value> {
+        let mut object = Map::new();
+        insert_u64(&mut object, "duration_ms", self.duration_ms);
+        insert_i32(&mut object, "exit_code", self.exit_code);
+        insert_u64(&mut object, "stdout_bytes", self.stdout_bytes);
+        insert_u64(&mut object, "stderr_bytes", self.stderr_bytes);
+        insert_u64(&mut object, "bytes", self.bytes);
+        if self.truncated {
+            object.insert("truncated".to_owned(), Value::Bool(true));
+        }
+        insert_u64(&mut object, "omitted_bytes", self.omitted_bytes);
+        insert_u64(&mut object, "limit_bytes", self.limit_bytes);
+        insert_u64(&mut object, "limit_lines", self.limit_lines);
+        insert_u64(&mut object, "returned_bytes", self.returned_bytes);
+        insert_u64(&mut object, "returned_lines", self.returned_lines);
+        insert_u64(&mut object, "total_bytes", self.total_bytes);
+        insert_u64(&mut object, "total_lines", self.total_lines);
+        insert_u64(&mut object, "returned_matches", self.returned_matches);
+        insert_u64(&mut object, "total_matches", self.total_matches);
+        insert_u64(&mut object, "returned_entries", self.returned_entries);
+        insert_u64(&mut object, "total_entries", self.total_entries);
+        if !self.changed_files.is_empty() {
+            object.insert(
+                "changed_files".to_owned(),
+                Value::Array(
+                    self.changed_files
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        if !value_is_empty(&self.details) {
+            object.insert("details".to_owned(), self.details.clone());
+        }
+        (!object.is_empty()).then_some(Value::Object(object))
+    }
+}
+
+fn insert_i32(object: &mut Map<String, Value>, key: &str, value: Option<i32>) {
+    if let Some(value) = value {
+        object.insert(key.to_owned(), Value::Number(value.into()));
+    }
+}
+
+fn insert_u64(object: &mut Map<String, Value>, key: &str, value: Option<u64>) {
+    if let Some(value) = value {
+        object.insert(key.to_owned(), Value::Number(value.into()));
+    }
+}
+
+fn value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(false) => true,
+        Value::Array(values) => values.is_empty(),
+        Value::Object(values) => values.is_empty(),
+        _ => false,
+    }
 }
 
 #[async_trait]
@@ -68,14 +742,25 @@ pub trait Tool: Send + Sync {
     /// Returns the tool's stable contract and JSON Schema surface.
     fn spec(&self) -> ToolSpec;
 
-    /// Returns the stable permission subject for one tool call, when the tool naturally targets
-    /// one file- or path-like resource.
+    /// Returns stable permission subjects for one tool call.
     ///
     /// # Errors
     ///
-    /// Returns an error when the arguments are invalid and no reliable subject can be derived.
-    fn permission_subject(&self, _args: &Value) -> Result<Option<String>> {
-        Ok(None)
+    /// Returns an error when the arguments are invalid and no reliable subjects can be derived.
+    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
+        Ok(Vec::new())
+    }
+
+    /// Returns the access class used for permission policy on this concrete call.
+    ///
+    /// Most tools use their static [`ToolSpec::access`]. Shell-like tools may conservatively
+    /// downgrade a simple read-only command to `Read` while keeping unknown syntax as `Execute`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arguments are invalid and no reliable access class can be derived.
+    fn permission_access(&self, _ctx: &ToolContext, _args: &Value) -> Result<ToolAccess> {
+        Ok(self.spec().access)
     }
 
     /// Produces an optional approval preview for the given tool call.
@@ -92,7 +777,8 @@ pub trait Tool: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error when arguments are invalid or the underlying tool action fails.
+    /// Returns an error when arguments are invalid or the underlying tool action fails before
+    /// it can be expressed as a structured [`ToolResult`].
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult>;
 }
 
@@ -162,18 +848,46 @@ impl ToolRegistry {
         tool.preview(ctx, args).await
     }
 
-    /// Returns the stable permission subject for a tool call by name.
+    /// Returns stable permission subjects for a tool call by name.
     ///
     /// # Errors
     ///
     /// Returns an error when the tool is unknown or the JSON arguments are invalid.
-    pub fn permission_subject(&self, call: &crate::provider::ToolCall) -> Result<Option<String>> {
+    pub fn permission_subjects(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Vec<ToolSubject>> {
         let tool = self
             .tools
             .get(&call.name)
             .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
-        tool.permission_subject(&args)
+        tool.permission_subjects(ctx, &args)
+    }
+
+    /// Returns the dynamic permission access class for one concrete tool call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is unknown, the JSON args are invalid, or the tool cannot
+    /// derive a reliable access class for the call.
+    pub fn permission_access(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<ToolAccess> {
+        let tool = self
+            .tools
+            .get(&call.name)
+            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        tool.permission_access(ctx, &args)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/tool_tests.rs"]
+mod tests;

@@ -55,18 +55,34 @@ impl AppState {
 
     pub(super) fn push_timeline(&mut self, role: TimelineRole, text: impl Into<String>) {
         let is_tool = role == TimelineRole::Tool;
+        let previous_selected_tool = self.selected_tool_timeline_entry;
         self.timeline.push(TimelineEntry {
             role,
             text: text.into(),
         });
+        let mut trimmed_front = false;
         if self.timeline.len() > 400 {
             self.timeline.remove(0);
             self.reindex_timeline_state_after_front_trim();
+            trimmed_front = true;
         }
         if is_tool {
             self.selected_tool_timeline_entry = self.timeline.len().checked_sub(1);
         }
-        self.rebuild_timeline_render_cache();
+        if trimmed_front {
+            self.rebuild_timeline_render_cache();
+            return;
+        }
+        if is_tool
+            && let Some(previous_index) = previous_selected_tool
+            && Some(previous_index) != self.selected_tool_timeline_entry
+            && previous_index < self.timeline.len().saturating_sub(1)
+        {
+            self.rerender_timeline_entry(previous_index);
+        }
+        // Default-open file diffs can be large, so new output should not force
+        // every historical tool card through JSON parsing and diff rendering.
+        self.append_timeline_render_cache_entry(self.timeline.len().saturating_sub(1));
     }
 
     fn reindex_timeline_state_after_front_trim(&mut self) {
@@ -81,6 +97,11 @@ impl AppState {
             .and_then(|index| index.checked_sub(1));
         self.expanded_tool_timeline_entries = self
             .expanded_tool_timeline_entries
+            .iter()
+            .filter_map(|index| index.checked_sub(1))
+            .collect();
+        self.collapsed_tool_timeline_entries = self
+            .collapsed_tool_timeline_entries
             .iter()
             .filter_map(|index| index.checked_sub(1))
             .collect();
@@ -191,6 +212,31 @@ impl AppState {
             }
         }
         self.rebuild_timeline_prefix_hashes_from(existing_range.start);
+        self.trim_trailing_timeline_blanks();
+        self.timeline_revision = self.timeline_revision.saturating_add(1);
+    }
+
+    fn append_timeline_render_cache_entry(&mut self, index: usize) {
+        if index != self.timeline_render_ranges.len() {
+            self.rebuild_timeline_render_cache();
+            return;
+        }
+        let Some(entry) = self.timeline.get(index) else {
+            self.rebuild_timeline_render_cache();
+            return;
+        };
+        let options = self.timeline_render_options();
+        let new_lines = crate::ui::render_timeline_entry_lines_with_options(entry, &options, index);
+        if !new_lines.is_empty() && !self.timeline_render_cache.is_empty() {
+            self.extend_timeline_render_buffers(vec![Line::raw(String::new())]);
+            if let Some(range) = self.timeline_render_ranges.last_mut() {
+                range.end = range.end.saturating_add(1);
+            }
+        }
+        let start = self.timeline_render_cache.len();
+        self.extend_timeline_render_buffers(new_lines);
+        let end = self.timeline_render_cache.len();
+        self.timeline_render_ranges.push(start..end);
         self.trim_trailing_timeline_blanks();
         self.timeline_revision = self.timeline_revision.saturating_add(1);
     }
@@ -381,6 +427,7 @@ impl AppState {
             expand_thinking_blocks: matches!(self.thinking_block_mode, ThinkingBlockMode::Expanded),
             selected_tool_entry: self.selected_tool_timeline_entry,
             expanded_tool_entries: self.expanded_tool_timeline_entries.clone(),
+            collapsed_tool_entries: self.collapsed_tool_timeline_entries.clone(),
             max_content_width: self.timeline_content_width(),
         }
     }

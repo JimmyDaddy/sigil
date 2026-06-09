@@ -82,8 +82,13 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
 
-    let registry = termquill_runtime::build_tool_registry(&root_config).await?;
     let provider = termquill_runtime::build_provider(&root_config)?;
+    let registry = termquill_runtime::build_tool_registry(
+        &root_config,
+        &provider.capabilities(),
+        workspace_root.clone(),
+    )
+    .await?;
     let agent = Agent::new(provider, registry);
 
     let session_store = JsonlSessionStore::new(default_session_path(
@@ -216,11 +221,20 @@ impl EventHandler for StdoutEventHandler {
             RunEvent::ToolApprovalRequested {
                 call,
                 spec,
+                subjects,
                 preview,
             } => {
                 eprintln!(
-                    "[tool:approval] {} ({}) read_only={}",
-                    call.name, call.id, spec.read_only
+                    "[tool:approval] {} ({}) {} {} subjects={}",
+                    call.name,
+                    call.id,
+                    spec.category.as_str(),
+                    spec.access.as_str(),
+                    subjects
+                        .iter()
+                        .map(|subject| subject.normalized.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 );
                 if let Some(preview) = preview {
                     eprintln!("[tool:preview] {}", preview.summary);
@@ -243,7 +257,9 @@ impl EventHandler for StdoutEventHandler {
             RunEvent::ToolResult(result) => {
                 eprintln!(
                     "[tool:result] {} error={} {}",
-                    result.tool_name, result.is_error, result.content
+                    result.tool_name,
+                    result.is_error(),
+                    result.content
                 );
             }
             RunEvent::Usage(usage) => {

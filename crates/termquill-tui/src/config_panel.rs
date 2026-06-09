@@ -73,7 +73,7 @@ pub(crate) enum ConfigField {
     ProviderApiKey,
     ProviderBaseUrl,
     ProviderFimModel,
-    PermissionsWriteMode,
+    PermissionsDefaultMode,
     MemoryEnabled,
     CompactionEnabled,
     CompactionSoftThresholdRatio,
@@ -93,7 +93,7 @@ impl ConfigField {
         Self::ProviderBaseUrl,
         Self::ProviderFimModel,
     ];
-    const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionsWriteMode];
+    const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionsDefaultMode];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
     const COMPACTION_FIELDS: [Self; 5] = [
         Self::CompactionEnabled,
@@ -125,7 +125,7 @@ impl ConfigField {
             Self::ProviderApiKey => "api_key",
             Self::ProviderBaseUrl => "base_url",
             Self::ProviderFimModel => "fim_model",
-            Self::PermissionsWriteMode => "write_mode",
+            Self::PermissionsDefaultMode => "default_mode",
             Self::MemoryEnabled => "enabled",
             Self::CompactionEnabled => "enabled",
             Self::CompactionSoftThresholdRatio => "soft_threshold_ratio",
@@ -160,7 +160,7 @@ impl ConfigField {
         match self {
             Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
             Self::ProviderApiKey => "Enter input",
-            Self::PermissionsWriteMode => "Enter cycle",
+            Self::PermissionsDefaultMode => "Enter cycle",
             Self::MemoryEnabled | Self::CompactionEnabled => "Enter toggle",
             _ if self.accepts_text_input() => "Enter input",
             _ => "",
@@ -277,6 +277,7 @@ impl McpServerDraft {
                 .map(ToOwned::to_owned)
                 .collect(),
             startup_timeout_secs,
+            ..McpServerConfig::default()
         })
     }
 }
@@ -293,7 +294,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) provider_strict_tools_mode: StrictToolsMode,
     pub(crate) provider_fim_model: String,
     pub(crate) provider_request_timeout_secs: String,
-    pub(crate) permission_write_mode: ApprovalMode,
+    pub(crate) permission_default_mode: ApprovalMode,
     pub(crate) memory_enabled: bool,
     pub(crate) compaction_enabled: bool,
     pub(crate) compaction_soft_threshold_ratio: String,
@@ -318,7 +319,7 @@ impl ConfigDraft {
             provider_strict_tools_mode: provider.strict_tools_mode,
             provider_fim_model: provider.fim_model,
             provider_request_timeout_secs: provider.request_timeout_secs.to_string(),
-            permission_write_mode: root_config.permission.write_mode,
+            permission_default_mode: root_config.permission.default_mode,
             memory_enabled: root_config.memory.enabled,
             compaction_enabled: root_config.compaction.enabled,
             compaction_soft_threshold_ratio: root_config
@@ -422,7 +423,7 @@ impl ConfigDraft {
 
         let mut root_config = self.base_root_config.clone();
         root_config.agent.model = model.to_owned();
-        root_config.permission.write_mode = self.permission_write_mode;
+        root_config.permission.default_mode = self.permission_default_mode;
         root_config.memory.enabled = self.memory_enabled;
         root_config.compaction.enabled = self.compaction_enabled;
         root_config.compaction.soft_threshold_ratio = soft_threshold_ratio;
@@ -664,7 +665,7 @@ impl ConfigState {
             ConfigField::McpStartupTimeoutSecs => self
                 .selected_mcp_server()
                 .map(|server| server.startup_timeout_secs.as_str()),
-            ConfigField::PermissionsWriteMode
+            ConfigField::PermissionsDefaultMode
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled => None,
         }
@@ -698,7 +699,7 @@ impl ConfigState {
             ConfigField::McpStartupTimeoutSecs => self
                 .selected_mcp_server_mut()
                 .map(|server| &mut server.startup_timeout_secs),
-            ConfigField::PermissionsWriteMode
+            ConfigField::PermissionsDefaultMode
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled => None,
         }
@@ -707,8 +708,8 @@ impl ConfigState {
     pub(crate) fn display_value(&self, field: ConfigField) -> String {
         let text_value = match field {
             ConfigField::ProviderApiKey => return mask_secret(&self.draft.provider_api_key),
-            ConfigField::PermissionsWriteMode => {
-                return self.draft.permission_write_mode.as_str().to_owned();
+            ConfigField::PermissionsDefaultMode => {
+                return self.draft.permission_default_mode.as_str().to_owned();
             }
             ConfigField::MemoryEnabled => {
                 return bool_label(self.draft.memory_enabled).to_owned();
@@ -804,7 +805,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::McpCommand
         | ConfigField::McpArgsCsv => !character.is_control(),
         ConfigField::ProviderApiKey
-        | ConfigField::PermissionsWriteMode
+        | ConfigField::PermissionsDefaultMode
         | ConfigField::MemoryEnabled
         | ConfigField::CompactionEnabled => false,
     }

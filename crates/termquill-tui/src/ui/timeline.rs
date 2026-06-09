@@ -25,12 +25,15 @@ use super::{
     tool_card::render_tool_entry_lines,
 };
 
+const COLLAPSED_THINKING_PREVIEW_LINES: usize = 3;
+
 #[derive(Clone, Default)]
 pub(crate) struct TimelineRenderOptions {
     pub expand_tool_previews: bool,
     pub expand_thinking_blocks: bool,
     pub selected_tool_entry: Option<usize>,
     pub expanded_tool_entries: BTreeSet<usize>,
+    pub collapsed_tool_entries: BTreeSet<usize>,
     pub max_content_width: usize,
 }
 
@@ -189,6 +192,9 @@ fn render_thinking_entry_lines(
     let body_style = Style::default()
         .fg(Color::Rgb(170, 166, 152))
         .add_modifier(Modifier::ITALIC);
+    let total_lines = thinking_line_count(&entry.text);
+    let preview_lines = thinking_preview_lines(&entry.text, COLLAPSED_THINKING_PREVIEW_LINES);
+    let preview_count = preview_lines.len();
     let mut lines = vec![Line::from(vec![
         Span::styled(
             "thought",
@@ -199,15 +205,13 @@ fn render_thinking_entry_lines(
         Span::raw("  "),
         Span::styled(
             if expanded {
-                format!(
-                    "{} lines · Ctrl-T collapse",
-                    thinking_line_count(&entry.text)
-                )
+                format!("{total_lines} lines · Ctrl-T collapse")
+            } else if preview_count == 0 {
+                format!("{total_lines} lines · Ctrl-T expand")
             } else {
                 format!(
-                    "{} · {} lines · Ctrl-T expand",
-                    summarize_thinking_text(&entry.text, 64),
-                    thinking_line_count(&entry.text)
+                    "showing first {}/{} lines · Ctrl-T expand",
+                    preview_count, total_lines
                 )
             },
             Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
@@ -217,6 +221,24 @@ fn render_thinking_entry_lines(
         return lines;
     }
     if !expanded {
+        lines.extend(render_markdown_timeline_lines(
+            accent,
+            body_style,
+            &preview_lines.join("\n"),
+            MarkdownRenderOptions::timeline(max_content_width),
+        ));
+        let hidden_lines = total_lines.saturating_sub(preview_count);
+        if hidden_lines > 0 {
+            lines.push(timeline_content_line(
+                accent,
+                vec![Span::styled(
+                    format!("… {hidden_lines} more lines hidden"),
+                    Style::default()
+                        .fg(dim())
+                        .add_modifier(Modifier::ITALIC | Modifier::BOLD),
+                )],
+            ));
+        }
         return lines;
     }
     lines.extend(render_markdown_timeline_lines(
@@ -269,19 +291,14 @@ fn thinking_line_count(text: &str) -> usize {
         .max(1)
 }
 
-fn summarize_thinking_text(text: &str, max_chars: usize) -> String {
-    let first = text
-        .lines()
-        .find_map(|line| {
+fn thinking_preview_lines(text: &str, max_lines: usize) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
             let trimmed = line.trim();
-            (!trimmed.is_empty()).then_some(trimmed)
+            (!trimmed.is_empty()).then_some(trimmed.to_owned())
         })
-        .unwrap_or("thinking hidden");
-    if first.chars().count() <= max_chars {
-        return first.to_owned();
-    }
-    let truncated = first.chars().take(max_chars).collect::<String>();
-    format!("{truncated}...")
+        .take(max_lines)
+        .collect()
 }
 
 fn render_notice_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {

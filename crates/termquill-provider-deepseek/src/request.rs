@@ -11,12 +11,14 @@ use crate::{
     fim::DeepSeekFimCompletionRequest,
     models::{DeepSeekChatCompletionRequest, DeepSeekCompletionRequest},
     prefix::DeepSeekPrefixCompletionRequest,
+    tools::ToolSchemaDiagnostic,
     tools::prepare_tools,
 };
 
 pub struct PreparedChatRequest {
     pub endpoint: DeepSeekEndpointClass,
     pub body: DeepSeekChatCompletionRequest,
+    pub tool_diagnostics: Vec<ToolSchemaDiagnostic>,
 }
 
 pub fn build_chat_request(
@@ -53,6 +55,7 @@ pub fn build_chat_request(
                 .map(reasoning_effort_to_string),
             user_id,
         },
+        tool_diagnostics: prepared_tools.diagnostics,
     })
 }
 

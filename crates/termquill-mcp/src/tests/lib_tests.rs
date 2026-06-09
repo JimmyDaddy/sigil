@@ -1,7 +1,10 @@
 use std::fs;
 
 use anyhow::Result;
-use termquill_kernel::{ToolContext, ToolRegistry};
+use termquill_kernel::{
+    McpServerConfig, McpServerStartup, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
+    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+};
 
 use super::register_mcp_tools;
 
@@ -58,14 +61,38 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[termquill_kernel::McpServerConfig {
+        &[McpServerConfig {
             name: "fake".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
             startup_timeout_secs: 5,
+            ..McpServerConfig::default()
         }],
     )
     .await?;
+    let spec = registry
+        .spec_for("mcp__fake__echo")
+        .expect("expected provider-visible MCP tool");
+    assert_eq!(spec.category, ToolCategory::Mcp);
+    assert_eq!(spec.access, ToolAccess::Network);
+    assert!(registry.spec_for("echo").is_none());
+
+    let subjects = registry.permission_subjects(
+        &ToolContext {
+            workspace_root: temp.path().to_path_buf(),
+            timeout_secs: 5,
+        },
+        &termquill_kernel::ToolCall {
+            id: "call-subject".to_owned(),
+            name: "mcp__fake__echo".to_owned(),
+            args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
+        },
+    )?;
+    assert_eq!(subjects.len(), 1);
+    assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
+    assert_eq!(subjects[0].normalized, "mcp__fake__echo");
+    assert_eq!(subjects[0].scope, ToolSubjectScope::Unknown);
+
     let result = registry
         .execute(
             termquill_kernel::ToolContext {
@@ -74,7 +101,7 @@ while True:
             },
             termquill_kernel::ToolCall {
                 id: "call-1".to_owned(),
-                name: "echo".to_owned(),
+                name: "mcp__fake__echo".to_owned(),
                 args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
             },
         )
@@ -116,17 +143,150 @@ if message and message.get("method") == "initialize":
     let mut registry = ToolRegistry::new();
     let error = register_mcp_tools(
         &mut registry,
-        &[termquill_kernel::McpServerConfig {
+        &[McpServerConfig {
             name: "slow".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
             startup_timeout_secs: 1,
+            ..McpServerConfig::default()
         }],
     )
     .await
     .expect_err("expected MCP initialize timeout");
 
-    assert!(error.to_string().contains("MCP initialize timed out"));
+    assert!(
+        error
+            .to_string()
+            .contains("MCP server slow initialize timed out")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn required_lazy_mcp_server_errors_until_lazy_activation_exists() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    let error = register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "required-lazy".to_owned(),
+            command: "/definitely/missing/termquill-mcp-server".to_owned(),
+            startup: McpServerStartup::Lazy,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await
+    .expect_err("required lazy server should not be silently skipped");
+
+    assert!(
+        error.to_string().contains(
+            "MCP server required-lazy is required but lazy startup is not implemented yet"
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn lazy_mcp_servers_are_not_started_or_registered() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "lazy".to_owned(),
+            command: "/definitely/missing/termquill-mcp-server".to_owned(),
+            startup: McpServerStartup::Lazy,
+            required: false,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    assert!(registry.specs().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn optional_eager_mcp_server_start_failure_is_skipped() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "optional".to_owned(),
+            command: "/definitely/missing/termquill-mcp-server".to_owned(),
+            required: false,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    assert!(registry.specs().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn optional_eager_mcp_server_start_failure_does_not_block_other_servers() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("healthy_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[
+            McpServerConfig {
+                name: "optional".to_owned(),
+                command: "/definitely/missing/termquill-mcp-server".to_owned(),
+                required: false,
+                ..McpServerConfig::default()
+            },
+            McpServerConfig {
+                name: "healthy".to_owned(),
+                command: "python3".to_owned(),
+                args: vec![script.to_string_lossy().to_string()],
+                startup_timeout_secs: 5,
+                ..McpServerConfig::default()
+            },
+        ],
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__healthy__echo").is_some());
     Ok(())
 }
 
@@ -176,11 +336,12 @@ while True:
     let mut registry = ToolRegistry::new();
     let error = register_mcp_tools(
         &mut registry,
-        &[termquill_kernel::McpServerConfig {
+        &[McpServerConfig {
             name: "invalid-tools-list".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
             startup_timeout_secs: 5,
+            ..McpServerConfig::default()
         }],
     )
     .await
@@ -242,16 +403,17 @@ while True:
     let mut registry = ToolRegistry::new();
     register_mcp_tools(
         &mut registry,
-        &[termquill_kernel::McpServerConfig {
+        &[McpServerConfig {
             name: "error-call".to_owned(),
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
             startup_timeout_secs: 5,
+            ..McpServerConfig::default()
         }],
     )
     .await?;
 
-    let error = registry
+    let result = registry
         .execute(
             ToolContext {
                 workspace_root: temp.path().to_path_buf(),
@@ -259,13 +421,399 @@ while True:
             },
             termquill_kernel::ToolCall {
                 id: "call-1".to_owned(),
-                name: "echo".to_owned(),
+                name: "mcp__error_call__echo".to_owned(),
                 args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
             },
         )
-        .await
-        .expect_err("expected remote tools/call error");
+        .await?;
 
-    assert!(error.to_string().contains("MCP request tools/call failed"));
+    let ToolResultStatus::Error(error) = result.status else {
+        panic!("expected remote tools/call error result");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Protocol);
+    assert!(error.message.contains("remote boom"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_tool_execute_falls_back_for_non_text_content() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("non_text_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"image","description":"Image","inputSchema":{"type":"object"}}]}})
+    elif method == "tools/call":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"image","data":"abc","mimeType":"image/png"}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "non-text".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            termquill_kernel::ToolCall {
+                id: "call-1".to_owned(),
+                name: "mcp__non_text__image".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+
+    assert!(result.content.contains(r#""type": "image""#));
+    assert!(result.content.contains(r#""mimeType": "image/png""#));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_client_answers_roots_list_while_waiting_for_tools_list() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("termquill mcp root");
+    fs::create_dir_all(&workspace_root)?;
+    let script = temp.path().join("roots_request_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        capabilities = message.get("params", {}).get("capabilities", {})
+        if "roots" not in capabilities:
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32602,"message":"missing roots capability"}})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"p1","progress":1}})
+        write_message({"jsonrpc":"2.0","id":"server-roots-1","method":"roots/list","params":{}})
+        roots_response = read_message()
+        roots = roots_response.get("result", {}).get("roots", [])
+        uri = roots[0].get("uri", "") if roots else ""
+        if roots_response.get("id") != "server-roots-1" or not uri.startswith("file://") or "termquill%20mcp%20root" not in uri:
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"invalid roots response"}})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    super::register_mcp_tools_with_name_limit_and_roots(
+        &mut registry,
+        &[McpServerConfig {
+            name: "roots".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+        64,
+        vec![workspace_root],
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__roots__echo").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_client_rejects_elicitation_requests_without_hanging() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("elicitation_request_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":"server-elicitation-1","method":"elicitation/create","params":{"message":"Need input"}})
+        elicitation_response = read_message()
+        error = elicitation_response.get("error", {})
+        if elicitation_response.get("id") != "server-elicitation-1" or error.get("code") != -32601:
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"invalid elicitation response"}})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "elicitation".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__elicitation__echo").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_provider_visible_names_are_sanitized_truncated_and_unique() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("many_tools_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+tools = [
+    {"name":"alpha tool","description":"Alpha","inputSchema":{"type":"object"}},
+    {"name":"alpha-tool","description":"Alpha collision","inputSchema":{"type":"object"}},
+    {"name":"very-long-tool-name-" + "x" * 80,"description":"Long","inputSchema":{"type":"object"}}
+]
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":tools}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    super::register_mcp_tools_with_name_limit(
+        &mut registry,
+        &[McpServerConfig {
+            name: "bad server!".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+        48,
+    )
+    .await?;
+
+    let names = registry
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    assert!(names.iter().all(|name| name.len() <= 48));
+    assert!(names.iter().all(|name| {
+        name.chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    }));
+    assert!(
+        names
+            .iter()
+            .any(|name| name == "mcp__bad_server__alpha_tool")
+    );
+    assert_eq!(
+        names
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        names.len()
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| name.starts_with("mcp__bad_server__very_long") && name.contains("__"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_tool_names_from_different_mcp_servers_stay_isolated() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("same_tool_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    super::register_mcp_tools_with_name_limit(
+        &mut registry,
+        &[
+            McpServerConfig {
+                name: "server-a".to_owned(),
+                command: "python3".to_owned(),
+                args: vec![script.to_string_lossy().to_string()],
+                startup_timeout_secs: 5,
+                ..McpServerConfig::default()
+            },
+            McpServerConfig {
+                name: "server-b".to_owned(),
+                command: "python3".to_owned(),
+                args: vec![script.to_string_lossy().to_string()],
+                startup_timeout_secs: 5,
+                ..McpServerConfig::default()
+            },
+        ],
+        64,
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__server_a__echo").is_some());
+    assert!(registry.spec_for("mcp__server_b__echo").is_some());
     Ok(())
 }

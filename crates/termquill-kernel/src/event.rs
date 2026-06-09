@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::{
     ControlEntry, ModelMessage, ProviderContinuationState, ToolCall, ToolPreview, ToolResult,
-    ToolSpec, UsageStats,
+    ToolSpec, ToolSubject, UsageStats,
 };
 
 /// Structured runtime events emitted by the agent loop for UI, logging, and orchestration.
@@ -19,6 +19,7 @@ pub enum RunEvent {
     ToolApprovalRequested {
         call: ToolCall,
         spec: ToolSpec,
+        subjects: Vec<ToolSubject>,
         preview: Option<ToolPreview>,
     },
     ToolApprovalResolved {

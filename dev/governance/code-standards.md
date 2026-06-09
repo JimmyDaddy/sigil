@@ -21,6 +21,7 @@
 - session log、control state、provider continuation state 必须可持久化
 - 不要依赖“只存在进程内存里”的隐式状态完成关键链路
 - 写入审计面状态时，优先追加记录，不做难以追踪的就地改写
+- tool approval、tool execution started/completed/failed/interrupted 必须落结构化 `ControlEntry`，不要用裸文本 `Note` 代替可恢复审计数据
 
 ## 2. Rust 编码规则
 
@@ -82,12 +83,28 @@
 ### 3.3 `termquill-tools-builtin`
 
 - 工具必须有稳定 `ToolSpec`
-- 写工具默认提供 `preview`，尤其是 `write_file`、`edit_file`、`bash`
+- `ToolSpec` 必须表达 provider-neutral 的 `category / access / preview`，不要退回 read/write 二分
+- 写文件类工具默认提供 `preview`，尤其是 `write_file`、`edit_file`
+- `bash` 属于 `Shell / Execute`，必须走审批、超时、exit code 和结构化错误结果，不能伪装成写工具
+- `bash` 只能对测试覆盖的简单只读 allowlist 命令动态降级为 `Read`；复杂 shell 语法、重定向、变量展开、未知命令和写/测试/包管理命令必须保持 `Execute`
+- 所有 model-visible 工具输出必须有默认上限和截断 metadata；大输出不能直接灌满 timeline 或 provider context
+- `read_file` / `ls` / `glob` / `grep` 必须支持 limit 类参数并写回 returned/total/truncated metadata
 - 所有路径操作必须限制在 workspace root 内
-- workspace confinement 必须基于 canonicalized root 和路径组件判断；文件、目录和父目录链上的 symlink 指向 workspace 外时必须拒绝
+- workspace confinement 必须基于 canonicalized root 和路径组件判断；文件、目录和父目录链上的 symlink 指向 workspace 外时必须标记为 `External` subject
+- workspace 外路径只能通过 `permission.external_directory` 高级权限进入审批或放行，默认关闭时必须返回 `external_directory_required`
 - 工具失败必须结构化返回，不能 panic
+- provider-visible tool result 必须使用 `ToolResult::to_model_content()` 的 JSON envelope，不要在 session 历史里写裸文本结果
 
-### 3.4 `termquill-tui`
+### 3.4 `termquill-mcp`
+
+- MCP 工具名必须带 server 前缀并限制在 provider 能接受的长度内，冲突时使用稳定 hash 后缀
+- MCP client 暴露给 server 的 `roots/list` 必须来自入口已解析的 workspace root，不要用配置文件路径猜测
+- `notifications/progress` 在没有产品化 timeline 映射前只能安全忽略，不能刷爆事件流
+- `elicitation/create` 在 TUI 交互闭环落地前必须明确返回 unsupported，不要静默挂起或伪造用户输入
+- MCP server 配置必须保留 lifecycle/trust 边界：默认 `required = true`、`startup = "eager"`；`required = false` 且 `startup = "lazy"` 当前只能跳过启动和注册，不要伪造 lazy 工具；required lazy 在 lazy activation 落地前必须明确报错；`required = false` 的 eager server 失败时可以降级为 warning 并跳过
+- MCP trust policy 必须可配置、可序列化，至少表达 `trust_class / approval_default / egress_logging / allow_secrets / pin_version`；在没有更细粒度 enforcement 前，不要把这些字段写成已经生效的安全保证
+
+### 3.5 `termquill-tui`
 
 - 优先分离“状态模型”和“渲染”
 - `app.rs` 保持 `AppState` façade、字段定义、bootstrap、顶层 key routing 和跨状态编排；具体状态流维护在 `app/input_flow.rs`、`app/slash_flow.rs`、`app/modal_flow.rs`、`app/config_flow.rs`、`app/session_flow.rs`、`app/timeline_flow.rs`、`app/tool_focus.rs`、`app/approval_flow.rs`、`app/worker_bridge.rs`、`app/command_dispatch.rs`
@@ -103,7 +120,7 @@
 - 新增或修改快捷键 / slash command 时必须同步 `commands.rs` metadata、info rail controls、README 和状态转换测试
 - 能用 TUI 焦点和快捷键自然表达的能力，不优先新增 slash command；hidden command 必须有明确退场计划和删除条件
 
-### 3.5 `termquill-runtime`
+### 3.6 `termquill-runtime`
 
 - 负责 TUI、CLI 和未来入口共享的 provider、tool registry、run options 装配
 - 入口层不应各自硬编码 DeepSeek provider、built-in tools 或 MCP 注册流程
@@ -115,6 +132,10 @@
 
 - `SessionLogEntry` 与 `ControlEntry` 的职责要清晰
 - continuation state、response handle、background task handle 等控制面信息必须能被持久化
+- 工具审批和执行审计必须使用 `ToolApproval` / `ToolExecution` 控制记录；provider-visible 历史仍只能包含 user / assistant / tool result message
+- tool result metadata 可以携带安全的调用上下文摘要供 TUI 展示，例如 command/path/pattern/subject；不要把 `write_file.content`、`edit_file.new_text` 等大文本或敏感参数原样塞进卡片摘要
+- session 恢复时，只有 `Started` 没有终态的工具执行必须追加 `Interrupted` 审计记录，悬空 tool call 必须投影为结构化 interrupted tool result，不自动重放工具
+- `agent.max_turns` 默认不限制，只能作为用户显式配置的 tool-call loop 保护阈值；达到阈值时应可恢复地停止当前 run 并提示原因，不要把已经成功执行的工具链路包装成工具执行失败
 - resume 后会影响下一轮 request 的 durable control state 必须通过 `Session` 查询方法恢复，不要让调用侧手写扫描逻辑
 - 不要把会影响恢复正确性的状态只存在 provider 私有字段中
 

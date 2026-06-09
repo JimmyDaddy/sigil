@@ -11,6 +11,7 @@ use crate::app::{
 };
 
 use super::{
+    diff::{DiffLineKind, diff_line_number_gutter, diff_line_style, number_unified_diff_lines},
     geometry::{centered_rect, halo_rect, shadow_rect},
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_options},
 };
@@ -22,7 +23,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     let diff_width = view
         .diff_lines
         .iter()
-        .map(|line| line.text.chars().count())
+        .map(|line| line.text.chars().count().saturating_add(12))
         .max()
         .unwrap_or(0);
     let inner_width = [
@@ -160,11 +161,16 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
             Paragraph::new(approval_diff_status_line(&view)),
             diff_sections[0],
         );
+        let numbered =
+            number_unified_diff_lines(view.diff_lines.iter().map(|line| line.text.as_str()));
         let diff_lines = view
             .diff_lines
             .iter()
             .cloned()
-            .map(render_approval_diff_line)
+            .zip(numbered)
+            .map(|(line, numbered)| {
+                render_approval_diff_line(line, numbered.old_line, numbered.new_line)
+            })
             .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(Text::from(diff_lines))
@@ -195,8 +201,11 @@ fn approval_header_lines(view: &ApprovalModalView, max_content_width: usize) -> 
     let mut lines = vec![
         Line::from(vec![
             approval_badge(
-                view.access_label,
-                if view.access_label == "write" {
+                &view.access_label,
+                if view.access_label.contains("write")
+                    || view.access_label.contains("execute")
+                    || view.access_label.contains("network")
+                {
                     Color::Yellow
                 } else {
                     Color::Green
@@ -322,30 +331,12 @@ fn approval_diff_status_line(view: &ApprovalModalView) -> Line<'static> {
     ])
 }
 
-fn render_approval_diff_line(line: ApprovalDiffLine) -> Line<'static> {
-    let (accent, body_style) = match line.kind {
-        ApprovalDiffLineKind::Header => (
-            Color::Blue,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        ApprovalDiffLineKind::Hunk => (
-            Color::Yellow,
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        ApprovalDiffLineKind::Added => (
-            Color::Green,
-            Style::default().fg(Color::Green).bg(Color::Rgb(16, 34, 22)),
-        ),
-        ApprovalDiffLineKind::Removed => (
-            Color::Red,
-            Style::default().fg(Color::Red).bg(Color::Rgb(40, 18, 18)),
-        ),
-        ApprovalDiffLineKind::Context => (Color::DarkGray, Style::default().fg(Color::Gray)),
-    };
+fn render_approval_diff_line(
+    line: ApprovalDiffLine,
+    old_line: Option<usize>,
+    new_line: Option<usize>,
+) -> Line<'static> {
+    let (accent, body_style) = diff_line_style(approval_diff_line_kind(line.kind));
     let marker = if line.active_hunk { ">" } else { "│" };
     let marker_style = if line.active_hunk {
         Style::default()
@@ -363,6 +354,10 @@ fn render_approval_diff_line(line: ApprovalDiffLine) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{marker} "), marker_style),
         Span::styled(
+            diff_line_number_gutter(old_line, new_line),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
             if line.text.is_empty() {
                 " ".to_owned()
             } else {
@@ -371,6 +366,16 @@ fn render_approval_diff_line(line: ApprovalDiffLine) -> Line<'static> {
             body_style,
         ),
     ])
+}
+
+fn approval_diff_line_kind(kind: ApprovalDiffLineKind) -> DiffLineKind {
+    match kind {
+        ApprovalDiffLineKind::Header => DiffLineKind::Header,
+        ApprovalDiffLineKind::Hunk => DiffLineKind::Hunk,
+        ApprovalDiffLineKind::Added => DiffLineKind::Added,
+        ApprovalDiffLineKind::Removed => DiffLineKind::Removed,
+        ApprovalDiffLineKind::Context => DiffLineKind::Context,
+    }
 }
 
 fn approval_badge(label: &str, color: Color) -> Span<'static> {

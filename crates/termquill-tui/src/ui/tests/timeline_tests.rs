@@ -40,12 +40,12 @@ fn render_timeline_entry_lines_separates_tool_header_and_json_body() {
 
     let lines = render_timeline_entry_lines(&entry);
 
-    assert!(lines.iter().any(|line| {
+    assert!(!lines.iter().any(|line| {
         line.spans
             .iter()
             .any(|span| span.content.as_ref().contains("call_123"))
     }));
-    assert!(lines.iter().any(|line| {
+    assert!(!lines.iter().any(|line| {
         line.spans
             .iter()
             .any(|span| span.content.as_ref().contains("meta"))
@@ -158,7 +158,7 @@ fn render_timeline_entry_lines_show_phase_block() {
 fn render_timeline_entry_lines_show_thinking_trace_block() {
     let entry = TimelineEntry {
         role: TimelineRole::Thinking,
-        text: "step 1\nstep 2".to_owned(),
+        text: "step 1\nstep 2\nstep 3\nstep 4".to_owned(),
     };
 
     let lines = render_timeline_entry_lines(&entry);
@@ -175,12 +175,26 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
             .iter()
             .any(|span| span.content.as_ref().contains("Ctrl-T expand"))
     );
-    assert!(
-        lines[0]
-            .spans
+    assert!(lines.iter().any(|line| {
+        line.spans
             .iter()
             .any(|span| span.content.as_ref().contains("step 1"))
-    );
+    }));
+    assert!(lines.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("step 3"))
+    }));
+    assert!(!lines.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("step 4"))
+    }));
+    assert!(lines.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("1 more lines hidden"))
+    }));
 
     let expanded = render_timeline_entry_lines_with_options(
         &entry,
@@ -205,6 +219,11 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
         line.spans
             .iter()
             .any(|span| span.content.as_ref().contains("step 2"))
+    }));
+    assert!(expanded.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("step 4"))
     }));
 }
 
@@ -396,7 +415,6 @@ fn render_timeline_entry_lines_formats_tool_cards() {
   "preview_lines": ["[", "  \".git\",", "  \"Cargo.toml\"", "]"],
   "preview_value": [".git", "Cargo.toml"],
   "hidden_lines": 0,
-  "metadata_line": "bytes=64",
   "metadata": {"bytes": 64}
 }"#
         .to_owned(),
@@ -424,11 +442,16 @@ fn render_timeline_entry_lines_formats_tool_cards() {
             .any(|span| span.content.as_ref().contains("OK"))
     );
     assert!(
-        lines[2]
+        lines[1]
             .spans
             .iter()
-            .any(|span| span.content.as_ref().contains("bytes=64"))
+            .any(|span| span.content.as_ref().contains("64 B"))
     );
+    assert!(!lines.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("bytes=64"))
+    }));
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()
@@ -555,4 +578,279 @@ fn render_timeline_entry_lines_hide_tool_preview_by_default() {
             .iter()
             .any(|span| span.content.as_ref().contains("# Title"))
     }));
+}
+
+#[test]
+fn render_timeline_entry_lines_expands_tool_diff_by_default() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "write_file",
+  "status": "ok",
+  "summary": "1 line · 14 B · diff +1 -1 · 1 file",
+  "metadata": {"changed_files": ["note.txt"]},
+  "preview_kind": "text",
+  "preview_lines": ["wrote note.txt"],
+  "hidden_lines": 0,
+  "diff": {
+    "summary": "+1 -1 · 1 file",
+    "truncated": false,
+    "original_line_count": 6,
+    "rendered_line_count": 6,
+    "files": [{
+      "path": "note.txt",
+      "lines": ["--- current/note.txt", "+++ proposed/note.txt", "@@ -1 +1 @@", "-old", "+new"],
+      "truncated": false,
+      "original_line_count": 5,
+      "rendered_line_count": 5
+    }]
+  }
+}"#
+        .to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines(&entry);
+    let plain = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("diff +1 -1"));
+    assert!(plain.contains("--- current/note.txt"));
+    assert!(plain.contains("   1      │ "));
+    assert!(plain.contains("        1 │ "));
+    assert!(plain.contains("-old"));
+    assert!(plain.contains("+new"));
+    assert!(!plain.contains("diff hidden"));
+}
+
+#[test]
+fn render_timeline_entry_lines_renders_delete_file_diff_as_file_change() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "delete_file",
+  "status": "ok",
+  "summary": "1 line · 16 B · diff +0 -2 · 1 file",
+  "metadata": {
+    "changed_files": ["note.txt"],
+    "details": {
+      "action": "delete",
+      "call": {"summary": "path=note.txt"}
+    }
+  },
+  "preview_kind": "text",
+  "preview_lines": ["deleted /workspace/note.txt"],
+  "hidden_lines": 0,
+  "diff": {
+    "summary": "+0 -2 · 1 file",
+    "truncated": false,
+    "original_line_count": 5,
+    "rendered_line_count": 5,
+    "files": [{
+      "path": "note.txt",
+      "lines": ["--- current/note.txt", "+++ proposed/note.txt", "@@ -1,2 +0,0 @@", "-alpha", "-beta"],
+      "truncated": false,
+      "original_line_count": 5,
+      "rendered_line_count": 5
+    }]
+  }
+}"#
+        .to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines(&entry);
+    let plain = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("delete_file"));
+    assert!(plain.contains("path=note.txt"));
+    assert!(plain.contains("1 deleted"));
+    assert!(plain.contains("deleted"));
+    assert!(plain.contains("--- current/note.txt"));
+    assert!(plain.contains("   1      │ "));
+    assert!(plain.contains("   2      │ "));
+    assert!(plain.contains("-alpha"));
+    assert!(plain.contains("-beta"));
+    assert!(plain.contains("result"));
+    assert!(plain.contains("delete summary"));
+    assert!(!plain.contains("tree"));
+}
+
+#[test]
+fn render_timeline_entry_lines_can_collapse_default_expanded_tool_diff() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "write_file",
+  "status": "ok",
+  "summary": "1 line · 14 B · diff +1 -1 · 1 file",
+  "metadata": {"changed_files": ["note.txt"]},
+  "preview_kind": "text",
+  "preview_lines": ["wrote note.txt"],
+  "hidden_lines": 0,
+  "diff": {
+    "summary": "+1 -1 · 1 file",
+    "truncated": false,
+    "original_line_count": 6,
+    "rendered_line_count": 6,
+    "files": [{
+      "path": "note.txt",
+      "lines": ["--- current/note.txt", "+++ proposed/note.txt", "@@ -1 +1 @@", "-old", "+new"],
+      "truncated": false,
+      "original_line_count": 5,
+      "rendered_line_count": 5
+    }]
+  }
+}"#
+        .to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            collapsed_tool_entries: BTreeSet::from([0]),
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let plain = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("diff hidden"));
+    assert!(!plain.contains("--- current/note.txt"));
+}
+
+#[test]
+fn render_timeline_entry_lines_renders_expanded_tool_diff() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "tool_name": "write_file",
+  "status": "ok",
+  "summary": "1 line · 14 B · diff +2 -1 · 1 file · truncated",
+  "metadata": {"changed_files": ["note.txt"]},
+  "preview_kind": "text",
+  "preview_lines": ["wrote note.txt"],
+  "hidden_lines": 0,
+  "diff": {
+    "summary": "+2 -1 · 1 file · truncated",
+    "truncated": true,
+    "original_line_count": 8,
+    "rendered_line_count": 5,
+    "files": [{
+      "path": "note.txt",
+      "lines": ["--- current/note.txt", "+++ proposed/note.txt", "@@ -1 +1 @@", "-old", "+new"],
+      "truncated": true,
+      "original_line_count": 8,
+      "rendered_line_count": 5
+    }]
+  }
+}"#
+        .to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let plain = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(plain.contains("files"));
+    assert!(plain.contains("diff"));
+    assert!(plain.contains("note.txt"));
+    assert!(plain.contains("--- current/note.txt"));
+    assert!(plain.contains("-old"));
+    assert!(plain.contains("+new"));
+    assert!(plain.contains("diff truncated"));
+    assert!(plain.contains("result"));
+}
+
+#[test]
+fn render_timeline_entry_lines_show_tool_call_context_when_collapsed() {
+    let bash_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r#"{
+  "call_id": "call-1",
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "summary": "last 1/1 lines · 12 B",
+  "preview_lines": ["ok"],
+  "hidden_lines": 0,
+  "metadata": {
+    "exit_code": 0,
+    "details": {
+      "call": {
+        "summary": "command=cargo test -p termquill-tui"
+      }
+    }
+  }
+}"#
+        .to_owned(),
+    };
+    let read_entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: r##"{
+  "call_id": "call-2",
+  "tool_name": "read_file",
+  "status": "ok",
+  "preview_kind": "markdown",
+  "summary": "first 2/12 lines · 2.4 KB",
+  "preview_lines": ["# Title", "body"],
+  "hidden_lines": 10,
+  "metadata": {
+    "details": {
+      "call": {
+        "summary": "path=crates/termquill-tui/src/runner/worker_loop.rs"
+      }
+    }
+  }
+}"##
+        .to_owned(),
+    };
+
+    let options = TimelineRenderOptions {
+        max_content_width: 120,
+        ..TimelineRenderOptions::default()
+    };
+    let bash_lines = render_timeline_entry_lines_with_options(&bash_entry, &options, 0);
+    let read_lines = render_timeline_entry_lines_with_options(&read_entry, &options, 0);
+
+    assert!(bash_lines[0].spans.iter().any(|span| {
+        span.content
+            .as_ref()
+            .contains("command=cargo test -p termquill-tui")
+    }));
+    assert!(!bash_lines.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("call-1"))
+    }));
+    assert!(read_lines[0].spans.iter().any(|span| {
+        span.content
+            .as_ref()
+            .contains("path=crates/termquill-tui/src/runner/worker_loop.rs")
+    }));
+    assert!(
+        !read_lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref() == "md")
+    );
 }

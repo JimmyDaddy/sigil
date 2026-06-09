@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde_json::{Value, json};
-use termquill_kernel::{ModelMessage, ToolSpec};
+use termquill_kernel::{ModelMessage, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec};
 
 use crate::{
     config::DeepSeekProviderQuirkProfile, endpoint::DeepSeekEndpointClass,
@@ -29,7 +29,9 @@ fn compatible_strict_tools_route_to_beta() -> Result<()> {
                 },
                 "required": ["path", "content"]
             }),
-            read_only: false,
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
         }],
         temperature: None,
         max_tokens: None,

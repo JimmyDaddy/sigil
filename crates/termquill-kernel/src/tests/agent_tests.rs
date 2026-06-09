@@ -14,11 +14,13 @@ use serde_json::json;
 
 use crate::{
     ApprovalHandler, ApprovalMode, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
-    CompactionConfig, CompletionRequest, ControlEntry, EventHandler, InteractionMode,
-    JsonlSessionStore, MemoryConfig, MessageRole, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderContinuationState, ReasoningEffort, ResponseHandle, RunEvent, Session,
-    SessionLogEntry, Tool, ToolApproval, ToolCall, ToolContext, ToolRegistry, ToolResult,
-    ToolResultMeta,
+    CompactionConfig, CompletionRequest, ControlEntry, EventHandler, ExternalDirectoryConfig,
+    ExternalDirectoryRule, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
+    PermissionConfig, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
+    ReasoningEffort, ResponseHandle, RunEvent, Session, SessionLogEntry, Tool, ToolAccess,
+    ToolApproval, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory,
+    ToolContext, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope,
 };
 
 use super::{Agent, AgentRunOptions};
@@ -45,6 +47,7 @@ impl Provider for MockProvider {
             supports_schema_constrained_tools: false,
             supports_infill_completion: false,
             supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
         }
     }
 
@@ -86,6 +89,10 @@ struct EchoTool;
 struct WriteTool {
     executed: Arc<AtomicBool>,
 }
+struct ExternalWriteTool {
+    executed: Arc<AtomicBool>,
+    external_path: std::path::PathBuf,
+}
 
 #[async_trait]
 impl Tool for EchoTool {
@@ -100,7 +107,9 @@ impl Tool for EchoTool {
                 },
                 "required": ["value"]
             }),
-            read_only: true,
+            category: ToolCategory::Custom,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
         }
     }
 
@@ -110,13 +119,12 @@ impl Tool for EchoTool {
         call_id: String,
         args: serde_json::Value,
     ) -> Result<ToolResult> {
-        Ok(ToolResult {
+        Ok(ToolResult::ok(
             call_id,
-            tool_name: "echo".to_owned(),
-            content: args["value"].as_str().unwrap_or_default().to_owned(),
-            is_error: false,
-            metadata: ToolResultMeta::default(),
-        })
+            "echo",
+            args["value"].as_str().unwrap_or_default(),
+            ToolResultMeta::default(),
+        ))
     }
 }
 
@@ -133,16 +141,43 @@ impl Tool for WriteTool {
                 },
                 "required": ["path"]
             }),
-            read_only: false,
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
         }
     }
 
-    fn permission_subject(&self, args: &serde_json::Value) -> Result<Option<String>> {
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
         let path = args
             .get("path")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
-        Ok(Some(path.to_owned()))
+        Ok(vec![ToolSubject::path(path, path)])
+    }
+
+    async fn preview(
+        &self,
+        _ctx: ToolContext,
+        args: serde_json::Value,
+    ) -> Result<Option<ToolPreview>> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+        Ok(Some(ToolPreview {
+            title: "Write file".to_owned(),
+            summary: format!("Create {path}"),
+            body: format!("Will write {path}"),
+            changed_files: vec![path.to_owned()],
+            file_diffs: vec![ToolPreviewFile {
+                path: path.to_owned(),
+                diff: format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+hello"),
+            }],
+        }))
     }
 
     async fn execute(
@@ -152,13 +187,60 @@ impl Tool for WriteTool {
         _args: serde_json::Value,
     ) -> Result<ToolResult> {
         self.executed.store(true, Ordering::SeqCst);
-        Ok(ToolResult {
+        Ok(ToolResult::ok(
             call_id,
-            tool_name: "write_file".to_owned(),
-            content: "wrote file".to_owned(),
-            is_error: false,
-            metadata: ToolResultMeta::default(),
-        })
+            "write_file",
+            "wrote file",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for ExternalWriteTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "write_file".to_owned(),
+            description: "write external".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        }
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        Ok(vec![ToolSubject::path_with_scope(
+            self.external_path.display().to_string(),
+            self.external_path.display().to_string(),
+            Some(self.external_path.clone()),
+            ToolSubjectScope::External,
+        )])
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        self.executed.store(true, Ordering::SeqCst);
+        Ok(ToolResult::ok(
+            call_id,
+            "write_file",
+            "wrote external file",
+            ToolResultMeta::default(),
+        ))
     }
 }
 
@@ -222,6 +304,7 @@ impl Provider for StateTrackingProvider {
             supports_schema_constrained_tools: false,
             supports_infill_completion: false,
             supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
         }
     }
 
@@ -295,6 +378,7 @@ impl Provider for PreviousHandleRecordingProvider {
             supports_schema_constrained_tools: false,
             supports_infill_completion: false,
             supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
         }
     }
 
@@ -330,7 +414,9 @@ impl Tool for PreviewFailingWriteTool {
                 },
                 "required": ["path"]
             }),
-            read_only: false,
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
         }
     }
 
@@ -349,13 +435,12 @@ impl Tool for PreviewFailingWriteTool {
         _args: serde_json::Value,
     ) -> Result<ToolResult> {
         self.executed.store(true, Ordering::SeqCst);
-        Ok(ToolResult {
+        Ok(ToolResult::ok(
             call_id,
-            tool_name: "write_file".to_owned(),
-            content: "wrote file".to_owned(),
-            is_error: false,
-            metadata: ToolResultMeta::default(),
-        })
+            "write_file",
+            "wrote file",
+            ToolResultMeta::default(),
+        ))
     }
 }
 
@@ -381,6 +466,7 @@ impl Provider for PreviewFallbackProvider {
             supports_schema_constrained_tools: false,
             supports_infill_completion: false,
             supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
         }
     }
 
@@ -440,7 +526,7 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
             "hi",
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
-                max_turns: 4,
+                max_turns: Some(4),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
@@ -460,11 +546,47 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
             .iter()
             .any(|message| message.role == MessageRole::Tool)
     );
+    assert!(session.messages().iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message.tool_call_id.as_deref() == Some("call-1")
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains(r#""status":"ok""#) && content.contains(r#""content":"hello""#)
+            })
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-1"
+                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
+                    && approval.policy_decision == ApprovalMode::Allow
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-1"
+                    && execution.status == ToolExecutionStatus::Started
+                    && execution.model_content_hash.is_none()
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-1"
+                    && execution.status == ToolExecutionStatus::Completed
+                    && execution.model_content_hash.is_some()
+                    && execution.error.is_none()
+        )
+    }));
     Ok(())
 }
 
 struct WriteMockProvider;
 struct InvalidWriteArgsProvider;
+struct LoopingToolProvider;
 
 #[async_trait]
 impl Provider for WriteMockProvider {
@@ -486,6 +608,7 @@ impl Provider for WriteMockProvider {
             supports_schema_constrained_tools: false,
             supports_infill_completion: false,
             supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
         }
     }
 
@@ -543,6 +666,7 @@ impl Provider for InvalidWriteArgsProvider {
             supports_schema_constrained_tools: false,
             supports_infill_completion: false,
             supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
         }
     }
 
@@ -580,6 +704,60 @@ impl Provider for InvalidWriteArgsProvider {
     }
 }
 
+#[async_trait]
+impl Provider for LoopingToolProvider {
+    fn name(&self) -> &str {
+        "mock-looping-tool"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            supports_reasoning_stream: true,
+            supports_tool_stream: true,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let call_index = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::Tool))
+            .count()
+            + 1;
+        let call_id = format!("call-loop-{call_index}");
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: call_id.clone(),
+                name: "echo".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: call_id.clone(),
+                delta: r#"{"value":"again"}"#.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: call_id,
+                name: "echo".to_owned(),
+                args_json: r#"{"value":"again"}"#.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
 #[tokio::test]
 async fn agent_respects_denied_write_approval() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
@@ -597,7 +775,7 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
             "write something",
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
-                max_turns: 4,
+                max_turns: Some(4),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
@@ -612,6 +790,201 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
         .await?;
     assert_eq!(result.final_text, "done");
     assert!(!executed.load(Ordering::SeqCst));
+    assert!(session.messages().iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message.tool_call_id.as_deref() == Some("call-write-1")
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains(r#""kind":"approval_denied""#)
+                    && content.contains("tool execution denied by user")
+                    && content.contains(r#""summary":"path=file.txt"#)
+            })
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::Requested
+                    && approval.user_decision.is_none()
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::Resolved
+                    && approval.user_decision == Some(ToolApprovalUserDecision::Denied)
+                    && approval.reason.as_deref() == Some("denied write_file")
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-write-1"
+                    && execution.status == ToolExecutionStatus::Started
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_captures_tool_preview_snapshot_before_approval_request() -> Result<()> {
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(executed.load(Ordering::SeqCst));
+
+    let entries = session.entries();
+    let snapshot_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))
+                    if snapshot.call_id == "call-write-1"
+                        && snapshot.tool_name == "write_file"
+                        && snapshot.file_diffs.len() == 1
+                        && snapshot.file_diffs[0].path == "file.txt"
+                        && snapshot.rendered_stats.added == 1
+            )
+        })
+        .expect("preview snapshot should be captured");
+    let requested_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                    if approval.call_id == "call-write-1"
+                        && approval.action == ToolApprovalAuditAction::Requested
+            )
+        })
+        .expect("approval request audit should be captured");
+    let started_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                    if execution.call_id == "call-write-1"
+                        && execution.status == ToolExecutionStatus::Started
+            )
+        })
+        .expect("tool execution start should be captured");
+
+    assert!(snapshot_index < requested_index);
+    assert!(requested_index < started_index);
+
+    let snapshot_hash = entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot)) => {
+            snapshot.original_preview_hash.clone()
+        }
+        _ => None,
+    });
+    let approval_hash = entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+            if approval.action == ToolApprovalAuditAction::Requested =>
+        {
+            approval.preview_hash.clone()
+        }
+        _ => None,
+    });
+    assert_eq!(snapshot_hash, approval_hash);
+    let messages = session.messages();
+    let tool_message_content = messages
+        .iter()
+        .find(|message| {
+            matches!(message.role, MessageRole::Tool)
+                && message.tool_call_id.as_deref() == Some("call-write-1")
+        })
+        .and_then(|message| message.content.as_deref())
+        .expect("expected provider-visible tool message");
+    assert!(!tool_message_content.contains("+hello"));
+    assert!(!tool_message_content.contains("file_diffs"));
+    assert!(!tool_message_content.contains("original_stats"));
+
+    let event_snapshot_index = handler
+        .events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                RunEvent::Control(ControlEntry::ToolPreviewCaptured(snapshot))
+                    if snapshot.call_id == "call-write-1"
+            )
+        })
+        .expect("preview snapshot event should be emitted");
+    let event_approval_index = handler
+        .events
+        .iter()
+        .position(|event| matches!(event, RunEvent::ToolApprovalRequested { .. }))
+        .expect("approval request event should be emitted");
+    assert!(event_snapshot_index < event_approval_index);
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_stops_after_max_turns_without_failing_the_run() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(LoopingToolProvider, registry);
+    let mut session = Session::new("mock-looping-tool", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let result = agent
+        .run(
+            &mut session,
+            "loop",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "");
+    assert_eq!(result.tool_calls, 2);
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::Notice(note) if note.contains("Stopped after 2 model turns"))
+    }));
     Ok(())
 }
 
@@ -632,7 +1005,7 @@ async fn agent_returns_tool_error_when_permission_subject_is_invalid() -> Result
             "write without a path",
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
-                max_turns: 4,
+                max_turns: Some(4),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
@@ -657,13 +1030,13 @@ async fn agent_returns_tool_error_when_permission_subject_is_invalid() -> Result
     }));
     assert!(handler.events.iter().any(|event| {
         matches!(event, RunEvent::ToolResult(result)
-            if result.is_error && result.content.contains("missing string field path"))
+            if result.is_error() && result.content.contains("missing string field path"))
     }));
     Ok(())
 }
 
 #[tokio::test]
-async fn agent_auto_allows_ask_mode_in_headless_runs() -> Result<()> {
+async fn agent_returns_approval_required_in_headless_ask_mode() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(WriteTool {
@@ -679,7 +1052,7 @@ async fn agent_auto_allows_ask_mode_in_headless_runs() -> Result<()> {
             "write something",
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
-                max_turns: 4,
+                max_turns: Some(4),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
@@ -694,9 +1067,18 @@ async fn agent_auto_allows_ask_mode_in_headless_runs() -> Result<()> {
         .await?;
 
     assert_eq!(result.final_text, "done");
-    assert!(executed.load(Ordering::SeqCst));
+    assert!(!executed.load(Ordering::SeqCst));
     assert!(handler.events.iter().any(|event| {
-        matches!(event, RunEvent::Notice(note) if note.contains("headless mode"))
+        matches!(event, RunEvent::ToolResult(result)
+            if result.is_error() && result.content.contains("requires approval in headless mode"))
+    }));
+    assert!(session.messages().iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message.tool_call_id.as_deref() == Some("call-write-1")
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains(r#""kind":"approval_required""#))
     }));
     Ok(())
 }
@@ -718,18 +1100,18 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
             "write something",
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
-                max_turns: 4,
+                max_turns: Some(4),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig {
-                    write_mode: ApprovalMode::Ask,
                     rules: vec![crate::PermissionRule {
-                        tool_name: "write_file".to_owned(),
+                        tool_name: Some("write_file".to_owned()),
                         subject_glob: Some("file.txt".to_owned()),
                         mode: ApprovalMode::Deny,
                     }],
+                    ..PermissionConfig::default()
                 },
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
@@ -752,6 +1134,168 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
 }
 
 #[tokio::test]
+async fn agent_returns_external_directory_required_when_disabled() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_path = temp.path().canonicalize()?.join("outside.txt");
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExternalWriteTool {
+        executed: Arc::clone(&executed),
+        external_path,
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = PanicApprovalHandler;
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write outside",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(!executed.load(Ordering::SeqCst));
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolResult(result)
+            if result.is_error()
+                && matches!(result.status, crate::ToolResultStatus::Error(ref error) if error.kind == ToolErrorKind::ExternalDirectoryRequired))
+    }));
+    assert!(session.messages().iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains(r#""kind":"external_directory_required""#))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_requests_approval_for_external_directory_default_ask() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_path = temp.path().canonicalize()?.join("outside.txt");
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExternalWriteTool {
+        executed: Arc::clone(&executed),
+        external_path: external_path.clone(),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write outside",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig {
+                    external_directory: ExternalDirectoryConfig {
+                        enabled: true,
+                        ..ExternalDirectoryConfig::default()
+                    },
+                    ..PermissionConfig::default()
+                },
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(executed.load(Ordering::SeqCst));
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolApprovalRequested { subjects, preview: Some(preview), .. }
+            if subjects.iter().any(|subject| subject.scope == ToolSubjectScope::External)
+                && preview.title.contains("External directory access")
+                && preview.body.contains(&external_path.display().to_string()))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_allows_external_directory_when_all_gates_allow() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_root = temp.path().canonicalize()?;
+    let external_path = external_root.join("outside.txt");
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExternalWriteTool {
+        executed: Arc::clone(&executed),
+        external_path,
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = PanicApprovalHandler;
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write outside",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig {
+                    access: crate::PermissionAccessConfig {
+                        write: Some(ApprovalMode::Allow),
+                        ..crate::PermissionAccessConfig::default()
+                    },
+                    external_directory: ExternalDirectoryConfig {
+                        enabled: true,
+                        rules: vec![ExternalDirectoryRule {
+                            path_glob: format!("{}/**", external_root.display()),
+                            mode: ApprovalMode::Allow,
+                        }],
+                        ..ExternalDirectoryConfig::default()
+                    },
+                    ..PermissionConfig::default()
+                },
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(executed.load(Ordering::SeqCst));
+    assert!(
+        !handler
+            .events
+            .iter()
+            .any(|event| matches!(event, RunEvent::ToolApprovalRequested { .. }))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_tracks_response_handles_background_tasks_and_continuation_state() -> Result<()> {
     let registry = ToolRegistry::new();
     let agent = Agent::new(StateTrackingProvider, registry);
@@ -763,7 +1307,7 @@ async fn agent_tracks_response_handles_background_tasks_and_continuation_state()
             "continue",
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
-                max_turns: 1,
+                max_turns: Some(1),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
@@ -843,7 +1387,7 @@ async fn agent_restores_previous_response_handle_from_durable_control_state() ->
             "resume from control state",
             AgentRunOptions {
                 workspace_root: temp.path().to_path_buf(),
-                max_turns: 1,
+                max_turns: Some(1),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
@@ -887,15 +1431,12 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
             "write file",
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
-                max_turns: 4,
+                max_turns: Some(4),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig {
-                    write_mode: ApprovalMode::Ask,
-                    rules: Vec::new(),
-                },
+                permission_config: PermissionConfig::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -919,6 +1460,20 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
             matches!(event, RunEvent::ToolApprovalResolved { approved: true, .. })
         })
     );
+    assert!(!handler.events.iter().any(|event| {
+        matches!(
+            event,
+            RunEvent::Control(ControlEntry::ToolPreviewCaptured(snapshot))
+                if snapshot.call_id == "call-write-1"
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))
+                if snapshot.call_id == "call-write-1"
+        )
+    }));
 
     let assistant_tool_message_id = session
         .messages()

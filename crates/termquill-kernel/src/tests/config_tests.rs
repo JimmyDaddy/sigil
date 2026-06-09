@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, path::Path};
 
 use super::{
-    CompactionConfig, CompactionThresholdStatus, RootConfig, preferred_config_path,
-    resolve_workspace_root,
+    CompactionConfig, CompactionThresholdStatus, McpServerStartup, McpTrustClass, RootConfig,
+    preferred_config_path, resolve_workspace_root,
 };
-use crate::{AgentConfig, WorkspaceConfig};
+use crate::{AgentConfig, ApprovalMode, WorkspaceConfig};
 
 #[test]
 fn compaction_threshold_status_follows_configured_window() {
@@ -50,7 +50,7 @@ fn root_config_save_roundtrips() {
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
             model: "deepseek-v4-flash".to_owned(),
-            max_turns: 8,
+            max_turns: Some(32),
             tool_timeout_secs: 30,
         },
         permission: Default::default(),
@@ -64,6 +64,58 @@ fn root_config_save_roundtrips() {
     let loaded = RootConfig::load(&path).expect("config should reload");
     assert_eq!(loaded.workspace.root, "/tmp/workspace");
     assert_eq!(loaded.agent.provider, "deepseek");
+}
+
+#[test]
+fn mcp_server_config_loads_lifecycle_and_trust_policy() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[[mcp_servers]]
+name = "required-filesystem"
+command = "node"
+args = ["/srv/filesystem.js"]
+startup_timeout_secs = 7
+
+[[mcp_servers]]
+name = "optional-third-party"
+command = "uvx"
+args = ["third-party-mcp"]
+startup_timeout_secs = 3
+required = false
+startup = "lazy"
+
+[mcp_servers.trust]
+trust_class = "third_party"
+approval_default = "ask"
+egress_logging = true
+allow_secrets = false
+pin_version = true
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("mcp config should parse");
+
+    assert_eq!(config.agent.max_turns, None);
+
+    let required = &config.mcp_servers[0];
+    assert!(required.required);
+    assert_eq!(required.startup, McpServerStartup::Eager);
+    assert_eq!(required.trust.trust_class, McpTrustClass::SelfHosted);
+    assert_eq!(required.trust.approval_default, ApprovalMode::Ask);
+    assert!(required.trust.egress_logging);
+    assert!(!required.trust.allow_secrets);
+    assert!(!required.trust.pin_version);
+
+    let optional = &config.mcp_servers[1];
+    assert!(!optional.required);
+    assert_eq!(optional.startup, McpServerStartup::Lazy);
+    assert_eq!(optional.trust.trust_class, McpTrustClass::ThirdParty);
+    assert_eq!(optional.trust.approval_default, ApprovalMode::Ask);
+    assert!(optional.trust.egress_logging);
+    assert!(!optional.trust.allow_secrets);
+    assert!(optional.trust.pin_version);
 }
 
 #[test]

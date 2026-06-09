@@ -3,8 +3,9 @@ use std::fs;
 use anyhow::Result;
 
 use crate::{
-    CompactionRecord, MemoryConfig, ProviderContinuationState, ResponseHandle, UsageStats,
-    provider::ModelMessage,
+    CompactionRecord, MemoryConfig, ProviderContinuationState, ResponseHandle, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
+    UsageStats, provider::ModelMessage,
 };
 
 use super::{
@@ -59,6 +60,37 @@ fn load_from_store_persists_identity_for_empty_log() -> Result<()> {
     assert!(matches!(
         session.entries()[0],
         SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn tool_preview_captured_control_entry_roundtrips() -> Result<()> {
+    let snapshot = ToolPreviewSnapshot::from_preview(
+        "call-1",
+        "write_file",
+        &ToolPreview {
+            title: "Write file".to_owned(),
+            summary: "Create a file".to_owned(),
+            body: "preview body".to_owned(),
+            changed_files: vec!["README.md".to_owned()],
+            file_diffs: vec![ToolPreviewFile {
+                path: "README.md".to_owned(),
+                diff: "--- /dev/null\n+++ b/README.md\n@@ -0,0 +1 @@\n+hello".to_owned(),
+            }],
+        },
+        Default::default(),
+        Some("preview-hash".to_owned()),
+    );
+    let entry = SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot.clone()));
+
+    let json = serde_json::to_string(&entry)?;
+    let decoded: SessionLogEntry = serde_json::from_str(&json)?;
+
+    assert!(matches!(
+        decoded,
+        SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(restored))
+            if restored == snapshot
     ));
     Ok(())
 }
@@ -127,8 +159,53 @@ fn messages_repair_orphan_tool_call_projection() -> Result<()> {
     assert_eq!(projected[1].tool_call_id.as_deref(), Some("call-1"));
     assert!(projected[1].content.as_deref().is_some_and(|content| {
         content.contains("did not return a result before the previous run stopped")
+            && content.contains(r#""kind":"interrupted""#)
     }));
     assert!(matches!(projected[2].role, crate::MessageRole::User));
+    Ok(())
+}
+
+#[test]
+fn load_from_store_marks_started_tool_execution_as_interrupted() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+        Box::new(ToolExecutionEntry {
+            call_id: "call-1".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        }),
+    )))?;
+
+    let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
+
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-1"
+                    && execution.status == ToolExecutionStatus::Interrupted
+                    && execution.error.as_ref().is_some_and(|error| {
+                        error.kind == crate::ToolErrorKind::Interrupted && error.retryable
+                    })
+        )
+    }));
+    let reloaded = JsonlSessionStore::read_entries(store.path())?;
+    assert!(reloaded.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-1"
+                    && execution.status == ToolExecutionStatus::Interrupted
+        )
+    }));
     Ok(())
 }
 

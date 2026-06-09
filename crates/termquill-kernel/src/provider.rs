@@ -62,6 +62,7 @@ pub struct ProviderCapabilities {
     pub supports_schema_constrained_tools: bool,
     pub supports_infill_completion: bool,
     pub supports_system_fingerprint: bool,
+    pub tool_name_max_chars: usize,
 }
 
 /// Incremental stream events emitted by a provider while serving a request.

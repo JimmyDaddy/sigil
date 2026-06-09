@@ -41,8 +41,17 @@ impl AppState {
             return false;
         };
         let selected = self.ensure_selected_tool_entry(&indices);
-        if !self.expanded_tool_timeline_entries.insert(selected) {
+        if self.tool_entry_is_open(selected) {
             self.expanded_tool_timeline_entries.remove(&selected);
+            if self.tool_entry_defaults_to_expanded(selected) {
+                self.collapsed_tool_timeline_entries.insert(selected);
+            }
+        } else if self.tool_entry_defaults_to_expanded(selected) {
+            self.collapsed_tool_timeline_entries.remove(&selected);
+        } else if !self.expanded_tool_timeline_entries.insert(selected) {
+            self.expanded_tool_timeline_entries.remove(&selected);
+        } else {
+            self.collapsed_tool_timeline_entries.remove(&selected);
         }
         self.rebuild_timeline_render_cache();
         self.reveal_timeline_entry(selected);
@@ -127,13 +136,30 @@ impl AppState {
         let selected_entry = self
             .selected_tool_timeline_entry
             .unwrap_or(*indices.last().unwrap_or(&0));
-        let open = self
-            .expanded_tool_timeline_entries
-            .contains(&selected_entry);
+        let open = self.tool_entry_is_open(selected_entry);
         format!(
             "tool card {selected}/{} {}",
             indices.len(),
             if open { "open" } else { "brief" }
         )
+    }
+
+    fn tool_entry_is_open(&self, entry_index: usize) -> bool {
+        self.expanded_tool_timeline_entries.contains(&entry_index)
+            || (self.tool_entry_defaults_to_expanded(entry_index)
+                && !self.collapsed_tool_timeline_entries.contains(&entry_index))
+    }
+
+    fn tool_entry_defaults_to_expanded(&self, entry_index: usize) -> bool {
+        let Some(entry) = self.timeline.get(entry_index) else {
+            return false;
+        };
+        if entry.role != TimelineRole::Tool {
+            return false;
+        }
+        serde_json::from_str::<serde_json::Value>(&entry.text)
+            .ok()
+            .and_then(|value| value.get("diff").cloned())
+            .is_some()
     }
 }

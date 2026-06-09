@@ -60,7 +60,7 @@ fn config_left_right_switches_steps() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Permissions"));
-    assert_eq!(app.config_selected_field_label(), Some("write_mode"));
+    assert_eq!(app.config_selected_field_label(), Some("default_mode"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
@@ -155,7 +155,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.provider_base_url = "https://example.invalid/api".to_owned();
     state.draft.provider_user_id_strategy = "stable_per_workspace".to_owned();
     state.draft.provider_fim_model = "deepseek-v4-flash".to_owned();
-    state.draft.permission_write_mode = ApprovalMode::Allow;
+    state.draft.permission_default_mode = ApprovalMode::Allow;
     state.draft.memory_enabled = false;
     state.draft.compaction_soft_threshold_ratio = "0.40".to_owned();
     state.draft.compaction_hard_threshold_ratio = "0.75".to_owned();
@@ -167,17 +167,17 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
         panic!("expected config save action");
     };
     assert_eq!(root_config.agent.model, "deepseek-v4-pro");
-    assert_eq!(root_config.permission.write_mode, ApprovalMode::Allow);
+    assert_eq!(root_config.permission.default_mode, ApprovalMode::Allow);
     assert!(!root_config.memory.enabled);
     assert_eq!(root_config.compaction.soft_threshold_ratio, 0.40);
     assert_eq!(root_config.compaction.hard_threshold_ratio, 0.75);
     assert!(!app.config_is_dirty());
-    assert_eq!(app.permission_write_mode, "allow");
+    assert_eq!(app.permission_default_mode, "allow");
     assert!(!app.memory_enabled);
 
     let saved = RootConfig::load(&config_path)?;
     assert_eq!(saved.agent.model, "deepseek-v4-pro");
-    assert_eq!(saved.permission.write_mode, ApprovalMode::Allow);
+    assert_eq!(saved.permission.default_mode, ApprovalMode::Allow);
     assert!(!saved.memory.enabled);
     assert_eq!(saved.compaction.soft_threshold_ratio, 0.40);
     assert_eq!(saved.compaction.hard_threshold_ratio, 0.75);
@@ -263,6 +263,16 @@ fn config_can_add_and_persist_mcp_server() -> Result<()> {
         ]
     );
     assert_eq!(root_config.mcp_servers[0].startup_timeout_secs, 15);
+    assert!(root_config.mcp_servers[0].required);
+    assert_eq!(root_config.mcp_servers[0].startup, McpServerStartup::Eager);
+    assert_eq!(
+        root_config.mcp_servers[0].trust.trust_class,
+        McpTrustClass::SelfHosted
+    );
+    assert_eq!(
+        root_config.mcp_servers[0].trust.approval_default,
+        ApprovalMode::Ask
+    );
 
     let saved = RootConfig::load(&config_path)?;
     assert_eq!(saved.mcp_servers.len(), 1);
@@ -277,6 +287,16 @@ fn config_can_add_and_persist_mcp_server() -> Result<()> {
         ]
     );
     assert_eq!(saved.mcp_servers[0].startup_timeout_secs, 15);
+    assert!(saved.mcp_servers[0].required);
+    assert_eq!(saved.mcp_servers[0].startup, McpServerStartup::Eager);
+    assert_eq!(
+        saved.mcp_servers[0].trust.trust_class,
+        McpTrustClass::SelfHosted
+    );
+    assert_eq!(
+        saved.mcp_servers[0].trust.approval_default,
+        ApprovalMode::Ask
+    );
     Ok(())
 }
 

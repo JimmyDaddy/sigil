@@ -1,4 +1,4 @@
-use termquill_kernel::{ToolCall, ToolPreview, ToolSpec};
+use termquill_kernel::{ToolCall, ToolPreview, ToolSpec, ToolSubject};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalDiffLineKind {
@@ -26,7 +26,7 @@ pub(crate) struct ApprovalFileRow {
 pub(crate) struct ApprovalModalView {
     pub tool_name: String,
     pub call_id: String,
-    pub access_label: &'static str,
+    pub access_label: String,
     pub preview_title: String,
     pub preview_summary: String,
     pub metadata_collapsed: bool,
@@ -43,6 +43,7 @@ pub(crate) struct ApprovalModalView {
 pub struct PendingApproval {
     pub call: ToolCall,
     pub spec: ToolSpec,
+    pub subjects: Vec<ToolSubject>,
     pub preview: Option<ToolPreview>,
 }
 

@@ -216,7 +216,7 @@ fn sync_terminal_scrollback(
     app: &AppState,
     sync_state: &mut ScrollbackSyncState,
 ) -> Result<()> {
-    if app.is_setup_mode() || app.is_config_mode() {
+    if !should_sync_terminal_scrollback(app) {
         return Ok(());
     }
     if sync_state.session_id.as_deref() == Some(app.session_id.as_str())
@@ -257,6 +257,10 @@ fn sync_terminal_scrollback(
     sync_state.line_count = next_line_count;
     sync_state.sequence_hash = app.scrollback_prefix_hash(next_line_count);
     Ok(())
+}
+
+fn should_sync_terminal_scrollback(app: &AppState) -> bool {
+    !app.is_busy && !app.is_setup_mode() && !app.is_config_mode()
 }
 
 fn plan_scrollback_sync(

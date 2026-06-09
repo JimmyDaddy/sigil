@@ -9,7 +9,7 @@
 - `DeepSeek-first` provider：优先支持 DeepSeek 流式对话、工具调用、reasoning replay 与 Beta 扩展点
 - 内置工具注册表：文件读写、编辑、搜索、shell 执行
 - stdio MCP 工具接入：远程工具通过统一 `ToolRegistry` 暴露给 agent
-- 权限策略：read-only 默认放行，写工具默认审批，headless `ask` 自动放行
+- 权限策略：只读工具默认放行，其它访问默认审批；headless `ask` 会回灌结构化 `approval_required` 错误而不是静默执行
 - 文档 memory boot：工作区根下 `TERMQUILL.md` / `AGENTS.md` / `CLAUDE.md` / `TERMQUILL.local.md` 与 `@path` 导入
 - context compaction：soft threshold 提示、hard threshold 在 idle 边界自动压缩，append-only 审计日志不改写
 - TUI 主入口：消息区、事件流、审批流、session 恢复、diff 预览、`/compact`、`/model`、`/effort`、Quick Setup、`/config`
@@ -56,11 +56,12 @@ TUI 当前支持：
 - composer 顶部直接展示当前模型与运行阶段；运行中会在 composer 内显示紧凑的 `thinking / tool / streaming` live 状态
 - 右侧 `Info rail` 独立占据整列，展示 `Session / Permissions / Agents / Usage / Controls` 五组状态，而不是挤进 composer 旁边的一个小角落
 - `ctx`、compaction status 和 auto-compaction 统一按同一个 effective context window 计算：已知模型窗口优先，其次才回退到 `compaction.context_window_tokens`
-- assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成卡片式展示；`read_file / ls / glob / grep / bash / write_file / edit_file` 走专用 renderer，其他结构化 payload 走树形 fallback，不再直接 dump 原始 JSON
-- live phase 只保留在运行态和事件流里，不再固化成 chat transcript；completed thinking 默认折叠成一行摘要，用 `Ctrl-T` 展开或收起
-- tool result 默认以 brief card 展示，避免工具预览控制继续扩张成主命令面；存在 tool card 后可用 `Ctrl-G` 聚焦最新卡片、`Alt-J` / `Alt-K` 切换卡片、`Ctrl-O` 展开/收起聚焦卡片，composer 为空时 `Esc` 清除 tool card focus
+- assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成卡片式展示；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file` 走专用 renderer，其他结构化 payload 走树形 fallback，不再直接 dump 原始 JSON
+- live phase 只保留在运行态和事件流里，不再固化成 chat transcript；completed thinking 默认显示前几行预览，用 `Ctrl-T` 完整展开或收起
+- tool result 默认以 brief card 展示，标题行会显示安全的调用上下文摘要，例如 `bash` 的 `command=...`、文件工具的 `path=...`、搜索工具的 `pattern=...`；存在 tool card 后可用 `Ctrl-G` 聚焦最新卡片、`Alt-J` / `Alt-K` 切换卡片、`Ctrl-O` 展开/收起聚焦卡片，composer 为空时 `Esc` 清除 tool card focus
+- `write_file` / `edit_file` / `delete_file` 的结果卡片默认展开执行时捕获的 bounded unified diff，diff 行会显示旧/新行号；仍可用 `Ctrl-O` 收起，大 diff 会显示截断提示，折叠态保留 diff stats 和隐藏提示
 - 工具调用审批改为居中 review card：固定 `Summary / Files / Diff / Actions` 四区，composer 不会因为审批而消失
-- `write_file` / `edit_file` diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换
+- `write_file` / `edit_file` / `delete_file` diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换
 - `/compact` 手动压缩当前会话的 provider 可见上下文
 - `/model <flash|pro|id>` 切换运行时模型，并开启一个 fresh session，避免把旧 session identity 和新模型混在一起
 - `/effort <low|medium|high|max>` 切换下一轮 agent run 的 reasoning effort
@@ -138,6 +139,8 @@ cargo run -p termquill-tui -- --config /absolute/path/to/termquill.toml
 
 - session identity 会跟随 durable log 恢复，而不是盲目回退到当前配置里的 provider/model
 - response handle、provider continuation state、prefix snapshot 与 compaction record 都写入 append-only control log；resume 后下一轮 request 会恢复最新匹配 provider 的 response handle
+- tool approval 和 execution lifecycle 会追加到 control log；已开始但没有完成记录的工具执行在恢复时标记为 `interrupted`，悬空 tool call 会投影为结构化 `interrupted` tool result
+- 文件变更工具的历史结果卡片会随 session restore 恢复；恢复后仍可回看 `write_file` / `edit_file` / `delete_file` 当时捕获的 bounded diff，下一轮模型上下文只保留工具结果摘要
 - `/config` 保存后的默认 provider/model 不会静默改写当前 session identity；当前会话仍以 durable log 中的身份为准，新默认值会用于后续新 session 或空白 session
 - 运行中取消后，TUI 会从 durable JSONL log 重建会话视图，避免把临时内存态当成恢复真相
 - 每轮 usage 会追加持久化 control 记录，session resume 后可恢复 cache hit、累计 usage 和最近一次 prompt pressure
@@ -150,7 +153,15 @@ cargo run -p termquill-tui -- --config /absolute/path/to/termquill.toml
 
 ```toml
 [permission]
-write_mode = "ask"
+default_mode = "ask"
+
+[permission.access]
+read = "allow"
+
+[permission.external_directory]
+enabled = false
+default_mode = "ask"
+rules = []
 
 [memory]
 enabled = true
@@ -165,10 +176,15 @@ tail_messages = 6
 
 当前语义：
 
-- `permission.write_mode = "ask"`：TUI 写工具弹审批；CLI/headless run 遇到 `ask` 自动放行
+- `permission.default_mode = "ask"`：未显式覆盖的工具调用默认进入审批；`permission.access.read = "allow"` 让只读文件/搜索工具默认放行
+- `bash` 静态属于 `Execute`；只有简单只读 allowlist 命令会在本次调用中降为 `Read`，复杂 shell 语法、重定向、变量展开、未知命令和包管理/测试/写操作仍按 `Execute` 审批
+- `permission.external_directory.enabled = false`：workspace 外路径默认不会执行；开启后仍按 `default_mode` 和 `rules` 进入审批或放行，不会扩大 workspace root
+- headless run 遇到最终 `ask` 不会静默自动执行，而是向模型回灌结构化 `approval_required` 工具错误
+- 内置工具的 model-visible 输出默认有上限；`read_file` 支持 `offset/limit`，`ls/glob/grep` 支持 `limit`，截断信息会写入 tool result metadata
+- `agent.max_turns` 默认不限制；如果用户在配置里显式设置该阈值，并且模型连续达到阈值仍只请求工具、没有给最终回答，TUI 会提示本轮已停止并保留已写入的 tool results；这不是工具执行失败，用户可继续发送下一条消息接着跑
 - `memory.enabled = true`：启动时稳定装载工作区根 memory 文档，并支持单独一行 `@path` 导入
 - `compaction.*`：控制 `/compact` 手动压缩、soft threshold 提示和 hard threshold 的 idle 自动 compaction；若当前模型已有已知 context window，会优先按模型窗口计算阈值，否则回退到 `context_window_tokens`
-- `/config`：当前已支持在 TUI 内按 step 编辑 provider 常用项、permissions、memory、compaction，以及 MCP server 的 `name / command / args_csv / startup_timeout_secs`；底部固定 `Actions` 栏负责保存和退出
+- `/config`：当前已支持在 TUI 内按 step 编辑 provider 常用项、permissions、memory、compaction，以及 MCP server 的 `name / command / args_csv / startup_timeout_secs`；TUI 新增的 MCP server 默认保存为 `required = true`、`startup = "eager"`、`trust.trust_class = "self_hosted"`；底部固定 `Actions` 栏负责保存和退出
 - `model` / `fim_model` 默认优先走 picker；`api_key` 默认优先走 secret modal，并会在保存时写回配置文件
 - 弹窗内 `Enter` 只应用当前字段；`Ctrl-S` 会应用当前字段并保存，`F2` / `F3` 仍可作为可选快捷键
 - config 页可以先 `Down` 到底部 actions，再 `Left/Right` 选中动作并 `Enter` 执行；如果有未保存改动，第一次 `Esc` 会把焦点拉到 `save` 并提示，第二次 `Esc` 才会丢弃草稿退出
@@ -179,6 +195,29 @@ tail_messages = 6
 - 如果配置文件在用户配置目录里，`.` 会在启动时解析成你运行 `termquill-tui` 或 `termquill-cli` 时所在的目录
 
 注意：permission 只负责 allow / ask / deny 策略判断，不等同于 shell sandbox。文件类内置工具会 canonicalize workspace root，并拒绝 `..`、绝对路径和指向 workspace 外的 symlink；`bash` 仍不提供更强进程隔离。
+
+### MCP 工具
+
+MCP server 通过 `mcp_servers` 配置接入，远端工具会用隔离后的 provider-visible 名称暴露给模型，例如 `mcp__filesystem__read_file`：
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+command = "node"
+args = ["/absolute/path/to/server.js"]
+startup_timeout_secs = 5
+required = true
+startup = "eager"
+
+[mcp_servers.trust]
+trust_class = "self_hosted"
+approval_default = "ask"
+egress_logging = true
+allow_secrets = false
+pin_version = false
+```
+
+当前 MCP 支持 stdio、`initialize`、`tools/list`、`tools/call`、provider-visible 名称清洗/截断/hash 去重，以及 `roots/list` 响应。client 只把已解析的 workspace root 暴露为 root；`notifications/progress` 会被安全忽略，不刷 timeline；`elicitation/create` 在完整 TUI 交互落地前会返回不支持错误。MCP server 默认是 required + eager；`required = false` 的 eager server 启动或 `tools/list` 失败时会跳过并记录 warning，`required = false` 且 `startup = "lazy"` 的 server 当前不会启动或注册工具；required lazy 会明确报错，避免关键 server 被静默跳过。
 
 ### Provider 环境变量 override
 

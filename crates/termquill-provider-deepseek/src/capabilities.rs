@@ -14,5 +14,6 @@ pub fn deepseek_capabilities() -> ProviderCapabilities {
         supports_schema_constrained_tools: true,
         supports_infill_completion: true,
         supports_system_fingerprint: true,
+        tool_name_max_chars: 64,
     }
 }

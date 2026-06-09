@@ -194,7 +194,7 @@ impl AppState {
                 lines.push("[default]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
-                    ConfigField::PermissionsWriteMode,
+                    ConfigField::PermissionsDefaultMode,
                 ));
                 lines.push(String::new());
                 lines.push("[rules]".to_owned());
@@ -214,7 +214,7 @@ impl AppState {
                     for rule in &config_state.draft.base_root_config.permission.rules {
                         lines.push(format!(
                             "- {}  subject={}  mode={}",
-                            rule.tool_name,
+                            rule.tool_name.as_deref().unwrap_or("*"),
                             rule.subject_glob.as_deref().unwrap_or("<none>"),
                             rule.mode.as_str()
                         ));
@@ -616,9 +616,9 @@ impl AppState {
                                 config_state.draft.provider_api_key.clone(),
                             ));
                         }
-                        ConfigField::PermissionsWriteMode => {
-                            config_state.draft.permission_write_mode =
-                                cycle_approval_mode(config_state.draft.permission_write_mode);
+                        ConfigField::PermissionsDefaultMode => {
+                            config_state.draft.permission_default_mode =
+                                cycle_approval_mode(config_state.draft.permission_default_mode);
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
@@ -783,7 +783,7 @@ impl AppState {
 
     pub(super) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {
         self.config_snapshot = Some(root_config.clone());
-        self.permission_write_mode = root_config.permission.write_mode.as_str().to_owned();
+        self.permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
         self.memory_config = root_config.memory.clone();
         self.compaction_config = root_config.compaction.clone();
         if self.current_session_entries.is_empty() {
@@ -936,13 +936,10 @@ fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
             model: model.to_owned(),
-            max_turns: 8,
+            max_turns: None,
             tool_timeout_secs: 30,
         },
-        permission: PermissionConfig {
-            write_mode: ApprovalMode::Ask,
-            rules: Vec::new(),
-        },
+        permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         compaction: CompactionConfig {
             enabled: true,

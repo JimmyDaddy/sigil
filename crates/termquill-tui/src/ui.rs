@@ -1,5 +1,6 @@
 mod approval;
 mod composer;
+mod diff;
 mod geometry;
 mod info_rail;
 mod live_panel;

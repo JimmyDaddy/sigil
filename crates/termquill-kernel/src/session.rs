@@ -12,11 +12,15 @@ use sha2::{Digest, Sha256};
 use crate::{
     CompactionConfig, MemoryConfig,
     memory::{apply_memory_report, materialize_memory},
+    permission::ApprovalMode,
     provider::{
         CompletionRequest, ModelMessage, PrefixSnapshot, ProviderContinuationState, ResponseHandle,
         SessionStats, UsageStats,
     },
-    tool::ToolSpec,
+    tool::{
+        ToolAccess, ToolError, ToolErrorKind, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
+        ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    },
 };
 
 /// Append-only session log entry stored in the durable JSONL session file.
@@ -69,6 +73,12 @@ pub enum ControlEntry {
     PrefixSnapshotCaptured(PrefixSnapshot),
     #[serde(alias = "UsageSnapshot")]
     UsageSnapshot(UsageStats),
+    #[serde(alias = "ToolApproval")]
+    ToolApproval(ToolApprovalEntry),
+    #[serde(alias = "ToolExecution")]
+    ToolExecution(Box<ToolExecutionEntry>),
+    #[serde(alias = "ToolPreviewCaptured")]
+    ToolPreviewCaptured(ToolPreviewSnapshot),
     #[serde(alias = "CompactionApplied")]
     CompactionApplied(CompactionRecord),
     #[serde(alias = "Note")]
@@ -76,6 +86,92 @@ pub enum ControlEntry {
         kind: String,
         data: serde_json::Value,
     },
+}
+
+/// Append-only audit entry for permission policy evaluation and interactive approval decisions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolApprovalEntry {
+    pub action: ToolApprovalAuditAction,
+    pub call_id: String,
+    pub tool_name: String,
+    pub access: ToolAccess,
+    pub subjects: Vec<ToolSubjectAudit>,
+    pub policy_decision: ApprovalMode,
+    pub external_directory_required: bool,
+    pub user_decision: Option<ToolApprovalUserDecision>,
+    pub reason: Option<String>,
+    pub preview_hash: Option<String>,
+}
+
+/// Stable phase marker for one approval audit entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalAuditAction {
+    PolicyEvaluated,
+    Requested,
+    Resolved,
+    PreviewFailed,
+}
+
+/// Stable user approval decision persisted in the control log.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalUserDecision {
+    Approved,
+    Denied,
+}
+
+/// Append-only audit entry for one tool execution lifecycle step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolExecutionEntry {
+    pub call_id: String,
+    pub tool_name: String,
+    pub status: ToolExecutionStatus,
+    pub duration_ms: Option<u64>,
+    pub subjects: Vec<ToolSubjectAudit>,
+    pub changed_files: Vec<String>,
+    pub metadata: ToolResultMeta,
+    pub error: Option<ToolError>,
+    pub model_content_hash: Option<String>,
+}
+
+/// Stable execution status for session audit records.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionStatus {
+    Started,
+    Completed,
+    Failed,
+    Cancelled,
+    Interrupted,
+}
+
+/// Durable subject snapshot for one permission or execution audit record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolSubjectAudit {
+    pub kind: ToolSubjectKind,
+    pub original: String,
+    pub normalized: String,
+    pub canonical_path: Option<String>,
+    pub scope: ToolSubjectScope,
+}
+
+impl From<&ToolSubject> for ToolSubjectAudit {
+    fn from(subject: &ToolSubject) -> Self {
+        Self {
+            kind: subject.kind,
+            original: subject.original.clone(),
+            normalized: subject.normalized.clone(),
+            canonical_path: subject
+                .canonical_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            scope: subject.scope,
+        }
+    }
 }
 
 /// Append-only JSONL store for session and control-plane history.
@@ -198,6 +294,7 @@ impl Session {
             .unwrap_or((fallback_provider_name, fallback_model_name));
         let mut session = Self::from_entries(provider_name, model_name, entries).with_store(store);
         session.ensure_identity_entry()?;
+        session.mark_interrupted_tool_executions()?;
         Ok(session)
     }
 
@@ -442,6 +539,13 @@ impl Session {
         })
     }
 
+    fn mark_interrupted_tool_executions(&mut self) -> Result<()> {
+        for execution in interrupted_tool_executions(&self.entries) {
+            self.append_control(ControlEntry::ToolExecution(Box::new(execution)))?;
+        }
+        Ok(())
+    }
+
     fn raw_messages(&self) -> Vec<ModelMessage> {
         self.entries
             .iter()
@@ -537,16 +641,57 @@ fn repair_orphan_tool_results(messages: &[ModelMessage]) -> Vec<ModelMessage> {
 }
 
 fn synthetic_orphan_tool_result(call: &crate::ToolCall) -> ModelMessage {
-    ModelMessage {
-        id: format!("local_repair:missing_tool_result:{}", call.id),
-        role: crate::MessageRole::Tool,
-        content: Some(format!(
+    let result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::Interrupted,
+        format!(
             "tool call {} did not return a result before the previous run stopped; retry the tool call with valid arguments if it is still needed",
             call.name
-        )),
-        tool_calls: Vec::new(),
-        tool_call_id: Some(call.id.clone()),
+        ),
+    );
+    let mut message = result.to_model_message();
+    message.id = format!("local_repair:missing_tool_result:{}", call.id);
+    message
+}
+
+fn interrupted_tool_executions(entries: &[SessionLogEntry]) -> Vec<ToolExecutionEntry> {
+    let mut open_executions = HashMap::<String, ToolExecutionEntry>::new();
+    for entry in entries {
+        let SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) = entry else {
+            continue;
+        };
+        match execution.status {
+            ToolExecutionStatus::Started => {
+                open_executions.insert(execution.call_id.clone(), execution.as_ref().clone());
+            }
+            ToolExecutionStatus::Completed
+            | ToolExecutionStatus::Failed
+            | ToolExecutionStatus::Cancelled
+            | ToolExecutionStatus::Interrupted => {
+                open_executions.remove(&execution.call_id);
+            }
+        }
     }
+
+    open_executions
+        .into_values()
+        .map(|mut execution| {
+            execution.status = ToolExecutionStatus::Interrupted;
+            execution.duration_ms = None;
+            execution.changed_files = Vec::new();
+            execution.metadata = ToolResultMeta::default();
+            execution.error = Some(ToolError {
+                kind: ToolErrorKind::Interrupted,
+                message: "tool execution was interrupted before a completion record was written"
+                    .to_owned(),
+                retryable: true,
+                details: serde_json::Value::Null,
+            });
+            execution.model_content_hash = None;
+            execution
+        })
+        .collect()
 }
 
 pub fn latest_compaction_record(entries: &[SessionLogEntry]) -> Option<CompactionRecord> {

@@ -13,7 +13,8 @@ use futures::{Stream, stream};
 use termquill_kernel::{
     Agent, AgentConfig, CompactionConfig, McpServerConfig, MemoryConfig, PermissionConfig,
     Provider, ProviderCapabilities, ProviderChunk, RootConfig, SessionConfig, SessionLogEntry,
-    Tool, ToolCall, ToolContext, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    Tool, ToolAccess, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolResult,
+    ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::super::{WorkerCommand, WorkerMessage, worker_loop::run_worker_loop};
@@ -29,7 +30,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         agent: AgentConfig {
             provider: provider.to_owned(),
             model: model.to_owned(),
-            max_turns: 8,
+            max_turns: None,
             tool_timeout_secs: 30,
         },
         permission: PermissionConfig::default(),
@@ -191,6 +192,7 @@ impl Provider for PlannedProvider {
             supports_schema_constrained_tools: false,
             supports_infill_completion: false,
             supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
         }
     }
 
@@ -236,6 +238,7 @@ impl Provider for ApprovalFlowProvider {
             supports_schema_constrained_tools: false,
             supports_infill_completion: false,
             supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
         }
     }
 
@@ -288,7 +291,9 @@ impl Tool for WriteTool {
                 },
                 "required": ["path"]
             }),
-            read_only: false,
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
         }
     }
 
@@ -298,12 +303,11 @@ impl Tool for WriteTool {
         call_id: String,
         _args: serde_json::Value,
     ) -> Result<ToolResult> {
-        Ok(ToolResult {
+        Ok(ToolResult::ok(
             call_id,
-            tool_name: "write_file".to_owned(),
-            content: "wrote file".to_owned(),
-            is_error: false,
-            metadata: ToolResultMeta::default(),
-        })
+            "write_file".to_owned(),
+            "wrote file".to_owned(),
+            ToolResultMeta::default(),
+        ))
     }
 }

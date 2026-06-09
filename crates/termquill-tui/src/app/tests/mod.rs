@@ -17,9 +17,11 @@ use serde_json::json;
 use tempfile::tempdir;
 use termquill_kernel::{
     AgentConfig, ApprovalMode, CompactionConfig, CompactionRecord, ControlEntry, EventHandler,
-    JsonlSessionStore, MemoryConfig, ModelMessage, PermissionConfig, ReasoningEffort, RootConfig,
-    RunEvent, SessionConfig, SessionLogEntry, ToolCall, ToolPreview, ToolSpec, UsageStats,
-    WorkspaceConfig,
+    JsonlSessionStore, McpServerStartup, McpTrustClass, MemoryConfig, ModelMessage,
+    PermissionConfig, ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry,
+    ToolAccess, ToolCall, ToolCategory, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreview, ToolPreviewCapability, ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, ToolSubjectScope, UsageStats, WorkspaceConfig,
 };
 
 use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -7,8 +8,8 @@ use std::{
 
 use termquill_kernel::{
     CompactionPreview, ControlEntry, JsonlSessionStore, ModelMessage, RootConfig, Session,
-    SessionLogEntry, inspect_memory_documents, latest_compaction_record,
-    session_stats_from_entries,
+    SessionLogEntry, ToolExecutionEntry, ToolPreviewSnapshot, inspect_memory_documents,
+    latest_compaction_record, session_stats_from_entries,
 };
 use uuid::Uuid;
 
@@ -200,6 +201,7 @@ impl AppState {
     pub(super) fn sync_current_session_state(&mut self, entries: Vec<SessionLogEntry>) {
         self.stats = session_stats_from_entries(&entries);
         self.latest_compaction_record = latest_compaction_record(&entries);
+        self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
         self.current_session_entries = entries;
         self.refresh_usage_sidebar_cache();
     }
@@ -381,7 +383,7 @@ impl AppState {
             format!("{}/{}", self.provider_name, self.model_name),
         );
         self.push_event("effort", self.reasoning_effort.as_str());
-        self.push_event("approval_default", self.permission_write_mode.clone());
+        self.push_event("approval_default", self.permission_default_mode.clone());
         self.push_event(
             "memory",
             format!(
@@ -394,6 +396,9 @@ impl AppState {
         self.push_event("focus", self.active_pane.label());
         self.push_event("restore", format!("entries={}", entries.len()));
 
+        let restored_tool_executions = restored_tool_execution_index(&entries);
+        let restored_tool_previews = restored_tool_preview_snapshot_index(&entries);
+        self.tool_preview_snapshots = restored_tool_previews.clone();
         for entry in entries {
             match entry {
                 SessionLogEntry::User(message) => {
@@ -410,7 +415,23 @@ impl AppState {
                 }
                 SessionLogEntry::ToolResult(message) => {
                     if let Some(content) = message.content {
-                        self.push_timeline(TimelineRole::Tool, format_tool_content_block(&content));
+                        let execution = message
+                            .tool_call_id
+                            .as_deref()
+                            .and_then(|call_id| restored_tool_executions.get(call_id));
+                        let preview = message
+                            .tool_call_id
+                            .as_deref()
+                            .and_then(|call_id| restored_tool_previews.get(call_id));
+                        self.push_timeline(
+                            TimelineRole::Tool,
+                            format_tool_content_block(
+                                message.tool_call_id.as_deref(),
+                                &content,
+                                execution,
+                                preview,
+                            ),
+                        );
                     }
                 }
                 SessionLogEntry::Control(control) => {
@@ -552,12 +573,76 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 usage.cache_hit_tokens,
                 usage.cache_miss_tokens
             ),
+            ControlEntry::ToolApproval(approval) => format!(
+                "[ctl] approval {} {} action={} mode={}",
+                approval.call_id,
+                approval.tool_name,
+                tool_approval_action_label(approval.action),
+                approval.policy_decision.as_str()
+            ),
+            ControlEntry::ToolExecution(execution) => format!(
+                "[ctl] execution {} {} status={}",
+                execution.call_id,
+                execution.tool_name,
+                tool_execution_status_label(execution.status)
+            ),
+            ControlEntry::ToolPreviewCaptured(snapshot) => format!(
+                "[ctl] preview {} {} files={} +{} -{}",
+                snapshot.call_id,
+                snapshot.tool_name,
+                snapshot.file_diffs.len(),
+                snapshot.original_stats.added,
+                snapshot.original_stats.removed
+            ),
             ControlEntry::CompactionApplied(record) => format!(
                 "[ctl] compacted={} tail={}",
                 record.compacted_message_count, record.retained_tail_message_count
             ),
             ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
         },
+    }
+}
+
+fn restored_tool_execution_index(
+    entries: &[SessionLogEntry],
+) -> HashMap<String, ToolExecutionEntry> {
+    let mut executions = HashMap::new();
+    for entry in entries {
+        if let SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) = entry {
+            executions.insert(execution.call_id.clone(), execution.as_ref().clone());
+        }
+    }
+    executions
+}
+
+fn restored_tool_preview_snapshot_index(
+    entries: &[SessionLogEntry],
+) -> HashMap<String, ToolPreviewSnapshot> {
+    let mut snapshots = HashMap::new();
+    for entry in entries {
+        if let SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot)) = entry {
+            snapshots.insert(snapshot.call_id.clone(), snapshot.clone());
+        }
+    }
+    snapshots
+}
+
+fn tool_approval_action_label(action: termquill_kernel::ToolApprovalAuditAction) -> &'static str {
+    match action {
+        termquill_kernel::ToolApprovalAuditAction::PolicyEvaluated => "policy",
+        termquill_kernel::ToolApprovalAuditAction::Requested => "requested",
+        termquill_kernel::ToolApprovalAuditAction::Resolved => "resolved",
+        termquill_kernel::ToolApprovalAuditAction::PreviewFailed => "preview_failed",
+    }
+}
+
+fn tool_execution_status_label(status: termquill_kernel::ToolExecutionStatus) -> &'static str {
+    match status {
+        termquill_kernel::ToolExecutionStatus::Started => "started",
+        termquill_kernel::ToolExecutionStatus::Completed => "completed",
+        termquill_kernel::ToolExecutionStatus::Failed => "failed",
+        termquill_kernel::ToolExecutionStatus::Cancelled => "cancelled",
+        termquill_kernel::ToolExecutionStatus::Interrupted => "interrupted",
     }
 }
 

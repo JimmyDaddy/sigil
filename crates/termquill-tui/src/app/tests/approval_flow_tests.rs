@@ -13,6 +13,46 @@ fn approval_request_stores_preview() -> Result<()> {
 }
 
 #[test]
+fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-mcp-1".to_owned(),
+            name: "remote_tool".to_owned(),
+            args_json: r#"{"query":"status"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "remote_tool".to_owned(),
+            description: "Remote tool".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Mcp,
+            access: ToolAccess::Network,
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: Vec::new(),
+        preview: None,
+    })?;
+
+    let lines = app.approval_preview_lines().join("\n");
+    assert!(lines.contains("tool=remote_tool"));
+    assert!(lines.contains("mode=mcp network"));
+    assert!(lines.contains(r#"args={"query":"status"}"#));
+
+    let view = app
+        .approval_modal_view()
+        .expect("approval modal view should exist");
+    assert_eq!(view.preview_title, "Run remote_tool");
+    assert_eq!(view.access_label, "mcp network");
+    assert!(view.preview_summary.contains("preview unavailable"));
+    assert!(
+        view.diff_lines
+            .iter()
+            .any(|line| line.text.contains("No structured diff preview available"))
+    );
+    Ok(())
+}
+
+#[test]
 fn approval_diff_mode_cycles_to_changed_only() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;
@@ -23,6 +63,43 @@ fn approval_diff_mode_cycles_to_changed_only() -> Result<()> {
     assert!(!lines.contains("   alpha"));
     assert!(lines.contains("-beta"));
     assert!(lines.contains("+gamma"));
+    Ok(())
+}
+
+#[test]
+fn approval_request_shows_external_subjects_without_preview() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let external_path = Path::new("/tmp/termquill-outside.txt").to_path_buf();
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-external-1".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: r#"{"path":"/tmp/termquill-outside.txt"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "read_file".to_owned(),
+            description: "Read file".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: vec![ToolSubject::path_with_scope(
+            "/tmp/termquill-outside.txt",
+            "/tmp/termquill-outside.txt",
+            Some(external_path.clone()),
+            ToolSubjectScope::External,
+        )],
+        preview: None,
+    })?;
+
+    let lines = app.approval_preview_lines().join("\n");
+    assert!(lines.contains("subject=external:path:/tmp/termquill-outside.txt"));
+    let view = app
+        .approval_modal_view()
+        .expect("approval modal view should exist");
+    assert!(view.preview_summary.contains("external:path"));
+    assert!(view.preview_summary.contains("/tmp/termquill-outside.txt"));
     Ok(())
 }
 

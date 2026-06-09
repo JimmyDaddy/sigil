@@ -20,7 +20,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         agent: AgentConfig {
             provider: provider.to_owned(),
             model: "deepseek-v4-flash".to_owned(),
-            max_turns: 12,
+            max_turns: Some(12),
             tool_timeout_secs: 45,
         },
         permission: PermissionConfig::default(),
@@ -74,7 +74,7 @@ fn build_run_options_carries_shared_runtime_defaults() {
     );
 
     assert_eq!(options.workspace_root, workspace_root);
-    assert_eq!(options.max_turns, 12);
+    assert_eq!(options.max_turns, Some(12));
     assert_eq!(options.tool_timeout_secs, 45);
     assert_eq!(options.traffic_partition_key.as_deref(), Some("local-user"));
     assert_eq!(options.interaction_mode, InteractionMode::Interactive);
@@ -82,7 +82,13 @@ fn build_run_options_carries_shared_runtime_defaults() {
 
 #[tokio::test]
 async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()> {
-    let registry = build_tool_registry(&test_root_config("deepseek")).await?;
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let registry = build_tool_registry(
+        &test_root_config("deepseek"),
+        &provider.capabilities(),
+        std::env::current_dir()?,
+    )
+    .await?;
 
     assert!(registry.specs().iter().any(|spec| spec.name == "read_file"));
     assert!(registry.specs().iter().any(|spec| spec.name == "bash"));

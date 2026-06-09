@@ -13,8 +13,9 @@ impl AppState {
                     "tool={}  id={}  mode={}",
                     pending.call.name,
                     pending.call.id,
-                    approval_access_label(pending.spec.read_only)
+                    approval_access_label(&pending.spec)
                 ));
+                lines.extend(approval_subject_lines(&pending.subjects));
                 lines.push(format!("preview={}", preview.title));
                 if !preview.summary.trim().is_empty() {
                     lines.push(preview.summary.clone());
@@ -84,8 +85,9 @@ impl AppState {
                 "tool={}  id={}  mode={}",
                 pending.call.name,
                 pending.call.id,
-                approval_access_label(pending.spec.read_only)
+                approval_access_label(&pending.spec)
             ));
+            lines.extend(approval_subject_lines(&pending.subjects));
             lines.push(format!("args={}", pending.call.args_json));
         }
 
@@ -96,14 +98,15 @@ impl AppState {
 
     pub(crate) fn approval_modal_view(&self) -> Option<ApprovalModalView> {
         let pending = self.pending_approval.as_ref()?;
-        let access_label = approval_access_label(pending.spec.read_only);
+        let access_label = approval_access_label(&pending.spec);
         let Some(preview) = pending.preview.as_ref() else {
             return Some(ApprovalModalView {
                 tool_name: pending.call.name.clone(),
                 call_id: pending.call.id.clone(),
                 access_label,
                 preview_title: format!("Run {}", pending.call.name),
-                preview_summary: "Tool preview unavailable for this call.".to_owned(),
+                preview_summary: approval_subject_summary(&pending.subjects)
+                    .unwrap_or_else(|| "Tool preview unavailable for this call.".to_owned()),
                 metadata_collapsed: self.approval_metadata_collapsed,
                 file_rows: Vec::new(),
                 changed_files: Vec::new(),
@@ -312,8 +315,35 @@ impl AppState {
     }
 }
 
-fn approval_access_label(read_only: bool) -> &'static str {
-    if read_only { "read" } else { "write" }
+fn approval_access_label(spec: &termquill_kernel::ToolSpec) -> String {
+    format!("{} {}", spec.category.as_str(), spec.access.as_str())
+}
+
+fn approval_subject_lines(subjects: &[termquill_kernel::ToolSubject]) -> Vec<String> {
+    subjects
+        .iter()
+        .map(|subject| format!("subject={}", approval_subject_label(subject)))
+        .collect()
+}
+
+fn approval_subject_summary(subjects: &[termquill_kernel::ToolSubject]) -> Option<String> {
+    (!subjects.is_empty()).then(|| {
+        subjects
+            .iter()
+            .map(approval_subject_label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+}
+
+fn approval_subject_label(subject: &termquill_kernel::ToolSubject) -> String {
+    let scope = subject.scope.as_str();
+    let target = subject
+        .canonical_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| subject.normalized.clone());
+    format!("{scope}:{}:{target}", subject.kind.as_str())
 }
 
 fn approval_diff_line_kind(line: &str) -> ApprovalDiffLineKind {

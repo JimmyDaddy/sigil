@@ -185,7 +185,7 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
             " {}/{}  write={}  {} ",
             app.provider_name,
             app.model_name,
-            app.permission_write_mode,
+            app.permission_default_mode,
             if app.is_busy { "running" } else { "idle" }
         )),
     ]);

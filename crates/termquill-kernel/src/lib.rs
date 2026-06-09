@@ -8,18 +8,19 @@ pub mod provider;
 pub mod session;
 pub mod tool;
 
-pub use agent::{Agent, AgentError, AgentRunOptions, AgentRunResult};
+pub use agent::{Agent, AgentRunOptions, AgentRunResult};
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
 pub use config::{
-    AgentConfig, CompactionConfig, CompactionThresholdStatus, McpServerConfig, MemoryConfig,
-    RootConfig, SessionConfig, WorkspaceConfig, default_user_config_dir, default_user_config_path,
-    preferred_config_path, resolve_workspace_root,
+    AgentConfig, CompactionConfig, CompactionThresholdStatus, McpServerConfig, McpServerStartup,
+    McpServerTrustPolicy, McpTrustClass, MemoryConfig, RootConfig, SessionConfig, WorkspaceConfig,
+    default_user_config_dir, default_user_config_path, preferred_config_path,
+    resolve_workspace_root,
 };
 pub use event::{EventHandler, NoopEventHandler, RunEvent};
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use permission::{
-    ApprovalMode, InteractionMode, PermissionConfig, PermissionDecision, PermissionPolicy,
-    PermissionRule,
+    ApprovalMode, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
+    PermissionAccessConfig, PermissionConfig, PermissionDecision, PermissionPolicy, PermissionRule,
 };
 pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
@@ -28,9 +29,12 @@ pub use provider::{
 };
 pub use session::{
     CompactionPreview, CompactionRecord, ControlEntry, JsonlSessionStore, Session, SessionLogEntry,
-    latest_compaction_record, session_stats_from_entries,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolExecutionEntry,
+    ToolExecutionStatus, ToolSubjectAudit, latest_compaction_record, session_stats_from_entries,
 };
 pub use tool::{
-    Tool, ToolContext, ToolPreview, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolSpec,
+    Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolError,
+    ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewFileSnapshot,
+    ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus,
+    ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
 };

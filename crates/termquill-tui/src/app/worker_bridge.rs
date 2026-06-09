@@ -5,7 +5,7 @@ use crate::provider_status::{
     BalanceSnapshot, fetch_provider_balance_snapshot, resolve_provider_api_key,
 };
 use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
-use termquill_kernel::{EventHandler, RunEvent};
+use termquill_kernel::{ControlEntry, EventHandler, RunEvent, ToolDiffBudget, ToolPreviewSnapshot};
 
 impl AppState {
     pub fn poll_background_tasks(&mut self) -> bool {
@@ -283,12 +283,27 @@ impl EventHandler for AppState {
             RunEvent::ToolApprovalRequested {
                 call,
                 spec,
+                subjects,
                 preview,
             } => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
+                if let Some(preview) = preview.as_ref() {
+                    self.tool_preview_snapshots
+                        .entry(call.id.clone())
+                        .or_insert_with(|| {
+                            ToolPreviewSnapshot::from_preview(
+                                call.id.clone(),
+                                call.name.clone(),
+                                preview,
+                                ToolDiffBudget::default(),
+                                None,
+                            )
+                        });
+                }
                 self.pending_approval = Some(PendingApproval {
                     call: call.clone(),
                     spec,
+                    subjects,
                     preview,
                 });
                 self.active_pane = PaneFocus::Activity;
@@ -335,8 +350,12 @@ impl EventHandler for AppState {
                 self.run_phase = RunPhase::Tool(result.tool_name.clone());
                 self.streaming_reasoning_index = None;
                 self.push_phase_marker(format!("tool|{}", result.tool_name));
-                let status = if result.is_error { "error" } else { "ok" };
-                self.push_timeline(TimelineRole::Tool, format_tool_result_block(&result));
+                let status = if result.is_error() { "error" } else { "ok" };
+                let preview = self.tool_preview_snapshots.get(&result.call_id);
+                self.push_timeline(
+                    TimelineRole::Tool,
+                    format_tool_result_block(&result, preview),
+                );
                 self.push_event("tool:result", format!("{} {}", result.tool_name, status));
             }
             RunEvent::Usage(usage) => {
@@ -354,9 +373,26 @@ impl EventHandler for AppState {
                     ),
                 );
             }
-            RunEvent::Control(control) => {
-                self.push_event("control", format!("{control:?}"));
-            }
+            RunEvent::Control(control) => match control {
+                ControlEntry::ToolPreviewCaptured(snapshot) => {
+                    self.push_event(
+                        "control",
+                        format!(
+                            "preview {} {} files={} +{} -{}",
+                            snapshot.call_id,
+                            snapshot.tool_name,
+                            snapshot.file_diffs.len(),
+                            snapshot.original_stats.added,
+                            snapshot.original_stats.removed
+                        ),
+                    );
+                    self.tool_preview_snapshots
+                        .insert(snapshot.call_id.clone(), snapshot);
+                }
+                other => {
+                    self.push_event("control", format!("{other:?}"));
+                }
+            },
             RunEvent::ContinuationState(state) => {
                 self.push_event("continuation", state.state_kind);
             }

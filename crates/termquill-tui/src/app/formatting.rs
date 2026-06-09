@@ -1,7 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ratatui::text::Line;
-use termquill_kernel::{ReasoningEffort, RootConfig, ToolResult, ToolResultMeta};
+use termquill_kernel::{
+    ReasoningEffort, RootConfig, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
+    ToolResult, ToolResultMeta,
+};
 
 use crate::slash::KNOWN_MODEL_IDS;
 
@@ -151,18 +154,52 @@ pub(super) fn ratio_to_percent(ratio: f32) -> u32 {
     (ratio * 100.0).round().clamp(0.0, 999.0) as u32
 }
 
-pub(super) fn format_tool_result_block(result: &ToolResult) -> String {
+pub(super) fn format_tool_result_block(
+    result: &ToolResult,
+    preview: Option<&ToolPreviewSnapshot>,
+) -> String {
+    let preview = if result.is_error() { None } else { preview };
     format_tool_preview_payload(
         Some(result.call_id.as_str()),
         result.tool_name.as_str(),
-        if result.is_error { "error" } else { "ok" },
+        if result.is_error() { "error" } else { "ok" },
         &result.content,
         Some(&result.metadata),
+        preview,
     )
 }
 
-pub(super) fn format_tool_content_block(content: &str) -> String {
-    format_tool_preview_payload(None, "tool_result", "ok", content, None)
+pub(super) fn format_tool_content_block(
+    call_id: Option<&str>,
+    content: &str,
+    execution: Option<&ToolExecutionEntry>,
+    preview: Option<&ToolPreviewSnapshot>,
+) -> String {
+    let envelope = parse_tool_result_envelope(content);
+    let display_content = envelope
+        .as_ref()
+        .and_then(|value| value.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(content);
+    let status = envelope
+        .as_ref()
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| execution.and_then(restored_execution_status_label))
+        .unwrap_or("ok");
+    let preview = if status == "ok" { preview } else { None };
+    let tool_name = execution
+        .map(|entry| entry.tool_name.as_str())
+        .unwrap_or("tool");
+    let metadata = restored_tool_metadata(envelope.as_ref(), execution);
+    format_tool_preview_payload(
+        call_id,
+        tool_name,
+        status,
+        display_content,
+        metadata.as_ref(),
+        preview,
+    )
 }
 
 fn format_tool_preview_payload(
@@ -171,6 +208,7 @@ fn format_tool_preview_payload(
     status: &str,
     content: &str,
     metadata: Option<&ToolResultMeta>,
+    preview: Option<&ToolPreviewSnapshot>,
 ) -> String {
     let preview_value = tool_preview_value(content);
     let (preview_kind, preview_source) =
@@ -189,10 +227,6 @@ fn format_tool_preview_payload(
     let bytes = metadata
         .and_then(|value| value.bytes)
         .unwrap_or(content.len() as u64);
-    let metadata_line = metadata
-        .and_then(render_tool_metadata_summary)
-        .filter(|value| !value.is_empty());
-
     let mut object = serde_json::Map::new();
     if let Some(call_id) = call_id {
         object.insert(
@@ -212,16 +246,19 @@ fn format_tool_preview_payload(
         "preview_kind".to_owned(),
         serde_json::Value::String(preview_kind.to_owned()),
     );
-    object.insert(
-        "summary".to_owned(),
-        serde_json::Value::String(format_tool_preview_summary(
-            tool_name,
-            total_lines,
-            preview_lines.len(),
-            hidden_lines,
-            bytes,
-        )),
+    let diff_payload = preview.and_then(format_tool_diff_payload);
+    let mut summary = format_tool_preview_summary(
+        tool_name,
+        total_lines,
+        preview_lines.len(),
+        hidden_lines,
+        bytes,
     );
+    if let Some((diff_summary, _)) = diff_payload.as_ref() {
+        summary.push_str(" · diff ");
+        summary.push_str(diff_summary);
+    }
+    object.insert("summary".to_owned(), serde_json::Value::String(summary));
     object.insert(
         "preview_lines".to_owned(),
         serde_json::Value::Array(
@@ -236,12 +273,6 @@ fn format_tool_preview_payload(
         "hidden_lines".to_owned(),
         serde_json::Value::Number(hidden_lines.into()),
     );
-    if let Some(metadata_line) = metadata_line {
-        object.insert(
-            "metadata_line".to_owned(),
-            serde_json::Value::String(metadata_line),
-        );
-    }
     if let Some(metadata) = metadata {
         object.insert(
             "metadata".to_owned(),
@@ -254,11 +285,200 @@ fn format_tool_preview_payload(
             compact_preview_value(&preview_value, 0),
         );
     }
+    if let Some((_, diff)) = diff_payload {
+        object.insert("diff".to_owned(), diff);
+    }
     serde_json::to_string(&serde_json::Value::Object(object)).unwrap_or_else(|_| content.to_owned())
+}
+
+fn format_tool_diff_payload(preview: &ToolPreviewSnapshot) -> Option<(String, serde_json::Value)> {
+    if preview.file_diffs.is_empty() {
+        return None;
+    }
+    let file_count = preview.changed_files.len().max(preview.file_diffs.len());
+    let file_label = if file_count == 1 { "file" } else { "files" };
+    let mut summary = format!(
+        "+{} -{} · {} {}",
+        preview.original_stats.added, preview.original_stats.removed, file_count, file_label
+    );
+    if preview.truncated {
+        summary.push_str(" · truncated");
+    }
+
+    let files = preview
+        .file_diffs
+        .iter()
+        .map(|file| {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "path".to_owned(),
+                serde_json::Value::String(file.path.clone()),
+            );
+            object.insert(
+                "lines".to_owned(),
+                serde_json::Value::Array(
+                    file.diff
+                        .lines()
+                        .map(|line| serde_json::Value::String(line.to_owned()))
+                        .collect(),
+                ),
+            );
+            object.insert(
+                "truncated".to_owned(),
+                serde_json::Value::Bool(file.truncated),
+            );
+            object.insert(
+                "original_line_count".to_owned(),
+                serde_json::Value::Number(file.original_line_count.into()),
+            );
+            object.insert(
+                "rendered_line_count".to_owned(),
+                serde_json::Value::Number(file.rendered_line_count.into()),
+            );
+            object.insert(
+                "original_stats".to_owned(),
+                serde_json::to_value(file.original_stats).unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "rendered_stats".to_owned(),
+                serde_json::to_value(file.rendered_stats).unwrap_or(serde_json::Value::Null),
+            );
+            serde_json::Value::Object(object)
+        })
+        .collect::<Vec<_>>();
+
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "summary".to_owned(),
+        serde_json::Value::String(summary.clone()),
+    );
+    object.insert(
+        "truncated".to_owned(),
+        serde_json::Value::Bool(preview.truncated),
+    );
+    object.insert(
+        "original_line_count".to_owned(),
+        serde_json::Value::Number(preview.original_line_count.into()),
+    );
+    object.insert(
+        "rendered_line_count".to_owned(),
+        serde_json::Value::Number(preview.rendered_line_count.into()),
+    );
+    object.insert(
+        "original_stats".to_owned(),
+        serde_json::to_value(preview.original_stats).unwrap_or(serde_json::Value::Null),
+    );
+    object.insert(
+        "rendered_stats".to_owned(),
+        serde_json::to_value(preview.rendered_stats).unwrap_or(serde_json::Value::Null),
+    );
+    object.insert("files".to_owned(), serde_json::Value::Array(files));
+    Some((summary, serde_json::Value::Object(object)))
 }
 
 fn parse_tool_content_value(content: &str) -> serde_json::Value {
     serde_json::from_str(content).unwrap_or_else(|_| serde_json::Value::String(content.to_owned()))
+}
+
+fn parse_tool_result_envelope(content: &str) -> Option<serde_json::Value> {
+    let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    let object = value.as_object()?;
+    (object.contains_key("status") && object.contains_key("content")).then_some(value)
+}
+
+fn restored_execution_status_label(execution: &ToolExecutionEntry) -> Option<&'static str> {
+    match execution.status {
+        ToolExecutionStatus::Completed => Some("ok"),
+        ToolExecutionStatus::Failed
+        | ToolExecutionStatus::Cancelled
+        | ToolExecutionStatus::Interrupted => Some("error"),
+        ToolExecutionStatus::Started => None,
+    }
+}
+
+fn restored_tool_metadata(
+    envelope: Option<&serde_json::Value>,
+    execution: Option<&ToolExecutionEntry>,
+) -> Option<ToolResultMeta> {
+    if let Some(execution) = execution {
+        return Some(execution.metadata.clone());
+    }
+    envelope
+        .and_then(|value| value.get("meta"))
+        .and_then(project_model_meta_to_tool_result_meta)
+}
+
+fn project_model_meta_to_tool_result_meta(value: &serde_json::Value) -> Option<ToolResultMeta> {
+    let object = value.as_object()?;
+    let mut metadata = ToolResultMeta {
+        duration_ms: object
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_u64),
+        exit_code: object
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
+        stdout_bytes: object
+            .get("stdout_bytes")
+            .and_then(serde_json::Value::as_u64),
+        stderr_bytes: object
+            .get("stderr_bytes")
+            .and_then(serde_json::Value::as_u64),
+        bytes: object.get("bytes").and_then(serde_json::Value::as_u64),
+        truncated: object
+            .get("truncated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        omitted_bytes: object
+            .get("omitted_bytes")
+            .and_then(serde_json::Value::as_u64),
+        limit_bytes: object
+            .get("limit_bytes")
+            .and_then(serde_json::Value::as_u64),
+        limit_lines: object
+            .get("limit_lines")
+            .and_then(serde_json::Value::as_u64),
+        returned_bytes: object
+            .get("returned_bytes")
+            .and_then(serde_json::Value::as_u64),
+        returned_lines: object
+            .get("returned_lines")
+            .and_then(serde_json::Value::as_u64),
+        total_bytes: object
+            .get("total_bytes")
+            .and_then(serde_json::Value::as_u64),
+        total_lines: object
+            .get("total_lines")
+            .and_then(serde_json::Value::as_u64),
+        returned_matches: object
+            .get("returned_matches")
+            .and_then(serde_json::Value::as_u64),
+        total_matches: object
+            .get("total_matches")
+            .and_then(serde_json::Value::as_u64),
+        returned_entries: object
+            .get("returned_entries")
+            .and_then(serde_json::Value::as_u64),
+        total_entries: object
+            .get("total_entries")
+            .and_then(serde_json::Value::as_u64),
+        changed_files: Vec::new(),
+        details: object
+            .get("details")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    };
+    if let Some(files) = object
+        .get("changed_files")
+        .and_then(serde_json::Value::as_array)
+    {
+        metadata.changed_files = files
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+    }
+    Some(metadata)
 }
 
 fn tool_preview_value(content: &str) -> Option<serde_json::Value> {
@@ -398,26 +618,6 @@ fn looks_like_markdown_document(content: &str) -> bool {
         || trimmed.contains("\n* ")
         || trimmed.contains("\n1. ")
         || (trimmed.contains('|') && trimmed.contains("---"))
-}
-
-fn render_tool_metadata_summary(metadata: &ToolResultMeta) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(exit_code) = metadata.exit_code {
-        parts.push(format!("exit={exit_code}"));
-    }
-    if let Some(bytes) = metadata.bytes {
-        parts.push(format!("bytes={bytes}"));
-    }
-    if metadata.truncated {
-        parts.push("truncated".to_owned());
-    }
-    if !metadata.changed_files.is_empty() {
-        parts.push(format!("files={}", metadata.changed_files.len()));
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(parts.join(" · "))
 }
 
 pub(super) fn build_model_picker_options(current: &str, remote: Vec<String>) -> Vec<String> {

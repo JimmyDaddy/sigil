@@ -32,6 +32,255 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
 }
 
 #[test]
+fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::User(ModelMessage::user("read the file")),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "call-read-1".to_owned(),
+            tool_name: "read_file".to_owned(),
+            status: ToolExecutionStatus::Completed,
+            duration_ms: Some(4),
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta {
+                bytes: Some(18),
+                details: json!({
+                    "call": {
+                        "summary": "path=README.md"
+                    }
+                }),
+                ..ToolResultMeta::default()
+            },
+            error: None,
+            model_content_hash: Some("hash".to_owned()),
+        }))),
+        SessionLogEntry::ToolResult(ModelMessage::tool(
+            "call-read-1",
+            json!({
+                "status": "ok",
+                "content": "# Title\nbody",
+                "meta": {
+                    "bytes": 18,
+                    "details": {
+                        "call": {
+                            "summary": "path=README.md"
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = app
+        .transcript_lines(20)
+        .into_iter()
+        .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("read_file"));
+    assert!(rendered.contains("path=README.md"));
+    assert!(!rendered.contains("tool_result"));
+    assert!(!rendered.contains("\"status\":\"ok\""));
+    Ok(())
+}
+
+#[test]
+fn restored_tool_result_uses_preview_snapshot_for_diff_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let preview = sample_approval_preview();
+    let snapshot = ToolPreviewSnapshot::from_preview(
+        "call-write-1",
+        "write_file",
+        &preview,
+        Default::default(),
+        Some("preview-hash".to_owned()),
+    );
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::User(ModelMessage::user("write note")),
+        SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot)),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "call-write-1".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Completed,
+            duration_ms: Some(4),
+            subjects: Vec::new(),
+            changed_files: vec!["note.txt".to_owned()],
+            metadata: ToolResultMeta {
+                bytes: Some(14),
+                changed_files: vec!["note.txt".to_owned()],
+                details: json!({
+                    "call": {
+                        "summary": "path=note.txt"
+                    }
+                }),
+                ..ToolResultMeta::default()
+            },
+            error: None,
+            model_content_hash: Some("hash".to_owned()),
+        }))),
+        SessionLogEntry::ToolResult(ModelMessage::tool(
+            "call-write-1",
+            json!({
+                "status": "ok",
+                "content": "wrote note.txt",
+                "meta": {
+                    "bytes": 14,
+                    "changed_files": ["note.txt"]
+                }
+            })
+            .to_string(),
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let tool_entry = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("expected restored tool entry");
+    let rendered: serde_json::Value = serde_json::from_str(&tool_entry.text)?;
+    assert_eq!(rendered["tool_name"], "write_file");
+    assert!(
+        rendered["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("diff +1 -1"))
+    );
+    assert_eq!(
+        rendered["metadata"]["details"]["call"]["summary"],
+        "path=note.txt"
+    );
+    assert!(
+        rendered["diff"]["files"][0]["lines"]
+            .as_array()
+            .is_some_and(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.as_str().is_some_and(|text| text == "-beta"))
+                    && lines
+                        .iter()
+                        .any(|line| line.as_str().is_some_and(|text| text == "+gamma"))
+            })
+    );
+    Ok(())
+}
+
+#[test]
+fn restored_delete_file_tool_result_uses_preview_snapshot_for_diff_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let snapshot = ToolPreviewSnapshot::from_preview(
+        "call-delete-1",
+        "delete_file",
+        &sample_delete_approval_preview(),
+        Default::default(),
+        Some("delete-preview-hash".to_owned()),
+    );
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::User(ModelMessage::user("delete note")),
+        SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot)),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "call-delete-1".to_owned(),
+            tool_name: "delete_file".to_owned(),
+            status: ToolExecutionStatus::Completed,
+            duration_ms: Some(4),
+            subjects: Vec::new(),
+            changed_files: vec!["note.txt".to_owned()],
+            metadata: ToolResultMeta {
+                bytes: Some(11),
+                changed_files: vec!["note.txt".to_owned()],
+                details: json!({
+                    "action": "delete",
+                    "call": {
+                        "summary": "path=note.txt"
+                    }
+                }),
+                ..ToolResultMeta::default()
+            },
+            error: None,
+            model_content_hash: Some("hash".to_owned()),
+        }))),
+        SessionLogEntry::ToolResult(ModelMessage::tool(
+            "call-delete-1",
+            json!({
+                "status": "ok",
+                "content": "deleted /workspace/note.txt",
+                "meta": {
+                    "bytes": 11,
+                    "changed_files": ["note.txt"],
+                    "details": {
+                        "action": "delete"
+                    }
+                }
+            })
+            .to_string(),
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let tool_entry = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("expected restored tool entry");
+    let rendered: serde_json::Value = serde_json::from_str(&tool_entry.text)?;
+    assert_eq!(rendered["tool_name"], "delete_file");
+    assert_eq!(rendered["metadata"]["details"]["action"], "delete");
+    assert!(
+        rendered["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("diff +0 -2"))
+    );
+    assert!(
+        rendered["diff"]["files"][0]["lines"]
+            .as_array()
+            .is_some_and(|lines| {
+                lines
+                    .iter()
+                    .any(|line| line.as_str().is_some_and(|text| text == "-alpha"))
+                    && lines
+                        .iter()
+                        .any(|line| line.as_str().is_some_and(|text| text == "-beta"))
+            })
+    );
+    Ok(())
+}
+
+#[test]
 fn session_sidebar_lines_include_model_and_phase() {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.run_phase = RunPhase::Thinking;

@@ -5,7 +5,9 @@ use std::{
 
 use anyhow::Result;
 use futures::StreamExt;
-use termquill_kernel::{Provider, ProviderChunk, ToolCall, ToolSpec};
+use termquill_kernel::{
+    Provider, ProviderChunk, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -38,7 +40,9 @@ fn request_body_injects_reasoning_replay_into_matching_assistant_message() -> Re
             name: "read_file".to_owned(),
             description: "read".to_owned(),
             input_schema: serde_json::json!({"type":"object"}),
-            read_only: true,
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
         }],
         temperature: None,
         max_tokens: None,

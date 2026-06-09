@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
 use termquill_kernel::{
-    AgentRunOptions, InteractionMode, Provider, ReasoningEffort, RootConfig, ToolRegistry,
+    AgentRunOptions, InteractionMode, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
+    ToolRegistry,
 };
 use termquill_provider_deepseek::{DeepSeekProvider, DeepSeekProviderConfig};
 
@@ -26,10 +27,20 @@ pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
 /// # Errors
 ///
 /// Returns an error when one configured MCP server cannot be started or queried.
-pub async fn build_tool_registry(root_config: &RootConfig) -> Result<ToolRegistry> {
+pub async fn build_tool_registry(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     termquill_tools_builtin::register_builtin_tools(&mut registry);
-    termquill_mcp::register_mcp_tools(&mut registry, &root_config.mcp_servers).await?;
+    termquill_mcp::register_mcp_tools_with_capabilities_and_roots(
+        &mut registry,
+        &root_config.mcp_servers,
+        provider_capabilities,
+        vec![canonical_workspace_root(workspace_root)],
+    )
+    .await?;
     Ok(registry)
 }
 
@@ -64,6 +75,10 @@ pub fn load_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProvider
         .cloned()
         .ok_or_else(|| anyhow!("missing [providers.deepseek] in termquill.toml"))?;
     serde_json::from_value(provider_config_value).context("invalid deepseek provider config")
+}
+
+fn canonical_workspace_root(workspace_root: PathBuf) -> PathBuf {
+    workspace_root.canonicalize().unwrap_or(workspace_root)
 }
 
 #[cfg(test)]

@@ -62,13 +62,21 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
 
     let finished =
         worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
-    assert!(matches!(
-        finished,
-        WorkerMessage::RunFinished { ref result, ref entries }
-            if result.final_text == "approved run finished"
-                && result.tool_calls == 1
-                && entries.iter().any(|entry| matches!(entry, SessionLogEntry::ToolResult(message) if message.content.as_deref() == Some("wrote file")))
-    ));
+    let WorkerMessage::RunFinished { result, entries } = finished else {
+        panic!("expected run finished");
+    };
+    assert_eq!(result.final_text, "approved run finished");
+    assert_eq!(result.tool_calls, 1);
+    let tool_result_message = entries
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::ToolResult(message) => message.content.as_deref(),
+            _ => None,
+        })
+        .expect("expected tool result session message");
+    let envelope: serde_json::Value = serde_json::from_str(tool_result_message)?;
+    assert_eq!(envelope["status"], "ok");
+    assert_eq!(envelope["content"], "wrote file");
 
     worker.shutdown()?;
     Ok(())

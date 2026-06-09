@@ -6,7 +6,7 @@ use futures::{Stream, StreamExt, stream};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::Serialize;
 use tokio::time::{Duration, sleep};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use termquill_kernel::{CompletionRequest, Provider, ProviderCapabilities, ProviderChunk};
 
@@ -155,6 +155,14 @@ impl DeepSeekProvider {
             self.config.strict_tools_mode,
             &self.profile.quirks,
         )?;
+        for diagnostic in &prepared.tool_diagnostics {
+            debug!(
+                target: "termquill_provider_deepseek",
+                diagnostic_level = ?diagnostic.level,
+                message = %diagnostic.message,
+                "tool schema diagnostic"
+            );
+        }
         self.stream_chat_chunks(
             prepared.endpoint,
             "/chat/completions",

@@ -1,9 +1,38 @@
+use std::{collections::BTreeMap, path::Path};
+
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use termquill_kernel::{
+    AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
+    WorkspaceConfig,
+};
+use termquill_tui::app::AppState;
 
 use super::{
     ScrollbackSyncPlan, ScrollbackSyncState, plan_scrollback_sync, render_scrollback_rows,
-    wrap_scrollback_text,
+    should_sync_terminal_scrollback, wrap_scrollback_text,
 };
+
+fn test_config() -> RootConfig {
+    RootConfig {
+        workspace: WorkspaceConfig {
+            root: ".".to_owned(),
+        },
+        session: SessionConfig {
+            log_dir: ".termquill/sessions".to_owned(),
+        },
+        agent: AgentConfig {
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-flash".to_owned(),
+            max_turns: None,
+            tool_timeout_secs: 30,
+        },
+        permission: PermissionConfig::default(),
+        memory: MemoryConfig { enabled: true },
+        compaction: CompactionConfig::default(),
+        providers: BTreeMap::new(),
+        mcp_servers: Vec::new(),
+    }
+}
 
 #[test]
 fn initial_sync_seeds_without_replaying_history() {
@@ -64,6 +93,17 @@ fn changing_existing_live_line_does_not_append_scrollback() {
     let plan = plan_scrollback_sync(&state, "session-a", 2, 12);
 
     assert_eq!(plan, ScrollbackSyncPlan::Noop);
+}
+
+#[test]
+fn busy_run_defers_terminal_scrollback_sync() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+
+    assert!(should_sync_terminal_scrollback(&app));
+
+    app.is_busy = true;
+
+    assert!(!should_sync_terminal_scrollback(&app));
 }
 
 #[test]

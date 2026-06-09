@@ -23,7 +23,7 @@ fn test_config() -> RootConfig {
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
             model: "deepseek-v4-flash".to_owned(),
-            max_turns: 8,
+            max_turns: None,
             tool_timeout_secs: 30,
         },
         permission: PermissionConfig::default(),

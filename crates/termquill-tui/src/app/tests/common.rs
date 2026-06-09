@@ -11,7 +11,7 @@ pub(super) fn test_config() -> RootConfig {
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
             model: "deepseek-v4-flash".to_owned(),
-            max_turns: 8,
+            max_turns: None,
             tool_timeout_secs: 30,
         },
         permission: PermissionConfig::default(),
@@ -70,6 +70,21 @@ pub(super) fn sample_approval_preview() -> ToolPreview {
     }
 }
 
+pub(super) fn sample_delete_approval_preview() -> ToolPreview {
+    ToolPreview {
+        title: "Delete note.txt".to_owned(),
+        summary: "Delete 2 lines from note.txt".to_owned(),
+        body: "--- current/note.txt\n+++ proposed/note.txt\n@@ -1,2 +0,0 @@\n-alpha\n-beta"
+            .to_owned(),
+        changed_files: vec!["note.txt".to_owned()],
+        file_diffs: vec![termquill_kernel::ToolPreviewFile {
+            path: "note.txt".to_owned(),
+            diff: "--- current/note.txt\n+++ proposed/note.txt\n@@ -1,2 +0,0 @@\n-alpha\n-beta"
+                .to_owned(),
+        }],
+    }
+}
+
 pub(super) fn multi_file_approval_preview() -> ToolPreview {
     ToolPreview {
         title: "Update multiple files".to_owned(),
@@ -100,8 +115,11 @@ pub(super) fn inject_write_file_approval(app: &mut AppState, preview: ToolPrevie
             name: "write_file".to_owned(),
             description: "Write a file".to_owned(),
             input_schema: json!({"type":"object"}),
-            read_only: false,
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
         },
+        subjects: Vec::new(),
         preview: Some(preview),
     })
 }

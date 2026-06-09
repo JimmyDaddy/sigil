@@ -41,17 +41,20 @@ pub fn spawn_agent_worker(
                 }
             };
 
-            let registry =
-                match runtime.block_on(termquill_runtime::build_tool_registry(&root_config)) {
-                    Ok(registry) => registry,
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                        return;
-                    }
-                };
-
             let provider = match termquill_runtime::build_provider(&root_config) {
                 Ok(provider) => provider,
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    return;
+                }
+            };
+            let provider_capabilities = provider.capabilities();
+            let registry = match runtime.block_on(termquill_runtime::build_tool_registry(
+                &root_config,
+                &provider_capabilities,
+                workspace_root.clone(),
+            )) {
+                Ok(registry) => registry,
                 Err(error) => {
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                     return;

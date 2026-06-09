@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env,
     ops::Range,
     path::{Path, PathBuf},
@@ -24,7 +24,7 @@ use ratatui::text::Line;
 use termquill_kernel::{
     AgentConfig, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
     MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig, Session, SessionConfig,
-    SessionLogEntry, SessionStats, WorkspaceConfig, resolve_workspace_root,
+    SessionLogEntry, SessionStats, ToolPreviewSnapshot, WorkspaceConfig, resolve_workspace_root,
 };
 use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQUILL_API_KEY_ENV};
 use uuid::Uuid;
@@ -73,7 +73,7 @@ pub struct AppState {
     pub session_log_path: PathBuf,
     pub provider_name: String,
     pub model_name: String,
-    pub permission_write_mode: String,
+    pub permission_default_mode: String,
     pub memory_enabled: bool,
     pub memory_document_count: usize,
     pub memory_last_status: String,
@@ -101,12 +101,14 @@ pub struct AppState {
     modal_state: Option<ModalState>,
     session_view_mode: SessionViewMode,
     current_session_entries: Vec<SessionLogEntry>,
+    tool_preview_snapshots: HashMap<String, ToolPreviewSnapshot>,
     latest_compaction_record: Option<CompactionRecord>,
     compaction_config: CompactionConfig,
     memory_config: MemoryConfig,
     thinking_block_mode: ThinkingBlockMode,
     selected_tool_timeline_entry: Option<usize>,
     expanded_tool_timeline_entries: BTreeSet<usize>,
+    collapsed_tool_timeline_entries: BTreeSet<usize>,
     last_notice: Option<String>,
     reasoning_effort: ReasoningEffort,
     run_phase: RunPhase,
@@ -167,7 +169,7 @@ impl AppState {
             resolve_workspace_root(config_path, &launch_cwd, &root_config.workspace.root);
         let session_log_dir = workspace_root.join(&root_config.session.log_dir);
         let session_id = Uuid::new_v4().to_string();
-        let permission_write_mode = root_config.permission.write_mode.as_str().to_owned();
+        let permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
         let initial_compaction_status = effective_compaction_config(
             &root_config.agent.provider,
             &root_config.agent.model,
@@ -184,7 +186,7 @@ impl AppState {
             session_log_path: PathBuf::new(),
             provider_name: root_config.agent.provider.clone(),
             model_name: root_config.agent.model.clone(),
-            permission_write_mode,
+            permission_default_mode,
             memory_enabled: root_config.memory.enabled,
             memory_document_count: 0,
             memory_last_status: "pending".to_owned(),
@@ -212,12 +214,14 @@ impl AppState {
             modal_state: None,
             session_view_mode: SessionViewMode::Provider,
             current_session_entries: Vec::new(),
+            tool_preview_snapshots: HashMap::new(),
             latest_compaction_record: None,
             compaction_config: root_config.compaction.clone(),
             memory_config: root_config.memory.clone(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             selected_tool_timeline_entry: None,
             expanded_tool_timeline_entries: BTreeSet::new(),
+            collapsed_tool_timeline_entries: BTreeSet::new(),
             last_notice: None,
             reasoning_effort: ReasoningEffort::Max,
             run_phase: RunPhase::Idle,
@@ -275,7 +279,7 @@ impl AppState {
             session_log_path: PathBuf::new(),
             provider_name: "deepseek".to_owned(),
             model_name: "deepseek-v4-flash".to_owned(),
-            permission_write_mode: ApprovalMode::Ask.as_str().to_owned(),
+            permission_default_mode: ApprovalMode::Ask.as_str().to_owned(),
             memory_enabled: true,
             memory_document_count: 0,
             memory_last_status: "pending".to_owned(),
@@ -303,12 +307,14 @@ impl AppState {
             modal_state: None,
             session_view_mode: SessionViewMode::Provider,
             current_session_entries: Vec::new(),
+            tool_preview_snapshots: HashMap::new(),
             latest_compaction_record: None,
             compaction_config: CompactionConfig::default(),
             memory_config: MemoryConfig::default(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
             selected_tool_timeline_entry: None,
             expanded_tool_timeline_entries: BTreeSet::new(),
+            collapsed_tool_timeline_entries: BTreeSet::new(),
             last_notice: startup_error,
             reasoning_effort: ReasoningEffort::Max,
             run_phase: RunPhase::Idle,
@@ -359,7 +365,7 @@ impl AppState {
             format!("{}/{}", self.provider_name, self.model_name),
         );
         self.push_event("effort", self.reasoning_effort.as_str());
-        self.push_event("approval_default", self.permission_write_mode.clone());
+        self.push_event("approval_default", self.permission_default_mode.clone());
         self.push_event(
             "memory",
             format!(
@@ -408,6 +414,7 @@ impl AppState {
         self.approval_scroll_back = 0;
         self.activity_scroll_back = 0;
         self.current_session_entries.clear();
+        self.tool_preview_snapshots.clear();
         self.latest_compaction_record = None;
         self.run_phase = RunPhase::Idle;
         self.last_phase_marker = None;
@@ -419,6 +426,7 @@ impl AppState {
         self.approval_diff_mode = ApprovalDiffMode::Full;
         self.selected_tool_timeline_entry = None;
         self.expanded_tool_timeline_entries.clear();
+        self.collapsed_tool_timeline_entries.clear();
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
@@ -1007,7 +1015,7 @@ impl AppState {
     #[allow(dead_code)]
     pub(crate) fn permission_card_lines(&self) -> Vec<String> {
         vec![
-            format!("mode: {}", self.permission_write_mode),
+            format!("mode: {}", self.permission_default_mode),
             "Shift-Tab toggle".to_owned(),
             if self.is_busy {
                 "busy: locked during run".to_owned()
@@ -1114,7 +1122,7 @@ impl AppState {
             token_line,
             context,
             self.cache_hit_ratio() * 100.0,
-            self.permission_write_mode,
+            self.permission_default_mode,
             if self.is_busy { "cancel" } else { "quit" }
         )
     }
@@ -1231,16 +1239,17 @@ impl AppState {
             return Ok(None);
         };
         let mut next_config = root_config.clone();
-        next_config.permission.write_mode = cycle_approval_mode(next_config.permission.write_mode);
+        next_config.permission.default_mode =
+            cycle_approval_mode(next_config.permission.default_mode);
         self.apply_runtime_config_snapshot(&next_config);
         self.last_notice = Some(format!(
-            "write mode = {}",
-            next_config.permission.write_mode.as_str()
+            "default mode = {}",
+            next_config.permission.default_mode.as_str()
         ));
-        self.push_event("approval_default", self.permission_write_mode.clone());
+        self.push_event("approval_default", self.permission_default_mode.clone());
         self.push_timeline(
             TimelineRole::Notice,
-            format!("write permission -> {}", self.permission_write_mode),
+            format!("default permission -> {}", self.permission_default_mode),
         );
         self.schedule_balance_refresh();
         Ok(Some(AppAction::RuntimeConfigUpdated {
