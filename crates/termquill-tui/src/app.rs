@@ -666,6 +666,9 @@ impl AppState {
             KeyCode::Char('t')
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.pending_approval.is_none() =>
+                if self.selected_tool_activity_key.is_some() && self.toggle_selected_tool_card() {
+                    return Ok(None);
+                }
             {
                 self.toggle_thinking_block_mode();
             }

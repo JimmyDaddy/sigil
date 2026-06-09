@@ -48,25 +48,26 @@ TUI 当前支持：
 - 提交 prompt 并流式查看输出
 - prompt 提交后 composer 会清空并保持可见；主聊天区改为 app-owned transcript，可用 `Up/Down`、`PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` 和滚轮持续回溯到会话最顶，同时最近一段历史仍会同步进终端原生 scrollback
 - 输入 `/` 时弹出 slash command selector，支持 `Up/Down` 选中、`Tab` 接受、`Enter` 执行；`/model`、`/effort`、`/resume` 会继续下钻参数候选，其中 `/resume` 展示可恢复 session 标题，当前内置 `/compact`、`/config`、`/effort`、`/model`、`/quit`、`/resume`
-- `F1` 打开 keyboard help；核心快捷键、tool card 快捷键和公开 slash command 列表都从真实命令面生成，不依赖隐藏兼容入口
+- `F1` 打开 keyboard help；核心快捷键、activity 快捷键和公开 slash command 列表都从真实命令面生成，不依赖隐藏兼容入口
 - composer 的历史输入只响应键盘：仅在 composer 聚焦且光标位于首行或末行时，`Up/Down` 才切换历史
 - `/config` 打开 TUI guided config flow；provider 主流程只保留 `model / api_key / base_url / fim_model`，文本项统一走弹窗输入，底部固定 `Actions` 栏可用 `Down` 聚焦，再用 `Left/Right` 选 `save / save+close / close`
-- 主屏默认走 chat-first：inline viewport 会占满当前终端可视区，左侧主区域展示 live transcript + 底部 composer，右侧保留独立的 full-height `info rail`；启动恢复旧会话时只 seed 最近一段 transcript 到 terminal scrollback，避免长会话整屏重放
-- 不再要求 `Tab` 在主屏各卡片之间切焦点；`Shift-Tab` 直接轮换当前会话的 `allow / ask / deny`
-- composer 顶部直接展示当前模型与运行阶段；运行中会在 composer 内显示紧凑的 `thinking / tool / streaming` live 状态
+- 主屏默认走 chat-first：inline viewport 会占满当前终端可视区，左侧主区域展示 live transcript + 底部 composer，右侧保留独立的 full-height `info rail`，窄终端会自动收起 info rail 给 chat/composer 让出空间；启动恢复旧会话时只 seed 最近一段 transcript 到 terminal scrollback，避免长会话整屏重放
+- 不再要求 `Tab` 在主屏各卡片之间切焦点；`Shift-Tab` 直接轮换并持久化默认 `allow / ask / deny` 权限模式
+- composer 顶部直接展示 mode / model / provider / reasoning effort；运行态统一沉到底部 run strip，只保留 interrupt/details 快捷键和右下角 context 使用状态，当前任务进度交给 chat 区域展示
+- 运行中 live transcript 底部会显示紧凑的 loading progress block，例如 `▰▱▱▱ Thinking...`、`Bash...`、`Read...` 和当前 reasoning/tool/streaming 摘要；这些运行态提示只做渲染层投影，不写回 durable transcript
 - 右侧 `Info rail` 独立占据整列，展示 `Session / Permissions / Agents / Usage / Controls` 五组状态，而不是挤进 composer 旁边的一个小角落
 - `ctx`、compaction status 和 auto-compaction 统一按同一个 effective context window 计算：已知模型窗口优先，其次才回退到 `compaction.context_window_tokens`
-- assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成卡片式展示；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file` 走专用 renderer，其他结构化 payload 走树形 fallback，不再直接 dump 原始 JSON
-- live phase 只保留在运行态和事件流里，不再固化成 chat transcript；completed thinking 默认显示前几行预览，用 `Ctrl-T` 完整展开或收起
-- tool result 默认以 brief card 展示，标题行会显示安全的调用上下文摘要，例如 `bash` 的 `command=...`、文件工具的 `path=...`、搜索工具的 `pattern=...`；存在 tool card 后可用 `Ctrl-G` 聚焦最新卡片、`Alt-J` / `Alt-K` 切换卡片、`Ctrl-O` 展开/收起聚焦卡片，composer 为空时 `Esc` 清除 tool card focus
-- `write_file` / `edit_file` / `delete_file` 的结果卡片默认展开执行时捕获的 bounded unified diff，diff 行会显示旧/新行号；仍可用 `Ctrl-O` 收起，大 diff 会显示截断提示，折叠态保留 diff stats 和隐藏提示
-- 工具调用审批改为居中 review card：固定 `Summary / Files / Diff / Actions` 四区，composer 不会因为审批而消失
+- assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成 action-first activity 展示，例如 `Ran cargo test -p termquill-tui`、`Searched needle in src/main.rs`、`Read README.md`、`Deleted note.txt`；activity header 会区分动作词、命令/路径和参数；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file` 走专用 renderer，简单只读 `rg / grep / fd / find` bash 命令会识别为 `Searched`，其他结构化 payload 走树形 fallback，不直接 dump 原始 JSON 或 call id
+- live phase 只保留在运行态和事件流里，不再固化成 chat transcript；reasoning delta 会写入 append-only control log，用于取消或重启后的 thinking block 恢复；completed thinking 默认显示前几行预览，用 `Ctrl-T` 完整展开或收起
+- tool result 默认以 brief activity 展示；连续的只读查看、列表、搜索 activity 会在 transcript 里合并为 `Inspected` block；bash 成功无输出会显示 `(no output)`，失败会突出 exit code 并优先展示诊断输出；存在 activity 后右侧 `Info rail / Controls` 会显示 `Ctrl-G` 聚焦最新 activity、`Alt-J` / `Alt-K` 切换 activity、`Ctrl-T` 展开/收起聚焦 activity，composer 为空时 `Esc` 清除 activity focus
+- `write_file` / `edit_file` / `delete_file` 的结果 activity 默认展开执行时捕获的 bounded unified diff，diff 行会显示旧/新行号；activity 正文会跳过重复的 `@@` hunk header，并在文件头汇总 hunk 数；仍可用 `Ctrl-T` 收起，大 diff 会显示 `diff truncated · N lines hidden`，折叠态保留 diff stats 和隐藏提示
+- 工具调用审批改为居中 review card：固定 `Summary / Files / Diff / Actions` 四区，composer 不会因为审批而消失；`Actions` 支持 `Left/Right` 选择 allow/deny 后 `Enter` 确认，也保留 `Y/N` 直达；审批通道 5 分钟无决策会自动 deny，避免 worker 永久等待
 - `write_file` / `edit_file` / `delete_file` diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换
 - `/compact` 手动压缩当前会话的 provider 可见上下文
 - `/model <flash|pro|id>` 切换运行时模型，并开启一个 fresh session，避免把旧 session identity 和新模型混在一起
 - `/effort <low|medium|high|max>` 切换下一轮 agent run 的 reasoning effort
 - soft / hard context threshold 提示与 idle 边界自动 compaction
-- `Ctrl-C` 取消运行后从 durable JSONL log 恢复当前 session 视图
+- `Esc` 或 `Ctrl-C` 取消运行后从 durable JSONL log 恢复当前 session 视图
 - TUI 重启时会默认恢复最近一次 durable session，而不是静默丢到一个全新的空白会话
 - 首次启动或配置损坏时，直接进入极简 Quick Setup，只确认“信任当前目录 / 模型 / 认证”；模型走候选选择，API key 走隐藏输入，当前启动目录自动成为 workspace
 - Quick Setup 保存后会写入 `workspace.root = "."`；当配置位于用户配置目录时，`.` 会在运行时解析成当前启动目录，而不是配置文件所在目录
@@ -139,7 +140,7 @@ cargo run -p termquill-tui -- --config /absolute/path/to/termquill.toml
 
 - session identity 会跟随 durable log 恢复，而不是盲目回退到当前配置里的 provider/model
 - response handle、provider continuation state、prefix snapshot 与 compaction record 都写入 append-only control log；resume 后下一轮 request 会恢复最新匹配 provider 的 response handle
-- tool approval 和 execution lifecycle 会追加到 control log；已开始但没有完成记录的工具执行在恢复时标记为 `interrupted`，悬空 tool call 会投影为结构化 `interrupted` tool result
+- tool approval、execution lifecycle 和 reasoning delta 会追加到 control log；已开始但没有完成记录的工具执行在恢复时标记为 `interrupted`，并用同一套 activity renderer 重建为用户可读卡片；悬空 tool call 会投影为结构化 `interrupted` tool result
 - 文件变更工具的历史结果卡片会随 session restore 恢复；恢复后仍可回看 `write_file` / `edit_file` / `delete_file` 当时捕获的 bounded diff，下一轮模型上下文只保留工具结果摘要
 - `/config` 保存后的默认 provider/model 不会静默改写当前 session identity；当前会话仍以 durable log 中的身份为准，新默认值会用于后续新 session 或空白 session
 - 运行中取消后，TUI 会从 durable JSONL log 重建会话视图，避免把临时内存态当成恢复真相

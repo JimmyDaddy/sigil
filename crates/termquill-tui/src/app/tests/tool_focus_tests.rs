@@ -77,7 +77,7 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     app.input.clear();
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert_eq!(app.selected_tool_activity_key, None);
-    assert_eq!(app.last_notice(), Some("tool focus cleared"));
+    assert_eq!(app.last_notice(), Some("activity focus cleared"));
     Ok(())
 }
 
@@ -123,7 +123,7 @@ fn file_diff_tool_card_defaults_open_and_can_toggle_closed() -> Result<()> {
             .any(|span| span.content.as_ref().contains("--- current/note.txt"))
     }));
 
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
 
     assert!(app.collapsed_tool_activity_keys.contains(&tool_key));
     assert!(app.tool_card_status_line().contains("brief"));

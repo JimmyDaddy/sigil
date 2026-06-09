@@ -7,7 +7,7 @@ impl AppState {
 
     pub(super) fn focus_latest_tool_card(&mut self) -> bool {
         let Some(entries) = self.tool_activity_entries() else {
-            self.last_notice = Some("no tool cards yet".to_owned());
+            self.last_notice = Some("no activities yet".to_owned());
             return false;
         };
         let (selected_index, selected_key) = entries
@@ -25,7 +25,7 @@ impl AppState {
 
     pub(super) fn select_adjacent_tool_card(&mut self, forward: bool) -> bool {
         let Some(entries) = self.tool_activity_entries() else {
-            self.last_notice = Some("no tool cards yet".to_owned());
+            self.last_notice = Some("no activities yet".to_owned());
             return false;
         };
         let (selected_index, selected_key) = self.next_tool_entry(&entries, forward);
@@ -40,7 +40,7 @@ impl AppState {
 
     pub(super) fn toggle_selected_tool_card(&mut self) -> bool {
         let Some(entries) = self.tool_activity_entries() else {
-            self.last_notice = Some("no tool cards yet".to_owned());
+            self.last_notice = Some("no activities yet".to_owned());
             return false;
         };
         let (selected_index, selected_key) = self.ensure_selected_tool_entry(&entries);
@@ -75,7 +75,7 @@ impl AppState {
         self.rebuild_timeline_render_cache();
         self.refresh_usage_sidebar_cache();
         self.push_event("tool:focus", "clear");
-        self.last_notice = Some("tool focus cleared".to_owned());
+        self.last_notice = Some("activity focus cleared".to_owned());
         true
     }
 
@@ -178,7 +178,7 @@ impl AppState {
 
     pub(super) fn tool_card_status_line(&self) -> String {
         let Some(entries) = self.tool_activity_entries() else {
-            return "tools: none".to_owned();
+            return "activities: none".to_owned();
         };
         let selected = self
             .selected_tool_activity_key
@@ -198,7 +198,7 @@ impl AppState {
             .unwrap_or_else(|| entries.last().cloned().unwrap_or((0, String::new())));
         let open = self.tool_entry_is_open_by_key(selected_entry, &selected_key);
         format!(
-            "tool card {selected}/{} {}",
+            "activity {selected}/{} {}",
             entries.len(),
             if open { "open" } else { "brief" }
         )

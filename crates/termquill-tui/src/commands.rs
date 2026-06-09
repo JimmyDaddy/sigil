@@ -67,8 +67,8 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::ToggleWriteMode,
         keys: &[KeyBinding { label: "Shift-Tab" }],
         slash: None,
-        label: "Write mode",
-        help: "Toggle runtime permission write mode.",
+        label: "Permission mode",
+        help: "Cycle and persist the default permission mode.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -76,7 +76,7 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         keys: &[KeyBinding { label: "Ctrl-T" }],
         slash: None,
         label: "Thinking view",
-        help: "Expand or collapse thinking blocks.",
+        help: "Expand or collapse thinking blocks when no activity is focused.",
         surface: CommandSurface::Global,
     },
     UiCommandSpec {
@@ -99,40 +99,40 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         command: UiCommand::FocusLatestToolCard,
         keys: &[KeyBinding { label: "Ctrl-G" }],
         slash: None,
-        label: "Latest tool",
-        help: "Focus the latest tool card.",
+        label: "Latest activity",
+        help: "Focus the latest activity.",
         surface: CommandSurface::ToolCard,
     },
     UiCommandSpec {
         command: UiCommand::SelectNextToolCard,
         keys: &[KeyBinding { label: "Alt-J" }],
         slash: None,
-        label: "Next tool",
-        help: "Focus the next tool card.",
+        label: "Next activity",
+        help: "Focus the next activity.",
         surface: CommandSurface::ToolCard,
     },
     UiCommandSpec {
         command: UiCommand::SelectPreviousToolCard,
         keys: &[KeyBinding { label: "Alt-K" }],
         slash: None,
-        label: "Previous tool",
-        help: "Focus the previous tool card.",
+        label: "Previous activity",
+        help: "Focus the previous activity.",
         surface: CommandSurface::ToolCard,
     },
     UiCommandSpec {
         command: UiCommand::ToggleSelectedToolCard,
-        keys: &[KeyBinding { label: "Ctrl-O" }],
+        keys: &[KeyBinding { label: "Ctrl-T" }],
         slash: None,
-        label: "Toggle tool",
-        help: "Open or close the focused tool card.",
+        label: "Toggle activity",
+        help: "Expand or collapse the focused activity.",
         surface: CommandSurface::ToolCard,
     },
     UiCommandSpec {
         command: UiCommand::ClearToolCardFocus,
         keys: &[KeyBinding { label: "Esc" }],
         slash: None,
-        label: "Clear tool focus",
-        help: "Clear tool card focus when the composer is empty.",
+        label: "Clear activity focus",
+        help: "Clear activity focus when the composer is empty.",
         surface: CommandSurface::ToolCard,
     },
 ];
@@ -161,7 +161,11 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
         control_hint(UiCommand::OpenKeyboardHelp).expect("keyboard help metadata exists"),
         "/ or 、: command palette".to_owned(),
         control_hint(UiCommand::ToggleWriteMode).expect("write mode metadata exists"),
-        format!("Ctrl-C: {}", if is_busy { "cancel" } else { "quit" }),
+        if is_busy {
+            "Esc: interrupt".to_owned()
+        } else {
+            "Ctrl-C: quit".to_owned()
+        },
         control_hint(UiCommand::ToggleThinking).expect("thinking metadata exists"),
     ];
     hints.retain(|hint| !hint.is_empty());
@@ -175,7 +179,7 @@ pub(crate) fn tool_card_control_hints() -> impl Iterator<Item = String> {
         .filter_map(command_spec_control_hint)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn tool_card_commands() -> impl Iterator<Item = UiCommand> {
     COMMAND_SPECS
         .iter()
@@ -198,7 +202,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         String::new(),
     ]);
     if include_tool_cards {
-        lines.push("Tool cards".to_owned());
+        lines.push("Activities".to_owned());
         lines.extend(
             COMMAND_SPECS
                 .iter()

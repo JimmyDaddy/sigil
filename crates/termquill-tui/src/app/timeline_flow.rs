@@ -90,7 +90,7 @@ impl AppState {
             self.rerender_timeline_entry(previous_index);
         }
         // Default-open file diffs can be large, so new output should not force
-        // every historical tool card through JSON parsing and diff rendering.
+        // every historical activity through JSON parsing and diff rendering.
         self.append_timeline_render_cache_entry(self.timeline.len().saturating_sub(1));
     }
 

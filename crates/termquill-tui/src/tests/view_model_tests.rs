@@ -1,9 +1,11 @@
 use std::{collections::BTreeMap, path::Path};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde_json::json;
 use termquill_kernel::{
-    AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
-    WorkspaceConfig,
+    AgentConfig, CompactionConfig, EventHandler, MemoryConfig, PermissionConfig, RootConfig,
+    RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolResult,
+    ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::*;
@@ -35,8 +37,12 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     let app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
     let view_model = UiViewModel::from_app(&app);
 
+    assert_eq!(view_model.composer.mode_label, "Build");
+    assert_eq!(view_model.composer.provider_name, "deepseek");
     assert_eq!(view_model.composer.model_name, "deepseek-v4-flash");
     assert_eq!(view_model.composer.input_rows, 1);
+    assert_eq!(view_model.footer.run_label, "ready");
+    assert!(view_model.footer.hints.contains("Enter send"));
     assert!(!view_model.info_rail.workspace_label.is_empty());
     assert!(
         view_model
@@ -85,12 +91,115 @@ fn live_panel_view_model_projects_activity_and_transcript_rows() -> anyhow::Resu
     let view_model = LivePanelViewModel::from_app(&app, 2);
 
     assert_eq!(
-        view_model.activity,
-        Some(LiveActivityViewModel {
-            label: "thinking".to_owned(),
+        view_model.progress,
+        Some(LiveProgressViewModel {
+            title: "Thinking".to_owned(),
             detail: "reasoning with deepseek-v4-flash".to_owned(),
         })
     );
     assert!(view_model.transcript_lines.len() <= 2);
+    Ok(())
+}
+
+#[test]
+fn live_panel_view_model_projects_tool_action_titles() {
+    assert_eq!(
+        LiveProgressViewModel::from_parts("tool", "running bash").title,
+        "Bash"
+    );
+    assert_eq!(
+        LiveProgressViewModel::from_parts("tool", "running read_file").title,
+        "Read"
+    );
+    assert_eq!(
+        LiveProgressViewModel::from_parts("tool", "running glob").title,
+        "Inspect"
+    );
+}
+
+#[test]
+fn footer_hints_track_slash_selector_state() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(view_model.footer.hints.contains("choose"));
+    assert!(view_model.footer.hints.contains("Esc close"));
+    Ok(())
+}
+
+#[test]
+fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-1",
+        "ls",
+        r#"["src/lib.rs"]"#,
+        ToolResultMeta::default(),
+    )))?;
+
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(!view_model.footer.hints.contains("Ctrl-T"));
+    assert!(!view_model.footer.hints.contains("Alt-J/K switch"));
+    assert!(!view_model.footer.hints.contains("Esc back"));
+    assert!(view_model.footer.hints.contains("Enter send"));
+    assert!(
+        view_model
+            .info_rail
+            .controls
+            .iter()
+            .any(|hint| hint == "Ctrl-T: toggle activity")
+    );
+    assert!(
+        view_model
+            .info_rail
+            .controls
+            .iter()
+            .any(|hint| hint == "Alt-J: next activity")
+    );
+    assert!(
+        !view_model
+            .info_rail
+            .controls
+            .iter()
+            .any(|hint| hint == "Ctrl-T: thinking view")
+    );
+    Ok(())
+}
+
+#[test]
+fn footer_hints_track_approval_state() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-approval".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: r#"{"path":"README.md"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "read_file".to_owned(),
+            description: "Read file".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: Vec::new(),
+        preview: None,
+    })?;
+
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(view_model.footer.hints.contains("Y allow"));
+    assert!(!view_model.footer.hints.contains("Esc interrupt"));
+    assert!(
+        !view_model
+            .info_rail
+            .controls
+            .iter()
+            .any(|hint| hint == "Esc: interrupt")
+    );
     Ok(())
 }
