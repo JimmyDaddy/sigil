@@ -18,4 +18,4 @@ mod tool_card;
 pub use shell::render;
 
 pub(crate) use timeline::{TimelineRenderOptions, render_timeline_entry_lines_with_options};
-pub(crate) use tool_card::tool_activity_view;
+pub(crate) use tool_card::{render_inspected_group_lines, tool_activity_view};

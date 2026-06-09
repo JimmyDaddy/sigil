@@ -167,8 +167,26 @@ impl AppState {
         self.timeline_plain_cache.clear();
         self.timeline_prefix_hashes.clear();
         self.timeline_render_ranges.clear();
-        for index in 0..self.timeline.len() {
+        let mut index = 0;
+        while index < self.timeline.len() {
             let start = self.timeline_render_cache.len();
+            if let Some(group_end) = self.inspection_group_end(index) {
+                let entries = (index..group_end)
+                    .filter_map(|entry_index| {
+                        self.timeline
+                            .get(entry_index)
+                            .map(|entry| (entry_index, entry))
+                    })
+                    .collect::<Vec<_>>();
+                let rendered = crate::ui::render_inspected_group_lines(&entries, &options);
+                self.extend_timeline_render_buffers(rendered);
+                let end = self.timeline_render_cache.len();
+                for _ in index..group_end {
+                    self.timeline_render_ranges.push(start..end);
+                }
+                index = group_end;
+                continue;
+            }
             let rendered = {
                 let entry = &self.timeline[index];
                 crate::ui::render_timeline_entry_lines_with_options(entry, &options, index)
@@ -176,12 +194,17 @@ impl AppState {
             self.extend_timeline_render_buffers(rendered);
             let end = self.timeline_render_cache.len();
             self.timeline_render_ranges.push(start..end);
+            index += 1;
         }
         self.trim_trailing_timeline_blanks();
         self.timeline_revision = self.timeline_revision.saturating_add(1);
     }
 
-    fn rerender_timeline_entry(&mut self, index: usize) {
+    pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
+        if self.tool_group_projection_may_include(index) {
+            self.rebuild_timeline_render_cache();
+            return;
+        }
         let Some(existing_range) = self.timeline_render_ranges.get(index).cloned() else {
             self.rebuild_timeline_render_cache();
             return;
@@ -214,6 +237,10 @@ impl AppState {
     }
 
     fn append_timeline_render_cache_entry(&mut self, index: usize) {
+        if self.tool_group_projection_may_include(index) {
+            self.rebuild_timeline_render_cache();
+            return;
+        }
         if index != self.timeline_render_ranges.len() {
             self.rebuild_timeline_render_cache();
             return;
@@ -236,6 +263,37 @@ impl AppState {
         self.timeline_render_ranges.push(start..end);
         self.trim_trailing_timeline_blanks();
         self.timeline_revision = self.timeline_revision.saturating_add(1);
+    }
+
+    fn inspection_group_end(&self, start: usize) -> Option<usize> {
+        if !self.timeline_entry_is_inspection_tool(start) {
+            return None;
+        }
+        let mut end = start + 1;
+        while self.timeline_entry_is_inspection_tool(end) {
+            end += 1;
+        }
+        (end > start + 1).then_some(end)
+    }
+
+    fn timeline_entry_is_inspection_tool(&self, index: usize) -> bool {
+        self.timeline
+            .get(index)
+            .filter(|entry| entry.role == TimelineRole::Tool)
+            .and_then(|entry| crate::ui::tool_activity_view(entry, index))
+            .is_some_and(|activity| activity.is_inspection)
+    }
+
+    fn tool_group_projection_may_include(&self, index: usize) -> bool {
+        index
+            .checked_sub(1)
+            .into_iter()
+            .chain([index, index.saturating_add(1)])
+            .any(|entry_index| {
+                self.timeline
+                    .get(entry_index)
+                    .is_some_and(|entry| entry.role == TimelineRole::Tool)
+            })
     }
 
     fn extend_timeline_render_buffers(&mut self, lines: Vec<Line<'static>>) {
@@ -275,9 +333,16 @@ impl AppState {
             let _ = self.timeline_render_cache.pop();
             let _ = self.timeline_plain_cache.pop();
             let _ = self.timeline_prefix_hashes.pop();
-            if let Some(range) = self.timeline_render_ranges.last_mut() {
-                if range.end > range.start {
-                    range.end -= 1;
+            if let Some(last_index) = self.timeline_render_ranges.len().checked_sub(1) {
+                let old_range = self.timeline_render_ranges[last_index].clone();
+                if old_range.end > old_range.start {
+                    let new_range = old_range.start..old_range.end - 1;
+                    self.timeline_render_ranges[last_index] = new_range.clone();
+                    for range in self.timeline_render_ranges.iter_mut().take(last_index) {
+                        if *range == old_range {
+                            *range = new_range.clone();
+                        }
+                    }
                 } else {
                     let _ = self.timeline_render_ranges.pop();
                 }
@@ -385,7 +450,6 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn transcript_lines(&self, max_lines: usize) -> Vec<Line<'static>> {
         let effective_len = self.effective_timeline_render_len();
         if effective_len == 0 {
@@ -401,17 +465,6 @@ impl AppState {
         let end = effective_len.saturating_sub(scroll_back);
         let start = end.saturating_sub(viewport);
         self.timeline_render_cache[start..end].to_vec()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn transcript_status_label(&self) -> String {
-        if self.timeline_scroll_back == 0 {
-            return "live tail".to_owned();
-        }
-        let hidden_after = self
-            .timeline_scroll_back
-            .min(self.max_timeline_scroll_back());
-        format!("+{hidden_after} above")
     }
 
     pub fn timeline_revision(&self) -> u64 {

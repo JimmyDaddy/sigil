@@ -369,6 +369,130 @@ fn transcript_live_tail_ignores_trailing_gap_rows() {
 }
 
 #[test]
+fn inspection_tool_entries_render_as_group_with_shared_ranges() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-ls",
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "preview_lines": ["[\"src/main.rs\"]"],
+  "preview_value": ["src/main.rs"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "path=crates"}}}
+}"#,
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-search",
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["src/main.rs:needle"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "command=grep -n needle src/main.rs"}}}
+}"#,
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-read",
+  "tool_name": "read_file",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["hello"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "path=README.md"}}}
+}"#,
+    );
+
+    let indices = app
+        .tool_timeline_entry_indices()
+        .expect("expected tool entries");
+    let ranges = indices
+        .iter()
+        .map(|index| app.timeline_render_ranges[*index].clone())
+        .collect::<Vec<_>>();
+    let rendered = app.timeline_plain_cache.join("\n");
+
+    assert_eq!(ranges.len(), 3);
+    assert_eq!(ranges[0], ranges[1]);
+    assert_eq!(ranges[1], ranges[2]);
+    assert_eq!(rendered.matches("Inspected").count(), 1);
+    assert!(rendered.contains("Listed crates"));
+    assert!(rendered.contains("Searched needle in src/main.rs"));
+    assert!(rendered.contains("Read README.md"));
+}
+
+#[test]
+fn inspection_group_breaks_on_file_changes_and_complex_bash() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-ls",
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "preview_lines": ["[\"src/main.rs\"]"],
+  "preview_value": ["src/main.rs"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "path=crates"}}}
+}"#,
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-write",
+  "tool_name": "write_file",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["wrote note.txt"],
+  "hidden_lines": 0,
+  "metadata": {
+    "changed_files": ["note.txt"],
+    "details": {"call": {"summary": "path=note.txt"}}
+  }
+}"#,
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-complex",
+  "tool_name": "bash",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["src/main.rs:needle"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "command=grep needle src/main.rs | head"}}}
+}"#,
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-read",
+  "tool_name": "read_file",
+  "status": "ok",
+  "preview_kind": "text",
+  "preview_lines": ["hello"],
+  "hidden_lines": 0,
+  "metadata": {"details": {"call": {"summary": "path=README.md"}}}
+}"#,
+    );
+
+    let rendered = app.timeline_plain_cache.join("\n");
+
+    assert!(!rendered.contains("Inspected"));
+    assert!(rendered.contains("Listed crates"));
+    assert!(rendered.contains("Wrote note.txt"));
+    assert!(rendered.contains("Ran grep needle src/main.rs | head"));
+    assert!(rendered.contains("Read README.md"));
+}
+
+#[test]
 fn mouse_scroll_moves_transcript() {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.set_terminal_size(80, 12);
@@ -424,7 +548,8 @@ fn default_open_large_diff_stays_stable_when_new_output_arrives() -> Result<()> 
     let rendered = app.timeline_plain_cache.join("\n");
     assert_eq!(rendered.matches("--- current/note.txt").count(), 1);
     assert_eq!(rendered.matches("-alpha").count(), 1);
-    assert_eq!(rendered.matches("path=note.txt").count(), 1);
+    assert_eq!(rendered.matches("Deleted note.txt").count(), 1);
+    assert_eq!(rendered.matches("path=note.txt").count(), 0);
     assert!(rendered.contains("stream one"));
     assert!(rendered.contains("stream two"));
     assert!(app.timeline_revision() > first_revision);
