@@ -10,12 +10,13 @@ impl AppState {
             self.last_notice = Some("no activities yet".to_owned());
             return false;
         };
+        let previous_index = self.selected_tool_entry_index(&entries);
         let (selected_index, selected_key) = entries
             .last()
             .cloned()
             .expect("tool activity entries are non-empty");
         self.selected_tool_activity_key = Some(selected_key);
-        self.rebuild_timeline_render_cache();
+        self.rerender_tool_selection_change(previous_index, selected_index);
         self.reveal_timeline_entry(selected_index);
         self.refresh_usage_sidebar_cache();
         self.push_event("tool:focus", "latest");
@@ -28,9 +29,10 @@ impl AppState {
             self.last_notice = Some("no activities yet".to_owned());
             return false;
         };
+        let previous_index = self.selected_tool_entry_index(&entries);
         let (selected_index, selected_key) = self.next_tool_entry(&entries, forward);
         self.selected_tool_activity_key = Some(selected_key);
-        self.rebuild_timeline_render_cache();
+        self.rerender_tool_selection_change(previous_index, selected_index);
         self.reveal_timeline_entry(selected_index);
         self.refresh_usage_sidebar_cache();
         self.push_event("tool:focus", if forward { "next" } else { "previous" });
@@ -60,7 +62,7 @@ impl AppState {
         } else {
             self.collapsed_tool_activity_keys.remove(&selected_key);
         }
-        self.rebuild_timeline_render_cache();
+        self.rerender_timeline_entry(selected_index);
         self.reveal_timeline_entry(selected_index);
         self.refresh_usage_sidebar_cache();
         self.push_event("tool:view", "toggle");
@@ -69,10 +71,16 @@ impl AppState {
     }
 
     pub(super) fn clear_tool_card_focus(&mut self) -> bool {
+        let previous_index = self
+            .selected_tool_activity_key
+            .as_deref()
+            .and_then(|key| self.timeline_entry_index_for_activity_key(key));
         if self.selected_tool_activity_key.take().is_none() {
             return false;
         }
-        self.rebuild_timeline_render_cache();
+        if let Some(index) = previous_index {
+            self.rerender_timeline_entry(index);
+        }
         self.refresh_usage_sidebar_cache();
         self.push_event("tool:focus", "clear");
         self.last_notice = Some("activity focus cleared".to_owned());
@@ -160,6 +168,28 @@ impl AppState {
             position - 1
         };
         entries[next_position].clone()
+    }
+
+    fn selected_tool_entry_index(&self, entries: &[(usize, String)]) -> Option<usize> {
+        let selected_key = self.selected_tool_activity_key.as_deref()?;
+        entries
+            .iter()
+            .find_map(|(index, key)| (key == selected_key).then_some(*index))
+    }
+
+    fn rerender_tool_selection_change(
+        &mut self,
+        previous_index: Option<usize>,
+        selected_index: usize,
+    ) {
+        if previous_index == Some(selected_index) {
+            self.rerender_timeline_entry(selected_index);
+            return;
+        }
+        if let Some(index) = previous_index {
+            self.rerender_timeline_entry(index);
+        }
+        self.rerender_timeline_entry(selected_index);
     }
 
     fn reveal_timeline_entry(&mut self, entry_index: usize) {
