@@ -108,6 +108,18 @@ termquill/
       src/
         lib.rs
         tests/lib_tests.rs
+    termquill-code-intel/
+      src/
+        lib.rs
+        workspace.rs
+        language.rs
+        lsp.rs
+        service.rs
+        cache.rs
+        tools.rs
+        error.rs
+        tests/
+          *_tests.rs
     termquill-mcp/
       src/
         lib.rs
@@ -148,6 +160,7 @@ termquill/
 - `termquill-kernel`：承载 provider、tool、session、event、approval、permission、memory、config 和 agent loop 等通用契约。当前采用 flat public module 文件，测试统一收纳在 `src/tests/*_tests.rs`；这里不出现 DeepSeek 专有字段，也不持有 TUI 状态。
 - `termquill-provider-deepseek`：首个旗舰 provider，内部拆成 transport、endpoint、request、response、stream、mapper、reasoning、tools、pricing 等模块。DeepSeek 专项能力在这里解释和降级，不反向污染 kernel。
 - `termquill-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。
+- `termquill-code-intel`：隔离 LSP client 生命周期、Rust Tree-sitter fallback、符号/诊断缓存和只读 code intelligence tools。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态代码智能结果只通过 bounded tool result 进入 provider-visible history，不注入 system prompt。
 - `termquill-mcp`：隔离 stdio MCP client 与工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
 - `termquill-runtime`：收口跨入口共享的 provider factory、tool registry 和 run options，避免 TUI / CLI 各自硬编码装配链。它不是新的领域层，kernel 仍然不知道 runtime 存在。
 - `termquill-cli`：薄启动器、调试入口和自动化入口，不承担最终产品心智。
