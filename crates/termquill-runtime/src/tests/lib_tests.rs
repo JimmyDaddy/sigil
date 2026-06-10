@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    env,
+    ffi::OsString,
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
 
 use anyhow::Result;
 use serde_json::json;
@@ -6,8 +12,14 @@ use termquill_kernel::{
     AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, InteractionMode, LanguageServerConfig,
     MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig, SessionConfig, WorkspaceConfig,
 };
+use termquill_provider_deepseek::{LEGACY_TERMQUILL_DEEPSEEK_API_KEY_ENV, TERMQUILL_API_KEY_ENV};
 
-use super::{build_provider, build_run_options, build_tool_registry, load_deepseek_config};
+use super::{
+    SecretSource, build_provider, build_run_options, build_tool_registry, load_deepseek_config,
+    resolve_deepseek_api_key, secret_redactor_for_root_config,
+};
+
+static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn test_root_config(provider: &str) -> RootConfig {
     RootConfig {
@@ -53,6 +65,65 @@ fn load_deepseek_config_reads_provider_block() -> Result<()> {
     assert_eq!(config.fim_model, "deepseek-v4-pro");
     assert_eq!(config.api_key.as_deref(), Some("test-key"));
     Ok(())
+}
+
+#[test]
+fn resolve_deepseek_api_key_uses_env_before_plaintext_config() -> Result<()> {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let _scope = EnvScope::set_many(&[(TERMQUILL_API_KEY_ENV, "env-key")]);
+    let config = load_deepseek_config(&test_root_config("deepseek"))?;
+
+    let resolved = resolve_deepseek_api_key(&config).expect("expected api key");
+
+    assert_eq!(resolved.value, "env-key");
+    assert_eq!(
+        resolved.source,
+        SecretSource::Environment(TERMQUILL_API_KEY_ENV)
+    );
+    Ok(())
+}
+
+#[test]
+fn resolve_deepseek_api_key_supports_legacy_env_and_config_fallback() -> Result<()> {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let config = load_deepseek_config(&test_root_config("deepseek"))?;
+
+    {
+        let _scope = EnvScope::set_many(&[(LEGACY_TERMQUILL_DEEPSEEK_API_KEY_ENV, "legacy-key")]);
+        let resolved = resolve_deepseek_api_key(&config).expect("expected legacy api key");
+        assert_eq!(resolved.value, "legacy-key");
+        assert_eq!(
+            resolved.source,
+            SecretSource::Environment(LEGACY_TERMQUILL_DEEPSEEK_API_KEY_ENV)
+        );
+    }
+
+    let resolved = resolve_deepseek_api_key(&config).expect("expected config api key");
+    assert_eq!(resolved.value, "test-key");
+    assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
+    Ok(())
+}
+
+#[test]
+fn secret_redactor_for_root_config_redacts_resolved_api_key() {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let _scope = EnvScope::set_many(&[(TERMQUILL_API_KEY_ENV, "env-secret-key")]);
+
+    let redactor = secret_redactor_for_root_config(&test_root_config("deepseek"));
+
+    assert_eq!(
+        redactor.redact_text("Authorization: Bearer env-secret-key"),
+        "Authorization: [redacted] [redacted]"
+    );
 }
 
 #[test]
@@ -130,4 +201,37 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
     assert!(registry.spec_for("code_symbols").is_some());
     assert!(registry.spec_for("code_diagnostics").is_some());
     Ok(())
+}
+
+struct EnvScope {
+    saved: Vec<(&'static str, Option<OsString>)>,
+}
+
+impl EnvScope {
+    fn set_many(values: &[(&'static str, &'static str)]) -> Self {
+        let mut saved = Vec::with_capacity(values.len());
+        for (name, value) in values {
+            saved.push((*name, env::var_os(name)));
+            // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+            unsafe { env::set_var(name, value) };
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for EnvScope {
+    fn drop(&mut self) {
+        for (name, value) in self.saved.drain(..).rev() {
+            match value {
+                Some(value) => {
+                    // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+                    unsafe { env::set_var(name, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize process-wide env mutation with ENV_LOCK.
+                    unsafe { env::remove_var(name) };
+                }
+            }
+        }
+    }
 }

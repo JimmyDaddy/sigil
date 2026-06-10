@@ -82,32 +82,28 @@ impl TextInputTarget {
     fn title(self) -> &'static str {
         match self {
             Self::SetupModel => "Model ID",
-            Self::ConfigField(field) => match field {
-                ConfigField::ProviderBaseUrl => "Base URL",
-                ConfigField::CompactionSoftThresholdRatio => "Soft Threshold",
-                ConfigField::CompactionHardThresholdRatio => "Hard Threshold",
-                ConfigField::CompactionContextWindowTokens => "Context Window",
-                ConfigField::CompactionTailMessages => "Tail Messages",
-                ConfigField::McpName => "MCP Name",
-                ConfigField::McpCommand => "MCP Command",
-                ConfigField::McpArgsCsv => "MCP Args",
-                ConfigField::McpStartupTimeoutSecs => "MCP Timeout",
-                _ => "Value",
-            },
+            Self::ConfigField(field) => field.display_label(),
         }
     }
 
     fn summary(self) -> &'static str {
         match self {
             Self::SetupModel => "Custom model id.",
-            Self::ConfigField(_) => "Edit value.",
+            Self::ConfigField(field) => field.help_text(),
         }
     }
 
     fn prompt_label(self) -> &'static str {
         match self {
             Self::SetupModel => "model",
-            Self::ConfigField(field) => field.label(),
+            Self::ConfigField(_) => "value",
+        }
+    }
+
+    fn config_key(self) -> Option<&'static str> {
+        match self {
+            Self::SetupModel => None,
+            Self::ConfigField(field) => Some(field.label()),
         }
     }
 }
@@ -175,16 +171,23 @@ impl AppState {
             }
             Some(ModalState::SecretInput(state)) => vec![
                 state.target.summary().to_owned(),
+                "key: api_key".to_owned(),
                 "Enter apply  F2 save  F3 save+close  Esc cancel".to_owned(),
                 String::new(),
                 format!("api_key: {}|", "*".repeat(state.buffer.chars().count())),
             ],
-            Some(ModalState::TextInput(state)) => vec![
-                state.target.summary().to_owned(),
-                "Enter apply  F2 save  F3 save+close  Esc cancel".to_owned(),
-                String::new(),
-                format!("{}: {}|", state.target.prompt_label(), state.buffer),
-            ],
+            Some(ModalState::TextInput(state)) => {
+                let mut lines = vec![state.target.summary().to_owned()];
+                if let Some(key) = state.target.config_key() {
+                    lines.push(format!("key: {key}"));
+                }
+                lines.extend([
+                    "Enter apply  F2 save  F3 save+close  Esc cancel".to_owned(),
+                    String::new(),
+                    format!("{}: {}|", state.target.prompt_label(), state.buffer),
+                ]);
+                lines
+            }
             Some(ModalState::KeyboardHelp) => {
                 let mut lines = keyboard_help_lines(self.has_tool_cards());
                 lines.push(String::new());
@@ -216,9 +219,18 @@ impl AppState {
 
     pub fn modal_input_cursor(&self) -> Option<(&'static str, usize, usize)> {
         match self.modal_state.as_ref()? {
-            ModalState::SecretInput(state) => Some(("api_key", state.buffer.chars().count(), 3)),
+            ModalState::SecretInput(state) => Some(("api_key", state.buffer.chars().count(), 4)),
             ModalState::TextInput(state) => {
-                Some((state.target.prompt_label(), state.buffer.chars().count(), 3))
+                let line_index = if state.target.config_key().is_some() {
+                    4
+                } else {
+                    3
+                };
+                Some((
+                    state.target.prompt_label(),
+                    state.buffer.chars().count(),
+                    line_index,
+                ))
             }
             ModalState::ModelPicker(_) => None,
             ModalState::KeyboardHelp => None,

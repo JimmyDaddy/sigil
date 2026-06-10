@@ -22,6 +22,29 @@ fn compaction_threshold_status_follows_configured_window() {
 }
 
 #[test]
+fn compaction_window_loads_legacy_key_and_saves_fallback_key() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[compaction]
+context_window_tokens = 128000
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("legacy config should load");
+    assert_eq!(config.compaction.context_window_tokens, Some(128_000));
+
+    let rendered = toml::to_string_pretty(&config).expect("config should serialize");
+    assert!(rendered.contains("fallback_context_window_tokens = 128000"));
+    assert!(
+        !rendered
+            .lines()
+            .any(|line| line.trim_start().starts_with("context_window_tokens ="))
+    );
+}
+
+#[test]
 fn preferred_config_path_uses_explicit_or_local_file() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let explicit = temp.path().join("explicit.toml");
@@ -150,11 +173,42 @@ check = { command = "check" }
     assert!(config.code_intelligence.enabled);
     assert_eq!(config.code_intelligence.startup, CodeIntelStartup::Lazy);
     assert_eq!(config.code_intelligence.default_timeout_ms, 2500);
+    assert!(config.code_intelligence.discovery.enabled);
+    assert!(config.code_intelligence.discovery.report_missing);
     assert_eq!(config.code_intelligence.servers[0].name, "rust-analyzer");
     assert_eq!(
         config.code_intelligence.servers[0].initialization_options["check"]["command"],
         "check"
     );
+}
+
+#[test]
+fn root_config_loads_code_intelligence_discovery_config() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[code_intelligence]
+enabled = true
+startup = "lazy"
+
+[code_intelligence.discovery]
+enabled = false
+report_missing = false
+"#;
+
+    let config: RootConfig =
+        toml::from_str(raw).expect("code intelligence discovery config should parse");
+
+    assert!(config.code_intelligence.enabled);
+    assert!(!config.code_intelligence.discovery.enabled);
+    assert!(!config.code_intelligence.discovery.report_missing);
+
+    let rendered = toml::to_string_pretty(&config).expect("config should serialize");
+    assert!(rendered.contains("[code_intelligence.discovery]"));
+    assert!(rendered.contains("enabled = false"));
+    assert!(rendered.contains("report_missing = false"));
 }
 
 #[test]

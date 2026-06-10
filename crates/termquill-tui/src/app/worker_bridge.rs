@@ -47,9 +47,9 @@ impl AppState {
             self.refresh_usage_sidebar_cache();
             return;
         };
-        let provider_config = load_deepseek_provider_config(root_config)
-            .unwrap_or_else(|| default_deepseek_provider_config(&root_config.agent.model));
-        let Ok(provider_config) = provider_config.resolved() else {
+        let provider_config = termquill_runtime::resolve_deepseek_config(root_config)
+            .or_else(|_| default_deepseek_provider_config(&root_config.agent.model).resolved());
+        let Ok(provider_config) = provider_config else {
             self.balance_snapshot.status = "balance unavailable".to_owned();
             self.refresh_usage_sidebar_cache();
             return;
@@ -330,6 +330,10 @@ fn code_intelligence_server_lines(result: &ToolResult) -> Option<Vec<(String, St
         let line = match status {
             "ready" => format!("{label}: ready {server_name}"),
             "fallback" => format!("{label}: fallback {server_name}"),
+            "installed" => format!("{label}: installed {server_name}"),
+            "missing" => format!("{label}: missing {server_name}"),
+            "configured" => format!("{label}: configured {server_name}"),
+            "disabled" => format!("{label}: disabled {server_name}"),
             other => format!("{label}: {other}"),
         };
         lines.push((server_name.to_owned(), line));
@@ -490,7 +494,7 @@ impl EventHandler for AppState {
                 let preview = self.tool_preview_snapshots.get(&result.call_id);
                 self.push_timeline(
                     TimelineRole::Tool,
-                    format_tool_result_block(&result, preview),
+                    format_tool_result_block_redacted(&result, preview, &self.secret_redactor),
                 );
                 self.push_event("tool:result", format!("{} {}", result.tool_name, status));
             }

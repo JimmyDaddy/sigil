@@ -301,7 +301,7 @@ fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
             enabled: true,
             soft_threshold_ratio: 0.5,
             hard_threshold_ratio: 0.8,
-            context_window_tokens: Some(128000),
+            context_window_tokens: None,
             tail_messages: 6,
         },
         code_intelligence: Default::default(),

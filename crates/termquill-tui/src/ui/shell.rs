@@ -181,41 +181,6 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
         frame.render_widget(paragraph, area);
         return;
     }
-    if app.is_config_mode() {
-        let title = Line::from(vec![
-            Span::styled(
-                " Termquill config ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" config "),
-        ]);
-        let secondary = Line::from(vec![Span::raw(format!(
-            "step={}  field={}  dirty={}  cfg={}",
-            app.config_section_title().unwrap_or("summary"),
-            app.config_selected_field_label().unwrap_or("<none>"),
-            if app.config_is_dirty() { "yes" } else { "no" },
-            short_path_label(&app.config_path)
-        ))]);
-        let tertiary = Line::from(vec![Span::styled(
-            app.last_notice()
-                .unwrap_or("Tab step  Up/Down field  Down footer  Enter open"),
-            Style::default().fg(Color::Yellow),
-        )]);
-        let paragraph = Paragraph::new(Text::from(vec![title, secondary, tertiary]))
-            .block(
-                Block::default()
-                    .title("Status")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Green)),
-            )
-            .wrap(Wrap { trim: false });
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
     let title = Line::from(vec![
         Span::styled(
             " Termquill TUI ",

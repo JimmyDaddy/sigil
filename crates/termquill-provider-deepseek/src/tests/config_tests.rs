@@ -1,8 +1,4 @@
-use std::{
-    env,
-    ffi::OsString,
-    sync::{Mutex, OnceLock},
-};
+use std::{env, ffi::OsString};
 
 use anyhow::Result;
 
@@ -13,14 +9,9 @@ use super::{
     TERMQUILL_USER_ID_STRATEGY_ENV,
 };
 
-static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
 #[test]
 fn resolved_applies_termquill_env_overrides() -> Result<()> {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[
         (TERMQUILL_API_KEY_ENV, "env-key"),
         (TERMQUILL_MODEL_ENV, "env-model"),
@@ -61,10 +52,7 @@ fn resolved_applies_termquill_env_overrides() -> Result<()> {
 
 #[test]
 fn resolved_api_key_env_overrides_file_value() -> Result<()> {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(TERMQUILL_API_KEY_ENV, "env-key")]);
 
     let resolved = DeepSeekProviderConfig {
@@ -86,10 +74,7 @@ fn resolved_api_key_env_overrides_file_value() -> Result<()> {
 
 #[test]
 fn resolved_rejects_invalid_timeout_override() {
-    let _guard = ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .expect("env lock poisoned");
+    let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[(TERMQUILL_REQUEST_TIMEOUT_SECS_ENV, "0")]);
 
     let error = DeepSeekProviderConfig {

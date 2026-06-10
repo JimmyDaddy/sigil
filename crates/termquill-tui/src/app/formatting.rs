@@ -1,12 +1,18 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    borrow::Cow,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ratatui::text::Line;
 use termquill_kernel::{
-    ReasoningEffort, RootConfig, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
-    ToolResult, ToolResultMeta, ToolResultStatus,
+    ReasoningEffort, RootConfig, SecretRedactor, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolResultStatus,
 };
 
 use crate::slash::KNOWN_MODEL_IDS;
+
+const TOOL_DISPLAY_CONTENT_MAX_BYTES: usize = 64 * 1024;
+const RESTORED_TOOL_ENVELOPE_PARSE_MAX_BYTES: usize = 128 * 1024;
 
 pub(super) fn human_file_size(bytes: u64) -> String {
     const KB: f64 = 1024.0;
@@ -158,9 +164,10 @@ pub(super) fn ratio_to_percent(ratio: f32) -> u32 {
     (ratio * 100.0).round().clamp(0.0, 999.0) as u32
 }
 
-pub(super) fn format_tool_result_block(
+pub(super) fn format_tool_result_block_redacted(
     result: &ToolResult,
     preview: Option<&ToolPreviewSnapshot>,
+    redactor: &SecretRedactor,
 ) -> String {
     let preview = if result.is_error() { None } else { preview };
     let error_kind = tool_result_error_kind(result);
@@ -172,16 +179,18 @@ pub(super) fn format_tool_result_block(
         Some(&result.metadata),
         preview,
         error_kind,
+        redactor,
     )
 }
 
-pub(super) fn format_tool_content_block(
+pub(super) fn format_tool_content_block_redacted_for_restore(
     call_id: Option<&str>,
     content: &str,
     execution: Option<&ToolExecutionEntry>,
     preview: Option<&ToolPreviewSnapshot>,
+    redactor: &SecretRedactor,
 ) -> String {
-    let envelope = parse_tool_result_envelope(content);
+    let envelope = parse_restored_tool_result_envelope(content);
     let display_content = envelope
         .as_ref()
         .and_then(|value| value.get("content"))
@@ -207,6 +216,7 @@ pub(super) fn format_tool_content_block(
         metadata.as_ref(),
         preview,
         error_kind.as_deref(),
+        redactor,
     )
 }
 
@@ -218,10 +228,14 @@ fn format_tool_preview_payload(
     metadata: Option<&ToolResultMeta>,
     preview: Option<&ToolPreviewSnapshot>,
     error_kind: Option<&str>,
+    redactor: &SecretRedactor,
 ) -> String {
-    let preview_value = tool_preview_value(content);
+    let original_bytes = content.len() as u64;
+    let (display_content, display_truncated) = bounded_tool_display_content(content);
+    let content = redactor.redact_text(display_content.as_ref());
+    let preview_value = tool_preview_value(&content);
     let (preview_kind, preview_source) =
-        tool_preview_source(tool_name, content, preview_value.as_ref());
+        tool_preview_source(tool_name, &content, preview_value.as_ref());
     let all_lines = if preview_source.is_empty() {
         Vec::new()
     } else {
@@ -235,7 +249,7 @@ fn format_tool_preview_payload(
     let hidden_lines = total_lines.saturating_sub(preview_lines.len());
     let bytes = metadata
         .and_then(|value| value.bytes)
-        .unwrap_or(content.len() as u64);
+        .unwrap_or(original_bytes);
     let mut object = serde_json::Map::new();
     if let Some(call_id) = call_id {
         object.insert(
@@ -261,7 +275,7 @@ fn format_tool_preview_payload(
         "preview_kind".to_owned(),
         serde_json::Value::String(preview_kind.to_owned()),
     );
-    let diff_payload = preview.and_then(format_tool_diff_payload);
+    let diff_payload = preview.and_then(|preview| format_tool_diff_payload(preview, redactor));
     let mut summary = format_tool_preview_summary(
         tool_name,
         total_lines,
@@ -272,6 +286,9 @@ fn format_tool_preview_payload(
     if let Some((diff_summary, _)) = diff_payload.as_ref() {
         summary.push_str(" · diff ");
         summary.push_str(diff_summary);
+    }
+    if display_truncated {
+        summary.push_str(" · display truncated");
     }
     object.insert("summary".to_owned(), serde_json::Value::String(summary));
     object.insert(
@@ -288,10 +305,17 @@ fn format_tool_preview_payload(
         "hidden_lines".to_owned(),
         serde_json::Value::Number(hidden_lines.into()),
     );
+    if display_truncated {
+        object.insert(
+            "display_truncated".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+    }
     if let Some(metadata) = metadata {
         object.insert(
             "metadata".to_owned(),
-            serde_json::to_value(metadata).unwrap_or(serde_json::Value::Null),
+            redactor
+                .redact_value(&serde_json::to_value(metadata).unwrap_or(serde_json::Value::Null)),
         );
     }
     if let Some(preview_value) = preview_value {
@@ -303,7 +327,7 @@ fn format_tool_preview_payload(
     if let Some((_, diff)) = diff_payload {
         object.insert("diff".to_owned(), diff);
     }
-    serde_json::to_string(&serde_json::Value::Object(object)).unwrap_or_else(|_| content.to_owned())
+    serde_json::to_string(&serde_json::Value::Object(object)).unwrap_or(content)
 }
 
 fn tool_result_error_kind(result: &ToolResult) -> Option<&str> {
@@ -313,7 +337,10 @@ fn tool_result_error_kind(result: &ToolResult) -> Option<&str> {
     }
 }
 
-fn format_tool_diff_payload(preview: &ToolPreviewSnapshot) -> Option<(String, serde_json::Value)> {
+fn format_tool_diff_payload(
+    preview: &ToolPreviewSnapshot,
+    redactor: &SecretRedactor,
+) -> Option<(String, serde_json::Value)> {
     if preview.file_diffs.is_empty() {
         return None;
     }
@@ -341,7 +368,7 @@ fn format_tool_diff_payload(preview: &ToolPreviewSnapshot) -> Option<(String, se
                 serde_json::Value::Array(
                     file.diff
                         .lines()
-                        .map(|line| serde_json::Value::String(line.to_owned()))
+                        .map(|line| serde_json::Value::String(redactor.redact_text(line)))
                         .collect(),
                 ),
             );
@@ -406,6 +433,34 @@ fn parse_tool_result_envelope(content: &str) -> Option<serde_json::Value> {
     let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
     let object = value.as_object()?;
     (object.contains_key("status") && object.contains_key("content")).then_some(value)
+}
+
+fn parse_restored_tool_result_envelope(content: &str) -> Option<serde_json::Value> {
+    if content.len() > RESTORED_TOOL_ENVELOPE_PARSE_MAX_BYTES {
+        return None;
+    }
+    parse_tool_result_envelope(content)
+}
+
+fn bounded_tool_display_content(content: &str) -> (Cow<'_, str>, bool) {
+    if content.len() <= TOOL_DISPLAY_CONTENT_MAX_BYTES {
+        return (Cow::Borrowed(content), false);
+    }
+    let cutoff = previous_char_boundary(content, TOOL_DISPLAY_CONTENT_MAX_BYTES);
+    let mut truncated = String::with_capacity(cutoff + 80);
+    truncated.push_str(&content[..cutoff]);
+    truncated.push_str("\n[display truncated; original bytes=");
+    truncated.push_str(&content.len().to_string());
+    truncated.push(']');
+    (Cow::Owned(truncated), true)
+}
+
+fn previous_char_boundary(value: &str, max_index: usize) -> usize {
+    let mut index = max_index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 fn restored_execution_status_label(execution: &ToolExecutionEntry) -> Option<&'static str> {

@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 use super::*;
 
+const SESSION_HISTORY_TITLE_LINE_MAX_BYTES: usize = 256 * 1024;
+
 impl AppState {
     pub fn restore_latest_session_from_disk(&mut self, root_config: &RootConfig) -> bool {
         self.refresh_session_history();
@@ -23,12 +25,27 @@ impl AppState {
             return false;
         };
 
+        self.restore_session_path_from_disk(
+            session_log_path,
+            &root_config.agent.provider,
+            &root_config.agent.model,
+            "restored latest session",
+        )
+    }
+
+    pub fn restore_session_path_from_disk(
+        &mut self,
+        session_log_path: PathBuf,
+        fallback_provider_name: &str,
+        fallback_model_name: &str,
+        notice: &str,
+    ) -> bool {
         let Ok(store) = JsonlSessionStore::new(&session_log_path) else {
             return false;
         };
         let Ok(session) = Session::load_from_store(
-            root_config.agent.provider.clone(),
-            root_config.agent.model.clone(),
+            fallback_provider_name.to_owned(),
+            fallback_model_name.to_owned(),
             store,
         ) else {
             return false;
@@ -37,14 +54,8 @@ impl AppState {
         let provider_name = session.provider_name().to_owned();
         let model_name = session.model_name().to_owned();
         let entries = session.entries().to_vec();
-        self.restore_session_view(
-            session_log_path,
-            provider_name,
-            model_name,
-            entries,
-            "restored latest session",
-        );
-        self.last_notice = Some("restored latest session".to_owned());
+        self.restore_session_view(session_log_path, provider_name, model_name, entries, notice);
+        self.last_notice = Some(notice.to_owned());
         self.refresh_session_history();
         true
     }
@@ -427,11 +438,12 @@ impl AppState {
                             .and_then(|call_id| restored_tool_previews.get(call_id));
                         self.push_timeline(
                             TimelineRole::Tool,
-                            format_tool_content_block(
+                            format_tool_content_block_redacted_for_restore(
                                 message.tool_call_id.as_deref(),
                                 &content,
                                 execution,
                                 preview,
+                                &self.secret_redactor,
                             ),
                         );
                     }
@@ -453,11 +465,12 @@ impl AppState {
                         let preview = restored_tool_previews.get(&execution.call_id);
                         self.push_timeline(
                             TimelineRole::Tool,
-                            format_tool_content_block(
+                            format_tool_content_block_redacted_for_restore(
                                 Some(execution.call_id.as_str()),
                                 &restored_tool_execution_content(execution.as_ref()),
                                 Some(execution.as_ref()),
                                 preview,
+                                &self.secret_redactor,
                             ),
                         );
                         self.push_event("control:restore", format!("{execution:?}"));
@@ -536,11 +549,11 @@ pub(super) fn session_history_display_label(entry: &SessionHistoryEntry) -> Stri
 
 fn session_history_title_from_log(path: &Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    for line in reader.lines().take(SESSION_HISTORY_TITLE_SCAN_LIMIT) {
-        let Ok(line) = line else {
-            break;
-        };
+    let mut reader = BufReader::new(file);
+    for _ in 0..SESSION_HISTORY_TITLE_SCAN_LIMIT {
+        let line = read_bounded_line(&mut reader, SESSION_HISTORY_TITLE_LINE_MAX_BYTES)
+            .ok()
+            .flatten()?;
         if line.trim().is_empty() {
             continue;
         }
@@ -555,6 +568,51 @@ fn session_history_title_from_log(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    let mut line = Vec::new();
+    let mut too_long = false;
+    let mut read_any = false;
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if !read_any {
+                return Ok(None);
+            }
+            if too_long {
+                return Ok(Some(String::new()));
+            }
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+
+        read_any = true;
+        let newline_index = available.iter().position(|byte| *byte == b'\n');
+        let take_len = newline_index
+            .map(|index| index + 1)
+            .unwrap_or(available.len());
+        let chunk = &available[..take_len];
+        if !too_long {
+            if line.len() + chunk.len() <= max_bytes {
+                line.extend_from_slice(chunk);
+            } else {
+                too_long = true;
+                line.clear();
+            }
+        }
+        reader.consume(take_len);
+
+        if newline_index.is_some() {
+            if too_long {
+                return Ok(Some(String::new()));
+            }
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
+        }
+    }
 }
 
 pub(super) fn short_session_token(token: &str) -> String {

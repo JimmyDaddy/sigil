@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use termquill_kernel::{CodeIntelligenceConfig, LanguageServerConfig};
+use termquill_kernel::{CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig};
 use tokio::{
     io::AsyncReadExt,
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
@@ -26,9 +26,9 @@ use crate::{
         response_array, text_document_identifier, workspace_symbol_supported,
     },
     workspace::{
-        config_enabled, effective_servers, file_uri_from_path, find_server_root, language_for_path,
-        resolve_workspace_file, safe_lsp_command, sanitize_lsp_env, server_for_path,
-        workspace_relative_path,
+        EffectiveServerPlan, config_enabled, effective_server_plan, file_uri_from_path,
+        find_server_root, language_for_path, resolve_workspace_file, safe_lsp_command,
+        sanitize_lsp_env, server_for_path, workspace_relative_path,
     },
 };
 
@@ -151,10 +151,17 @@ pub struct CodeIntelligenceService {
 struct ServiceInner {
     workspace_root: PathBuf,
     config: CodeIntelligenceConfig,
-    servers: Vec<LanguageServerConfig>,
+    server_plan: RwLock<ServerPlanState>,
     clients: Mutex<BTreeMap<String, ProcessLanguageServer>>,
     status: Mutex<CodeIntelStatus>,
     symbol_cache: Mutex<TimedCache<CodeIntelResponse<CodeSymbol>>>,
+}
+
+#[derive(Clone, Default)]
+struct ServerPlanState {
+    servers: Vec<LanguageServerConfig>,
+    discovery_statuses: Vec<CodeIntelServerStatus>,
+    discovery_loaded: bool,
 }
 
 struct ProcessLanguageServer {
@@ -171,9 +178,54 @@ impl Drop for ProcessLanguageServer {
     }
 }
 
+fn initial_server_plan(config: &CodeIntelligenceConfig, workspace_root: &Path) -> ServerPlanState {
+    if config.startup == CodeIntelStartup::Lazy && config.discovery.enabled {
+        return ServerPlanState {
+            servers: config.servers.clone(),
+            discovery_statuses: config
+                .servers
+                .iter()
+                .map(|server| {
+                    server_status(
+                        server.name.clone(),
+                        server.languages.clone(),
+                        "configured".to_owned(),
+                        0,
+                        0,
+                        false,
+                    )
+                })
+                .collect(),
+            discovery_loaded: false,
+        };
+    }
+    server_plan_state_from_effective(effective_server_plan(config, workspace_root), true)
+}
+
+fn server_plan_state_from_effective(
+    plan: EffectiveServerPlan,
+    discovery_loaded: bool,
+) -> ServerPlanState {
+    ServerPlanState {
+        servers: plan.servers,
+        discovery_statuses: plan
+            .statuses
+            .into_iter()
+            .map(|status| {
+                server_status(status.server, status.languages, status.status, 0, 0, false)
+            })
+            .collect(),
+        discovery_loaded,
+    }
+}
+
 impl CodeIntelligenceService {
     pub fn new(workspace_root: PathBuf, config: CodeIntelligenceConfig) -> Self {
-        let servers = effective_servers(&config);
+        let server_plan = if config_enabled(&config) {
+            initial_server_plan(&config, &workspace_root)
+        } else {
+            Default::default()
+        };
         let status = if config_enabled(&config) {
             CodeIntelStatus::Degraded {
                 reason: "lazy".to_owned(),
@@ -185,7 +237,7 @@ impl CodeIntelligenceService {
             inner: Arc::new(ServiceInner {
                 workspace_root,
                 config,
-                servers,
+                server_plan: RwLock::new(server_plan),
                 clients: Mutex::new(BTreeMap::new()),
                 status: Mutex::new(status),
                 symbol_cache: Mutex::new(TimedCache::new(Duration::from_secs(300))),
@@ -238,6 +290,79 @@ impl CodeIntelligenceService {
         resolve_workspace_file(&self.inner.workspace_root, requested)
     }
 
+    async fn ensure_server_plan(&self) {
+        if !config_enabled(&self.inner.config) || !self.inner.config.discovery.enabled {
+            return;
+        }
+        if self.server_plan_snapshot().discovery_loaded {
+            return;
+        }
+
+        let config = self.inner.config.clone();
+        let workspace_root = self.inner.workspace_root.clone();
+        let next_plan = match tokio::task::spawn_blocking(move || {
+            effective_server_plan(&config, &workspace_root)
+        })
+        .await
+        {
+            Ok(plan) => server_plan_state_from_effective(plan, true),
+            Err(error) => ServerPlanState {
+                servers: Vec::new(),
+                discovery_statuses: vec![server_status(
+                    "discovery".to_owned(),
+                    Vec::new(),
+                    format!("degraded {error}"),
+                    0,
+                    0,
+                    false,
+                )],
+                discovery_loaded: true,
+            },
+        };
+
+        let mut state = match self.inner.server_plan.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !state.discovery_loaded {
+            *state = next_plan;
+        }
+    }
+
+    fn server_plan_snapshot(&self) -> ServerPlanState {
+        match self.inner.server_plan.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    fn current_servers(&self) -> Vec<LanguageServerConfig> {
+        self.server_plan_snapshot().servers
+    }
+
+    fn with_discovery_statuses<T>(
+        &self,
+        mut response: CodeIntelResponse<T>,
+    ) -> CodeIntelResponse<T> {
+        response.server_statuses =
+            self.merge_discovery_statuses(std::mem::take(&mut response.server_statuses));
+        response
+    }
+
+    fn merge_discovery_statuses(
+        &self,
+        response_statuses: Vec<CodeIntelServerStatus>,
+    ) -> Vec<CodeIntelServerStatus> {
+        let mut statuses = BTreeMap::new();
+        for status in self.server_plan_snapshot().discovery_statuses {
+            statuses.insert(status.server.clone(), status);
+        }
+        for status in response_statuses {
+            statuses.insert(status.server.clone(), status);
+        }
+        statuses.into_values().collect()
+    }
+
     pub async fn document_symbols(
         &self,
         requested: &str,
@@ -246,6 +371,7 @@ impl CodeIntelligenceService {
     ) -> Result<CodeIntelResponse<CodeSymbol>> {
         let started = Instant::now();
         let path = self.resolve_file(requested)?;
+        self.ensure_server_plan().await;
         let limit = self.limit(max_results);
         let cache_key = format!("symbols:{}:{query:?}:{limit}", path.display());
         if let Some(response) = self.inner.symbol_cache.lock().await.get(&cache_key) {
@@ -264,22 +390,42 @@ impl CodeIntelligenceService {
                     .insert(cache_key, result.clone());
                 Ok(result)
             }
-            Err(_) => {
+            Err(error) => {
                 let symbols = rust_document_symbols(
                     &self.inner.workspace_root,
                     &path,
                     query,
                     limit.saturating_add(1),
                 )?;
-                Ok(response(
+                let mut server_statuses = Vec::new();
+                if let Some(server) = server_for_path(&self.current_servers(), &path) {
+                    server_statuses.push(server_status(
+                        server.name.clone(),
+                        server.languages.clone(),
+                        format!("degraded {}", lsp_error_to_reason(error)),
+                        0,
+                        0,
+                        false,
+                    ));
+                }
+                let count = symbols.len();
+                server_statuses.push(server_status(
                     "tree-sitter-rust".to_owned(),
                     vec!["rust".to_owned()],
+                    "fallback".to_owned(),
+                    count.min(limit),
+                    count,
+                    count > limit,
+                ));
+                Ok(self.with_discovery_statuses(response_with_statuses(
+                    "tree-sitter-rust".to_owned(),
                     "tree_sitter/document_symbols".to_owned(),
                     symbols,
+                    server_statuses,
                     limit,
                     started,
                     0,
-                ))
+                )))
             }
         }
     }
@@ -290,6 +436,7 @@ impl CodeIntelligenceService {
         max_results: usize,
     ) -> Result<CodeIntelResponse<CodeSymbol>> {
         let started = Instant::now();
+        self.ensure_server_plan().await;
         let limit = self.limit(max_results);
         if let Ok(result) = self.lsp_workspace_symbols(query, limit, started).await {
             return Ok(result);
@@ -316,15 +463,38 @@ impl CodeIntelligenceService {
             )?;
             symbols.append(&mut file_symbols);
         }
-        Ok(response(
+        let mut server_statuses = self
+            .current_servers()
+            .iter()
+            .map(|server| {
+                server_status(
+                    server.name.clone(),
+                    server.languages.clone(),
+                    "degraded workspace/symbol unavailable".to_owned(),
+                    0,
+                    0,
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+        let count = symbols.len();
+        server_statuses.push(server_status(
             "tree-sitter-rust".to_owned(),
             vec!["rust".to_owned()],
+            "fallback".to_owned(),
+            count.min(limit),
+            count,
+            count > limit,
+        ));
+        Ok(self.with_discovery_statuses(response_with_statuses(
+            "tree-sitter-rust".to_owned(),
             "tree_sitter/workspace_symbols".to_owned(),
             symbols,
+            server_statuses,
             limit,
             started,
             0,
-        ))
+        )))
     }
 
     pub async fn definition(
@@ -337,6 +507,7 @@ impl CodeIntelligenceService {
         let started = Instant::now();
         let limit = self.limit(max_results);
         let path = self.resolve_file(requested)?;
+        self.ensure_server_plan().await;
         let mut clients = self.inner.clients.lock().await;
         let server = self.ensure_client_locked(&mut clients, &path).await?;
         if !definition_supported(&server.capabilities) {
@@ -356,7 +527,7 @@ impl CodeIntelligenceService {
             )
             .await?;
         let (locations, filtered) = self.parse_locations(response_array(value)).await?;
-        Ok(response_with_filtered(
+        Ok(self.with_discovery_statuses(response_with_filtered(
             server.config.name.clone(),
             server.config.languages.clone(),
             "textDocument/definition".to_owned(),
@@ -364,7 +535,7 @@ impl CodeIntelligenceService {
             limit,
             started,
             filtered,
-        ))
+        )))
     }
 
     pub async fn references(
@@ -378,6 +549,7 @@ impl CodeIntelligenceService {
         let started = Instant::now();
         let limit = self.limit(max_results);
         let path = self.resolve_file(requested)?;
+        self.ensure_server_plan().await;
         let mut clients = self.inner.clients.lock().await;
         let server = self.ensure_client_locked(&mut clients, &path).await?;
         if !references_supported(&server.capabilities) {
@@ -395,7 +567,7 @@ impl CodeIntelligenceService {
             .request("textDocument/references", params, self.request_timeout())
             .await?;
         let (locations, filtered) = self.parse_locations(response_array(value)).await?;
-        Ok(response_with_filtered(
+        Ok(self.with_discovery_statuses(response_with_filtered(
             server.config.name.clone(),
             server.config.languages.clone(),
             "textDocument/references".to_owned(),
@@ -403,7 +575,7 @@ impl CodeIntelligenceService {
             limit,
             started,
             filtered,
-        ))
+        )))
     }
 
     pub async fn diagnostics(
@@ -413,6 +585,7 @@ impl CodeIntelligenceService {
         max_results: usize,
     ) -> Result<CodeIntelResponse<CodeDiagnostic>> {
         let started = Instant::now();
+        self.ensure_server_plan().await;
         let limit = self.limit(max_results);
         let mut diagnostics = Vec::new();
         let mut server_name = "tree-sitter-rust".to_owned();
@@ -437,8 +610,18 @@ impl CodeIntelligenceService {
                     ));
                     diagnostics.extend(result.3);
                 }
-                Err(_) => {
+                Err(error) => {
                     let fallback = rust_syntax_diagnostics(&self.inner.workspace_root, &path)?;
+                    if let Some(server) = server_for_path(&self.current_servers(), &path) {
+                        server_statuses.push(server_status(
+                            server.name.clone(),
+                            server.languages.clone(),
+                            format!("degraded {}", lsp_error_to_reason(error)),
+                            0,
+                            0,
+                            false,
+                        ));
+                    }
                     let count = fallback.len();
                     server_statuses.push(server_status(
                         "tree-sitter-rust".to_owned(),
@@ -458,7 +641,7 @@ impl CodeIntelligenceService {
             diagnostics.retain(|diagnostic| diagnostic.severity == filter);
         }
 
-        Ok(response_with_statuses(
+        Ok(self.with_discovery_statuses(response_with_statuses(
             server_name,
             capability,
             diagnostics,
@@ -466,7 +649,7 @@ impl CodeIntelligenceService {
             limit,
             started,
             0,
-        ))
+        )))
     }
 
     async fn lsp_document_symbols(
@@ -502,7 +685,7 @@ impl CodeIntelligenceService {
             query.as_deref(),
             &mut symbols,
         );
-        Ok(response(
+        Ok(self.with_discovery_statuses(response(
             server.config.name.clone(),
             server.config.languages.clone(),
             "textDocument/documentSymbol".to_owned(),
@@ -510,7 +693,7 @@ impl CodeIntelligenceService {
             limit,
             started,
             0,
-        ))
+        )))
     }
 
     async fn lsp_workspace_symbols(
@@ -519,7 +702,7 @@ impl CodeIntelligenceService {
         limit: usize,
         started: Instant,
     ) -> Result<CodeIntelResponse<CodeSymbol>> {
-        let configs = self.inner.servers.clone();
+        let configs = self.current_servers();
         if configs.is_empty() {
             return Err(CodeIntelError::Disabled.into());
         }
@@ -574,7 +757,7 @@ impl CodeIntelligenceService {
         } else {
             "multiple".to_owned()
         };
-        Ok(response_with_statuses(
+        Ok(self.with_discovery_statuses(response_with_statuses(
             server_label,
             "workspace/symbol".to_owned(),
             symbols,
@@ -582,7 +765,7 @@ impl CodeIntelligenceService {
             limit,
             started,
             filtered,
-        ))
+        )))
     }
 
     async fn lsp_workspace_symbols_for_server_locked(
@@ -672,7 +855,7 @@ impl CodeIntelligenceService {
         clients: &'a mut BTreeMap<String, ProcessLanguageServer>,
         path: &Path,
     ) -> Result<&'a mut ProcessLanguageServer> {
-        let config = server_for_path(&self.inner.servers, path)
+        let config = server_for_path(&self.current_servers(), path)
             .cloned()
             .ok_or_else(|| CodeIntelError::NoServerForPath {
                 path: workspace_relative_path(&self.inner.workspace_root, path),
@@ -691,7 +874,7 @@ impl CodeIntelligenceService {
         }
         if !clients.contains_key(server_name) {
             let config = self
-                .inner
+                .server_plan_snapshot()
                 .servers
                 .iter()
                 .find(|server| server.name == server_name)

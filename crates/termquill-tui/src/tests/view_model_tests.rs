@@ -137,6 +137,16 @@ fn code_tool_result_projects_per_server_lsp_status_lines() -> anyhow::Result<()>
                             "server": "pyright",
                             "languages": ["python"],
                             "status": "degraded missing binary"
+                        },
+                        {
+                            "server": "typescript-language-server",
+                            "languages": ["typescript", "javascript"],
+                            "status": "missing"
+                        },
+                        {
+                            "server": "gopls",
+                            "languages": ["go"],
+                            "status": "installed"
                         }
                     ]
                 }
@@ -160,6 +170,20 @@ fn code_tool_result_projects_per_server_lsp_status_lines() -> anyhow::Result<()>
             .code_lines
             .iter()
             .any(|line| line == "python: degraded missing binary")
+    );
+    assert!(
+        view_model
+            .info_rail
+            .code_lines
+            .iter()
+            .any(|line| line == "typescript/javascript: missing typescript-language-server")
+    );
+    assert!(
+        view_model
+            .info_rail
+            .code_lines
+            .iter()
+            .any(|line| line == "go: installed gopls")
     );
     Ok(())
 }

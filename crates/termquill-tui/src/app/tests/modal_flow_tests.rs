@@ -129,11 +129,13 @@ fn config_text_field_uses_modal_and_applies_value() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(app.config_is_editing());
-    assert_eq!(app.modal_title(), Some("Base URL"));
+    assert_eq!(app.modal_title(), Some("Endpoint"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
     let detail = app.modal_lines().join("\n");
-    assert!(detail.contains("base_url: https://api.deepseek.comx|"));
+    assert!(detail.contains("OpenAI-compatible DeepSeek endpoint"));
+    assert!(detail.contains("key: base_url"));
+    assert!(detail.contains("value: https://api.deepseek.comx|"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(!app.config_is_editing());

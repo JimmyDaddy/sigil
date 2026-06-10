@@ -1,15 +1,134 @@
 use std::{collections::BTreeMap, fs};
 
-use termquill_kernel::CodeIntelligenceConfig;
+use termquill_kernel::{
+    CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig, LanguageServerConfig,
+};
+
+use crate::discovery::{DiscoveredLanguageServer, DiscoverySource, ServerAvailability};
 
 use super::*;
 
 #[test]
-fn effective_servers_defaults_to_rust_analyzer() {
-    let servers = effective_servers(&CodeIntelligenceConfig::default());
+fn effective_servers_defaults_to_rust_analyzer_when_discovery_is_disabled() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let config = CodeIntelligenceConfig {
+        discovery: CodeIntelligenceDiscoveryConfig {
+            enabled: false,
+            report_missing: true,
+        },
+        ..CodeIntelligenceConfig::default()
+    };
+    let servers = effective_servers(&config, temp.path());
 
     assert_eq!(servers[0].name, "rust-analyzer");
     assert!(servers[0].file_extensions.contains(&"rs".to_owned()));
+}
+
+#[test]
+fn effective_server_plan_keeps_missing_servers_status_only() {
+    let config = CodeIntelligenceConfig::default();
+    let rust = discovered_server(
+        default_rust_analyzer_server(),
+        ServerAvailability::Installed,
+    );
+    let typescript = discovered_server(
+        test_server(
+            "typescript-language-server",
+            &["typescript", "javascript"],
+            &["ts", "tsx", "js"],
+        ),
+        ServerAvailability::Missing,
+    );
+
+    let plan = effective_server_plan_from_discovered(&config, vec![rust, typescript]);
+
+    assert_eq!(plan.servers.len(), 1);
+    assert_eq!(plan.servers[0].name, "rust-analyzer");
+    assert_eq!(
+        plan.statuses
+            .iter()
+            .find(|status| status.server == "rust-analyzer")
+            .map(|status| status.status.as_str()),
+        Some("installed")
+    );
+    assert_eq!(
+        plan.statuses
+            .iter()
+            .find(|status| status.server == "typescript-language-server")
+            .map(|status| status.status.as_str()),
+        Some("missing")
+    );
+}
+
+#[test]
+fn configured_servers_override_discovered_profile_by_name() {
+    let configured = LanguageServerConfig {
+        command: "custom-ts-lsp".to_owned(),
+        startup_timeout_ms: 123,
+        ..test_server(
+            "typescript-language-server",
+            &["typescript", "javascript"],
+            &["ts", "tsx", "js"],
+        )
+    };
+    let config = CodeIntelligenceConfig {
+        servers: vec![configured.clone()],
+        ..CodeIntelligenceConfig::default()
+    };
+    let discovered = discovered_server(
+        test_server(
+            "typescript-language-server",
+            &["typescript", "javascript"],
+            &["ts", "tsx", "js"],
+        ),
+        ServerAvailability::Missing,
+    );
+
+    let plan = effective_server_plan_from_discovered(&config, vec![discovered]);
+
+    assert_eq!(plan.servers.len(), 1);
+    assert_eq!(plan.servers[0].command, "custom-ts-lsp");
+    assert_eq!(plan.servers[0].startup_timeout_ms, 123);
+    assert_eq!(
+        plan.statuses
+            .iter()
+            .find(|status| status.server == "typescript-language-server")
+            .map(|status| status.status.as_str()),
+        Some("configured")
+    );
+}
+
+fn discovered_server(
+    config: LanguageServerConfig,
+    availability: ServerAvailability,
+) -> DiscoveredLanguageServer {
+    DiscoveredLanguageServer {
+        config,
+        source: DiscoverySource::BuiltIn,
+        availability,
+        install_hint: None,
+    }
+}
+
+fn test_server(name: &str, languages: &[&str], file_extensions: &[&str]) -> LanguageServerConfig {
+    LanguageServerConfig {
+        name: name.to_owned(),
+        languages: languages
+            .iter()
+            .map(|language| (*language).to_owned())
+            .collect(),
+        command: name.to_owned(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        root_markers: Vec::new(),
+        file_extensions: file_extensions
+            .iter()
+            .map(|extension| (*extension).to_owned())
+            .collect(),
+        initialization_options: serde_json::Value::Null,
+        trust_required: true,
+        startup_timeout_ms: 10_000,
+    }
 }
 
 #[test]

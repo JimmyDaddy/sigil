@@ -2,15 +2,34 @@ use std::fs;
 
 use anyhow::Result;
 use termquill_kernel::{
-    McpServerConfig, McpServerStartup, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
-    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    McpServerConfig, McpServerStartup, McpServerTrustPolicy, ProviderCapabilities, SecretRedactor,
+    ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolRegistry, ToolResultStatus,
+    ToolSubjectKind, ToolSubjectScope,
 };
 
-use super::register_mcp_tools;
+use super::{register_mcp_tools, register_mcp_tools_with_capabilities_roots_and_secrets};
 
 fn write_fake_server_script(path: &std::path::Path, body: &str) -> Result<()> {
     fs::write(path, body)?;
     Ok(())
+}
+
+fn test_provider_capabilities() -> ProviderCapabilities {
+    ProviderCapabilities {
+        exact_prefix_cache: false,
+        reports_cache_tokens: false,
+        supports_reasoning_stream: false,
+        supports_tool_stream: false,
+        supports_background_tasks: false,
+        supports_response_handles: false,
+        supports_reasoning_artifacts: false,
+        supports_structured_output: false,
+        supports_assistant_prefix_seed: false,
+        supports_schema_constrained_tools: false,
+        supports_infill_completion: false,
+        supports_system_fingerprint: false,
+        tool_name_max_chars: 64,
+    }
 }
 
 #[tokio::test]
@@ -107,6 +126,180 @@ while True:
         )
         .await?;
     assert_eq!(result.content, "hello from mcp");
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_tool_blocks_secret_args_when_trust_disallows_secrets() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("fake_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]}})
+    elif method == "tools/call":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":"should not run"}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_capabilities_roots_and_secrets(
+        &mut registry,
+        &[McpServerConfig {
+            name: "fake".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                allow_secrets: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::from_values(["sk-secret"]),
+    )
+    .await?;
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            termquill_kernel::ToolCall {
+                id: "call-secret".to_owned(),
+                name: "mcp__fake__echo".to_owned(),
+                args_json: r#"{"value":"sk-secret"}"#.to_owned(),
+            },
+        )
+        .await?;
+
+    match result.status {
+        ToolResultStatus::Error(error) => {
+            assert_eq!(error.kind, ToolErrorKind::PermissionDenied);
+        }
+        ToolResultStatus::Ok => panic!("secret egress should be blocked"),
+    }
+    assert!(!result.content.contains("sk-secret"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_tool_redacts_secret_echo_when_trust_allows_secrets() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("fake_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]}})
+    elif method == "tools/call":
+        value = message["params"]["arguments"]["value"]
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":value}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_capabilities_roots_and_secrets(
+        &mut registry,
+        &[McpServerConfig {
+            name: "fake".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                allow_secrets: true,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::from_values(["sk-secret"]),
+    )
+    .await?;
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            termquill_kernel::ToolCall {
+                id: "call-secret".to_owned(),
+                name: "mcp__fake__echo".to_owned(),
+                args_json: r#"{"value":"sk-secret"}"#.to_owned(),
+            },
+        )
+        .await?;
+
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert_eq!(result.content, termquill_kernel::REDACTED_SECRET);
     Ok(())
 }
 
@@ -581,6 +774,7 @@ while True:
         }],
         64,
         vec![workspace_root],
+        SecretRedactor::empty(),
     )
     .await?;
 

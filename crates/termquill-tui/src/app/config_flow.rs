@@ -1,4 +1,8 @@
 use super::*;
+use crate::config_panel::{
+    CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
+    CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT,
+};
 
 impl AppState {
     pub fn config_section_title(&self) -> Option<&'static str> {
@@ -12,9 +16,24 @@ impl AppState {
             if state.footer_selected {
                 Some(state.selected_footer_action.field_label())
             } else {
-                state.selected_field.map(ConfigField::label)
+                state.selected_field.map(ConfigField::display_label)
             }
         })
+    }
+
+    pub fn config_status_summary(&self) -> String {
+        let section = self.config_section_title().unwrap_or("Config");
+        let saved = if self.config_is_dirty() {
+            "unsaved"
+        } else {
+            "saved"
+        };
+        let config_label = self
+            .config_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("config");
+        format!("{section} · {saved} · {config_label}")
     }
 
     pub fn config_selected_footer_action_label(&self) -> Option<&'static str> {
@@ -26,11 +45,20 @@ impl AppState {
     }
 
     pub fn config_footer_hint(&self) -> String {
-        if self.config_is_dirty() {
-            "draft has unsaved changes".to_owned()
+        if self.config_close_guard_armed() {
+            "status: confirm close - Esc discards".to_owned()
+        } else if self.config_is_dirty() {
+            "status: unsaved - save before close".to_owned()
         } else {
-            "all changes saved".to_owned()
+            "status: saved".to_owned()
         }
+    }
+
+    pub fn config_close_guard_armed(&self) -> bool {
+        self.config_state
+            .as_ref()
+            .map(|state| state.close_guard_armed)
+            .unwrap_or(false)
     }
 
     pub fn config_is_editing(&self) -> bool {
@@ -72,12 +100,15 @@ impl AppState {
             ));
         }
         lines.push(String::new());
-        lines.push("Tab step  Up/Down field".to_owned());
-        lines.push("Down footer  Left/Right action".to_owned());
-        lines.push("Enter choose/input/toggle/run".to_owned());
-        lines.push("Ctrl-S save  Esc close".to_owned());
-        lines.push("MCP: Ctrl-N add  Ctrl-D drop".to_owned());
-        lines.push("MCP: PgUp/PgDn switch".to_owned());
+        lines.push(CONFIG_SECTION_NAV_HINT.to_owned());
+        lines.push(CONFIG_FIELD_NAV_HINT.to_owned());
+        lines.push(CONFIG_EDIT_OR_TOGGLE_HINT.to_owned());
+        lines.push(format!("{CONFIG_SAVE_HINT}  Esc close"));
+        if state.selected_section == ConfigSection::Mcp {
+            lines.push("MCP: Ctrl-N add".to_owned());
+            lines.push("MCP: Ctrl-D drop".to_owned());
+            lines.push("MCP: PgUp/PgDn switch".to_owned());
+        }
         lines
     }
 
@@ -99,101 +130,93 @@ impl AppState {
             .join(" ");
         let mut lines = vec![match section.flow_index() {
             Some(index) => format!(
-                "{} ({}/{})",
+                "{} {}/{} · {}",
                 section.title(),
                 index + 1,
-                ConfigSection::FLOW.len()
+                ConfigSection::FLOW.len(),
+                section.summary()
             ),
             None => section.title().to_owned(),
         }];
         lines.push(step_label);
-        lines.push(section.summary().to_owned());
-        lines.push(
-            "Tab step  Up/Down field  Down footer  Left/Right action  Enter open/toggle/run"
-                .to_owned(),
-        );
         lines.push(String::new());
 
         match section {
             ConfigSection::Provider => {
-                lines.push("[runtime]".to_owned());
+                lines.push("[model]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::ProviderModel,
                 ));
+                lines.push(String::new());
+                lines.push("[authentication]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::ProviderApiKey,
                 ));
                 lines.push(String::new());
-                lines.push("[network]".to_owned());
+                lines.push("[endpoint]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::ProviderBaseUrl,
                 ));
+                lines.push(String::new());
+                lines.push("[advanced]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::ProviderFimModel,
                 ));
-                lines.push(String::new());
-                lines.push("[notes]".to_owned());
-                lines.push(format!("auth: file api_key or env {TERMQUILL_API_KEY_ENV}"));
-                lines.push("advanced provider fields: config file or env".to_owned());
-                lines.push("see README for TERMQUILL_* overrides".to_owned());
+                lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Permissions => {
-                lines.push("[default]".to_owned());
+                lines.push("[policy]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::PermissionsDefaultMode,
                 ));
                 lines.push(String::new());
                 lines.push("[rules]".to_owned());
-                lines.push(format!(
-                    "overrides: {}",
-                    config_state.draft.base_root_config.permission.rules.len()
-                ));
-                if config_state
-                    .draft
-                    .base_root_config
-                    .permission
-                    .rules
-                    .is_empty()
-                {
-                    lines.push("no overrides".to_owned());
-                } else {
-                    for rule in &config_state.draft.base_root_config.permission.rules {
-                        lines.push(format!(
-                            "- {}  subject={}  mode={}",
-                            rule.tool_name.as_deref().unwrap_or("*"),
-                            rule.subject_glob.as_deref().unwrap_or("<none>"),
-                            rule.mode.as_str()
-                        ));
-                    }
-                }
+                lines.extend(render_permission_rule_summary(config_state));
+                lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Memory => {
-                lines.push("[memory]".to_owned());
+                lines.push("[workspace memory]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::MemoryEnabled,
                 ));
-                lines.push(format!("docs: {}", self.memory_document_count));
-                lines.push(format!("status: {}", self.memory_last_status));
-                lines.push(
-                    "root docs: TERMQUILL.md AGENTS.md CLAUDE.md TERMQUILL.local.md".to_owned(),
-                );
+                lines.push(String::new());
+                lines.push("[loaded context]".to_owned());
+                lines.push(render_config_readonly_row(
+                    "Documents",
+                    &format!("{} loaded", self.memory_document_count),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Last scan",
+                    &self.memory_last_status,
+                ));
+                lines.push(render_config_readonly_row(
+                    "Root files",
+                    "TERMQUILL.md, AGENTS.md, CLAUDE.md, local override",
+                ));
+                lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Compaction => {
-                lines.push("[thresholds]".to_owned());
+                lines.push("[context]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::CompactionEnabled,
+                ));
+                lines.push(render_config_readonly_row(
+                    "Effective window",
+                    &render_effective_context_window(config_state),
                 ));
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::CompactionContextWindowTokens,
                 ));
+                lines.push(String::new());
+                lines.push("[thresholds]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
                     ConfigField::CompactionSoftThresholdRatio,
@@ -207,20 +230,31 @@ impl AppState {
                     ConfigField::CompactionTailMessages,
                 ));
                 lines.push(format!("status: {}", self.compaction_status));
+                lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Mcp => {
                 lines.push("[servers]".to_owned());
-                lines.push(format!("servers: {}", config_state.draft.mcp_servers.len()));
+                lines.push(render_config_readonly_row(
+                    "Configured",
+                    &format!("{} servers", config_state.draft.mcp_servers.len()),
+                ));
                 if config_state.draft.mcp_servers.is_empty() {
-                    lines.push("no MCP servers".to_owned());
-                    lines.push("Ctrl-N to add".to_owned());
+                    lines.push(render_config_hint_row("No MCP servers configured"));
+                    lines.push(render_config_hint_row(
+                        "Ctrl-N adds a required eager self-hosted server",
+                    ));
                 } else {
-                    lines.push(format!(
-                        "selected: {}/{}",
-                        config_state.selected_mcp_server_index + 1,
-                        config_state.draft.mcp_servers.len()
+                    lines.push(render_config_readonly_row(
+                        "Selected",
+                        &format!(
+                            "{} of {}",
+                            config_state.selected_mcp_server_index + 1,
+                            config_state.draft.mcp_servers.len()
+                        ),
                     ));
                     if config_state.selected_mcp_server().is_some() {
+                        lines.push(String::new());
+                        lines.push("[server]".to_owned());
                         lines.push(render_config_value_row(config_state, ConfigField::McpName));
                         lines.push(render_config_value_row(
                             config_state,
@@ -234,11 +268,14 @@ impl AppState {
                             config_state,
                             ConfigField::McpStartupTimeoutSecs,
                         ));
+                        lines.push(String::new());
+                        lines.push("[lifecycle]".to_owned());
+                        lines.extend(render_mcp_lifecycle_summary(config_state));
                     }
                 }
                 lines.push(String::new());
                 lines.push("Ctrl-N add  Ctrl-D drop  PgUp/PgDn server".to_owned());
-                lines.push("args_csv: comma list".to_owned());
+                lines.extend(render_config_selection_details(config_state));
             }
         }
 
@@ -633,6 +670,7 @@ impl AppState {
 
     pub(super) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {
         self.config_snapshot = Some(root_config.clone());
+        self.secret_redactor = termquill_runtime::secret_redactor_for_root_config(root_config);
         self.permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
         self.memory_config = root_config.memory.clone();
         self.compaction_config = root_config.compaction.clone();
@@ -656,4 +694,134 @@ pub(super) fn cycle_approval_mode(mode: ApprovalMode) -> ApprovalMode {
         ApprovalMode::Ask => ApprovalMode::Deny,
         ApprovalMode::Deny => ApprovalMode::Allow,
     }
+}
+
+fn render_effective_context_window(config_state: &ConfigState) -> String {
+    let fallback_tokens = config_state
+        .draft
+        .compaction_context_window_tokens
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|tokens| *tokens > 0);
+    let resolved = resolve_context_window_tokens(
+        &config_state.draft.base_root_config.agent.provider,
+        config_state.draft.provider_model.trim(),
+        fallback_tokens,
+    );
+
+    match resolved.tokens {
+        Some(tokens) if tokens > 0 => format!(
+            "{} tokens  source={}",
+            format_token_count(tokens as u64),
+            config_context_window_source_label(resolved.source)
+        ),
+        _ => "unknown  source=none".to_owned(),
+    }
+}
+
+fn config_context_window_source_label(source: ContextWindowSource) -> &'static str {
+    match source {
+        ContextWindowSource::Provider => "provider",
+        ContextWindowSource::Config => "fallback",
+        ContextWindowSource::None => "none",
+    }
+}
+
+fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
+    let Some(field) = config_state.selected_field else {
+        let mut lines = vec![
+            String::new(),
+            "[details]".to_owned(),
+            CONFIG_CONTROLS_HINT.to_owned(),
+            CONFIG_ACTIONS_HINT.to_owned(),
+        ];
+        if config_state.selected_section == ConfigSection::Mcp {
+            lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
+        }
+        return lines;
+    };
+    let mut lines = vec![
+        String::new(),
+        "[details]".to_owned(),
+        format!("selected: {}", field.display_label()),
+        format!("key: {}", field.label()),
+        field.help_text().to_owned(),
+        String::new(),
+        CONFIG_CONTROLS_HINT.to_owned(),
+        CONFIG_ACTIONS_HINT.to_owned(),
+    ];
+
+    if matches!(field, ConfigField::ProviderApiKey) {
+        lines.push(format!("override: {TERMQUILL_API_KEY_ENV}"));
+    }
+    if matches!(field, ConfigField::ProviderFimModel) {
+        lines.push("advanced: provider-specific fields remain in config file or env".to_owned());
+    }
+    if config_state.selected_section == ConfigSection::Mcp {
+        lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
+    }
+
+    lines
+}
+
+fn render_permission_rule_summary(config_state: &ConfigState) -> Vec<String> {
+    let rules = &config_state.draft.base_root_config.permission.rules;
+    let rule_count = if rules.is_empty() {
+        "none".to_owned()
+    } else {
+        format!("{} configured", rules.len())
+    };
+    let mut lines = vec![render_config_readonly_row("Rule overrides", &rule_count)];
+
+    if rules.is_empty() {
+        lines.push(render_config_hint_row(
+            "All unmatched tools use the default mode above",
+        ));
+        return lines;
+    }
+
+    for rule in rules.iter().take(4) {
+        let tool = rule.tool_name.as_deref().unwrap_or("any tool");
+        let subject = rule.subject_glob.as_deref().unwrap_or("any subject");
+        lines.push(format!("- {tool} · {} · {subject}", rule.mode.as_str()));
+    }
+    if rules.len() > 4 {
+        lines.push(format!("... {} more rules in config file", rules.len() - 4));
+    }
+
+    lines
+}
+
+fn render_mcp_lifecycle_summary(config_state: &ConfigState) -> Vec<String> {
+    let config = config_state
+        .draft
+        .base_root_config
+        .mcp_servers
+        .get(config_state.selected_mcp_server_index)
+        .cloned()
+        .unwrap_or_default();
+
+    vec![
+        render_config_readonly_row("Required", bool_summary(config.required)),
+        render_config_readonly_row("Startup", config.startup.as_str()),
+        render_config_readonly_row("Trust", config.trust.trust_class.as_str()),
+        render_config_readonly_row("Approval", config.trust.approval_default.as_str()),
+        render_config_readonly_row(
+            "Secrets",
+            if config.trust.allow_secrets {
+                "allowed"
+            } else {
+                "blocked"
+            },
+        ),
+    ]
+}
+
+fn bool_summary(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn render_config_hint_row(text: &str) -> String {
+    format!("i {text}")
 }

@@ -1,4 +1,5 @@
 pub mod cache;
+pub mod discovery;
 pub mod error;
 pub mod language;
 pub mod lsp;

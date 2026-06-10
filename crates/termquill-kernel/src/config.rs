@@ -51,6 +51,8 @@ pub struct CodeIntelligenceConfig {
     #[serde(default = "default_code_intel_max_payload_bytes")]
     pub max_payload_bytes: usize,
     #[serde(default)]
+    pub discovery: CodeIntelligenceDiscoveryConfig,
+    #[serde(default)]
     pub servers: Vec<LanguageServerConfig>,
 }
 
@@ -62,7 +64,27 @@ impl Default for CodeIntelligenceConfig {
             default_timeout_ms: default_code_intel_timeout_ms(),
             max_results: default_code_intel_max_results(),
             max_payload_bytes: default_code_intel_max_payload_bytes(),
+            discovery: CodeIntelligenceDiscoveryConfig::default(),
             servers: Vec::new(),
+        }
+    }
+}
+
+/// Automatic language server discovery controls.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct CodeIntelligenceDiscoveryConfig {
+    #[serde(default = "default_code_intel_discovery_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_code_intel_discovery_report_missing")]
+    pub report_missing: bool,
+}
+
+impl Default for CodeIntelligenceDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_code_intel_discovery_enabled(),
+            report_missing: default_code_intel_discovery_report_missing(),
         }
     }
 }
@@ -293,7 +315,13 @@ pub struct CompactionConfig {
     pub soft_threshold_ratio: f32,
     #[serde(default = "default_hard_threshold_ratio")]
     pub hard_threshold_ratio: f32,
-    #[serde(default)]
+    /// Fallback model window used only when provider/model metadata cannot resolve one.
+    #[serde(
+        default,
+        rename = "fallback_context_window_tokens",
+        alias = "context_window_tokens",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub context_window_tokens: Option<u32>,
     #[serde(default = "default_tail_messages")]
     pub tail_messages: usize,
@@ -490,6 +518,14 @@ fn default_code_intel_max_results() -> usize {
 
 fn default_code_intel_max_payload_bytes() -> usize {
     64 * 1024
+}
+
+fn default_code_intel_discovery_enabled() -> bool {
+    true
+}
+
+fn default_code_intel_discovery_report_missing() -> bool {
+    true
 }
 
 fn default_lsp_trust_required() -> bool {

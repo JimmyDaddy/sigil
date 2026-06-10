@@ -21,6 +21,11 @@ use crate::{
 
 use super::DeepSeekProvider;
 
+fn deepseek_provider(config: crate::DeepSeekProviderConfig) -> Result<DeepSeekProvider> {
+    let _guard = crate::test_env::lock();
+    DeepSeekProvider::new(config)
+}
+
 #[test]
 fn request_body_injects_reasoning_replay_into_matching_assistant_message() -> Result<()> {
     let assistant = termquill_kernel::ModelMessage::assistant(
@@ -111,7 +116,7 @@ async fn provider_retries_400_reasoning_and_yields_chunks() -> Result<()> {
         strict_tools_mode: crate::StrictToolsMode::Auto,
         request_timeout_secs: 10,
     };
-    let provider = DeepSeekProvider::new(config.clone())?;
+    let provider = deepseek_provider(config.clone())?;
     let request = termquill_kernel::CompletionRequest {
         provider_name: "deepseek".to_owned(),
         model_name: config.model.clone(),
@@ -161,7 +166,7 @@ async fn provider_yields_first_delta_before_stream_finishes() -> Result<()> {
         strict_tools_mode: crate::StrictToolsMode::Auto,
         request_timeout_secs: 10,
     };
-    let provider = DeepSeekProvider::new(config.clone())?;
+    let provider = deepseek_provider(config.clone())?;
     let request = termquill_kernel::CompletionRequest {
         provider_name: "deepseek".to_owned(),
         model_name: config.model.clone(),
@@ -202,7 +207,7 @@ async fn provider_stream_ends_after_done_without_waiting_for_socket_close() -> R
         strict_tools_mode: crate::StrictToolsMode::Auto,
         request_timeout_secs: 10,
     };
-    let provider = DeepSeekProvider::new(config.clone())?;
+    let provider = deepseek_provider(config.clone())?;
     let request = termquill_kernel::CompletionRequest {
         provider_name: "deepseek".to_owned(),
         model_name: config.model.clone(),
@@ -248,7 +253,7 @@ async fn prefix_completion_uses_beta_chat_path() -> Result<()> {
         "data: {\"choices\":[{\"delta\":{\"content\":\"prefixed\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
     )])));
     let server = spawn_recording_server(Arc::clone(&requests), Arc::clone(&responses)).await?;
-    let provider = DeepSeekProvider::new(crate::DeepSeekProviderConfig {
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
         base_url: server.clone(),
         beta_base_url: server.clone(),
         anthropic_base_url: server.clone(),
@@ -298,7 +303,7 @@ async fn fim_completion_uses_completions_path() -> Result<()> {
         "data: {\"choices\":[{\"text\":\"middle\",\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"prompt_cache_hit_tokens\":2,\"prompt_cache_miss_tokens\":5},\"system_fingerprint\":\"fp-fim\"}\n\ndata: [DONE]\n\n",
     )])));
     let server = spawn_recording_server(Arc::clone(&requests), Arc::clone(&responses)).await?;
-    let provider = DeepSeekProvider::new(crate::DeepSeekProviderConfig {
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
         base_url: server.clone(),
         beta_base_url: server.clone(),
         anthropic_base_url: server.clone(),
@@ -354,7 +359,7 @@ async fn fim_completion_uses_completions_path() -> Result<()> {
 #[tokio::test]
 async fn fim_completion_yields_first_delta_before_stream_finishes() -> Result<()> {
     let server = spawn_slow_completion_streaming_server().await?;
-    let provider = DeepSeekProvider::new(crate::DeepSeekProviderConfig {
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
         base_url: server.clone(),
         beta_base_url: server.clone(),
         anthropic_base_url: server,

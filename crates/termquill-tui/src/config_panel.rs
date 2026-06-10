@@ -2,6 +2,15 @@ use anyhow::{Result, anyhow, bail};
 use termquill_kernel::{ApprovalMode, McpServerConfig, RootConfig};
 use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
 
+pub(crate) const CONFIG_SECTION_NAV_HINT: &str = "Tab section";
+pub(crate) const CONFIG_FIELD_NAV_HINT: &str = "Up/Down field";
+pub(crate) const CONFIG_EDIT_OR_TOGGLE_HINT: &str = "Enter edit/toggle";
+pub(crate) const CONFIG_SAVE_HINT: &str = "Ctrl-S save";
+pub(crate) const CONFIG_HEADER_NOTICE: &str =
+    "Tab section · Up/Down field · Enter edit · Ctrl-S save";
+pub(crate) const CONFIG_CONTROLS_HINT: &str = "controls: Tab section · Up/Down field · Enter edit";
+pub(crate) const CONFIG_ACTIONS_HINT: &str = "actions: Down to actions · Ctrl-S save · Esc close";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigSection {
     Provider,
@@ -35,7 +44,7 @@ impl ConfigSection {
             Self::Provider => "provider settings",
             Self::Permissions => "approval rules",
             Self::Memory => "memory status",
-            Self::Compaction => "thresholds",
+            Self::Compaction => "context and thresholds",
             Self::Mcp => "MCP servers",
         }
     }
@@ -97,9 +106,9 @@ impl ConfigField {
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
     const COMPACTION_FIELDS: [Self; 5] = [
         Self::CompactionEnabled,
+        Self::CompactionContextWindowTokens,
         Self::CompactionSoftThresholdRatio,
         Self::CompactionHardThresholdRatio,
-        Self::CompactionContextWindowTokens,
         Self::CompactionTailMessages,
     ];
     const MCP_FIELDS: [Self; 4] = [
@@ -128,14 +137,76 @@ impl ConfigField {
             Self::PermissionsDefaultMode => "default_mode",
             Self::MemoryEnabled => "enabled",
             Self::CompactionEnabled => "enabled",
-            Self::CompactionSoftThresholdRatio => "soft_threshold_ratio",
-            Self::CompactionHardThresholdRatio => "hard_threshold_ratio",
-            Self::CompactionContextWindowTokens => "context_window_tokens",
+            Self::CompactionSoftThresholdRatio => "soft_threshold",
+            Self::CompactionHardThresholdRatio => "hard_threshold",
+            Self::CompactionContextWindowTokens => "fallback_window",
             Self::CompactionTailMessages => "tail_messages",
             Self::McpName => "name",
             Self::McpCommand => "command",
             Self::McpArgsCsv => "args_csv",
             Self::McpStartupTimeoutSecs => "startup_timeout_secs",
+        }
+    }
+
+    pub(crate) fn display_label(self) -> &'static str {
+        match self {
+            Self::ProviderModel => "Model",
+            Self::ProviderApiKey => "API key",
+            Self::ProviderBaseUrl => "Endpoint",
+            Self::ProviderFimModel => "FIM model",
+            Self::PermissionsDefaultMode => "Default mode",
+            Self::MemoryEnabled => "Memory",
+            Self::CompactionEnabled => "Auto compact",
+            Self::CompactionSoftThresholdRatio => "Soft threshold",
+            Self::CompactionHardThresholdRatio => "Hard threshold",
+            Self::CompactionContextWindowTokens => "Fallback window",
+            Self::CompactionTailMessages => "Tail messages",
+            Self::McpName => "Name",
+            Self::McpCommand => "Command",
+            Self::McpArgsCsv => "Arguments",
+            Self::McpStartupTimeoutSecs => "Startup timeout",
+        }
+    }
+
+    pub(crate) fn help_text(self) -> &'static str {
+        match self {
+            Self::ProviderModel => {
+                "Chat model used for new runs. Switching the saved default does not rewrite the current session."
+            }
+            Self::ProviderApiKey => {
+                "Saved locally when entered here. TERMQUILL_API_KEY still overrides it at runtime."
+            }
+            Self::ProviderBaseUrl => {
+                "OpenAI-compatible DeepSeek endpoint. Leave this unchanged unless you use a proxy."
+            }
+            Self::ProviderFimModel => {
+                "Model used by prefix/FIM helpers. This is advanced; chat runs use Model."
+            }
+            Self::PermissionsDefaultMode => {
+                "Fallback approval mode for tool calls not covered by a more specific rule."
+            }
+            Self::MemoryEnabled => {
+                "Loads workspace memory documents once at startup for stable session context."
+            }
+            Self::CompactionEnabled => {
+                "Allows manual compaction and idle hard-threshold auto compaction."
+            }
+            Self::CompactionSoftThresholdRatio => {
+                "Prompt pressure where the UI starts warning that compaction may be useful."
+            }
+            Self::CompactionHardThresholdRatio => {
+                "Prompt pressure where the runner compacts after the current turn returns idle."
+            }
+            Self::CompactionContextWindowTokens => {
+                "Used only when provider/model metadata cannot resolve the model context window."
+            }
+            Self::CompactionTailMessages => {
+                "Recent messages retained verbatim after older history is folded into a summary."
+            }
+            Self::McpName => "Stable local name for this MCP server.",
+            Self::McpCommand => "Executable used to start the MCP server process.",
+            Self::McpArgsCsv => "Comma-separated startup arguments for the MCP server.",
+            Self::McpStartupTimeoutSecs => "Seconds to wait for initialize/tools before failing.",
         }
     }
 
@@ -404,10 +475,10 @@ impl ConfigDraft {
                 .trim()
                 .parse::<u32>()
                 .map_err(|error| {
-                    anyhow!("context_window_tokens must be a positive integer: {error}")
+                    anyhow!("fallback_context_window_tokens must be a positive integer: {error}")
                 })?;
             if parsed == 0 {
-                bail!("context_window_tokens must be greater than 0");
+                bail!("fallback_context_window_tokens must be greater than 0");
             }
             Some(parsed)
         };
@@ -721,10 +792,15 @@ impl ConfigState {
         };
 
         match field {
-            ConfigField::McpArgsCsv if text_value.trim().is_empty() => "<empty>".to_owned(),
+            ConfigField::CompactionSoftThresholdRatio
+            | ConfigField::CompactionHardThresholdRatio => display_ratio(text_value),
+            ConfigField::CompactionTailMessages => format!("{text_value} messages"),
+            ConfigField::McpArgsCsv if text_value.trim().is_empty() => "none".to_owned(),
+            ConfigField::McpStartupTimeoutSecs => format!("{text_value} seconds"),
             ConfigField::CompactionContextWindowTokens if text_value.trim().is_empty() => {
-                "<empty = n/a>".to_owned()
+                "provider/model metadata".to_owned()
             }
+            ConfigField::CompactionContextWindowTokens => format!("{text_value} tokens"),
             _ => text_value.to_owned(),
         }
     }
@@ -776,18 +852,22 @@ pub(crate) fn render_config_value_row(state: &ConfigState, field: ConfigField) -
 
     if action.is_empty() {
         format!(
-            "{marker} {:<22}: {}",
-            field.label(),
+            "{marker} {}: {}",
+            field.display_label(),
             state.display_value(field)
         )
     } else {
         format!(
-            "{marker} {:<22}: {}  [{}]",
-            field.label(),
+            "{marker} {}: {}  [{}]",
+            field.display_label(),
             state.display_value(field),
             action
         )
     }
+}
+
+pub(crate) fn render_config_readonly_row(label: &str, value: &str) -> String {
+    format!("- {label}: {value}")
 }
 
 pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> bool {
@@ -813,14 +893,21 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
 
 fn mask_secret(value: &str) -> String {
     if value.is_empty() {
-        "<empty>".to_owned()
+        "not set".to_owned()
     } else {
-        "*".repeat(value.chars().count().max(8))
+        "set (hidden)".to_owned()
     }
 }
 
 fn bool_label(enabled: bool) -> &'static str {
     if enabled { "yes" } else { "no" }
+}
+
+fn display_ratio(value: &str) -> String {
+    match value.trim().parse::<f32>() {
+        Ok(ratio) if ratio.is_finite() => format!("{}% ({})", (ratio * 100.0).round(), value),
+        _ => value.to_owned(),
+    }
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ use crate::app::AppState;
 use super::{
     geometry::{centered_rect, halo_rect, shadow_rect},
     text::wrapped_line_rows,
+    theme,
 };
 
 pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
@@ -43,7 +44,8 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     let lines = raw_lines
         .iter()
         .cloned()
-        .map(|line| render_modal_line(line, visual.accent))
+        .enumerate()
+        .map(|(index, line)| render_modal_line(index, line, &visual))
         .collect::<Vec<_>>();
 
     let backdrop = halo_rect(area, frame.area(), 4, 1);
@@ -66,24 +68,32 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
         );
     }
     frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(title)
+        .title_style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(visual.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .border_type(BorderType::Rounded)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(visual.border))
+        .style(Style::default().bg(visual.modal_bg));
+    let content_area = block.inner(area);
+    frame.render_widget(block, area);
+    render_modal_focus_row_bgs(
+        frame,
+        content_area,
+        &raw_lines,
+        desired_inner_width,
+        &visual,
+    );
+
     let widget = Paragraph::new(Text::from(lines))
         .style(Style::default().bg(visual.modal_bg))
-        .block(
-            Block::default()
-                .title(title)
-                .title_style(
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(visual.accent)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(visual.accent))
-                .style(Style::default().bg(visual.modal_bg)),
-        )
         .wrap(Wrap { trim: false });
-    frame.render_widget(widget, area);
+    frame.render_widget(widget, content_area);
 
     if let Some((label, offset, line_index)) = app.modal_input_cursor() {
         let rows_before = raw_lines
@@ -100,37 +110,178 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
     }
 }
 
-fn render_modal_line(line: String, accent: Color) -> Line<'static> {
+fn render_modal_focus_row_bgs(
+    frame: &mut Frame,
+    content_area: ratatui::layout::Rect,
+    raw_lines: &[String],
+    desired_inner_width: usize,
+    visual: &ModalVisual,
+) {
+    let mut row_offset = 0u16;
+    for line in raw_lines {
+        let row_height = wrapped_line_rows(line, desired_inner_width)
+            .max(1)
+            .min(u16::MAX as usize) as u16;
+        if modal_line_is_focus(line) && row_offset < content_area.height {
+            let height = row_height.min(content_area.height - row_offset);
+            frame.render_widget(
+                Block::default().style(Style::default().bg(visual.selected_bg)),
+                ratatui::layout::Rect {
+                    y: content_area.y + row_offset,
+                    height,
+                    ..content_area
+                },
+            );
+        }
+        row_offset = row_offset.saturating_add(row_height);
+    }
+}
+
+fn modal_line_is_focus(line: &str) -> bool {
+    line.starts_with("> ") || line_is_input_value(line)
+}
+
+fn line_is_input_value(line: &str) -> bool {
+    line.ends_with('|')
+        && line
+            .split_once(':')
+            .is_some_and(|(label, _)| label != "key")
+}
+
+fn render_modal_line(index: usize, line: String, visual: &ModalVisual) -> Line<'static> {
     if line.is_empty() {
         return Line::raw(String::new());
     }
-    if line.starts_with("> ") {
-        return Line::styled(
-            line,
-            Style::default()
-                .fg(Color::Black)
-                .bg(accent)
-                .add_modifier(Modifier::BOLD),
-        );
+    if let Some(rest) = line.strip_prefix("> ") {
+        return Line::from(vec![
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(visual.accent)
+                    .bg(visual.selected_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                rest.to_owned(),
+                Style::default()
+                    .fg(visual.text)
+                    .bg(visual.selected_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+        .style(Style::default().bg(visual.selected_bg));
     }
     if line.starts_with("Up/Down ") || line.starts_with("Enter apply") {
-        return Line::styled(line, Style::default().fg(accent));
+        return render_modal_command_line(&line, visual);
     }
     if let Some((label, value)) = line.split_once(':') {
+        if line_is_input_value(&line) {
+            return render_modal_input_line(label, value.trim_start(), visual);
+        }
+        if label == "key" {
+            return render_modal_metadata_line(label, value.trim_start(), visual);
+        }
         return Line::from(vec![
-            Span::styled(label.to_owned(), Style::default().fg(accent)),
-            Span::styled(": ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                label.to_owned(),
+                Style::default()
+                    .fg(visual.label)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(": ", Style::default().fg(visual.muted)),
             Span::styled(
                 value.trim_start().to_owned(),
-                Style::default().fg(Color::White),
+                Style::default().fg(visual.text),
             ),
         ]);
     }
-    Line::styled(line, Style::default().fg(Color::White))
+    if index == 0 {
+        return Line::styled(
+            line,
+            Style::default()
+                .fg(visual.text)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    Line::styled(line, Style::default().fg(visual.muted))
+}
+
+fn render_modal_command_line(line: &str, visual: &ModalVisual) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, token) in line
+        .split("  ")
+        .filter(|token| !token.is_empty())
+        .enumerate()
+    {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        push_modal_command_token(&mut spans, token, visual);
+    }
+    Line::from(spans)
+}
+
+fn render_modal_metadata_line(label: &str, value: &str, visual: &ModalVisual) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "meta ",
+            Style::default()
+                .fg(visual.muted)
+                .bg(visual.command_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{label}: "), Style::default().fg(visual.muted)),
+        Span::styled(value.to_owned(), Style::default().fg(visual.muted)),
+    ])
+}
+
+fn push_modal_command_token(spans: &mut Vec<Span<'static>>, token: &str, visual: &ModalVisual) {
+    let (key, suffix) = token.split_once(' ').unwrap_or((token, ""));
+    spans.push(Span::styled(
+        key.to_owned(),
+        Style::default()
+            .fg(visual.hint)
+            .bg(visual.command_bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if !suffix.is_empty() {
+        spans.push(Span::styled(
+            format!(" {suffix}"),
+            Style::default().fg(visual.muted),
+        ));
+    }
+}
+
+fn render_modal_input_line(label: &str, value: &str, visual: &ModalVisual) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            label.to_owned(),
+            Style::default()
+                .fg(visual.label)
+                .bg(visual.selected_bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            ": ",
+            Style::default().fg(visual.muted).bg(visual.selected_bg),
+        ),
+        Span::styled(
+            value.to_owned(),
+            Style::default().fg(visual.text).bg(visual.selected_bg),
+        ),
+    ])
+    .style(Style::default().bg(visual.selected_bg))
 }
 
 struct ModalVisual {
     accent: Color,
+    border: Color,
+    label: Color,
+    hint: Color,
+    text: Color,
+    muted: Color,
+    selected_bg: Color,
+    command_bg: Color,
     modal_bg: Color,
     backdrop_bg: Color,
     backdrop_border: Color,
@@ -138,9 +289,33 @@ struct ModalVisual {
 }
 
 fn modal_visual(app: &AppState) -> ModalVisual {
+    if app.is_config_mode() {
+        return ModalVisual {
+            accent: theme::config_primary(),
+            border: theme::config_border(),
+            label: theme::config_detail(),
+            hint: theme::config_warning(),
+            text: theme::ink(),
+            muted: theme::muted(),
+            selected_bg: theme::config_selected_bg(),
+            command_bg: theme::config_tab_bg(),
+            modal_bg: theme::config_panel_bg(),
+            backdrop_bg: Color::Rgb(10, 13, 15),
+            backdrop_border: theme::config_border(),
+            shadow_bg: Color::Rgb(5, 7, 8),
+        };
+    }
+
     match app.modal_title() {
         Some("API Key") => ModalVisual {
             accent: Color::Yellow,
+            border: Color::Yellow,
+            label: Color::Yellow,
+            hint: Color::Yellow,
+            text: Color::White,
+            muted: Color::Gray,
+            selected_bg: Color::Rgb(51, 43, 14),
+            command_bg: Color::Rgb(37, 34, 22),
             modal_bg: Color::Rgb(28, 26, 18),
             backdrop_bg: Color::Rgb(17, 16, 12),
             backdrop_border: Color::Rgb(90, 82, 30),
@@ -148,6 +323,13 @@ fn modal_visual(app: &AppState) -> ModalVisual {
         },
         Some("Model") | Some("FIM Model") | Some("Model ID") => ModalVisual {
             accent: Color::Cyan,
+            border: Color::Cyan,
+            label: Color::Cyan,
+            hint: Color::Cyan,
+            text: Color::White,
+            muted: Color::Gray,
+            selected_bg: Color::Rgb(14, 32, 36),
+            command_bg: Color::Rgb(22, 32, 38),
             modal_bg: Color::Rgb(18, 24, 30),
             backdrop_bg: Color::Rgb(12, 18, 22),
             backdrop_border: Color::Rgb(38, 84, 92),
@@ -155,6 +337,13 @@ fn modal_visual(app: &AppState) -> ModalVisual {
         },
         _ => ModalVisual {
             accent: Color::Green,
+            border: Color::Green,
+            label: Color::Green,
+            hint: Color::Green,
+            text: Color::White,
+            muted: Color::Gray,
+            selected_bg: Color::Rgb(14, 36, 22),
+            command_bg: Color::Rgb(24, 34, 28),
             modal_bg: Color::Rgb(19, 26, 22),
             backdrop_bg: Color::Rgb(12, 18, 15),
             backdrop_border: Color::Rgb(42, 88, 58),

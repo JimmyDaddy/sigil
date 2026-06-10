@@ -16,7 +16,7 @@
 - `termquill-runtime`：TUI / CLI 共享 provider、内置工具、MCP tool registry 和 run options 装配。
 - `termquill-provider-deepseek`：DeepSeek 主链路、reasoning replay、strict tools、prefix / FIM 专项入口、usage / cache token 统计。
 - `termquill-tools-builtin`：`read_file`、`write_file`、`edit_file`、`delete_file`、`ls`、`glob`、`grep`、`bash`。
-- `termquill-code-intel`：可选 Code Intelligence / LSP 能力，包含 Rust `rust-analyzer` client、Tree-sitter Rust fallback、符号/定义/引用/诊断工具和 TUI code tool card。
+- `termquill-code-intel`：可选 Code Intelligence / LSP 能力，包含常见语言 LSP 自动发现、Rust `rust-analyzer` client、Tree-sitter Rust fallback、符号/定义/引用/诊断工具和 TUI code tool card。
 - `termquill-mcp`：stdio MCP server 启动、`tools/list` / `tools/call` 适配、`roots/list` 响应、progress notification 安全忽略。
 - `termquill-tui`：chat-first transcript、composer、slash selector、Quick Setup、`/config`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮。
 - `termquill-cli`：公开 `run` 自动化入口；`prefix` / `fim` 作为隐藏调试入口保留。
@@ -36,7 +36,7 @@
 
 | 优先级 | 能力 | 当前状态 | 推荐目标 |
 | --- | --- | --- | --- |
-| P0 | Code intelligence / LSP | Rust MVP 已落地；默认关闭，支持 LSP + Tree-sitter fallback | 扩展多语言、workspace trust UI、code action/rename 审批闭环 |
+| P0 | Code intelligence / LSP | Rust MVP 和多语言自动发现已落地；默认关闭，支持 LSP + Tree-sitter fallback | 扩展 workspace trust UI、code action/rename 审批闭环 |
 | P0 | MCP 完整闭环 | tools 可用；elicitation / trust enforcement / lazy activation 未完成 | 信任策略真实影响调用，支持安全 elicitation 和 lazy server |
 | P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key | 增加 secret 存储、迁移与 redaction 审计 |
 | P1 | 多 provider | runtime 只支持 `deepseek` | 增加 OpenAI-compatible provider，再扩 Anthropic / Gemini |
@@ -52,26 +52,28 @@
 
 目标：在大功能前先降低安全和路线漂移风险。
 
-### 4.1 Secret 存储与 redaction
+### 4.1 Secret resolution 与 redaction
 
 当前事实：
 
 - TUI secret modal 会遮罩 `api_key`。
-- `termquill.toml` 被 `.gitignore` 忽略，但仍支持把 `api_key` 明文写入本地配置。
-- MCP trust policy 有 `allow_secrets` 字段，但还没有逐调用 enforcement。
+- `termquill.toml` 被 `.gitignore` 忽略，并继续支持把 `api_key` 明文写入本地配置；这与 Codex / Claude Code / opencode 的本地配置体验一致。
+- 环境变量继续优先于本地明文配置，便于 CI、临时 session 或用户不希望落盘的场景。
+- MCP trust policy 有 `allow_secrets` 字段，需要逐调用 enforcement。
 
 交付物：
 
-1. 增加 secret provider 抽象，优先支持环境变量和本地明文配置的兼容读取。
-2. macOS 优先接 Keychain；其它平台先提供 file-backed encrypted 或明确的 fallback 策略。
-3. `/config` 保存 api key 时提供“保存到 keychain / 保存到配置 / 仅本进程使用”的清晰路径。
+1. 增加 runtime secret resolver，优先支持环境变量、本地明文配置与 session-only 值的兼容读取。
+2. 把本地明文配置作为 P0 默认支持路径；Keychain 或 file-backed encrypted store 不作为 P0 默认路径，只作为后续可选 backend 评估。
+3. `/config` 保存 api key 时明确标注本地配置为 plaintext，并保留环境变量覆盖路径；后续再补“仅本进程使用”的 UI 入口。
 4. 所有 TUI activity、session control、tool meta、error chain 默认 redaction secret-like 字段。
 5. MCP `allow_secrets = false` 时，模型或 MCP server 不应收到已识别 secret。
 
 验收标准：
 
 - 旧配置仍能加载。
-- 新保存路径不会把 api key 回写到普通 TOML，除非用户显式选择。
+- `TERMQUILL_API_KEY` 继续优先于配置文件里的 `api_key`。
+- 本地 TOML 保存 api key 是受支持行为，但必须在文档和 UI 文案中明确它是 plaintext。
 - session log、tool result、notice、debug output 不包含明文 secret。
 - MCP server trust policy 能阻止 secret egress。
 
@@ -104,9 +106,10 @@ cargo clippy --all-targets -- -D warnings
 当前实现状态：
 
 - 已新增 `crates/termquill-code-intel`。
-- 已支持 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具；`code_workspace_symbols` 会对已配置 language server 做 fan-out 并合并结果。
+- 已支持 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具；`code_workspace_symbols` 会对已配置或自动发现的 language server 做 fan-out 并合并结果。
+- `code_intelligence.discovery.enabled = true` 时会按 workspace marker / 文件扩展名自动发现 Rust、TypeScript/JavaScript、Python、Go，并只把 PATH 上可用的内置 allowlist server 纳入启动计划；手写 `code_intelligence.servers` 作为高级覆盖或补充。
 - Rust 项目优先走 `rust-analyzer`；LSP 不可用时，符号与语法诊断回退到 Tree-sitter Rust。
-- TUI info rail 的 `LSP` 区按 language/server 显示最近状态，并在 `code_diagnostics` 后投影错误/警告摘要；code tool result 使用专门 renderer。
+- TUI info rail 的 `LSP` 区按 language/server 显示最近状态，包括 installed、missing、ready、degraded、fallback，并在 `code_diagnostics` 后投影错误/警告摘要；code tool result 使用专门 renderer。
 - 默认配置仍为关闭，不影响普通 chat、内置工具和 MCP。
 
 ### 5.1 最小 code intelligence 服务
@@ -156,7 +159,7 @@ cargo check
 2. 工具结果必须有 `max_results` / `max_payload_bytes` 上限和 truncation metadata。
 3. 工具输出使用结构化 JSON envelope，不写裸文本。
 4. TUI tool card 提供专门 renderer，而不是直接 dump JSON。
-5. 多 server workspace symbol 查询需要合并结果，并保留每个 server 的 ready/degraded/fallback 状态。
+5. 多 server workspace symbol 查询需要合并结果，并保留每个 server 的 installed/missing/ready/degraded/fallback 状态。
 
 验收标准：
 

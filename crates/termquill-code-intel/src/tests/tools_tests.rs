@@ -2,8 +2,8 @@ use std::fs;
 
 use serde_json::json;
 use termquill_kernel::{
-    CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig, ToolCall, ToolContext,
-    ToolRegistry,
+    CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig,
+    LanguageServerConfig, ToolCall, ToolContext, ToolRegistry,
 };
 
 use super::*;
@@ -15,6 +15,10 @@ fn enabled_config() -> CodeIntelligenceConfig {
         default_timeout_ms: 50,
         max_results: 10,
         max_payload_bytes: 64 * 1024,
+        discovery: CodeIntelligenceDiscoveryConfig {
+            enabled: false,
+            report_missing: true,
+        },
         servers: vec![LanguageServerConfig {
             name: "missing-rust-analyzer".to_owned(),
             languages: vec!["rust".to_owned()],
@@ -82,12 +86,22 @@ async fn code_symbols_tool_returns_bounded_json_envelope() {
         serde_json::from_str(&result.content).expect("content should be json");
     assert_eq!(content["tool"], "code_symbols");
     assert_eq!(content["server"], "tree-sitter-rust");
-    assert_eq!(content["servers"][0]["server"], "tree-sitter-rust");
-    assert_eq!(content["servers"][0]["languages"][0], "rust");
+    let content_servers = content["servers"]
+        .as_array()
+        .expect("content servers should be an array");
+    assert!(content_servers.iter().any(|server| {
+        server["server"] == "tree-sitter-rust"
+            && server["status"] == "fallback"
+            && server["languages"][0] == "rust"
+    }));
     assert_eq!(content["symbols"][0]["name"], "hello");
-    assert_eq!(
-        result.metadata.details["code_intelligence"]["servers"][0]["server"],
-        "tree-sitter-rust"
+    let metadata_servers = result.metadata.details["code_intelligence"]["servers"]
+        .as_array()
+        .expect("metadata servers should be an array");
+    assert!(
+        metadata_servers
+            .iter()
+            .any(|server| server["server"] == "tree-sitter-rust" && server["status"] == "fallback")
     );
 }
 

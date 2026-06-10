@@ -53,13 +53,13 @@ TUI 当前支持：
 - `F1` 打开 keyboard help；核心快捷键、activity 快捷键和公开 slash command 列表都从真实命令面生成，不依赖隐藏兼容入口
 - composer 的历史输入只响应键盘：composer 聚焦时 `Up/Down` 显示历史 prompt；多行输入中间行仍按垂直光标移动处理
 - assistant / thinking markdown 的 fenced code block 会按语言做语法高亮；未知语言、纯文本或超大代码块自动回退到普通代码块渲染
-- `/config` 打开 TUI guided config flow；provider 主流程只保留 `model / api_key / base_url / fim_model`，文本项统一走弹窗输入，底部固定 `Actions` 栏可用 `Down` 聚焦，再用 `Left/Right` 选 `save / save+close / close`
+- `/config` 打开 TUI guided config flow；provider 主流程只保留 `model / api_key / base_url / fim_model`，文本项统一走弹窗输入；顶部 status strip 展示当前 section、字段、保存状态和配置路径，主面板展示 section tabs 与字段列表；宽屏下配置内容会保持居中最大宽度，Details 作为右侧说明栏，窄屏下说明内联到选中字段附近；`Actions` 栏跟随当前配置面板收在内容区内，可用 `Down` 聚焦，再用 `Left/Right` 选 `save / save+close / close`，并按宽度显示完整或紧凑的 `saved / unsaved / confirm close` 状态
 - 主屏默认走 chat-first：inline viewport 会占满当前终端可视区，左侧主区域展示 live transcript + 底部 composer，右侧保留独立的 full-height `info rail`，窄终端会自动收起 info rail 给 chat/composer 让出空间；启动恢复旧会话时只 seed 最近一段 transcript 到 terminal scrollback，避免长会话整屏重放
 - 不再要求 `Tab` 在主屏各卡片之间切焦点；`Shift-Tab` 直接轮换并持久化默认 `allow / ask / deny` 权限模式
 - composer 顶部直接展示 mode / model / provider / reasoning effort；运行态统一沉到底部 run strip，只保留 interrupt/details 快捷键和右下角 context 使用状态，当前任务进度交给 chat 区域展示
 - 运行中 live transcript 底部会显示紧凑的 loading progress block，例如 `▰▱▱▱ Thinking...`、`Bash...`、`Read...` 和当前 reasoning/tool/streaming 摘要；这些运行态提示只做渲染层投影，不写回 durable transcript
 - 右侧 `Info rail` 独立占据整列，展示 `Session / Permissions / Agents / LSP / Usage / Controls` 六组状态，而不是挤进 composer 旁边的一个小角落；`LSP` 会按 language/server 保留最近状态，例如 `rust: ready rust-analyzer`，跨语言 workspace symbol 查询会合并多个 server 的结果和状态
-- `ctx`、compaction status 和 auto-compaction 统一按同一个 effective context window 计算：已知模型窗口优先，其次才回退到 `compaction.context_window_tokens`
+- `ctx`、compaction status 和 auto-compaction 统一按同一个 effective context window 计算：已知模型窗口优先，其次才回退到 `compaction.fallback_context_window_tokens`
 - assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成 action-first activity 展示，例如 `Ran cargo test -p termquill-tui`、`Searched needle in src/main.rs`、`Read README.md`、`Deleted note.txt`；activity header 会区分动作词、命令/路径和参数；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file / code_symbols / code_workspace_symbols / code_definition / code_references / code_diagnostics` 走专用 renderer，简单只读 `rg / grep / fd / find` bash 命令会识别为 `Searched`，其他结构化 payload 走树形 fallback，不直接 dump 原始 JSON 或 call id
 - live phase 只保留在运行态和事件流里，不再固化成 chat transcript；reasoning delta 会写入 append-only control log，用于取消或重启后的 thinking block 恢复；completed thinking 默认显示前几行预览，用 `Ctrl-T` 完整展开或收起
 - tool result 默认以独立 brief activity 展示；bash 成功无输出会显示 `(no output)`，失败会突出 exit code 并优先展示诊断输出；存在 activity 后右侧 `Info rail / Controls` 会显示 `Ctrl-G` 聚焦最新 activity、`Alt-J` / `Alt-K` 切换 activity、`Ctrl-T` 展开/收起聚焦 activity，composer 为空时 `Esc` 清除 activity focus
@@ -111,7 +111,7 @@ TUI / CLI 当前按这个顺序找配置：
 - Linux：`$XDG_CONFIG_HOME/termquill/termquill.toml` 或 `~/.config/termquill/termquill.toml`
 - Windows：`%APPDATA%\\termquill\\termquill.toml`
 
-如果 TUI 启动时没有可用配置，或配置加载失败，它不会直接退出，而是进入 Quick Setup，把配置写回上述目标路径。首配只要求授权当前目录、从候选里选择模型并填好认证；认证可以直接录入 `api_key` 并持久化到配置文件，也可以预先导出 `TERMQUILL_API_KEY` 在运行时覆盖。如果要用自定义模型 id，可以先 `Esc` 退出选择器后手动输入。后续 `/config` 继续只暴露高频项；更细的 provider 兼容字段改走配置文件或环境变量。
+如果 TUI 启动时没有可用配置，或配置加载失败，它不会直接退出，而是进入 Quick Setup，把配置写回上述目标路径。首配只要求授权当前目录、从候选里选择模型并填好认证；认证可以直接录入 `api_key` 并以 plaintext 形式持久化到本地配置文件，也可以预先导出 `TERMQUILL_API_KEY` 在运行时覆盖。配置文件默认应放在用户配置目录或被仓库 `.gitignore` 忽略的 `termquill.toml`，不要提交到版本库。如果要用自定义模型 id，可以先 `Esc` 退出选择器后手动输入。后续 `/config` 继续只暴露高频项；更细的 provider 兼容字段改走配置文件或环境变量。
 
 ### 2. 启动方式
 
@@ -174,7 +174,9 @@ enabled = true
 enabled = true
 soft_threshold_ratio = 0.5
 hard_threshold_ratio = 0.8
-context_window_tokens = 128000
+# Optional: only used when provider/model metadata cannot resolve a window.
+# Old configs with context_window_tokens still load as this fallback.
+# fallback_context_window_tokens = 128000
 tail_messages = 6
 
 [code_intelligence]
@@ -183,6 +185,10 @@ startup = "lazy"
 default_timeout_ms = 5000
 max_results = 100
 max_payload_bytes = 65536
+
+[code_intelligence.discovery]
+enabled = true
+report_missing = true
 ```
 
 当前语义：
@@ -194,10 +200,10 @@ max_payload_bytes = 65536
 - 内置工具的 model-visible 输出默认有上限；`read_file` 支持 `offset/limit`，`ls/glob/grep` 支持 `limit`，截断信息会写入 tool result metadata
 - `agent.max_turns` 默认不限制；如果用户在配置里显式设置该阈值，并且模型连续达到阈值仍只请求工具、没有给最终回答，TUI 会提示本轮已停止并保留已写入的 tool results；这不是工具执行失败，用户可继续发送下一条消息接着跑
 - `memory.enabled = true`：启动时稳定装载工作区根 memory 文档，并支持单独一行 `@path` 导入
-- `compaction.*`：控制 `/compact` 手动压缩、soft threshold 提示和 hard threshold 的 idle 自动 compaction；若当前模型已有已知 context window，会优先按模型窗口计算阈值，否则回退到 `context_window_tokens`
-- `code_intelligence.*`：默认关闭；开启后 runtime 会注册 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具。工具结果同时受 `max_results` 和 `max_payload_bytes` 约束。Rust 项目默认使用 `rust-analyzer`；没有可用 LSP server 时，符号和语法诊断会回退到 Tree-sitter Rust outline / syntax diagnostics，不阻塞普通 chat 和工具调用。配置多个 language server 时，文件型工具按扩展名路由，`code_workspace_symbols` 会查询所有可用 server 并合并结果
-- `/config`：当前已支持在 TUI 内按 step 编辑 provider 常用项、permissions、memory、compaction，以及 MCP server 的 `name / command / args_csv / startup_timeout_secs`；TUI 新增的 MCP server 默认保存为 `required = true`、`startup = "eager"`、`trust.trust_class = "self_hosted"`；底部固定 `Actions` 栏负责保存和退出
-- `model` / `fim_model` 默认优先走 picker；`api_key` 默认优先走 secret modal，并会在保存时写回配置文件
+- `compaction.*`：控制 `/compact` 手动压缩、soft threshold 提示和 hard threshold 的 idle 自动 compaction；若当前模型已有已知 context window，会优先按模型窗口计算阈值，否则回退到 `fallback_context_window_tokens`；旧配置里的 `context_window_tokens` 会继续兼容读取，但保存时会写成新的 fallback 字段
+- `code_intelligence.*`：默认关闭；开启后 runtime 会注册 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具。工具结果同时受 `max_results` 和 `max_payload_bytes` 约束。`discovery.enabled = true` 时会按 workspace 自动发现常见语言和 PATH 上可用的安全 LSP server；手写 `code_intelligence.servers` 只作为高级覆盖或补充。Rust 项目默认使用 `rust-analyzer`；没有可用 LSP server 时，符号和语法诊断会回退到 Tree-sitter Rust outline / syntax diagnostics，不阻塞普通 chat 和工具调用。配置或发现多个 language server 时，文件型工具按扩展名路由，`code_workspace_symbols` 会查询所有可用 server 并合并结果；`report_missing = true` 会在 TUI `LSP` 区显示已发现但未安装的 server
+- `/config`：当前已支持在 TUI 内按 section 编辑 provider 常用项、permissions、memory、compaction，以及 MCP server 的 `name / command / args_csv / startup_timeout_secs`；配置页使用产品化字段标签、选中字段详情和统一快捷键提示，顶部 status strip 会做宽度自适应截断；宽终端会把配置内容限制在居中最大宽度，并把 Details 作为右侧说明栏展示，窄终端会把说明内联到选中字段附近，真实配置 key 会在 Details 中显示；TUI 新增的 MCP server 默认保存为 `required = true`、`startup = "eager"`、`trust.trust_class = "self_hosted"`；`Actions` 栏跟随配置面板负责保存和退出，并会在窄终端切换到紧凑动作文案
+- `model` / `fim_model` 默认优先走 picker；`api_key` 默认优先走 secret modal，并会在保存时以 plaintext 写回本地配置文件；`TERMQUILL_API_KEY` 始终可以在运行时覆盖配置值
 - 弹窗内 `Enter` 只应用当前字段；`Ctrl-S` 会应用当前字段并保存，`F2` / `F3` 仍可作为可选快捷键
 - config 页可以先 `Down` 到底部 actions，再 `Left/Right` 选中动作并 `Enter` 执行；如果有未保存改动，第一次 `Esc` 会把焦点拉到 `save` 并提示，第二次 `Esc` 才会丢弃草稿退出
 
@@ -229,13 +235,14 @@ allow_secrets = false
 pin_version = false
 ```
 
-当前 MCP 支持 stdio、`initialize`、`tools/list`、`tools/call`、provider-visible 名称清洗/截断/hash 去重，以及 `roots/list` 响应。client 只把已解析的 workspace root 暴露为 root；`notifications/progress` 会被安全忽略，不刷 timeline；`elicitation/create` 在完整 TUI 交互落地前会返回不支持错误。MCP server 默认是 required + eager；`required = false` 的 eager server 启动或 `tools/list` 失败时会跳过并记录 warning，`required = false` 且 `startup = "lazy"` 的 server 当前不会启动或注册工具；required lazy 会明确报错，避免关键 server 被静默跳过。
+当前 MCP 支持 stdio、`initialize`、`tools/list`、`tools/call`、provider-visible 名称清洗/截断/hash 去重，以及 `roots/list` 响应。client 只把已解析的 workspace root 暴露为 root；`notifications/progress` 会被安全忽略，不刷 timeline；`elicitation/create` 在完整 TUI 交互落地前会返回不支持错误。`allow_secrets = false` 时，MCP tool 参数中一旦包含已解析 secret 或 secret-like 字段会被阻断；允许发送 secret 的 MCP 结果仍会在回到本地 tool result 前脱敏。MCP server 默认是 required + eager；`required = false` 的 eager server 启动或 `tools/list` 失败时会跳过并记录 warning，`required = false` 且 `startup = "lazy"` 的 server 当前不会启动或注册工具；required lazy 会明确报错，避免关键 server 被静默跳过。
 
 ### Provider 环境变量 override
 
 除了可以在配置文件里保存 `api_key`，当前还支持这些运行时 override：
 
 - `TERMQUILL_MODEL`
+- `TERMQUILL_API_KEY`
 - `TERMQUILL_BASE_URL`
 - `TERMQUILL_BETA_BASE_URL`
 - `TERMQUILL_ANTHROPIC_BASE_URL`
@@ -243,6 +250,8 @@ pin_version = false
 - `TERMQUILL_USER_ID_STRATEGY`
 - `TERMQUILL_REQUEST_TIMEOUT_SECS`
 - `TERMQUILL_STRICT_TOOLS_MODE`
+
+`TERMQUILL_API_KEY` 优先级最高；`TERMQUILL_DEEPSEEK_API_KEY` 和 `DEEPSEEK_API_KEY` 作为 legacy fallback 继续兼容读取。
 
 主 TUI 配置页不会继续暴露 `anthropic_base_url`、`request_timeout_secs`、`strict_tools_mode`，以及 `beta_base_url` / `user_id_strategy` 这类 provider 专项低频项；它们保留给配置文件和环境变量层处理。
 

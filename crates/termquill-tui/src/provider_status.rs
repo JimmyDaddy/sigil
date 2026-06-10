@@ -1,8 +1,9 @@
-use std::{env, time::Duration};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use reqwest::blocking::Client as BlockingClient;
-use termquill_provider_deepseek::{DeepSeekProviderConfig, TERMQUILL_API_KEY_ENV};
+use termquill_provider_deepseek::DeepSeekProviderConfig;
+use termquill_runtime::resolve_deepseek_api_key;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BalanceSnapshot {
@@ -115,18 +116,7 @@ fn parse_remote_model_ids(payload: &serde_json::Value) -> Vec<String> {
 }
 
 pub(crate) fn resolve_provider_api_key(config: &DeepSeekProviderConfig) -> Option<String> {
-    if let Ok(api_key) = env::var(TERMQUILL_API_KEY_ENV) {
-        let trimmed = api_key.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_owned());
-        }
-    }
-    if let Some(api_key) = config.api_key.as_deref().map(str::trim)
-        && !api_key.is_empty()
-    {
-        return Some(api_key.to_owned());
-    }
-    None
+    resolve_deepseek_api_key(config).map(|secret| secret.value)
 }
 
 #[cfg(test)]

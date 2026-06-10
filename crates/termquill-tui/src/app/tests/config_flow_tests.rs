@@ -10,7 +10,14 @@ fn config_command_opens_first_editable_step() -> Result<()> {
     assert!(action.is_none());
     assert!(app.is_config_mode());
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("model"));
+    assert_eq!(app.config_selected_field_label(), Some("Model"));
+    assert_eq!(
+        app.config_status_summary(),
+        "Provider · saved · termquill.toml"
+    );
+    let nav = app.config_nav_lines().join("\n");
+    assert!(nav.contains("Tab section"));
+    assert!(!nav.contains("Tab/Left/Right section"));
     Ok(())
 }
 
@@ -20,13 +27,13 @@ fn config_up_down_moves_between_fields_in_current_step() -> Result<()> {
     app.open_config_panel();
 
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("model"));
+    assert_eq!(app.config_selected_field_label(), Some("Model"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("api_key"));
+    assert_eq!(app.config_selected_field_label(), Some("API key"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("model"));
+    assert_eq!(app.config_selected_field_label(), Some("Model"));
     Ok(())
 }
 
@@ -49,7 +56,7 @@ fn config_down_to_footer_focuses_actions() -> Result<()> {
     assert_eq!(app.config_selected_field_label(), Some("close"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("fim_model"));
+    assert_eq!(app.config_selected_field_label(), Some("FIM model"));
     Ok(())
 }
 
@@ -60,11 +67,11 @@ fn config_left_right_switches_steps() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Permissions"));
-    assert_eq!(app.config_selected_field_label(), Some("default_mode"));
+    assert_eq!(app.config_selected_field_label(), Some("Default mode"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
-    assert_eq!(app.config_selected_field_label(), Some("model"));
+    assert_eq!(app.config_selected_field_label(), Some("Model"));
     Ok(())
 }
 
@@ -98,7 +105,8 @@ fn config_direct_typing_replaces_selected_text_value() -> Result<()> {
     assert!(app.has_modal());
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))?;
     let detail = app.modal_lines().join("\n");
-    assert!(detail.contains("model: gp|"));
+    assert!(detail.contains("key: model"));
+    assert!(detail.contains("value: gp|"));
     assert!(!detail.contains("deepseek-v4-flashg"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -115,13 +123,133 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.open_config_panel();
 
-    let detail = app.config_detail_lines().join("\n");
+    let lines = app.config_detail_lines();
+    let detail = lines.join("\n");
 
+    assert_eq!(lines[0], "Provider 1/5 · provider settings");
+    assert_eq!(lines[1], "[provider] permissions memory compaction mcp");
+    assert_eq!(lines[2], "");
+    assert!(detail.contains("[model]"));
+    assert!(detail.contains("[authentication]"));
+    assert!(detail.contains("[endpoint]"));
+    assert!(detail.contains("[advanced]"));
+    assert!(detail.contains("[details]"));
+    assert!(detail.contains("selected: Model"));
+    assert!(detail.contains("key: model"));
+    assert!(detail.contains("controls: Tab section · Up/Down field · Enter edit"));
+    assert!(detail.contains("actions: Down to actions · Ctrl-S save · Esc close"));
+    assert!(!lines.iter().take(3).any(|line| line.contains("Tab")));
     assert!(!detail.contains("beta_base_url"));
     assert!(!detail.contains("user_id_strategy"));
     assert!(!detail.contains("anthropic_base_url"));
     assert!(!detail.contains("strict_tools_mode"));
     assert!(!detail.contains("request_timeout_secs"));
+}
+
+#[test]
+fn config_permissions_step_uses_policy_summary_and_details() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Permissions);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("[policy]"));
+    assert!(detail.contains("Default mode"));
+    assert!(detail.contains("[rules]"));
+    assert!(detail.contains("- Rule overrides"));
+    assert!(detail.contains("i All unmatched tools use the default mode above"));
+    assert!(detail.contains("[details]"));
+    assert!(detail.contains("selected: Default mode"));
+    assert!(detail.contains("key: default_mode"));
+    assert!(detail.contains("controls: Tab section"));
+    assert!(!detail.lines().any(|line| line.starts_with("overrides:")));
+    assert!(!detail.contains("subject="));
+}
+
+#[test]
+fn config_memory_step_uses_loaded_context_summary() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Memory);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("[workspace memory]"));
+    assert!(detail.contains("Memory"));
+    assert!(detail.contains("[loaded context]"));
+    assert!(detail.contains("- Documents"));
+    assert!(detail.contains("- Last scan"));
+    assert!(detail.contains("- Root files"));
+    assert!(detail.contains("[details]"));
+    assert!(detail.contains("selected: Memory"));
+    assert!(!detail.contains("docs:"));
+    assert!(!detail.contains("root docs:"));
+}
+
+#[test]
+fn config_mcp_step_uses_server_summary_when_empty() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("[servers]"));
+    assert!(detail.contains("- Configured"));
+    assert!(detail.contains("0 servers"));
+    assert!(detail.contains("i No MCP servers configured"));
+    assert!(detail.contains("i Ctrl-N adds a required eager self-hosted server"));
+    assert!(detail.contains("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server"));
+    assert!(!detail.contains("servers:"));
+    assert!(!detail.contains("args_csv:"));
+}
+
+#[test]
+fn config_compaction_step_shows_effective_context_window_source() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Compaction);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("[context]"));
+    assert!(detail.contains("- Effective window"));
+    assert!(detail.contains("1,000,000 tokens  source=provider"));
+    assert!(detail.contains("Fallback window"));
+    assert!(detail.contains("[details]"));
+    assert!(detail.contains("selected: Auto compact"));
+    assert!(!detail.contains("context_window_tokens"));
+}
+
+#[test]
+fn config_compaction_step_uses_fallback_for_unknown_provider_window() {
+    let mut config = test_config();
+    config.agent.provider = "custom".to_owned();
+    config.agent.model = "custom-model".to_owned();
+    config.compaction.context_window_tokens = Some(128_000);
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Compaction);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("128,000 tokens  source=fallback"));
 }
 
 #[test]
@@ -159,6 +287,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.memory_enabled = false;
     state.draft.compaction_soft_threshold_ratio = "0.40".to_owned();
     state.draft.compaction_hard_threshold_ratio = "0.75".to_owned();
+    state.draft.compaction_context_window_tokens = "64000".to_owned();
     state.dirty = true;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
@@ -171,6 +300,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert!(!root_config.memory.enabled);
     assert_eq!(root_config.compaction.soft_threshold_ratio, 0.40);
     assert_eq!(root_config.compaction.hard_threshold_ratio, 0.75);
+    assert_eq!(root_config.compaction.context_window_tokens, Some(64_000));
     assert!(!app.config_is_dirty());
     assert_eq!(app.permission_default_mode, "allow");
     assert!(!app.memory_enabled);
@@ -181,6 +311,14 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert!(!saved.memory.enabled);
     assert_eq!(saved.compaction.soft_threshold_ratio, 0.40);
     assert_eq!(saved.compaction.hard_threshold_ratio, 0.75);
+    assert_eq!(saved.compaction.context_window_tokens, Some(64_000));
+    let saved_raw = std::fs::read_to_string(&config_path)?;
+    assert!(saved_raw.contains("fallback_context_window_tokens = 64000"));
+    assert!(
+        !saved_raw
+            .lines()
+            .any(|line| line.trim_start().starts_with("context_window_tokens ="))
+    );
     assert_eq!(
         saved
             .providers
@@ -269,6 +407,18 @@ fn config_can_add_and_persist_mcp_server() -> Result<()> {
     state.draft.mcp_servers[0].args_csv =
         "-y, @modelcontextprotocol/server-filesystem, .".to_owned();
     state.draft.mcp_servers[0].startup_timeout_secs = "15".to_owned();
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("[server]"));
+    assert!(detail.contains("Name"));
+    assert!(detail.contains("Command"));
+    assert!(detail.contains("Arguments"));
+    assert!(detail.contains("[lifecycle]"));
+    assert!(detail.contains("Required"));
+    assert!(detail.contains("Startup"));
+    assert!(detail.contains("Trust"));
+    assert!(detail.contains("Secrets"));
+    assert!(!detail.contains("args_csv:"));
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
 
@@ -362,11 +512,20 @@ fn config_close_requires_second_escape_when_dirty() -> Result<()> {
         .expect("config state should exist after opening /config");
     state.draft.provider_model = "deepseek-v4-pro".to_owned();
     state.dirty = true;
+    assert_eq!(
+        app.config_footer_hint(),
+        "status: unsaved - save before close"
+    );
 
     let first = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
     assert!(first.is_none());
     assert!(app.is_config_mode());
     assert_eq!(app.config_selected_field_label(), Some("save"));
+    assert!(app.config_close_guard_armed());
+    assert_eq!(
+        app.config_footer_hint(),
+        "status: confirm close - Esc discards"
+    );
     assert_eq!(
         app.last_notice(),
         Some("unsaved changes; Down footer to save, Esc discard")
@@ -617,6 +776,14 @@ fn setup_mode_saves_config_and_returns_runtime_boot_action() -> Result<()> {
     );
     assert!(saved.memory.enabled);
     assert!(saved.compaction.enabled);
+    assert_eq!(saved.compaction.context_window_tokens, None);
+    let saved_raw = std::fs::read_to_string(&saved_path)?;
+    assert!(!saved_raw.contains("fallback_context_window_tokens"));
+    assert!(
+        !saved_raw
+            .lines()
+            .any(|line| line.trim_start().starts_with("context_window_tokens ="))
+    );
     Ok(())
 }
 

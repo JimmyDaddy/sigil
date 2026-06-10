@@ -1,12 +1,15 @@
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use termquill_kernel::{
     AgentRunOptions, InteractionMode, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
-    ToolRegistry,
+    SecretRedactor, ToolRegistry,
 };
-use termquill_provider_deepseek::{DeepSeekProvider, DeepSeekProviderConfig};
+use termquill_provider_deepseek::{
+    DeepSeekProvider, DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV,
+    LEGACY_TERMQUILL_DEEPSEEK_API_KEY_ENV, TERMQUILL_API_KEY_ENV,
+};
 
 /// Builds the configured model provider for runtime entrypoints.
 ///
@@ -16,7 +19,7 @@ use termquill_provider_deepseek::{DeepSeekProvider, DeepSeekProviderConfig};
 /// configuration cannot be parsed or initialized.
 pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
     match root_config.agent.provider.as_str() {
-        "deepseek" => Ok(Box::new(DeepSeekProvider::new(load_deepseek_config(
+        "deepseek" => Ok(Box::new(DeepSeekProvider::new(resolve_deepseek_config(
             root_config,
         )?)?)),
         other => Err(anyhow!("unsupported provider {other}")),
@@ -40,11 +43,12 @@ pub async fn build_tool_registry(
         &root_config.code_intelligence,
         workspace_root.clone(),
     );
-    termquill_mcp::register_mcp_tools_with_capabilities_and_roots(
+    termquill_mcp::register_mcp_tools_with_capabilities_roots_and_secrets(
         &mut registry,
         &root_config.mcp_servers,
         provider_capabilities,
         vec![canonical_workspace_root(workspace_root)],
+        secret_redactor_for_root_config(root_config),
     )
     .await?;
     Ok(registry)
@@ -82,6 +86,91 @@ pub fn load_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProvider
         .cloned()
         .ok_or_else(|| anyhow!("missing [providers.deepseek] in termquill.toml"))?;
     serde_json::from_value(provider_config_value).context("invalid deepseek provider config")
+}
+
+/// Source used for a resolved runtime secret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretSource {
+    Environment(&'static str),
+    ConfigPlaintext,
+    Session,
+}
+
+/// A resolved secret value and the storage layer it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretResolution {
+    pub value: String,
+    pub source: SecretSource,
+}
+
+/// Resolves DeepSeek configuration with runtime overrides applied.
+///
+/// # Errors
+///
+/// Returns an error when provider config is missing, malformed, or an environment override is
+/// invalid.
+pub fn resolve_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProviderConfig> {
+    load_deepseek_config(root_config)?.resolved()
+}
+
+#[must_use]
+pub fn resolve_deepseek_api_key(config: &DeepSeekProviderConfig) -> Option<SecretResolution> {
+    resolve_deepseek_api_key_with_session(config, None)
+}
+
+#[must_use]
+pub fn resolve_deepseek_api_key_with_session(
+    config: &DeepSeekProviderConfig,
+    session_value: Option<&str>,
+) -> Option<SecretResolution> {
+    for name in [
+        TERMQUILL_API_KEY_ENV,
+        LEGACY_TERMQUILL_DEEPSEEK_API_KEY_ENV,
+        LEGACY_DEEPSEEK_API_KEY_ENV,
+    ] {
+        if let Some(value) = read_secret_env(name) {
+            return Some(SecretResolution {
+                value,
+                source: SecretSource::Environment(name),
+            });
+        }
+    }
+    if let Some(value) = session_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(SecretResolution {
+            value: value.to_owned(),
+            source: SecretSource::Session,
+        });
+    }
+    config
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| SecretResolution {
+            value: value.to_owned(),
+            source: SecretSource::ConfigPlaintext,
+        })
+}
+
+#[must_use]
+pub fn secret_redactor_for_root_config(root_config: &RootConfig) -> SecretRedactor {
+    let mut redactor = SecretRedactor::empty();
+    if let Ok(config) = load_deepseek_config(root_config)
+        && let Some(api_key) = resolve_deepseek_api_key(&config)
+    {
+        redactor.add_secret(api_key.value);
+    }
+    redactor
+}
+
+fn read_secret_env(name: &'static str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn canonical_workspace_root(workspace_root: PathBuf) -> PathBuf {

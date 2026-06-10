@@ -70,6 +70,42 @@ pub(crate) fn badge_bg() -> Color {
     Color::Rgb(30, 35, 43)
 }
 
+pub(crate) fn config_panel_bg() -> Color {
+    Color::Rgb(15, 18, 21)
+}
+
+pub(crate) fn config_border() -> Color {
+    Color::Rgb(70, 86, 91)
+}
+
+pub(crate) fn config_primary() -> Color {
+    accent_lime()
+}
+
+pub(crate) fn config_detail() -> Color {
+    accent_teal()
+}
+
+pub(crate) fn config_warning() -> Color {
+    accent_gold()
+}
+
+pub(crate) fn config_danger() -> Color {
+    accent_rose()
+}
+
+pub(crate) fn config_tab_bg() -> Color {
+    badge_bg()
+}
+
+pub(crate) fn config_section_bg() -> Color {
+    Color::Rgb(28, 35, 38)
+}
+
+pub(crate) fn config_selected_bg() -> Color {
+    Color::Rgb(23, 34, 36)
+}
+
 pub(crate) fn phase_accent(phase: &RunPhase) -> Color {
     match phase {
         RunPhase::Idle => accent_teal(),

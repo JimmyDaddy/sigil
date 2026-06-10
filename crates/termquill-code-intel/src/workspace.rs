@@ -8,28 +8,72 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use termquill_kernel::{CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig};
 
-use crate::error::CodeIntelError;
+use crate::{
+    discovery::{
+        DiscoveredLanguageServer, ServerAvailability, built_in_profiles, discover_language_servers,
+    },
+    error::CodeIntelError,
+};
 
-pub fn effective_servers(config: &CodeIntelligenceConfig) -> Vec<LanguageServerConfig> {
-    if !config.servers.is_empty() {
-        return config.servers.clone();
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EffectiveServerPlan {
+    pub servers: Vec<LanguageServerConfig>,
+    pub statuses: Vec<PlannedServerStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedServerStatus {
+    pub server: String,
+    pub languages: Vec<String>,
+    pub status: String,
+}
+
+pub fn effective_server_plan(
+    config: &CodeIntelligenceConfig,
+    workspace_root: &Path,
+) -> EffectiveServerPlan {
+    if !config.discovery.enabled {
+        return configured_or_default_plan(config);
     }
-    vec![default_rust_analyzer_server()]
+
+    match discover_language_servers(workspace_root, config.discovery.report_missing) {
+        Ok(discovered) => effective_server_plan_from_discovered(config, discovered),
+        Err(error) => {
+            let mut plan = configured_or_default_plan(config);
+            plan.statuses.push(PlannedServerStatus {
+                server: "discovery".to_owned(),
+                languages: Vec::new(),
+                status: format!("degraded {error}"),
+            });
+            plan
+        }
+    }
+}
+
+pub fn effective_servers(
+    config: &CodeIntelligenceConfig,
+    workspace_root: &Path,
+) -> Vec<LanguageServerConfig> {
+    effective_server_plan(config, workspace_root).servers
 }
 
 pub fn default_rust_analyzer_server() -> LanguageServerConfig {
-    LanguageServerConfig {
-        name: "rust-analyzer".to_owned(),
-        languages: vec!["rust".to_owned()],
-        command: "rust-analyzer".to_owned(),
-        args: Vec::new(),
-        env: BTreeMap::new(),
-        root_markers: vec!["Cargo.toml".to_owned(), "rust-project.json".to_owned()],
-        file_extensions: vec!["rs".to_owned()],
-        initialization_options: serde_json::json!({ "check": { "command": "check" } }),
-        trust_required: true,
-        startup_timeout_ms: 10_000,
-    }
+    built_in_profiles()
+        .into_iter()
+        .find(|profile| profile.name == "rust-analyzer")
+        .map(|profile| profile.to_config())
+        .unwrap_or_else(|| LanguageServerConfig {
+            name: "rust-analyzer".to_owned(),
+            languages: vec!["rust".to_owned()],
+            command: "rust-analyzer".to_owned(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            root_markers: vec!["Cargo.toml".to_owned(), "rust-project.json".to_owned()],
+            file_extensions: vec!["rs".to_owned()],
+            initialization_options: serde_json::json!({ "check": { "command": "check" } }),
+            trust_required: true,
+            startup_timeout_ms: 10_000,
+        })
 }
 
 pub fn config_enabled(config: &CodeIntelligenceConfig) -> bool {
@@ -118,6 +162,85 @@ fn normalized_extension(path: &Path) -> Option<String> {
         .and_then(OsStr::to_str)
         .map(|value| value.trim_start_matches('.').to_ascii_lowercase())
         .filter(|value| !value.is_empty())
+}
+
+fn configured_or_default_plan(config: &CodeIntelligenceConfig) -> EffectiveServerPlan {
+    let servers = if config.servers.is_empty() {
+        vec![default_rust_analyzer_server()]
+    } else {
+        config.servers.clone()
+    };
+    EffectiveServerPlan {
+        statuses: servers
+            .iter()
+            .map(|server| planned_status(server, "configured"))
+            .collect(),
+        servers,
+    }
+}
+
+pub(crate) fn effective_server_plan_from_discovered(
+    config: &CodeIntelligenceConfig,
+    discovered: Vec<DiscoveredLanguageServer>,
+) -> EffectiveServerPlan {
+    let mut plan = EffectiveServerPlan::default();
+    for server in discovered {
+        match server.availability {
+            ServerAvailability::Installed => {
+                plan.statuses
+                    .push(planned_status(&server.config, "installed"));
+                plan.servers.push(server.config);
+            }
+            ServerAvailability::Missing => {
+                plan.statuses
+                    .push(planned_status(&server.config, "missing"));
+            }
+            ServerAvailability::Disabled => {
+                plan.statuses
+                    .push(planned_status(&server.config, "disabled"));
+            }
+        }
+    }
+    apply_configured_server_overrides(&mut plan, &config.servers);
+    plan
+}
+
+fn apply_configured_server_overrides(
+    plan: &mut EffectiveServerPlan,
+    configured_servers: &[LanguageServerConfig],
+) {
+    for configured in configured_servers {
+        if let Some(existing) = plan
+            .servers
+            .iter_mut()
+            .find(|server| server.name == configured.name)
+        {
+            *existing = configured.clone();
+        } else {
+            plan.servers.push(configured.clone());
+        }
+        replace_status(plan, planned_status(configured, "configured"));
+    }
+}
+
+fn replace_status(plan: &mut EffectiveServerPlan, next: PlannedServerStatus) {
+    if let Some(existing) = plan
+        .statuses
+        .iter_mut()
+        .find(|status| status.server == next.server)
+    {
+        *existing = next;
+    } else {
+        plan.statuses.push(next);
+    }
+}
+
+fn planned_status(server: &LanguageServerConfig, status: &str) -> PlannedServerStatus {
+    PlannedServerStatus {
+        server: server.name.clone(),
+        languages: server.languages.clone(),
+        status: status.to_owned(),
+    }
 }
 
 pub fn find_server_root(workspace_root: &Path, server: &LanguageServerConfig) -> Result<PathBuf> {

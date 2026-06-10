@@ -3,7 +3,10 @@ use crate::{
     mouse::{AppMouseOutcome, MouseInput, MouseInputKind},
     ui::LayoutSnapshot,
 };
-use ratatui::layout::Rect;
+use ratatui::{
+    layout::Rect,
+    style::{Color, Style},
+};
 
 #[test]
 fn short_transcript_stays_in_live_panel_instead_of_terminal_scrollback() {
@@ -154,6 +157,205 @@ fn tool_result_is_rendered_as_multiline_json_block() -> Result<()> {
             .any(|line| line.as_str().is_some_and(|text| text.contains(".git")))
     }));
     Ok(())
+}
+
+#[test]
+fn tool_result_card_redacts_configured_secret_from_display_payloads() -> Result<()> {
+    let mut config = test_config();
+    config.providers.insert(
+        "deepseek".to_owned(),
+        json!({
+            "api_key": "sk-ui-secret"
+        }),
+    );
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
+    let preview = ToolPreview {
+        title: "Update secrets.txt".to_owned(),
+        summary: "Preview summary".to_owned(),
+        body: "--- current/secrets.txt\n+++ proposed/secrets.txt\n@@ -1 +1 @@\n-old\n+sk-ui-secret"
+            .to_owned(),
+        changed_files: vec!["secrets.txt".to_owned()],
+        file_diffs: vec![termquill_kernel::ToolPreviewFile {
+            path: "secrets.txt".to_owned(),
+            diff: "--- current/secrets.txt\n+++ proposed/secrets.txt\n@@ -1 +1 @@\n-old\n+sk-ui-secret"
+                .to_owned(),
+        }],
+    };
+    let snapshot = ToolPreviewSnapshot::from_preview(
+        "call-secret",
+        "write_file",
+        &preview,
+        Default::default(),
+        None,
+    );
+
+    app.handle(RunEvent::Control(ControlEntry::ToolPreviewCaptured(
+        snapshot,
+    )))?;
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-secret",
+        "write_file",
+        r#"{"token":"sk-ui-secret","value":"visible"}"#,
+        ToolResultMeta {
+            bytes: Some(36),
+            changed_files: vec!["secrets.txt".to_owned()],
+            details: json!({
+                "api_key": "sk-ui-secret",
+                "note": "visible"
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    let entry = app.timeline.last().expect("expected tool timeline entry");
+    let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
+    let serialized = serde_json::to_string(&rendered)?;
+
+    assert!(!serialized.contains("sk-ui-secret"));
+    assert!(serialized.contains(termquill_kernel::REDACTED_SECRET));
+    assert_eq!(
+        rendered["metadata"]["details"]["api_key"],
+        termquill_kernel::REDACTED_SECRET
+    );
+    assert_eq!(
+        rendered["preview_value"]["token"],
+        termquill_kernel::REDACTED_SECRET
+    );
+    Ok(())
+}
+
+#[test]
+fn large_tool_result_display_is_bounded_and_redacted() -> Result<()> {
+    let mut config = test_config();
+    config.providers.insert(
+        "deepseek".to_owned(),
+        json!({
+            "api_key": "sk-large-secret"
+        }),
+    );
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
+    let content = format!(
+        "Authorization: Bearer sk-large-secret\n{}",
+        "x".repeat(70 * 1024)
+    );
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-large",
+        "bash",
+        content,
+        ToolResultMeta::default(),
+    )))?;
+
+    let entry = app.timeline.last().expect("expected tool timeline entry");
+    let rendered: serde_json::Value = serde_json::from_str(&entry.text)?;
+    let serialized = serde_json::to_string(&rendered)?;
+    assert_eq!(rendered["display_truncated"], true);
+    assert!(
+        rendered["summary"]
+            .as_str()
+            .is_some_and(|summary| { summary.contains("display truncated") })
+    );
+    assert!(!serialized.contains("sk-large-secret"));
+    assert!(serialized.contains(termquill_kernel::REDACTED_SECRET));
+    Ok(())
+}
+
+#[test]
+fn batched_streaming_text_deltas_rerender_once_after_drain() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+
+    app.begin_timeline_render_batch();
+    app.handle(RunEvent::TextDelta("```rust\n".to_owned()))?;
+    let revision_after_first_delta = app.timeline_revision();
+    app.handle(RunEvent::TextDelta("fn main() {}\n".to_owned()))?;
+    app.handle(RunEvent::TextDelta("```\n".to_owned()))?;
+
+    let rendered_before_flush = app.timeline_plain_cache.join("\n");
+    assert!(!rendered_before_flush.contains("fn main"));
+    assert_eq!(app.timeline_revision(), revision_after_first_delta);
+
+    assert!(app.flush_timeline_render_batch());
+
+    let rendered_after_flush = app.timeline_plain_cache.join("\n");
+    assert!(rendered_after_flush.contains("fn main"));
+    assert!(app.timeline_revision() > revision_after_first_delta);
+    Ok(())
+}
+
+#[test]
+fn streaming_assistant_defers_code_highlight_until_finished() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let plain_code_style = Style::default()
+        .fg(Color::Rgb(236, 240, 246))
+        .bg(Color::Rgb(28, 33, 41));
+
+    app.handle(RunEvent::TextDelta("```rust\n".to_owned()))?;
+    app.handle(RunEvent::TextDelta("fn main() {}\n```\n".to_owned()))?;
+
+    let streaming_style =
+        timeline_span_style_containing(&app, "fn main").expect("streaming fn should render");
+    assert_eq!(streaming_style, plain_code_style);
+
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+
+    let finished_style =
+        timeline_span_style_containing(&app, "fn").expect("finished fn should render");
+    assert_ne!(finished_style, plain_code_style);
+    Ok(())
+}
+
+#[test]
+fn streaming_deltas_do_not_fill_ui_event_log() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let initial_events = app.events.len();
+
+    for _ in 0..32 {
+        app.handle(RunEvent::TextDelta("chunk ".to_owned()))?;
+    }
+
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "phase" && event.detail == "streaming")
+    );
+    assert!(!app.events.iter().any(|event| event.label == "text"));
+    let after_text_events = app.events.len();
+    assert_eq!(after_text_events, initial_events + 1);
+
+    for _ in 0..32 {
+        app.handle(RunEvent::ReasoningDelta("thought ".to_owned()))?;
+    }
+
+    assert!(
+        app.events.iter().any(|event| {
+            event.label == "phase" && event.detail == "thinking|deepseek-v4-flash"
+        })
+    );
+    assert!(!app.events.iter().any(|event| event.label == "reasoning"));
+    assert_eq!(app.events.len(), after_text_events + 1);
+
+    for _ in 0..32 {
+        app.handle(RunEvent::ToolCallArgsDelta {
+            id: "call-1".to_owned(),
+            delta: r#"{"path":"src/lib.rs"}"#.to_owned(),
+        })?;
+    }
+
+    assert!(!app.events.iter().any(|event| event.label == "tool:args"));
+    assert_eq!(app.events.len(), after_text_events + 1);
+    Ok(())
+}
+
+fn timeline_span_style_containing(app: &AppState, text: &str) -> Option<Style> {
+    app.timeline_render_cache
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.contains(text))
+        .map(|span| span.style)
 }
 
 #[test]
@@ -706,7 +908,7 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
     assert!(
         app.usage_sidebar_lines()
             .iter()
-            .any(|line| line == "policy: 1,000,000 model · soft 50% · hard 80%")
+            .any(|line| line == "policy: 1,000,000 provider · soft 50% · hard 80%")
     );
     Ok(())
 }

@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use termquill_kernel::{
-    McpServerConfig, McpServerStartup, ProviderCapabilities, Tool, ToolAccess, ToolCategory,
-    ToolContext, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolSpec, ToolSubject,
+    McpServerConfig, McpServerStartup, McpServerTrustPolicy, ProviderCapabilities, SecretRedactor,
+    Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -40,11 +40,29 @@ pub async fn register_mcp_tools_with_capabilities_and_roots(
     capabilities: &ProviderCapabilities,
     roots: Vec<PathBuf>,
 ) -> Result<()> {
+    register_mcp_tools_with_capabilities_roots_and_secrets(
+        registry,
+        servers,
+        capabilities,
+        roots,
+        SecretRedactor::empty(),
+    )
+    .await
+}
+
+pub async fn register_mcp_tools_with_capabilities_roots_and_secrets(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<PathBuf>,
+    secret_redactor: SecretRedactor,
+) -> Result<()> {
     register_mcp_tools_with_name_limit_and_roots(
         registry,
         servers,
         capabilities.tool_name_max_chars,
         roots,
+        secret_redactor,
     )
     .await
 }
@@ -59,6 +77,7 @@ async fn register_mcp_tools_with_name_limit(
         servers,
         provider_tool_name_max_chars,
         default_mcp_roots()?,
+        SecretRedactor::empty(),
     )
     .await
 }
@@ -68,6 +87,7 @@ async fn register_mcp_tools_with_name_limit_and_roots(
     servers: &[McpServerConfig],
     provider_tool_name_max_chars: usize,
     roots: Vec<PathBuf>,
+    secret_redactor: SecretRedactor,
 ) -> Result<()> {
     let mut used_provider_names = BTreeSet::new();
     for server in servers {
@@ -132,6 +152,8 @@ async fn register_mcp_tools_with_name_limit_and_roots(
                     preview: ToolPreviewCapability::None,
                 },
                 tool_name,
+                trust: server.trust.clone(),
+                secret_redactor: secret_redactor.clone(),
             }));
         }
     }
@@ -385,6 +407,8 @@ struct McpTool {
     client: Arc<McpClient>,
     spec: ToolSpec,
     tool_name: McpToolName,
+    trust: McpServerTrustPolicy,
+    secret_redactor: SecretRedactor,
 }
 
 #[async_trait]
@@ -398,18 +422,27 @@ impl Tool for McpTool {
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        if !self.trust.allow_secrets && self.secret_redactor.value_contains_secret(&args) {
+            return Ok(ToolResult::error(
+                call_id,
+                self.spec.name.clone(),
+                ToolErrorKind::PermissionDenied,
+                "MCP tool arguments contain a secret and this server has allow_secrets = false",
+            ));
+        }
         let response = self
             .client
             .call_tool_response(&self.tool_name.original_name, args)
             .await?;
         if let Some(error) = response.get("error") {
+            let redacted_error = self.secret_redactor.redact_value(error);
             return Ok(ToolResult::error(
                 call_id,
                 self.spec.name.clone(),
                 ToolErrorKind::Protocol,
-                format!("MCP tools/call failed: {error}"),
+                format!("MCP tools/call failed: {redacted_error}"),
             )
-            .with_error_details(false, error.clone()));
+            .with_error_details(false, redacted_error));
         }
         let result = response
             .get("result")
@@ -433,7 +466,7 @@ impl Tool for McpTool {
         Ok(ToolResult::ok(
             call_id,
             self.spec.name.clone(),
-            content,
+            self.secret_redactor.redact_text(&content),
             ToolResultMeta::default(),
         ))
     }

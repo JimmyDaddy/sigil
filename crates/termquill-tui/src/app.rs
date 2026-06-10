@@ -26,8 +26,8 @@ use ratatui::text::Line;
 use termquill_kernel::{
     AgentConfig, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
     CompactionRecord, CompactionThresholdStatus, MemoryConfig, PermissionConfig, ReasoningEffort,
-    RootConfig, Session, SessionConfig, SessionLogEntry, SessionStats, ToolPreviewSnapshot,
-    WorkspaceConfig, resolve_workspace_root,
+    RootConfig, SecretRedactor, Session, SessionConfig, SessionLogEntry, SessionStats,
+    ToolPreviewSnapshot, WorkspaceConfig, resolve_workspace_root,
 };
 use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQUILL_API_KEY_ENV};
 use uuid::Uuid;
@@ -43,7 +43,7 @@ use crate::commands::{
 pub(crate) use crate::config_panel::{
     ConfigDraft, ConfigField, ConfigFieldMove, ConfigFooterAction, ConfigSection, ConfigState,
     config_field_accepts_char, default_deepseek_provider_config, load_deepseek_provider_config,
-    render_config_value_row, serialize_deepseek_provider_value,
+    render_config_readonly_row, render_config_value_row, serialize_deepseek_provider_value,
 };
 use crate::context_window::{
     ContextWindowSource, effective_compaction_config, resolve_context_window_tokens,
@@ -111,6 +111,7 @@ pub struct AppState {
     pub session_history_selected: usize,
     pub session_history_filter: String,
     config_snapshot: Option<RootConfig>,
+    secret_redactor: SecretRedactor,
     setup_state: Option<SetupState>,
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
@@ -234,6 +235,7 @@ impl AppState {
             session_history_selected: 0,
             session_history_filter: String::new(),
             config_snapshot: Some(root_config.clone()),
+            secret_redactor: termquill_runtime::secret_redactor_for_root_config(root_config),
             setup_state: None,
             config_state: None,
             modal_state: None,
@@ -335,6 +337,7 @@ impl AppState {
             session_history_selected: 0,
             session_history_filter: String::new(),
             config_snapshot: None,
+            secret_redactor: SecretRedactor::default(),
             setup_state: Some(SetupState::new(config_path, startup_error.clone())),
             config_state: None,
             modal_state: None,
@@ -966,8 +969,8 @@ impl AppState {
                 "policy: {} {} · soft {}% · hard {}%",
                 format_token_count(cap as u64),
                 match resolved.source {
-                    ContextWindowSource::Provider => "model",
-                    ContextWindowSource::Config => "cfg",
+                    ContextWindowSource::Provider => "provider",
+                    ContextWindowSource::Config => "fallback",
                     ContextWindowSource::None => "n/a",
                 },
                 ratio_to_percent(self.compaction_config.soft_threshold_ratio),
