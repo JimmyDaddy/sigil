@@ -123,11 +123,24 @@ pub struct QueryMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub struct CodeIntelServerStatus {
+    pub server: String,
+    pub languages: Vec<String>,
+    pub status: String,
+    pub returned: usize,
+    pub total: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct CodeIntelResponse<T> {
     pub server: String,
     pub capability: String,
     pub results: Vec<T>,
     pub metadata: QueryMetadata,
+    #[serde(default)]
+    pub server_statuses: Vec<CodeIntelServerStatus>,
 }
 
 #[derive(Clone)]
@@ -141,7 +154,7 @@ struct ServiceInner {
     servers: Vec<LanguageServerConfig>,
     clients: Mutex<BTreeMap<String, ProcessLanguageServer>>,
     status: Mutex<CodeIntelStatus>,
-    symbol_cache: Mutex<TimedCache<Vec<CodeSymbol>>>,
+    symbol_cache: Mutex<TimedCache<CodeIntelResponse<CodeSymbol>>>,
 }
 
 struct ProcessLanguageServer {
@@ -235,15 +248,8 @@ impl CodeIntelligenceService {
         let path = self.resolve_file(requested)?;
         let limit = self.limit(max_results);
         let cache_key = format!("symbols:{}:{query:?}:{limit}", path.display());
-        if let Some(symbols) = self.inner.symbol_cache.lock().await.get(&cache_key) {
-            return Ok(response(
-                "cache".to_owned(),
-                "cache/document_symbols".to_owned(),
-                symbols,
-                limit,
-                started,
-                0,
-            ));
+        if let Some(response) = self.inner.symbol_cache.lock().await.get(&cache_key) {
+            return Ok(response);
         }
 
         match self
@@ -255,7 +261,7 @@ impl CodeIntelligenceService {
                     .symbol_cache
                     .lock()
                     .await
-                    .insert(cache_key, result.results.clone());
+                    .insert(cache_key, result.clone());
                 Ok(result)
             }
             Err(_) => {
@@ -267,6 +273,7 @@ impl CodeIntelligenceService {
                 )?;
                 Ok(response(
                     "tree-sitter-rust".to_owned(),
+                    vec!["rust".to_owned()],
                     "tree_sitter/document_symbols".to_owned(),
                     symbols,
                     limit,
@@ -311,6 +318,7 @@ impl CodeIntelligenceService {
         }
         Ok(response(
             "tree-sitter-rust".to_owned(),
+            vec!["rust".to_owned()],
             "tree_sitter/workspace_symbols".to_owned(),
             symbols,
             limit,
@@ -350,6 +358,7 @@ impl CodeIntelligenceService {
         let (locations, filtered) = self.parse_locations(response_array(value)).await?;
         Ok(response_with_filtered(
             server.config.name.clone(),
+            server.config.languages.clone(),
             "textDocument/definition".to_owned(),
             locations,
             limit,
@@ -388,6 +397,7 @@ impl CodeIntelligenceService {
         let (locations, filtered) = self.parse_locations(response_array(value)).await?;
         Ok(response_with_filtered(
             server.config.name.clone(),
+            server.config.languages.clone(),
             "textDocument/references".to_owned(),
             locations,
             limit,
@@ -407,17 +417,38 @@ impl CodeIntelligenceService {
         let mut diagnostics = Vec::new();
         let mut server_name = "tree-sitter-rust".to_owned();
         let mut capability = "tree_sitter/diagnostics".to_owned();
+        let mut server_statuses = Vec::new();
 
         for requested in requested_paths {
             let path = self.resolve_file(requested)?;
             match self.lsp_diagnostics_for_path(&path).await {
                 Ok(result) => {
                     server_name = result.0;
-                    capability = result.1;
-                    diagnostics.extend(result.2);
+                    let languages = result.1;
+                    capability = result.2;
+                    let count = result.3.len();
+                    server_statuses.push(server_status(
+                        server_name.clone(),
+                        languages,
+                        "ready".to_owned(),
+                        count,
+                        count,
+                        false,
+                    ));
+                    diagnostics.extend(result.3);
                 }
                 Err(_) => {
-                    diagnostics.extend(rust_syntax_diagnostics(&self.inner.workspace_root, &path)?);
+                    let fallback = rust_syntax_diagnostics(&self.inner.workspace_root, &path)?;
+                    let count = fallback.len();
+                    server_statuses.push(server_status(
+                        "tree-sitter-rust".to_owned(),
+                        vec!["rust".to_owned()],
+                        "fallback".to_owned(),
+                        count,
+                        count,
+                        false,
+                    ));
+                    diagnostics.extend(fallback);
                 }
             }
         }
@@ -427,10 +458,11 @@ impl CodeIntelligenceService {
             diagnostics.retain(|diagnostic| diagnostic.severity == filter);
         }
 
-        Ok(response(
+        Ok(response_with_statuses(
             server_name,
             capability,
             diagnostics,
+            server_statuses,
             limit,
             started,
             0,
@@ -472,6 +504,7 @@ impl CodeIntelligenceService {
         );
         Ok(response(
             server.config.name.clone(),
+            server.config.languages.clone(),
             "textDocument/documentSymbol".to_owned(),
             symbols,
             limit,
@@ -486,12 +519,80 @@ impl CodeIntelligenceService {
         limit: usize,
         started: Instant,
     ) -> Result<CodeIntelResponse<CodeSymbol>> {
-        let Some(config) = self.inner.servers.first().cloned() else {
+        let configs = self.inner.servers.clone();
+        if configs.is_empty() {
             return Err(CodeIntelError::Disabled.into());
-        };
+        }
         let mut clients = self.inner.clients.lock().await;
+        let mut symbols = Vec::new();
+        let mut filtered = 0usize;
+        let mut successful_servers = Vec::new();
+        let mut server_statuses = Vec::new();
+
+        for config in configs {
+            match self
+                .lsp_workspace_symbols_for_server_locked(&mut clients, &config.name, query)
+                .await
+            {
+                Ok((server_symbols, server_filtered, languages)) => {
+                    let count = server_symbols.len();
+                    successful_servers.push(config.name.clone());
+                    server_statuses.push(server_status(
+                        config.name,
+                        languages,
+                        "ready".to_owned(),
+                        count,
+                        count,
+                        false,
+                    ));
+                    symbols.extend(server_symbols);
+                    filtered = filtered.saturating_add(server_filtered);
+                }
+                Err(error) => {
+                    server_statuses.push(server_status(
+                        config.name,
+                        config.languages,
+                        format!("degraded {}", lsp_error_to_reason(error)),
+                        0,
+                        0,
+                        false,
+                    ));
+                }
+            }
+        }
+
+        if successful_servers.is_empty() {
+            return Err(CodeIntelError::ServerUnavailable {
+                server: "workspace/symbol".to_owned(),
+                reason: "no configured language server could answer workspace/symbol".to_owned(),
+            }
+            .into());
+        }
+
+        let server_label = if successful_servers.len() == 1 {
+            successful_servers.remove(0)
+        } else {
+            "multiple".to_owned()
+        };
+        Ok(response_with_statuses(
+            server_label,
+            "workspace/symbol".to_owned(),
+            symbols,
+            server_statuses,
+            limit,
+            started,
+            filtered,
+        ))
+    }
+
+    async fn lsp_workspace_symbols_for_server_locked(
+        &self,
+        clients: &mut BTreeMap<String, ProcessLanguageServer>,
+        server_name: &str,
+        query: &str,
+    ) -> Result<(Vec<CodeSymbol>, usize, Vec<String>)> {
         let server = self
-            .ensure_client_by_name_locked(&mut clients, &config.name)
+            .ensure_client_by_name_locked(clients, server_name)
             .await?;
         if !workspace_symbol_supported(&server.capabilities) {
             return Err(CodeIntelError::UnsupportedCapability {
@@ -517,20 +618,13 @@ impl CodeIntelligenceService {
                 filtered += 1;
             }
         }
-        Ok(response_with_filtered(
-            server.config.name.clone(),
-            "workspace/symbol".to_owned(),
-            symbols,
-            limit,
-            started,
-            filtered,
-        ))
+        Ok((symbols, filtered, server.config.languages.clone()))
     }
 
     async fn lsp_diagnostics_for_path(
         &self,
         path: &Path,
-    ) -> Result<(String, String, Vec<CodeDiagnostic>)> {
+    ) -> Result<(String, Vec<String>, String, Vec<CodeDiagnostic>)> {
         let mut clients = self.inner.clients.lock().await;
         let server = self.ensure_client_locked(&mut clients, path).await?;
         server.sync_document(path).await?;
@@ -567,6 +661,7 @@ impl CodeIntelligenceService {
             .collect::<Vec<_>>();
         Ok((
             server.config.name.clone(),
+            server.config.languages.clone(),
             capability.to_owned(),
             diagnostics,
         ))
@@ -791,6 +886,7 @@ fn drain_stderr(server: String, mut stderr: ChildStderr) {
 
 fn response<T>(
     server: String,
+    languages: Vec<String>,
     capability: String,
     mut results: Vec<T>,
     limit: usize,
@@ -800,22 +896,33 @@ fn response<T>(
     let total = results.len();
     let truncated = total > limit;
     results.truncate(limit);
+    let metadata = QueryMetadata {
+        returned: total.min(limit),
+        total,
+        truncated,
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        external_results_filtered: external_filtered,
+    };
+    let server_statuses = vec![server_status(
+        server.clone(),
+        languages,
+        "ready".to_owned(),
+        metadata.returned,
+        metadata.total,
+        metadata.truncated,
+    )];
     CodeIntelResponse {
         server,
         capability,
         results,
-        metadata: QueryMetadata {
-            returned: total.min(limit),
-            total,
-            truncated,
-            elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-            external_results_filtered: external_filtered,
-        },
+        metadata,
+        server_statuses,
     }
 }
 
 fn response_with_filtered<T>(
     server: String,
+    languages: Vec<String>,
     capability: String,
     results: Vec<T>,
     limit: usize,
@@ -824,12 +931,69 @@ fn response_with_filtered<T>(
 ) -> CodeIntelResponse<T> {
     response(
         server,
+        languages,
         capability,
         results,
         limit,
         started,
         external_filtered,
     )
+}
+
+fn response_with_statuses<T>(
+    server: String,
+    capability: String,
+    mut results: Vec<T>,
+    mut server_statuses: Vec<CodeIntelServerStatus>,
+    limit: usize,
+    started: Instant,
+    external_filtered: usize,
+) -> CodeIntelResponse<T> {
+    let total = results.len();
+    let truncated = total > limit;
+    results.truncate(limit);
+    let metadata = QueryMetadata {
+        returned: total.min(limit),
+        total,
+        truncated,
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        external_results_filtered: external_filtered,
+    };
+    if server_statuses.is_empty() {
+        server_statuses.push(server_status(
+            server.clone(),
+            Vec::new(),
+            "ready".to_owned(),
+            metadata.returned,
+            metadata.total,
+            metadata.truncated,
+        ));
+    }
+    CodeIntelResponse {
+        server,
+        capability,
+        results,
+        metadata,
+        server_statuses,
+    }
+}
+
+fn server_status(
+    server: String,
+    languages: Vec<String>,
+    status: String,
+    returned: usize,
+    total: usize,
+    truncated: bool,
+) -> CodeIntelServerStatus {
+    CodeIntelServerStatus {
+        server,
+        languages,
+        status,
+        returned,
+        total,
+        truncated,
+    }
 }
 
 fn collect_lsp_symbols(

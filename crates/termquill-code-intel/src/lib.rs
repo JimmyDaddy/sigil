@@ -7,8 +7,8 @@ pub mod tools;
 pub mod workspace;
 
 pub use service::{
-    CodeDiagnostic, CodeIntelResponse, CodeIntelStatus, CodeIntelligenceService, CodeLocation,
-    CodeRange, CodeSymbol, QueryMetadata,
+    CodeDiagnostic, CodeIntelResponse, CodeIntelServerStatus, CodeIntelStatus,
+    CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol, QueryMetadata,
 };
 pub use tools::register_code_intelligence_tools;
 

@@ -6,7 +6,7 @@ pub(crate) struct SlashCommandSpec {
     pub(crate) completes_with_space: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedSlashCommand {
     pub(crate) canonical: &'static str,
     pub(crate) arg: String,

@@ -17,10 +17,9 @@ impl AppState {
                     if self.pending_approval.is_none() =>
                 {
                     self.active_pane = PaneFocus::Composer;
-                    if self.select_slash_candidate(index) {
-                        Ok(crate::mouse::AppMouseOutcome::Redraw)
-                    } else {
-                        Ok(crate::mouse::AppMouseOutcome::Noop)
+                    match self.handle_mouse_slash_candidate(index)? {
+                        Some(action) => Ok(crate::mouse::AppMouseOutcome::Action(action)),
+                        None => Ok(crate::mouse::AppMouseOutcome::Redraw),
                     }
                 }
                 crate::mouse::HitTarget::ToolCard { entry_index }

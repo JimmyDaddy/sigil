@@ -104,9 +104,9 @@ cargo clippy --all-targets -- -D warnings
 当前实现状态：
 
 - 已新增 `crates/termquill-code-intel`。
-- 已支持 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具。
+- 已支持 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具；`code_workspace_symbols` 会对已配置 language server 做 fan-out 并合并结果。
 - Rust 项目优先走 `rust-analyzer`；LSP 不可用时，符号与语法诊断回退到 Tree-sitter Rust。
-- TUI info rail 显示 code intelligence 状态，并在 `code_diagnostics` 后投影错误/警告摘要；code tool result 使用专门 renderer。
+- TUI info rail 的 `LSP` 区按 language/server 显示最近状态，并在 `code_diagnostics` 后投影错误/警告摘要；code tool result 使用专门 renderer。
 - 默认配置仍为关闭，不影响普通 chat、内置工具和 MCP。
 
 ### 5.1 最小 code intelligence 服务
@@ -156,6 +156,7 @@ cargo check
 2. 工具结果必须有 `max_results` / `max_payload_bytes` 上限和 truncation metadata。
 3. 工具输出使用结构化 JSON envelope，不写裸文本。
 4. TUI tool card 提供专门 renderer，而不是直接 dump JSON。
+5. 多 server workspace symbol 查询需要合并结果，并保留每个 server 的 ready/degraded/fallback 状态。
 
 验收标准：
 

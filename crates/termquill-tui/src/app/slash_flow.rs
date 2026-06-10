@@ -222,13 +222,31 @@ impl AppState {
             return Vec::new();
         };
 
-        if let Some(spec) = Self::exact_slash_command(token)
+        let mut entries = if let Some(spec) = Self::exact_slash_command(token)
             && let Some(entries) = self.slash_argument_entries(spec, &arg)
         {
-            return entries;
-        }
+            entries
+        } else {
+            Self::slash_command_entries(token, &arg)
+        };
 
-        Self::slash_command_entries(token, &arg)
+        self.decorate_pending_mouse_confirmation(&mut entries);
+        entries
+    }
+
+    fn decorate_pending_mouse_confirmation(&self, entries: &mut [SlashSelectorEntry]) {
+        let Some(pending) = &self.pending_mouse_slash_confirmation else {
+            return;
+        };
+        for entry in entries {
+            if &entry.resolved == pending {
+                entry.description = format!(
+                    "click again to confirm {}  {}",
+                    entry.fill.trim_end(),
+                    entry.description
+                );
+            }
+        }
     }
 
     fn selected_slash_entry(&self) -> Option<SlashSelectorEntry> {
@@ -255,6 +273,7 @@ impl AppState {
 
     pub(super) fn reset_slash_selector(&mut self) {
         self.slash_selector_index = 0;
+        self.pending_mouse_slash_confirmation = None;
         self.refresh_slash_selector_context();
     }
 
@@ -272,6 +291,7 @@ impl AppState {
         if rows.is_empty() {
             return;
         }
+        self.pending_mouse_slash_confirmation = None;
 
         if forward {
             self.slash_selector_index = (self.slash_selector_index + 1) % rows.len();
@@ -286,24 +306,59 @@ impl AppState {
         }
     }
 
-    pub(super) fn select_slash_candidate(&mut self, index: usize) -> bool {
+    pub(super) fn handle_mouse_slash_candidate(
+        &mut self,
+        index: usize,
+    ) -> Result<Option<AppAction>> {
         let rows = self.slash_selector_entries();
         if rows.is_empty() {
-            return false;
+            return Ok(None);
         }
 
         let selected = index.min(rows.len().saturating_sub(1));
         self.slash_selector_index = selected;
-        if let Some(entry) = rows.get(selected) {
-            self.last_notice = Some(format!("slash selected {}", entry.label));
+        let Some(entry) = rows.get(selected).cloned() else {
+            return Ok(None);
+        };
+
+        if entry.fill.ends_with(' ') {
+            self.complete_slash_entry(&entry);
+            return Ok(None);
         }
-        true
+
+        if Self::slash_command_requires_mouse_confirmation(&entry.resolved) {
+            if self
+                .pending_mouse_slash_confirmation
+                .as_ref()
+                .is_some_and(|pending| pending == &entry.resolved)
+            {
+                let prompt = entry.fill.trim_end().to_owned();
+                self.record_input_history(prompt.clone());
+                self.reset_input_history_navigation();
+                return self.execute_slash_command(entry.resolved, prompt);
+            }
+
+            self.complete_slash_entry(&entry);
+            self.pending_mouse_slash_confirmation = Some(entry.resolved.clone());
+            self.last_notice = Some(format!("click again to confirm {}", entry.fill.trim_end()));
+            return Ok(None);
+        }
+
+        self.pending_mouse_slash_confirmation = None;
+        let prompt = entry.fill.trim_end().to_owned();
+        self.record_input_history(prompt.clone());
+        self.reset_input_history_navigation();
+        self.execute_slash_command(entry.resolved, prompt)
     }
 
     pub(super) fn accept_slash_selector(&mut self) {
         let Some(entry) = self.selected_slash_entry() else {
             return;
         };
+        self.complete_slash_entry(&entry);
+    }
+
+    fn complete_slash_entry(&mut self, entry: &SlashSelectorEntry) {
         let trimmed = self.input.trim_start();
         let leading_len = self.input.len().saturating_sub(trimmed.len());
         let leading = self.input[..leading_len].to_owned();
@@ -312,6 +367,13 @@ impl AppState {
         self.last_notice = Some(format!("slash completed to {}", entry.fill.trim_end()));
         self.reset_input_history_navigation();
         self.reset_slash_selector();
+    }
+
+    fn slash_command_requires_mouse_confirmation(command: &ResolvedSlashCommand) -> bool {
+        matches!(
+            command.canonical,
+            "/compact" | "/model" | "/quit" | "/resume"
+        )
     }
 
     pub(super) fn should_accept_slash_selector_on_enter(&self) -> bool {

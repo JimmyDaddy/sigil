@@ -638,6 +638,8 @@ impl AppState {
         self.compaction_config = root_config.compaction.clone();
         self.code_intelligence_status =
             super::code_intelligence_config_status(&root_config.code_intelligence);
+        self.code_intelligence_server_lines.clear();
+        self.code_intelligence_diagnostics_line = None;
         if self.current_session_entries.is_empty() {
             self.provider_name = root_config.agent.provider.clone();
             self.model_name = root_config.agent.model.clone();

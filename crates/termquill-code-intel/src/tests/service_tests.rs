@@ -56,6 +56,8 @@ async fn document_symbols_falls_back_to_tree_sitter_when_lsp_is_unavailable() {
         .expect("fallback symbols should succeed");
 
     assert_eq!(result.server, "tree-sitter-rust");
+    assert_eq!(result.server_statuses[0].server, "tree-sitter-rust");
+    assert_eq!(result.server_statuses[0].languages, vec!["rust".to_owned()]);
     assert!(result.results.iter().any(|symbol| symbol.name == "hello"));
 }
 
@@ -71,6 +73,7 @@ async fn diagnostics_falls_back_to_tree_sitter_syntax_errors() {
         .expect("fallback diagnostics should succeed");
 
     assert_eq!(result.server, "tree-sitter-rust");
+    assert_eq!(result.server_statuses[0].server, "tree-sitter-rust");
     assert!(
         result
             .results

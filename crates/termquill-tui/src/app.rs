@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     ops::Range,
     path::{Path, PathBuf},
@@ -52,6 +52,7 @@ pub use crate::input::PaneFocus;
 use crate::provider_status::BalanceSnapshot;
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
 pub(crate) use crate::setup::{SetupField, SetupState};
+use crate::slash::ResolvedSlashCommand;
 pub use crate::timeline::{EventEntry, TimelineEntry, TimelineRole};
 pub(crate) use crate::timeline::{
     LiveActivitySummary, RunPhase, SessionHistoryRow, SidebarAgentRow, SidebarCard,
@@ -90,6 +91,8 @@ pub struct AppState {
     pub memory_last_status: String,
     pub compaction_status: String,
     pub code_intelligence_status: String,
+    pub code_intelligence_server_lines: BTreeMap<String, String>,
+    pub code_intelligence_diagnostics_line: Option<String>,
     pub session_id: String,
     pub input: String,
     pub input_history: Vec<String>,
@@ -121,6 +124,7 @@ pub struct AppState {
     selected_tool_activity_key: Option<String>,
     expanded_tool_activity_keys: BTreeSet<String>,
     collapsed_tool_activity_keys: BTreeSet<String>,
+    pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     last_notice: Option<String>,
     reasoning_effort: ReasoningEffort,
     run_phase: RunPhase,
@@ -207,6 +211,8 @@ impl AppState {
             memory_last_status: "pending".to_owned(),
             compaction_status: initial_compaction_status,
             code_intelligence_status: initial_code_intelligence_status,
+            code_intelligence_server_lines: BTreeMap::new(),
+            code_intelligence_diagnostics_line: None,
             session_id,
             input: String::new(),
             input_history: Vec::new(),
@@ -238,6 +244,7 @@ impl AppState {
             selected_tool_activity_key: None,
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
+            pending_mouse_slash_confirmation: None,
             last_notice: None,
             reasoning_effort: ReasoningEffort::Max,
             run_phase: RunPhase::Idle,
@@ -302,6 +309,8 @@ impl AppState {
             memory_last_status: "pending".to_owned(),
             compaction_status: CompactionThresholdStatus::NotAvailable.as_str().to_owned(),
             code_intelligence_status: "off".to_owned(),
+            code_intelligence_server_lines: BTreeMap::new(),
+            code_intelligence_diagnostics_line: None,
             session_id,
             input: String::new(),
             input_history: Vec::new(),
@@ -333,6 +342,7 @@ impl AppState {
             selected_tool_activity_key: None,
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
+            pending_mouse_slash_confirmation: None,
             last_notice: startup_error,
             reasoning_effort: ReasoningEffort::Max,
             run_phase: RunPhase::Idle,
@@ -371,6 +381,23 @@ impl AppState {
         app.bootstrap_setup();
         app.refresh_usage_sidebar_cache();
         app
+    }
+
+    pub(crate) fn code_intelligence_sidebar_lines(&self) -> Vec<String> {
+        if self.code_intelligence_server_lines.is_empty()
+            && self.code_intelligence_diagnostics_line.is_none()
+        {
+            return vec![format!("status: {}", self.code_intelligence_status)];
+        }
+        let mut lines = self
+            .code_intelligence_server_lines
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(line) = &self.code_intelligence_diagnostics_line {
+            lines.push(line.clone());
+        }
+        lines
     }
 
     fn bootstrap(&mut self) {
@@ -448,6 +475,7 @@ impl AppState {
         self.selected_tool_activity_key = None;
         self.expanded_tool_activity_keys.clear();
         self.collapsed_tool_activity_keys.clear();
+        self.pending_mouse_slash_confirmation = None;
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
@@ -750,53 +778,7 @@ impl AppState {
                 return Ok(None);
             };
 
-            self.input.clear();
-            self.input_cursor = 0;
-            self.reset_slash_selector();
-            self.push_event("slash", prompt.clone());
-            return match command.canonical {
-                "/compact" => {
-                    if self.is_busy {
-                        self.push_timeline(TimelineRole::Notice, "busy; compact later");
-                        Ok(None)
-                    } else {
-                        self.last_notice = Some("compact requested".to_owned());
-                        Ok(Some(AppAction::CompactNow))
-                    }
-                }
-                "/config" => {
-                    self.open_config_panel();
-                    Ok(None)
-                }
-                "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
-                "/model" => self.set_runtime_model_from_command(&command.arg),
-                "/quit" => {
-                    self.should_quit = true;
-                    self.push_timeline(TimelineRole::Notice, "quitting");
-                    Ok(None)
-                }
-                "/resume" => {
-                    if self.is_busy {
-                        self.push_timeline(TimelineRole::Notice, "busy; resume later");
-                        return Ok(None);
-                    }
-
-                    self.refresh_session_history();
-                    match self.resolve_resume_target(&command.arg) {
-                        Some(path) => Ok(Some(AppAction::SwitchSession {
-                            session_log_path: path,
-                        })),
-                        None => {
-                            self.push_timeline(TimelineRole::Notice, "no matching session");
-                            Ok(None)
-                        }
-                    }
-                }
-                _ => {
-                    self.push_timeline(TimelineRole::Notice, "unknown slash command");
-                    Ok(None)
-                }
-            };
+            return self.execute_slash_command(command, prompt);
         }
 
         if self.is_busy {
@@ -822,6 +804,61 @@ impl AppState {
         self.streaming_reasoning_index = None;
         self.refresh_usage_sidebar_cache();
         Ok(Some(AppAction::SubmitPrompt(prompt)))
+    }
+
+    pub(super) fn execute_slash_command(
+        &mut self,
+        command: ResolvedSlashCommand,
+        prompt: String,
+    ) -> Result<Option<AppAction>> {
+        self.input.clear();
+        self.input_cursor = 0;
+        self.pending_mouse_slash_confirmation = None;
+        self.reset_slash_selector();
+        self.push_event("slash", prompt);
+        match command.canonical {
+            "/compact" => {
+                if self.is_busy {
+                    self.push_timeline(TimelineRole::Notice, "busy; compact later");
+                    Ok(None)
+                } else {
+                    self.last_notice = Some("compact requested".to_owned());
+                    Ok(Some(AppAction::CompactNow))
+                }
+            }
+            "/config" => {
+                self.open_config_panel();
+                Ok(None)
+            }
+            "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
+            "/model" => self.set_runtime_model_from_command(&command.arg),
+            "/quit" => {
+                self.should_quit = true;
+                self.push_timeline(TimelineRole::Notice, "quitting");
+                Ok(None)
+            }
+            "/resume" => {
+                if self.is_busy {
+                    self.push_timeline(TimelineRole::Notice, "busy; resume later");
+                    return Ok(None);
+                }
+
+                self.refresh_session_history();
+                match self.resolve_resume_target(&command.arg) {
+                    Some(path) => Ok(Some(AppAction::SwitchSession {
+                        session_log_path: path,
+                    })),
+                    None => {
+                        self.push_timeline(TimelineRole::Notice, "no matching session");
+                        Ok(None)
+                    }
+                }
+            }
+            _ => {
+                self.push_timeline(TimelineRole::Notice, "unknown slash command");
+                Ok(None)
+            }
+        }
     }
 
     pub(crate) fn run_phase(&self) -> RunPhase {

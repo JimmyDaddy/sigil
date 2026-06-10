@@ -58,7 +58,7 @@ TUI 当前支持：
 - 不再要求 `Tab` 在主屏各卡片之间切焦点；`Shift-Tab` 直接轮换并持久化默认 `allow / ask / deny` 权限模式
 - composer 顶部直接展示 mode / model / provider / reasoning effort；运行态统一沉到底部 run strip，只保留 interrupt/details 快捷键和右下角 context 使用状态，当前任务进度交给 chat 区域展示
 - 运行中 live transcript 底部会显示紧凑的 loading progress block，例如 `▰▱▱▱ Thinking...`、`Bash...`、`Read...` 和当前 reasoning/tool/streaming 摘要；这些运行态提示只做渲染层投影，不写回 durable transcript
-- 右侧 `Info rail` 独立占据整列，展示 `Session / Permissions / Agents / LSP / Usage / Controls` 六组状态，而不是挤进 composer 旁边的一个小角落
+- 右侧 `Info rail` 独立占据整列，展示 `Session / Permissions / Agents / LSP / Usage / Controls` 六组状态，而不是挤进 composer 旁边的一个小角落；`LSP` 会按 language/server 保留最近状态，例如 `rust: ready rust-analyzer`，跨语言 workspace symbol 查询会合并多个 server 的结果和状态
 - `ctx`、compaction status 和 auto-compaction 统一按同一个 effective context window 计算：已知模型窗口优先，其次才回退到 `compaction.context_window_tokens`
 - assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成 action-first activity 展示，例如 `Ran cargo test -p termquill-tui`、`Searched needle in src/main.rs`、`Read README.md`、`Deleted note.txt`；activity header 会区分动作词、命令/路径和参数；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file / code_symbols / code_workspace_symbols / code_definition / code_references / code_diagnostics` 走专用 renderer，简单只读 `rg / grep / fd / find` bash 命令会识别为 `Searched`，其他结构化 payload 走树形 fallback，不直接 dump 原始 JSON 或 call id
 - live phase 只保留在运行态和事件流里，不再固化成 chat transcript；reasoning delta 会写入 append-only control log，用于取消或重启后的 thinking block 恢复；completed thinking 默认显示前几行预览，用 `Ctrl-T` 完整展开或收起
@@ -195,7 +195,7 @@ max_payload_bytes = 65536
 - `agent.max_turns` 默认不限制；如果用户在配置里显式设置该阈值，并且模型连续达到阈值仍只请求工具、没有给最终回答，TUI 会提示本轮已停止并保留已写入的 tool results；这不是工具执行失败，用户可继续发送下一条消息接着跑
 - `memory.enabled = true`：启动时稳定装载工作区根 memory 文档，并支持单独一行 `@path` 导入
 - `compaction.*`：控制 `/compact` 手动压缩、soft threshold 提示和 hard threshold 的 idle 自动 compaction；若当前模型已有已知 context window，会优先按模型窗口计算阈值，否则回退到 `context_window_tokens`
-- `code_intelligence.*`：默认关闭；开启后 runtime 会注册 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具。工具结果同时受 `max_results` 和 `max_payload_bytes` 约束。Rust 项目默认使用 `rust-analyzer`；没有可用 LSP server 时，符号和语法诊断会回退到 Tree-sitter Rust outline / syntax diagnostics，不阻塞普通 chat 和工具调用
+- `code_intelligence.*`：默认关闭；开启后 runtime 会注册 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具。工具结果同时受 `max_results` 和 `max_payload_bytes` 约束。Rust 项目默认使用 `rust-analyzer`；没有可用 LSP server 时，符号和语法诊断会回退到 Tree-sitter Rust outline / syntax diagnostics，不阻塞普通 chat 和工具调用。配置多个 language server 时，文件型工具按扩展名路由，`code_workspace_symbols` 会查询所有可用 server 并合并结果
 - `/config`：当前已支持在 TUI 内按 step 编辑 provider 常用项、permissions、memory、compaction，以及 MCP server 的 `name / command / args_csv / startup_timeout_secs`；TUI 新增的 MCP server 默认保存为 `required = true`、`startup = "eager"`、`trust.trust_class = "self_hosted"`；底部固定 `Actions` 栏负责保存和退出
 - `model` / `fim_model` 默认优先走 picker；`api_key` 默认优先走 secret modal，并会在保存时写回配置文件
 - 弹窗内 `Enter` 只应用当前字段；`Ctrl-S` 会应用当前字段并保存，`F2` / `F3` 仍可作为可选快捷键

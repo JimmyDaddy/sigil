@@ -353,6 +353,7 @@ where
                 &query,
                 &response.server,
                 &response.capability,
+                &response.server_statuses,
                 &mut results,
                 &mut metadata,
             )?;
@@ -374,7 +375,8 @@ where
                         "total": response.metadata.total,
                         "truncated": metadata.truncated,
                         "external_results_filtered": response.metadata.external_results_filtered,
-                        "status_line": format!("ready {}", response.server)
+                        "status_line": format!("ready {}", response.server),
+                        "servers": response.server_statuses
                     }
                 }),
                 ..ToolResultMeta::default()
@@ -409,6 +411,7 @@ fn bounded_response_content<T>(
     query: &Value,
     server: &str,
     capability: &str,
+    server_statuses: &[crate::service::CodeIntelServerStatus],
     results: &mut Vec<T>,
     metadata: &mut crate::service::QueryMetadata,
 ) -> Result<(String, bool)>
@@ -427,6 +430,7 @@ where
             "query": query,
             result_key: results.clone(),
             "results": results.clone(),
+            "servers": server_statuses,
             "metadata": metadata
         });
         let content_text = serde_json::to_string(&content)?;

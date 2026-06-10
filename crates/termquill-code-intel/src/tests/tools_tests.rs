@@ -82,7 +82,13 @@ async fn code_symbols_tool_returns_bounded_json_envelope() {
         serde_json::from_str(&result.content).expect("content should be json");
     assert_eq!(content["tool"], "code_symbols");
     assert_eq!(content["server"], "tree-sitter-rust");
+    assert_eq!(content["servers"][0]["server"], "tree-sitter-rust");
+    assert_eq!(content["servers"][0]["languages"][0], "rust");
     assert_eq!(content["symbols"][0]["name"], "hello");
+    assert_eq!(
+        result.metadata.details["code_intelligence"]["servers"][0]["server"],
+        "tree-sitter-rust"
+    );
 }
 
 #[tokio::test]

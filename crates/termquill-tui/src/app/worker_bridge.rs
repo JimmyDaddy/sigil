@@ -252,8 +252,19 @@ impl AppState {
         if !result.tool_name.starts_with("code_") {
             return;
         }
+        let updated_server_lines = if let Some(lines) = code_intelligence_server_lines(result) {
+            for (key, line) in lines {
+                self.code_intelligence_server_lines.insert(key, line);
+            }
+            true
+        } else {
+            false
+        };
         if let Some(status_line) = code_diagnostics_status_line(result) {
             self.code_intelligence_status = status_line;
+            self.code_intelligence_diagnostics_line = Some(code_diagnostics_sidebar_line(
+                &self.code_intelligence_status,
+            ));
         } else if let Some(status_line) = result
             .metadata
             .details
@@ -262,13 +273,68 @@ impl AppState {
             .and_then(serde_json::Value::as_str)
         {
             self.code_intelligence_status = status_line.to_owned();
+            if result.is_error() && !updated_server_lines {
+                self.code_intelligence_server_lines.insert(
+                    "status".to_owned(),
+                    format!("status: {}", self.code_intelligence_status),
+                );
+            }
         } else if result.is_error() {
             self.code_intelligence_status = "degraded tool error".to_owned();
+            if !updated_server_lines {
+                self.code_intelligence_server_lines.insert(
+                    "status".to_owned(),
+                    format!("status: {}", self.code_intelligence_status),
+                );
+            }
         } else {
             self.code_intelligence_status = "ready".to_owned();
         }
         self.push_event("code_intelligence", self.code_intelligence_status.clone());
     }
+}
+
+fn code_intelligence_server_lines(result: &ToolResult) -> Option<Vec<(String, String)>> {
+    let servers = result
+        .metadata
+        .details
+        .get("code_intelligence")
+        .and_then(|details| details.get("servers"))
+        .and_then(serde_json::Value::as_array)?;
+    let mut lines = Vec::new();
+    for server in servers {
+        let server_name = server
+            .get("server")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("server");
+        let status = server
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ready");
+        let languages = server
+            .get("languages")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|language| !language.trim().is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let label = if languages.is_empty() {
+            server_name.to_owned()
+        } else {
+            languages.join("/")
+        };
+        let line = match status {
+            "ready" => format!("{label}: ready {server_name}"),
+            "fallback" => format!("{label}: fallback {server_name}"),
+            other => format!("{label}: {other}"),
+        };
+        lines.push((server_name.to_owned(), line));
+    }
+    Some(lines)
 }
 
 fn code_diagnostics_status_line(result: &ToolResult) -> Option<String> {
@@ -303,6 +369,16 @@ fn code_diagnostics_status_line(result: &ToolResult) -> Option<String> {
     } else {
         Some(format!("diagnostics {errors} errors {warnings} warnings"))
     }
+}
+
+fn code_diagnostics_sidebar_line(status_line: &str) -> String {
+    if status_line == "diagnostics clean" {
+        return "diagnostics: clean".to_owned();
+    }
+    status_line
+        .strip_prefix("diagnostics ")
+        .map(|summary| format!("diagnostics: {summary}"))
+        .unwrap_or_else(|| format!("diagnostics: {status_line}"))
 }
 
 impl EventHandler for AppState {

@@ -31,6 +31,19 @@ fn slash_candidate_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
     )
 }
 
+fn slash_candidate_point_by_label(
+    app: &AppState,
+    layout: &LayoutSnapshot,
+    label: &str,
+) -> (u16, u16) {
+    let index = app
+        .slash_selector_rows()
+        .iter()
+        .position(|(candidate, _)| candidate == label)
+        .expect("expected slash candidate");
+    slash_candidate_point(layout, index)
+}
+
 fn tool_card_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
     let hit_area = layout
         .tool_cards
@@ -159,19 +172,79 @@ fn mouse_click_tool_card_selects_without_toggling() -> Result<()> {
 }
 
 #[test]
-fn mouse_click_slash_candidate_selects_without_accepting() -> Result<()> {
+fn mouse_click_regular_slash_candidate_executes() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.input = "/".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
-    let (column, row) = slash_candidate_point(&layout, 1);
+    let (column, row) = slash_candidate_point_by_label(&app, &layout, "/config");
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.active_pane, PaneFocus::Composer);
-    assert_eq!(app.slash_selector_selected_index(), Some(1));
-    assert_eq!(app.input, "/");
+    assert!(app.is_config_mode());
+    assert!(app.input.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mouse_click_dangerous_slash_candidate_requires_second_click() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/".to_owned();
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = slash_candidate_point_by_label(&app, &layout, "/compact");
+
+    let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(first, AppMouseOutcome::Redraw));
+    assert_eq!(app.input, "/compact");
+    assert_eq!(app.last_notice(), Some("click again to confirm /compact"));
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = slash_candidate_point_by_label(&app, &layout, "/compact");
+    let second = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(
+        second,
+        AppMouseOutcome::Action(AppAction::CompactNow)
+    ));
+    assert!(app.input.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mouse_click_quit_shows_confirmation_in_slash_row() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/".to_owned();
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = slash_candidate_point_by_label(&app, &layout, "/quit");
+
+    let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(first, AppMouseOutcome::Redraw));
+    assert!(!app.should_quit);
+    assert_eq!(app.input, "/quit");
+    let rows = app.slash_selector_rows();
+    let (_, description) = rows
+        .iter()
+        .find(|(label, _)| label == "/quit")
+        .expect("expected /quit row");
+    assert!(description.starts_with("click again to confirm /quit"));
+    Ok(())
+}
+
+#[test]
+fn keyboard_enter_dangerous_slash_command_needs_no_mouse_confirmation() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.input = "/compact".to_owned();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(action, Some(AppAction::CompactNow)));
+    assert_eq!(app.last_notice(), Some("compact requested"));
     Ok(())
 }
 

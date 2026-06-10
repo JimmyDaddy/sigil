@@ -79,7 +79,7 @@ impl InfoRailViewModel {
                     )
                 })
                 .collect(),
-            code_lines: vec![format!("status: {}", app.code_intelligence_status)],
+            code_lines: app.code_intelligence_sidebar_lines(),
             usage_lines: app.usage_sidebar_lines().to_vec(),
             controls,
         }

@@ -117,6 +117,54 @@ fn code_tool_result_updates_code_intelligence_status() -> anyhow::Result<()> {
 }
 
 #[test]
+fn code_tool_result_projects_per_server_lsp_status_lines() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-code",
+        "code_workspace_symbols",
+        "{}",
+        ToolResultMeta {
+            details: json!({
+                "code_intelligence": {
+                    "status_line": "ready multiple",
+                    "servers": [
+                        {
+                            "server": "rust-analyzer",
+                            "languages": ["rust"],
+                            "status": "ready"
+                        },
+                        {
+                            "server": "pyright",
+                            "languages": ["python"],
+                            "status": "degraded missing binary"
+                        }
+                    ]
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(
+        view_model
+            .info_rail
+            .code_lines
+            .iter()
+            .any(|line| line == "rust: ready rust-analyzer")
+    );
+    assert!(
+        view_model
+            .info_rail
+            .code_lines
+            .iter()
+            .any(|line| line == "python: degraded missing binary")
+    );
+    Ok(())
+}
+
+#[test]
 fn code_diagnostics_tool_result_projects_diagnostic_counts() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
     app.handle(RunEvent::ToolResult(ToolResult::ok(
@@ -133,7 +181,12 @@ fn code_diagnostics_tool_result_projects_diagnostic_counts() -> anyhow::Result<(
         ToolResultMeta {
             details: json!({
                 "code_intelligence": {
-                    "status_line": "ready rust-analyzer"
+                    "status_line": "ready rust-analyzer",
+                    "servers": [{
+                        "server": "rust-analyzer",
+                        "languages": ["rust"],
+                        "status": "ready"
+                    }]
                 }
             }),
             ..ToolResultMeta::default()
@@ -143,6 +196,21 @@ fn code_diagnostics_tool_result_projects_diagnostic_counts() -> anyhow::Result<(
     assert_eq!(
         app.code_intelligence_status,
         "diagnostics 1 errors 2 warnings"
+    );
+    let view_model = UiViewModel::from_app(&app);
+    assert!(
+        view_model
+            .info_rail
+            .code_lines
+            .iter()
+            .any(|line| line == "rust: ready rust-analyzer")
+    );
+    assert!(
+        view_model
+            .info_rail
+            .code_lines
+            .iter()
+            .any(|line| line == "diagnostics: 1 errors 2 warnings")
     );
     Ok(())
 }
