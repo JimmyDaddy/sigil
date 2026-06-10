@@ -126,8 +126,168 @@ fn render_timeline_entry_lines_shows_code_intelligence_tool_card() {
 
     assert!(plain.contains("Inspected"));
     assert!(plain.contains("symbols"));
+    assert!(plain.contains("Tree-sitter"));
+    assert!(plain.contains("document symbols"));
     assert!(plain.contains("src/lib.rs:3"));
     assert!(plain.contains("AppState"));
+}
+
+#[test]
+fn render_timeline_entry_lines_shows_lsp_definition_source_and_preview() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: serde_json::json!({
+            "tool_name": "code_definition",
+            "status": "ok",
+            "call_id": "call-code-def",
+            "summary": "1 lines · 120 B",
+            "preview_kind": "json",
+            "preview_lines": [],
+            "hidden_lines": 0,
+            "metadata": {
+                "returned_entries": 1,
+                "total_entries": 1,
+                "details": {
+                    "call": { "summary": "path=src/app.rs line=42 character=9" },
+                    "code_intelligence": {
+                        "server": "rust-analyzer",
+                        "capability": "textDocument/definition"
+                    }
+                }
+            },
+            "preview_value": {
+                "tool": "code_definition",
+                "server": "rust-analyzer",
+                "capability": "textDocument/definition",
+                "definition": [{
+                    "path": "src/service.rs",
+                    "range": {
+                        "start_line": 440,
+                        "start_character": 12,
+                        "end_line": 448,
+                        "end_character": 1
+                    },
+                    "preview": "async fn lsp_document_symbols("
+                }],
+                "metadata": { "returned": 1, "total": 1, "truncated": false, "elapsed_ms": 18 }
+            }
+        })
+        .to_string(),
+    };
+
+    let lines = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let plain = rendered_plain_lines(&lines).join("\n");
+
+    assert!(plain.contains("Located"));
+    assert!(plain.contains("LSP"));
+    assert!(plain.contains("rust-analyzer"));
+    assert!(plain.contains("definition"));
+    assert!(plain.contains("src/service.rs:440:12"));
+    assert!(plain.contains("async fn lsp_document_symbols"));
+}
+
+#[test]
+fn render_timeline_entry_lines_shows_lsp_diagnostics_with_server_breakdown() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: serde_json::json!({
+            "tool_name": "code_diagnostics",
+            "status": "ok",
+            "call_id": "call-code-diagnostics",
+            "summary": "2 lines · 180 B",
+            "preview_kind": "json",
+            "preview_lines": [],
+            "hidden_lines": 0,
+            "metadata": {
+                "returned_entries": 2,
+                "total_entries": 2,
+                "details": {
+                    "call": { "summary": "paths=diagnostics" },
+                    "code_intelligence": {
+                        "server": "multiple",
+                        "capability": "textDocument/diagnostic"
+                    }
+                }
+            },
+            "preview_value": {
+                "tool": "code_diagnostics",
+                "server": "multiple",
+                "capability": "textDocument/diagnostic",
+                "diagnostics": [
+                    {
+                        "path": "src/lib.rs",
+                        "range": {
+                            "start_line": 9,
+                            "start_character": 4,
+                            "end_line": 9,
+                            "end_character": 14
+                        },
+                        "severity": "error",
+                        "message": "cannot find value `state` in this scope",
+                        "source": "rustc"
+                    },
+                    {
+                        "path": "web/app.ts",
+                        "range": {
+                            "start_line": 2,
+                            "start_character": 0,
+                            "end_line": 2,
+                            "end_character": 5
+                        },
+                        "severity": "warning",
+                        "message": "unused import",
+                        "source": "tsserver"
+                    }
+                ],
+                "servers": [
+                    {
+                        "server": "rust-analyzer",
+                        "languages": ["rust"],
+                        "status": "ready",
+                        "returned": 1,
+                        "total": 1,
+                        "truncated": false
+                    },
+                    {
+                        "server": "typescript-language-server",
+                        "languages": ["typescript", "javascript"],
+                        "status": "ready",
+                        "returned": 1,
+                        "total": 1,
+                        "truncated": false
+                    }
+                ],
+                "metadata": { "returned": 2, "total": 2, "truncated": false, "elapsed_ms": 32 }
+            }
+        })
+        .to_string(),
+    };
+
+    let lines = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let plain = rendered_plain_lines(&lines).join("\n");
+
+    assert!(plain.contains("Checked"));
+    assert!(plain.contains("LSP"));
+    assert!(plain.contains("rust-analyzer ready (rust)"));
+    assert!(plain.contains("typescript-language-server ready (typescript,javascript)"));
+    assert!(plain.contains("src/lib.rs:9:4"));
+    assert!(plain.contains("rustc: cannot find value"));
+    assert!(plain.contains("web/app.ts:2"));
+    assert!(plain.contains("tsserver: unused import"));
 }
 
 #[test]

@@ -34,6 +34,8 @@ use unicode_width::UnicodeWidthStr;
 
 const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SCROLLBACK_SEED_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const SCROLLBACK_SEED_CHUNK_LINES: usize = 160;
 const SPINNER_FRAME_MILLIS: u128 = 120;
 
 #[derive(Parser)]
@@ -121,6 +123,7 @@ fn run_app(
 
         let size = terminal.size()?;
         dirty |= app.set_terminal_size(size.width, size.height);
+        dirty |= scrollback.has_pending_seed() && should_sync_terminal_scrollback(app);
 
         let spinner_tick = live_spinner_tick();
         if app.is_busy && spinner_tick != last_spinner_tick {
@@ -143,6 +146,8 @@ fn run_app(
 
         let poll_interval = if app.is_busy {
             BUSY_POLL_INTERVAL
+        } else if scrollback.has_pending_seed() && should_sync_terminal_scrollback(app) {
+            SCROLLBACK_SEED_POLL_INTERVAL
         } else {
             IDLE_POLL_INTERVAL
         };
@@ -223,12 +228,32 @@ struct ScrollbackSyncState {
     revision: u64,
     line_count: usize,
     sequence_hash: u64,
+    pending_seed: Option<ScrollbackSeedProgress>,
+}
+
+impl ScrollbackSyncState {
+    fn has_pending_seed(&self) -> bool {
+        self.pending_seed.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScrollbackSeedProgress {
+    session_id: String,
+    next_line_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScrollbackSyncPlan {
-    Seed { insert_separator: bool },
-    Append { from_index: usize },
+    Seed {
+        insert_separator: bool,
+        from_index: usize,
+        to_index: usize,
+        total_line_count: usize,
+    },
+    Append {
+        from_index: usize,
+    },
     Noop,
 }
 
@@ -242,6 +267,7 @@ fn sync_terminal_scrollback(
     }
     if sync_state.session_id.as_deref() == Some(app.session_id.as_str())
         && sync_state.revision == app.timeline_revision()
+        && sync_state.pending_seed.is_none()
     {
         return Ok(());
     }
@@ -256,26 +282,46 @@ fn sync_terminal_scrollback(
         next_line_count,
         shared_hash,
     ) {
-        ScrollbackSyncPlan::Seed { insert_separator } => {
+        ScrollbackSyncPlan::Seed {
+            insert_separator,
+            from_index,
+            to_index,
+            total_line_count,
+        } => {
             if insert_separator {
                 insert_scrollback_lines(
                     terminal,
                     vec![scrollback_separator(app), Line::raw(String::new())],
                 )?;
             }
-            insert_scrollback_lines(terminal, app.scrollback_lines_from(0))?;
+            insert_scrollback_lines(terminal, app.scrollback_lines_range(from_index, to_index))?;
+            sync_state.pending_seed = if to_index < total_line_count {
+                Some(ScrollbackSeedProgress {
+                    session_id: app.session_id.clone(),
+                    next_line_index: to_index,
+                })
+            } else {
+                None
+            };
+            sync_state.line_count = to_index;
+            sync_state.sequence_hash = app.scrollback_prefix_hash(to_index);
         }
         ScrollbackSyncPlan::Append { from_index } => {
             let appended = app.scrollback_lines_from(from_index);
             insert_scrollback_lines(terminal, appended)?;
+            sync_state.pending_seed = None;
+            sync_state.line_count = next_line_count;
+            sync_state.sequence_hash = app.scrollback_prefix_hash(next_line_count);
         }
-        ScrollbackSyncPlan::Noop => {}
+        ScrollbackSyncPlan::Noop => {
+            sync_state.pending_seed = None;
+            sync_state.line_count = next_line_count;
+            sync_state.sequence_hash = app.scrollback_prefix_hash(next_line_count);
+        }
     }
 
     sync_state.session_id = Some(app.session_id.clone());
     sync_state.revision = app.timeline_revision();
-    sync_state.line_count = next_line_count;
-    sync_state.sequence_hash = app.scrollback_prefix_hash(next_line_count);
     Ok(())
 }
 
@@ -289,10 +335,50 @@ fn plan_scrollback_sync(
     next_line_count: usize,
     shared_hash: u64,
 ) -> ScrollbackSyncPlan {
+    plan_scrollback_sync_with_chunk_size(
+        sync_state,
+        session_id,
+        next_line_count,
+        shared_hash,
+        SCROLLBACK_SEED_CHUNK_LINES,
+    )
+}
+
+fn plan_scrollback_sync_with_chunk_size(
+    sync_state: &ScrollbackSyncState,
+    session_id: &str,
+    next_line_count: usize,
+    shared_hash: u64,
+    chunk_size: usize,
+) -> ScrollbackSyncPlan {
+    let chunk_size = chunk_size.max(1);
+    if let Some(pending_seed) = &sync_state.pending_seed {
+        let pending_seed_matches = sync_state.session_id.as_deref() == Some(session_id)
+            && pending_seed.session_id == session_id
+            && pending_seed.next_line_index == sync_state.line_count
+            && pending_seed.next_line_index <= next_line_count;
+        if pending_seed_matches && pending_seed.next_line_index < next_line_count {
+            let to_index = pending_seed
+                .next_line_index
+                .saturating_add(chunk_size)
+                .min(next_line_count);
+            return ScrollbackSyncPlan::Seed {
+                insert_separator: false,
+                from_index: pending_seed.next_line_index,
+                to_index,
+                total_line_count: next_line_count,
+            };
+        }
+    }
+
     let session_changed = sync_state.session_id.as_deref() != Some(session_id);
     if session_changed {
+        let to_index = chunk_size.min(next_line_count);
         return ScrollbackSyncPlan::Seed {
             insert_separator: sync_state.session_id.is_some() && sync_state.line_count > 0,
+            from_index: 0,
+            to_index,
+            total_line_count: next_line_count,
         };
     }
     if next_line_count > sync_state.line_count && shared_hash == sync_state.sequence_hash {

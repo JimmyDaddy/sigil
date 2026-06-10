@@ -517,10 +517,18 @@ fn render_code_intelligence_preview(
         code_intelligence_section(summary),
         accent_blue(),
         vec![Span::styled(
-            format!("{returned}/{total} · {server} · {capability}"),
+            format!(
+                "{} · {} · {} · {returned}/{total}",
+                code_intelligence_source_label(server, capability),
+                server,
+                code_intelligence_capability_label(capability)
+            ),
             Style::default().fg(dim()),
         )],
     )];
+    if let Some(server_line) = code_intelligence_servers_line(value) {
+        lines.push(timeline_content_line(accent, server_line));
+    }
     if let Some(items) = code_intelligence_items(summary, value) {
         for item in items.into_iter().take(16) {
             lines.push(timeline_content_line(accent, item));
@@ -582,20 +590,32 @@ fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<
         let severity = entry.get("severity")?.as_str()?.to_owned();
         let path = entry.get("path")?.as_str()?.to_owned();
         let message = entry.get("message")?.as_str()?.to_owned();
-        let line = range_start_line(entry);
-        return Some(vec![
-            section_badge(&severity, accent_rose()),
-            Span::raw(" "),
-            Span::styled(format!("{path}:{line}"), Style::default().fg(accent_blue())),
+        let source = entry
+            .get("source")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let mut spans = vec![
+            section_badge(&severity, diagnostic_severity_color(&severity)),
             Span::raw(" "),
             Span::styled(
-                truncate_inline_text(&message, 120),
-                Style::default().fg(ink()),
+                code_location_label(&path, entry),
+                Style::default().fg(accent_blue()),
             ),
-        ]);
+            Span::raw(" "),
+        ];
+        if let Some(source) = source {
+            spans.push(Span::styled(
+                format!("{source}: "),
+                Style::default().fg(dim()),
+            ));
+        }
+        spans.push(Span::styled(
+            truncate_inline_text(&message, 120),
+            Style::default().fg(ink()),
+        ));
+        return Some(spans);
     }
     let path = entry.get("path")?.as_str()?.to_owned();
-    let line = range_start_line(entry);
     let label = entry
         .get("kind")
         .and_then(Value::as_str)
@@ -616,13 +636,32 @@ fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<
         .or_else(|| entry.get("preview").and_then(Value::as_str))
         .unwrap_or("")
         .to_owned();
-    Some(vec![
+    let mut spans = vec![
         section_badge(&label, accent_teal()),
         Span::raw(" "),
-        Span::styled(format!("{path}:{line}"), Style::default().fg(accent_blue())),
+        Span::styled(
+            code_location_label(&path, entry),
+            Style::default().fg(accent_blue()),
+        ),
         Span::raw(" "),
         Span::styled(truncate_inline_text(&name, 120), Style::default().fg(ink())),
-    ])
+    ];
+    if let Some(container) = entry.get("container_name").and_then(Value::as_str) {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("in {container}"),
+            Style::default().fg(dim()),
+        ));
+    }
+    Some(spans)
+}
+
+fn code_location_label(path: &str, entry: &Value) -> String {
+    let line = range_start_line(entry);
+    match range_start_character(entry) {
+        Some(character) if character > 0 => format!("{path}:{line}:{character}"),
+        _ => format!("{path}:{line}"),
+    }
 }
 
 fn range_start_line(entry: &Value) -> u64 {
@@ -631,6 +670,94 @@ fn range_start_line(entry: &Value) -> u64 {
         .and_then(|range| range.get("start_line"))
         .and_then(Value::as_u64)
         .unwrap_or(1)
+}
+
+fn range_start_character(entry: &Value) -> Option<u64> {
+    entry
+        .get("range")
+        .and_then(|range| range.get("start_character"))
+        .and_then(Value::as_u64)
+}
+
+fn code_intelligence_source_label(server: &str, capability: &str) -> &'static str {
+    if server.starts_with("tree-sitter") || capability.starts_with("tree_sitter/") {
+        "Tree-sitter"
+    } else if capability.starts_with("textDocument/") || capability.starts_with("workspace/") {
+        "LSP"
+    } else {
+        "Code"
+    }
+}
+
+fn code_intelligence_capability_label(capability: &str) -> String {
+    match capability {
+        "textDocument/documentSymbol" | "tree_sitter/document_symbols" => {
+            "document symbols".to_owned()
+        }
+        "workspace/symbol" | "tree_sitter/workspace_symbols" => "workspace symbols".to_owned(),
+        "textDocument/definition" => "definition".to_owned(),
+        "textDocument/references" => "references".to_owned(),
+        "textDocument/diagnostic"
+        | "textDocument/publishDiagnostics"
+        | "tree_sitter/diagnostics" => "diagnostics".to_owned(),
+        other => other.replace('/', " / "),
+    }
+}
+
+fn code_intelligence_servers_line(value: &Value) -> Option<Vec<Span<'static>>> {
+    let servers = value.get("servers").and_then(Value::as_array)?;
+    if servers.len() <= 1 {
+        return None;
+    }
+    let mut labels = servers
+        .iter()
+        .take(3)
+        .filter_map(code_intelligence_server_label)
+        .collect::<Vec<_>>();
+    let hidden = servers.len().saturating_sub(labels.len());
+    if hidden > 0 {
+        labels.push(format!("+{hidden} more"));
+    }
+    if labels.is_empty() {
+        return None;
+    }
+    Some(vec![
+        section_badge("servers", accent_blue()),
+        Span::raw(" "),
+        Span::styled(labels.join(" · "), Style::default().fg(dim())),
+    ])
+}
+
+fn code_intelligence_server_label(value: &Value) -> Option<String> {
+    let server = value.get("server").and_then(Value::as_str)?;
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("ready");
+    let languages = value
+        .get("languages")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .filter(|languages| !languages.is_empty());
+    Some(match languages {
+        Some(languages) => format!("{server} {status} ({languages})"),
+        None => format!("{server} {status}"),
+    })
+}
+
+fn diagnostic_severity_color(severity: &str) -> Color {
+    match severity {
+        "error" => accent_rose(),
+        "warning" => accent_gold(),
+        _ => accent_teal(),
+    }
 }
 
 fn file_change_count_label(summary: &ToolCardRender) -> &'static str {

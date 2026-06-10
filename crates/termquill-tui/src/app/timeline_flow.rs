@@ -393,17 +393,22 @@ impl AppState {
     }
 
     pub fn scrollback_lines_from(&self, from_index: usize) -> Vec<Line<'static>> {
+        self.scrollback_lines_range(from_index, self.scrollback_cutoff_line())
+    }
+
+    pub fn scrollback_lines_range(&self, from_index: usize, to_index: usize) -> Vec<Line<'static>> {
         let cutoff_line = self.scrollback_cutoff_line();
         let start = from_index.min(cutoff_line);
-        let mut lines = self.timeline_render_cache
-            [start..cutoff_line.min(self.timeline_render_cache.len())]
-            .to_vec();
-        while lines
-            .last()
-            .map(|line| !line_has_visible_content(line))
-            .unwrap_or(false)
-        {
-            let _ = lines.pop();
+        let end = to_index.min(cutoff_line).max(start);
+        let mut lines = self.timeline_render_cache[start..end].to_vec();
+        if end >= cutoff_line {
+            while lines
+                .last()
+                .map(|line| !line_has_visible_content(line))
+                .unwrap_or(false)
+            {
+                let _ = lines.pop();
+            }
         }
         lines
     }

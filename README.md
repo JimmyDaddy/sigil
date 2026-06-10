@@ -48,19 +48,19 @@ cargo run -p termquill-tui
 TUI 当前支持：
 
 - 提交 prompt 并流式查看输出
-- prompt 提交后 composer 会清空并保持可见；主聊天区改为 app-owned transcript，可用 `PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` 和滚轮持续回溯到会话最顶，同时最近一段历史仍会同步进终端原生 scrollback
+- prompt 提交后 composer 会清空并保持可见；主聊天区改为 app-owned transcript，可用 `PageUp/PageDown`、`Ctrl-U/D`、`Ctrl-Home/End` 和滚轮持续回溯到会话最顶，同时历史会分批同步进终端原生 scrollback
 - 输入 `/` 时弹出 slash command selector，支持 `Up/Down` 选中、`Tab` 接受、`Enter` 执行；`/model`、`/effort`、`/resume` 会继续下钻参数候选，其中 `/resume` 展示可恢复 session 标题，当前内置 `/compact`、`/config`、`/effort`、`/model`、`/quit`、`/resume`
 - `F1` 打开 keyboard help；核心快捷键、activity 快捷键和公开 slash command 列表都从真实命令面生成，不依赖隐藏兼容入口
 - composer 的历史输入只响应键盘：composer 聚焦时 `Up/Down` 显示历史 prompt；多行输入中间行仍按垂直光标移动处理
 - assistant / thinking markdown 的 fenced code block 会按语言做语法高亮；未知语言、纯文本或超大代码块自动回退到普通代码块渲染
 - `/config` 打开 TUI guided config flow；provider 主流程只保留 `model / api_key / base_url / fim_model`，文本项统一走弹窗输入；顶部 status strip 展示当前 section、字段、保存状态和配置路径，主面板展示 section tabs 与字段列表；宽屏下配置内容会保持居中最大宽度，Details 作为右侧说明栏，窄屏下说明内联到选中字段附近；`Actions` 栏跟随当前配置面板收在内容区内，可用 `Down` 聚焦，再用 `Left/Right` 选 `save / save+close / close`，并按宽度显示完整或紧凑的 `saved / unsaved / confirm close` 状态
-- 主屏默认走 chat-first：inline viewport 会占满当前终端可视区，左侧主区域展示 live transcript + 底部 composer，右侧保留独立的 full-height `info rail`，窄终端会自动收起 info rail 给 chat/composer 让出空间；启动恢复旧会话时只 seed 最近一段 transcript 到 terminal scrollback，避免长会话整屏重放
+- 主屏默认走 chat-first：inline viewport 会占满当前终端可视区，左侧主区域展示 live transcript + 底部 composer，右侧保留独立的 full-height `info rail`，窄终端会自动收起 info rail 给 chat/composer 让出空间；启动恢复旧会话时会把完整 scrollback 分批 seed 到 terminal scrollback，避免长会话集中在单帧重放
 - 不再要求 `Tab` 在主屏各卡片之间切焦点；`Shift-Tab` 直接轮换并持久化默认 `allow / ask / deny` 权限模式
 - composer 顶部直接展示 mode / model / provider / reasoning effort；运行态统一沉到底部 run strip，只保留 interrupt/details 快捷键和右下角 context 使用状态，当前任务进度交给 chat 区域展示
 - 运行中 live transcript 底部会显示紧凑的 loading progress block，例如 `▰▱▱▱ Thinking...`、`Bash...`、`Read...` 和当前 reasoning/tool/streaming 摘要；这些运行态提示只做渲染层投影，不写回 durable transcript
 - 右侧 `Info rail` 独立占据整列，展示 `Session / Permissions / Agents / LSP / Usage / Controls` 六组状态，而不是挤进 composer 旁边的一个小角落；`LSP` 会按 language/server 保留最近状态，例如 `rust: ready rust-analyzer`，跨语言 workspace symbol 查询会合并多个 server 的结果和状态
 - `ctx`、compaction status 和 auto-compaction 统一按同一个 effective context window 计算：已知模型窗口优先，其次才回退到 `compaction.fallback_context_window_tokens`
-- assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成 action-first activity 展示，例如 `Ran cargo test -p termquill-tui`、`Searched needle in src/main.rs`、`Read README.md`、`Deleted note.txt`；activity header 会区分动作词、命令/路径和参数；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file / code_symbols / code_workspace_symbols / code_definition / code_references / code_diagnostics` 走专用 renderer，简单只读 `rg / grep / fd / find` bash 命令会识别为 `Searched`，其他结构化 payload 走树形 fallback，不直接 dump 原始 JSON 或 call id
+- assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成 action-first activity 展示，例如 `Ran cargo test -p termquill-tui`、`Searched needle in src/main.rs`、`Read README.md`、`Deleted note.txt`；activity header 会区分动作词、命令/路径和参数；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file / code_symbols / code_workspace_symbols / code_definition / code_references / code_diagnostics` 走专用 renderer，其中 code intelligence 卡片会展示 LSP/Tree-sitter 来源、server、capability、server breakdown 和结果位置；简单只读 `rg / grep / fd / find` bash 命令会识别为 `Searched`，其他结构化 payload 走树形 fallback，不直接 dump 原始 JSON 或 call id
 - live phase 只保留在运行态和事件流里，不再固化成 chat transcript；reasoning delta 会写入 append-only control log，用于取消或重启后的 thinking block 恢复；completed thinking 默认显示前几行预览，用 `Ctrl-T` 完整展开或收起
 - tool result 默认以独立 brief activity 展示；bash 成功无输出会显示 `(no output)`，失败会突出 exit code 并优先展示诊断输出；存在 activity 后右侧 `Info rail / Controls` 会显示 `Ctrl-G` 聚焦最新 activity、`Alt-J` / `Alt-K` 切换 activity、`Ctrl-T` 展开/收起聚焦 activity，composer 为空时 `Esc` 清除 activity focus
 - `write_file` / `edit_file` / `delete_file` 的结果 activity 默认展开执行时捕获的 bounded unified diff，diff 行会显示旧/新行号；activity 正文会跳过重复的 `@@` hunk header，并在文件头汇总 hunk 数；仍可用 `Ctrl-T` 收起，大 diff 会显示 `diff truncated · N lines hidden`，折叠态保留 diff stats 和隐藏提示
