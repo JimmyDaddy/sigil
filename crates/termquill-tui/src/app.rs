@@ -56,7 +56,7 @@ use crate::slash::ResolvedSlashCommand;
 pub use crate::timeline::{EventEntry, TimelineEntry, TimelineRole};
 pub(crate) use crate::timeline::{
     LiveActivitySummary, RunPhase, SessionHistoryRow, SidebarAgentRow, SidebarCard,
-    ThinkingBlockMode,
+    ThinkingBlockMode, ToolActivityCacheEntry,
 };
 
 use self::config_flow::cycle_approval_mode;
@@ -136,6 +136,9 @@ pub struct AppState {
     timeline_prefix_hashes: Vec<u64>,
     timeline_render_ranges: Vec<Range<usize>>,
     timeline_revision: u64,
+    defer_timeline_renders: bool,
+    deferred_timeline_render_indexes: BTreeSet<usize>,
+    tool_activity_cache: Vec<ToolActivityCacheEntry>,
     usage_sidebar_cache: Vec<String>,
     sidebar_selected_card: SidebarCard,
     sidebar_agent_selected: usize,
@@ -256,6 +259,9 @@ impl AppState {
             timeline_prefix_hashes: Vec::new(),
             timeline_render_ranges: Vec::new(),
             timeline_revision: 0,
+            defer_timeline_renders: false,
+            deferred_timeline_render_indexes: BTreeSet::new(),
+            tool_activity_cache: Vec::new(),
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
             sidebar_agent_selected: 0,
@@ -354,6 +360,9 @@ impl AppState {
             timeline_prefix_hashes: Vec::new(),
             timeline_render_ranges: Vec::new(),
             timeline_revision: 0,
+            defer_timeline_renders: false,
+            deferred_timeline_render_indexes: BTreeSet::new(),
+            tool_activity_cache: Vec::new(),
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
             sidebar_agent_selected: 0,
@@ -402,6 +411,7 @@ impl AppState {
 
     fn bootstrap(&mut self) {
         self.timeline.clear();
+        self.tool_activity_cache.clear();
         self.events.clear();
         self.push_timeline(TimelineRole::System, "termquill ready.");
         self.push_event("session", format!("active {}", self.session_id));
@@ -428,6 +438,7 @@ impl AppState {
 
     fn bootstrap_setup(&mut self) {
         self.timeline.clear();
+        self.tool_activity_cache.clear();
         self.events.clear();
         self.push_timeline(TimelineRole::System, "quick setup");
         self.push_timeline(TimelineRole::Notice, "launch dir = workspace");

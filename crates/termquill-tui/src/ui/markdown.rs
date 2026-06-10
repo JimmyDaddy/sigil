@@ -21,6 +21,7 @@ pub(crate) struct MarkdownRenderState {
 pub(crate) struct MarkdownRenderOptions {
     pub max_content_width: usize,
     pub code_wrap: CodeWrapMode,
+    pub highlight_code: bool,
     pub show_link_urls: bool,
     pub table_mode: TableRenderMode,
 }
@@ -35,6 +36,7 @@ impl MarkdownRenderOptions {
         Self {
             max_content_width,
             code_wrap: CodeWrapMode::Preserve,
+            highlight_code: true,
             show_link_urls: true,
             table_mode: TableRenderMode::Compact,
         }
@@ -135,7 +137,7 @@ pub(crate) fn render_markdown_timeline_lines(
                     ),
                 ));
             } else {
-                let highlighted = highlight_code_block_lines(&block_lines, language_token);
+                let highlighted = highlight_code_block_lines(&block_lines, language_token, options);
                 for (line_index, block_line) in block_lines.iter().enumerate() {
                     rendered.extend(render_code_block_line_rows(
                         accent,
@@ -219,7 +221,11 @@ fn code_block_render_rows(line: &str, options: MarkdownRenderOptions) -> Vec<Str
 fn highlight_code_block_lines(
     block_lines: &[&str],
     language: &str,
+    options: MarkdownRenderOptions,
 ) -> Option<Vec<Vec<Span<'static>>>> {
+    if !options.highlight_code {
+        return None;
+    }
     highlight_code_to_spans(&block_lines.join("\n"), language)
 }
 

@@ -2,14 +2,13 @@ use super::*;
 
 impl AppState {
     pub(crate) fn has_tool_cards(&self) -> bool {
-        self.tool_activity_entries().is_some()
+        !self.tool_activity_cache.is_empty()
     }
 
     pub(crate) fn tool_activity_entry_indices(&self) -> Vec<usize> {
-        self.tool_activity_entries()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(index, _)| index)
+        self.tool_activity_cache
+            .iter()
+            .map(|activity| activity.index)
             .collect()
     }
 
@@ -121,49 +120,35 @@ impl AppState {
 
     pub(super) fn tool_activity_entries(&self) -> Option<Vec<(usize, String)>> {
         let entries = self
-            .timeline
+            .tool_activity_cache
             .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| self.tool_activity_key_at(index, entry))
+            .map(|activity| (activity.index, activity.key.clone()))
             .collect::<Vec<_>>();
         (!entries.is_empty()).then_some(entries)
-    }
-
-    pub(super) fn tool_activity_key_at(
-        &self,
-        index: usize,
-        entry: &TimelineEntry,
-    ) -> Option<(usize, String)> {
-        (entry.role == TimelineRole::Tool)
-            .then(|| crate::ui::tool_activity_view(entry, index))
-            .flatten()
-            .map(|activity| (index, activity.key))
     }
 
     pub(super) fn timeline_entry_index_for_activity_key(
         &self,
         activity_key: &str,
     ) -> Option<usize> {
-        self.tool_activity_entries()?
-            .into_iter()
-            .find_map(|(index, key)| (key == activity_key).then_some(index))
+        self.tool_activity_cache
+            .iter()
+            .find_map(|activity| (activity.key == activity_key).then_some(activity.index))
     }
 
-    pub(super) fn retain_existing_tool_activity_state(&mut self) {
-        let keys = self
-            .tool_activity_entries()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(_, key)| key)
-            .collect::<BTreeSet<_>>();
-        self.selected_tool_activity_key = self
-            .selected_tool_activity_key
-            .take()
-            .filter(|key| keys.contains(key));
-        self.expanded_tool_activity_keys
-            .retain(|key| keys.contains(key));
-        self.collapsed_tool_activity_keys
-            .retain(|key| keys.contains(key));
+    pub(super) fn tool_activity_cache_entry(
+        &self,
+        index: usize,
+        entry: &TimelineEntry,
+    ) -> Option<ToolActivityCacheEntry> {
+        (entry.role == TimelineRole::Tool)
+            .then(|| crate::ui::tool_activity_view(entry, index))
+            .flatten()
+            .map(|activity| ToolActivityCacheEntry {
+                index,
+                key: activity.key,
+                defaults_expanded: activity.defaults_expanded,
+            })
     }
 
     fn ensure_selected_tool_entry(&mut self, entries: &[(usize, String)]) -> (usize, String) {
@@ -267,13 +252,9 @@ impl AppState {
     }
 
     fn tool_entry_defaults_to_expanded(&self, entry_index: usize) -> bool {
-        let Some(entry) = self.timeline.get(entry_index) else {
-            return false;
-        };
-        if entry.role != TimelineRole::Tool {
-            return false;
-        }
-        crate::ui::tool_activity_view(entry, entry_index)
+        self.tool_activity_cache
+            .iter()
+            .find(|activity| activity.index == entry_index)
             .map(|activity| activity.defaults_expanded)
             .unwrap_or(false)
     }

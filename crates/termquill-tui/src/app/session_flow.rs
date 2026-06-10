@@ -368,6 +368,7 @@ impl AppState {
         self.refresh_memory_summary();
         self.recompute_compaction_status(false);
         self.timeline.clear();
+        self.tool_activity_cache.clear();
         self.events.clear();
         self.reset_scroll();
 

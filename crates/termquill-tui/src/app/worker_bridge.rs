@@ -91,7 +91,7 @@ impl AppState {
                 self.run_phase = RunPhase::Idle;
                 self.pending_approval = None;
                 self.last_phase_marker = None;
-                self.streaming_assistant_index = None;
+                self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
                 self.last_notice = Some("agent idle".to_owned());
                 self.sync_current_session_state(entries);
@@ -117,7 +117,7 @@ impl AppState {
                 self.run_phase = RunPhase::Idle;
                 self.pending_approval = None;
                 self.last_phase_marker = None;
-                self.streaming_assistant_index = None;
+                self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
                 self.restore_session_view(
                     session_log_path,
@@ -138,7 +138,7 @@ impl AppState {
                 self.run_phase = RunPhase::Idle;
                 self.pending_approval = None;
                 self.last_phase_marker = None;
-                self.streaming_assistant_index = None;
+                self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
                 self.restore_session_view(
                     session_log_path,
@@ -388,28 +388,27 @@ impl EventHandler for AppState {
                 self.run_phase = RunPhase::Streaming;
                 self.push_phase_marker("streaming".to_owned());
                 self.append_assistant_delta(&delta);
-                self.push_event("text", delta);
             }
             RunEvent::ReasoningDelta(delta) => {
                 self.run_phase = RunPhase::Thinking;
                 self.push_phase_marker(format!("thinking|{}", self.model_name));
                 self.append_reasoning_delta(&delta);
-                self.push_event("reasoning", delta);
             }
             RunEvent::ToolCallStarted(call) => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
+                self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
                 self.push_phase_marker(format!("tool|{}", call.name));
                 self.push_event("tool:start", format!("{} {}", call.name, call.id));
             }
-            RunEvent::ToolCallArgsDelta { id, delta } => {
+            RunEvent::ToolCallArgsDelta { .. } => {
                 if !matches!(self.run_phase, RunPhase::Tool(_)) {
                     self.run_phase = RunPhase::Tool("tool".to_owned());
                 }
-                self.push_event("tool:args", format!("{id} {delta}"));
             }
             RunEvent::ToolCallCompleted(call) => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
+                self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
                 self.push_phase_marker(format!("tool|{}", call.name));
                 self.push_event("tool:complete", format!("{} {}", call.name, call.id));
@@ -421,6 +420,7 @@ impl EventHandler for AppState {
                 preview,
             } => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
+                self.finish_streaming_assistant_entry();
                 if let Some(preview) = preview.as_ref() {
                     self.tool_preview_snapshots
                         .entry(call.id.clone())
@@ -535,7 +535,7 @@ impl EventHandler for AppState {
             RunEvent::AssistantMessage(message) => {
                 self.run_phase = RunPhase::Streaming;
                 self.push_phase_marker("streaming".to_owned());
-                self.streaming_assistant_index = None;
+                self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
                 if let Some(content) = message.content
                     && !content.is_empty()

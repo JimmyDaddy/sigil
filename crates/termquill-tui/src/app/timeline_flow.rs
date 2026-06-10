@@ -54,31 +54,20 @@ impl AppState {
     }
 
     pub(super) fn push_timeline(&mut self, role: TimelineRole, text: impl Into<String>) {
+        self.flush_deferred_timeline_renders();
         let is_tool = role == TimelineRole::Tool;
         let previous_selected_tool = self.selected_tool_activity_key.clone();
+        let entry_index = self.timeline.len();
         self.timeline.push(TimelineEntry {
             role,
             text: text.into(),
         });
-        let mut trimmed_front = false;
-        if self.timeline.len() > 400 {
-            self.timeline.remove(0);
-            self.reindex_timeline_state_after_front_trim();
-            trimmed_front = true;
-        }
-        if is_tool {
-            self.selected_tool_activity_key = self
-                .timeline
-                .last()
-                .and_then(|entry| {
-                    let index = self.timeline.len().saturating_sub(1);
-                    self.tool_activity_key_at(index, entry)
-                })
-                .map(|(_, key)| key);
-        }
-        if trimmed_front {
-            self.rebuild_timeline_render_cache();
-            return;
+        if is_tool
+            && let Some(entry) = self.timeline.last()
+            && let Some(activity) = self.tool_activity_cache_entry(entry_index, entry)
+        {
+            self.selected_tool_activity_key = Some(activity.key.clone());
+            self.tool_activity_cache.push(activity);
         }
         if is_tool
             && previous_selected_tool != self.selected_tool_activity_key
@@ -92,16 +81,6 @@ impl AppState {
         // Default-open file diffs can be large, so new output should not force
         // every historical activity through JSON parsing and diff rendering.
         self.append_timeline_render_cache_entry(self.timeline.len().saturating_sub(1));
-    }
-
-    fn reindex_timeline_state_after_front_trim(&mut self) {
-        self.streaming_assistant_index = self
-            .streaming_assistant_index
-            .and_then(|index| index.checked_sub(1));
-        self.streaming_reasoning_index = self
-            .streaming_reasoning_index
-            .and_then(|index| index.checked_sub(1));
-        self.retain_existing_tool_activity_state();
     }
 
     pub(super) fn push_event(&mut self, label: impl Into<String>, detail: impl Into<String>) {
@@ -120,7 +99,7 @@ impl AppState {
             && let Some(entry) = self.timeline.get_mut(index)
         {
             entry.text.push_str(delta);
-            self.rerender_timeline_entry(index);
+            self.rerender_timeline_entry_deferred(index);
             return;
         }
 
@@ -129,12 +108,12 @@ impl AppState {
     }
 
     pub(super) fn append_reasoning_delta(&mut self, delta: &str) {
-        self.streaming_assistant_index = None;
+        self.finish_streaming_assistant_entry();
         if let Some(index) = self.streaming_reasoning_index
             && let Some(entry) = self.timeline.get_mut(index)
         {
             entry.text.push_str(delta);
-            self.rerender_timeline_entry(index);
+            self.rerender_timeline_entry_deferred(index);
             return;
         }
 
@@ -162,6 +141,7 @@ impl AppState {
     }
 
     pub(super) fn rebuild_timeline_render_cache(&mut self) {
+        self.deferred_timeline_render_indexes.clear();
         let options = self.timeline_render_options();
         self.timeline_render_cache.clear();
         self.timeline_plain_cache.clear();
@@ -182,6 +162,7 @@ impl AppState {
     }
 
     pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
+        self.deferred_timeline_render_indexes.remove(&index);
         let Some(existing_range) = self.timeline_render_ranges.get(index).cloned() else {
             self.rebuild_timeline_render_cache();
             return;
@@ -211,6 +192,46 @@ impl AppState {
         self.rebuild_timeline_prefix_hashes_from(existing_range.start);
         self.trim_trailing_timeline_blanks();
         self.timeline_revision = self.timeline_revision.saturating_add(1);
+    }
+
+    fn rerender_timeline_entry_deferred(&mut self, index: usize) {
+        if self.defer_timeline_renders {
+            self.deferred_timeline_render_indexes.insert(index);
+            return;
+        }
+        self.rerender_timeline_entry(index);
+    }
+
+    pub fn begin_timeline_render_batch(&mut self) {
+        self.defer_timeline_renders = true;
+    }
+
+    pub fn flush_timeline_render_batch(&mut self) -> bool {
+        self.defer_timeline_renders = false;
+        self.flush_deferred_timeline_renders()
+    }
+
+    pub(super) fn finish_streaming_assistant_entry(&mut self) {
+        let Some(index) = self.streaming_assistant_index.take() else {
+            return;
+        };
+        self.deferred_timeline_render_indexes.remove(&index);
+        if index < self.timeline.len() {
+            self.rerender_timeline_entry(index);
+        }
+    }
+
+    fn flush_deferred_timeline_renders(&mut self) -> bool {
+        if self.deferred_timeline_render_indexes.is_empty() {
+            return false;
+        }
+        let indexes = std::mem::take(&mut self.deferred_timeline_render_indexes);
+        for index in indexes {
+            if index < self.timeline.len() {
+                self.rerender_timeline_entry(index);
+            }
+        }
+        true
     }
 
     fn append_timeline_render_cache_entry(&mut self, index: usize) {
@@ -443,6 +464,7 @@ impl AppState {
             expanded_tool_activity_keys: self.expanded_tool_activity_keys.clone(),
             collapsed_tool_activity_keys: self.collapsed_tool_activity_keys.clone(),
             max_content_width: self.timeline_content_width(),
+            streaming_assistant_index: self.streaming_assistant_index,
         }
     }
 

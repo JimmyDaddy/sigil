@@ -36,6 +36,7 @@ pub(crate) struct TimelineRenderOptions {
     pub expanded_tool_activity_keys: BTreeSet<String>,
     pub collapsed_tool_activity_keys: BTreeSet<String>,
     pub max_content_width: usize,
+    pub streaming_assistant_index: Option<usize>,
 }
 
 pub(crate) fn render_timeline_entry_lines_with_options(
@@ -46,7 +47,11 @@ pub(crate) fn render_timeline_entry_lines_with_options(
     let lines = if entry.role == TimelineRole::User {
         render_user_entry_lines(entry, options.max_content_width)
     } else if entry.role == TimelineRole::Assistant {
-        render_assistant_entry_lines(entry, options.max_content_width)
+        render_assistant_entry_lines(
+            entry,
+            options.max_content_width,
+            options.streaming_assistant_index != Some(entry_index),
+        )
     } else if entry.role == TimelineRole::Phase {
         render_phase_entry_lines(entry)
     } else if entry.role == TimelineRole::Thinking {
@@ -165,6 +170,7 @@ fn user_bubble_content_line(
 fn render_assistant_entry_lines(
     entry: &TimelineEntry,
     max_content_width: usize,
+    highlight_code: bool,
 ) -> Vec<Line<'static>> {
     let accent = accent_blue();
     if entry.text.trim().is_empty() {
@@ -174,7 +180,10 @@ fn render_assistant_entry_lines(
         accent,
         Style::default().fg(ink()),
         &entry.text,
-        MarkdownRenderOptions::timeline(max_content_width),
+        MarkdownRenderOptions {
+            highlight_code,
+            ..MarkdownRenderOptions::timeline(max_content_width)
+        },
     )
 }
 

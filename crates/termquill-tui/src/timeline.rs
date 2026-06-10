@@ -21,6 +21,13 @@ pub struct EventEntry {
     pub detail: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ToolActivityCacheEntry {
+    pub index: usize,
+    pub key: String,
+    pub defaults_expanded: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveActivitySummary {
     pub label: String,

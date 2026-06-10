@@ -32,7 +32,6 @@ use termquill_tui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const SEEDED_SCROLLBACK_MAX_LINES: usize = 120;
 const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SPINNER_FRAME_MILLIS: u128 = 120;
@@ -111,10 +110,12 @@ fn run_app(
     loop {
         let mut dirty = needs_render;
         if let Some(runtime) = worker.as_mut() {
+            app.begin_timeline_render_batch();
             while let Ok(message) = runtime.worker_rx.try_recv() {
                 app.handle_worker_message(message)?;
                 dirty = true;
             }
+            dirty |= app.flush_timeline_render_batch();
         }
         dirty |= app.poll_background_tasks();
 
@@ -262,8 +263,7 @@ fn sync_terminal_scrollback(
                     vec![scrollback_separator(app), Line::raw(String::new())],
                 )?;
             }
-            let seed_from_index = next_line_count.saturating_sub(SEEDED_SCROLLBACK_MAX_LINES);
-            insert_scrollback_lines(terminal, app.scrollback_lines_from(seed_from_index))?;
+            insert_scrollback_lines(terminal, app.scrollback_lines_from(0))?;
         }
         ScrollbackSyncPlan::Append { from_index } => {
             let appended = app.scrollback_lines_from(from_index);
