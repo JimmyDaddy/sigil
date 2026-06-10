@@ -372,7 +372,17 @@ impl AppState {
             }
             KeyCode::Left => {
                 if let Some(config_state) = self.config_state.as_mut() {
-                    if config_state.footer_selected {
+                    if config_state.footer_selected
+                        && config_state.selected_section == ConfigSection::Mcp
+                        && config_state.selected_field.is_none()
+                        && config_state.selected_footer_action == ConfigFooterAction::Save
+                    {
+                        config_state.set_section(config_state.selected_section.previous_flow());
+                        self.last_notice = Some(format!(
+                            "step {}",
+                            config_state.selected_section.title().to_lowercase()
+                        ));
+                    } else if config_state.footer_selected {
                         config_state.move_footer_action(false);
                         self.last_notice = Some(format!(
                             "action {}",
@@ -389,7 +399,17 @@ impl AppState {
             }
             KeyCode::Right => {
                 if let Some(config_state) = self.config_state.as_mut() {
-                    if config_state.footer_selected {
+                    if config_state.footer_selected
+                        && config_state.selected_section == ConfigSection::Mcp
+                        && config_state.selected_field.is_none()
+                        && config_state.selected_footer_action == ConfigFooterAction::Close
+                    {
+                        config_state.set_section(config_state.selected_section.next_flow());
+                        self.last_notice = Some(format!(
+                            "step {}",
+                            config_state.selected_section.title().to_lowercase()
+                        ));
+                    } else if config_state.footer_selected {
                         config_state.move_footer_action(true);
                         self.last_notice = Some(format!(
                             "action {}",
@@ -441,6 +461,12 @@ impl AppState {
                             && let Some(field) = config_state.selected_field
                         {
                             self.last_notice = Some(format!("config field {}", field.label()));
+                        } else {
+                            config_state.footer_selected = false;
+                            self.last_notice = Some(format!(
+                                "step {}",
+                                config_state.selected_section.title().to_lowercase()
+                            ));
                         }
                     } else if let ConfigFieldMove::Moved = config_state.move_field(false)
                         && let Some(field) = config_state.selected_field

@@ -61,6 +61,58 @@ fn config_down_to_footer_focuses_actions() -> Result<()> {
 }
 
 #[test]
+fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+    assert_eq!(app.config_selected_field_label(), None);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.config_section_title(), Some("MCP"));
+    assert_eq!(app.config_selected_field_label(), None);
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should still exist");
+    assert!(!state.footer_selected);
+    assert_eq!(state.selected_field, None);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    assert_eq!(app.config_section_title(), Some("Compaction"));
+    assert_eq!(app.config_selected_field_label(), Some("Auto compact"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    assert_eq!(app.config_section_title(), Some("Compaction"));
+    assert_eq!(app.config_selected_field_label(), Some("Auto compact"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("close"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_section_title(), Some("Provider"));
+    assert_eq!(app.config_selected_field_label(), Some("Model"));
+    Ok(())
+}
+
+#[test]
 fn config_left_right_switches_steps() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.open_config_panel();
