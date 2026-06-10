@@ -200,3 +200,54 @@ fn appending_tool_card_moves_focus_marker_to_latest_card() {
     assert!(!focus_lines[0].contains("Wrote first.txt"));
     assert!(!rendered.iter().any(|line| line.contains("path=second.txt")));
 }
+
+#[test]
+fn tool_activity_metadata_is_cached_after_append() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-cache",
+  "tool_name": "write_file",
+  "status": "ok",
+  "summary": "1 line · 14 B · diff +1 -1 · 1 file",
+  "metadata": {"changed_files": ["note.txt"]},
+  "preview_kind": "text",
+  "preview_lines": ["wrote note.txt"],
+  "hidden_lines": 0,
+  "diff": {
+    "summary": "+1 -1 · 1 file",
+    "truncated": false,
+    "original_line_count": 5,
+    "rendered_line_count": 5,
+    "files": [{
+      "path": "note.txt",
+      "lines": ["--- current/note.txt", "+++ proposed/note.txt", "@@ -1 +1 @@", "-old", "+new"],
+      "truncated": false,
+      "original_line_count": 5,
+      "rendered_line_count": 5
+    }]
+  }
+}"#,
+    );
+
+    let activity = app
+        .tool_activity_cache
+        .first()
+        .expect("tool activity should be cached")
+        .clone();
+    assert_eq!(activity.key, "call:call-cache");
+    assert!(activity.defaults_expanded);
+
+    app.timeline[activity.index].text = "not json anymore".to_owned();
+
+    assert_eq!(
+        app.timeline_entry_index_for_activity_key("call:call-cache"),
+        Some(activity.index)
+    );
+    assert_eq!(
+        app.tool_timeline_entry_indices(),
+        Some(vec![activity.index])
+    );
+    assert!(app.tool_card_status_line().contains("open"));
+}

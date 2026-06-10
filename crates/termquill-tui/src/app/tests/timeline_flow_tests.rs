@@ -24,6 +24,21 @@ fn short_transcript_stays_in_live_panel_instead_of_terminal_scrollback() {
 }
 
 #[test]
+fn long_transcript_keeps_render_cache_consistent_without_front_trim() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+
+    for index in 0..450 {
+        app.push_timeline(TimelineRole::Notice, format!("notice {index}"));
+    }
+
+    assert!(app.timeline.len() >= 450);
+    assert_eq!(app.timeline_render_ranges.len(), app.timeline.len());
+    let rendered = app.timeline_plain_cache.join("\n");
+    assert!(rendered.contains("notice 0"));
+    assert!(rendered.contains("notice 449"));
+}
+
+#[test]
 fn reasoning_delta_creates_collapsed_thinking_block() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
 
