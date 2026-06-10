@@ -1,4 +1,9 @@
 use super::*;
+use crate::{
+    mouse::{AppMouseOutcome, MouseInput, MouseInputKind},
+    ui::LayoutSnapshot,
+};
+use ratatui::layout::Rect;
 
 #[test]
 fn short_transcript_stays_in_live_panel_instead_of_terminal_scrollback() {
@@ -539,18 +544,38 @@ fn file_changes_and_complex_bash_do_not_create_inspected_group() {
 }
 
 #[test]
-fn mouse_scroll_moves_transcript() {
+fn mouse_scroll_moves_transcript() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.set_terminal_size(80, 12);
     for index in 0..8 {
         app.push_timeline(TimelineRole::Assistant, format!("message {index}"));
     }
 
-    app.handle_mouse_scroll(true);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 12), &app);
+    let outcome = app.handle_mouse_event(
+        MouseInput {
+            column: 1,
+            row: 1,
+            kind: MouseInputKind::ScrollUp,
+            modifiers: KeyModifiers::NONE,
+        },
+        &layout,
+    )?;
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert!(app.timeline_scroll_back > 0);
 
-    app.handle_mouse_scroll(false);
+    let outcome = app.handle_mouse_event(
+        MouseInput {
+            column: 1,
+            row: 1,
+            kind: MouseInputKind::ScrollDown,
+            modifiers: KeyModifiers::NONE,
+        },
+        &layout,
+    )?;
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.timeline_scroll_back, 0);
+    Ok(())
 }
 
 #[test]

@@ -12,6 +12,7 @@ mod config_flow;
 mod formatting;
 mod input_flow;
 mod modal_flow;
+mod mouse_flow;
 mod session_flow;
 mod setup_flow;
 mod slash_flow;

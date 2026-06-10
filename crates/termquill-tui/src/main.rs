@@ -9,8 +9,7 @@ use clap::Parser;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyEventKind,
-        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -25,9 +24,10 @@ use ratatui::{
 };
 use termquill_kernel::{RootConfig, preferred_config_path};
 use termquill_tui::{
-    app::AppState,
+    app::{AppAction, AppState},
+    mouse::AppMouseOutcome,
     runner::{self, WorkerMessage},
-    ui,
+    ui::{self, LayoutSnapshot},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -151,46 +151,23 @@ fn run_app(
                     terminal.autoresize()?;
                     needs_render = true;
                 }
-                CrosstermEvent::Mouse(mouse) => match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        app.handle_mouse_scroll(true);
-                        needs_render = true;
+                CrosstermEvent::Mouse(mouse) => {
+                    let layout =
+                        LayoutSnapshot::from_app(Rect::new(0, 0, size.width, size.height), app);
+                    match app.handle_mouse_event(mouse.into(), &layout)? {
+                        AppMouseOutcome::Noop => {}
+                        AppMouseOutcome::Redraw => {
+                            needs_render = true;
+                        }
+                        AppMouseOutcome::Action(action) => {
+                            process_app_action(app, worker, action)?;
+                            needs_render = true;
+                        }
                     }
-                    MouseEventKind::ScrollDown => {
-                        app.handle_mouse_scroll(false);
-                        needs_render = true;
-                    }
-                    _ => {}
-                },
+                }
                 CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     if let Some(action) = app.handle_key_event(key)? {
-                        match action {
-                            termquill_tui::app::AppAction::SetupCompleted {
-                                config_path,
-                                root_config,
-                            } => {
-                                *app = AppState::from_root_config(&config_path, &root_config);
-                                app.restore_latest_session_from_disk(&root_config);
-                                *worker = Some(spawn_worker(*root_config, app)?);
-                            }
-                            termquill_tui::app::AppAction::ConfigSaved { root_config } => {
-                                if let Some(runtime) = worker.take() {
-                                    let _ = runtime.worker_tx.send(AppState::shutdown_command());
-                                }
-                                *worker = Some(spawn_worker(*root_config, app)?);
-                            }
-                            termquill_tui::app::AppAction::RuntimeConfigUpdated { root_config } => {
-                                if let Some(runtime) = worker.take() {
-                                    let _ = runtime.worker_tx.send(AppState::shutdown_command());
-                                }
-                                *worker = Some(spawn_worker(*root_config, app)?);
-                            }
-                            action => {
-                                if let Some(runtime) = worker.as_ref() {
-                                    runtime.worker_tx.send(app.into_worker_command(action))?;
-                                }
-                            }
-                        }
+                        process_app_action(app, worker, action)?;
                     }
                     needs_render = true;
                 }
@@ -199,6 +176,36 @@ fn run_app(
         }
     }
 
+    Ok(())
+}
+
+fn process_app_action(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: AppAction,
+) -> Result<()> {
+    match action {
+        AppAction::SetupCompleted {
+            config_path,
+            root_config,
+        } => {
+            *app = AppState::from_root_config(&config_path, &root_config);
+            app.restore_latest_session_from_disk(&root_config);
+            *worker = Some(spawn_worker(*root_config, app)?);
+        }
+        AppAction::ConfigSaved { root_config }
+        | AppAction::RuntimeConfigUpdated { root_config } => {
+            if let Some(runtime) = worker.take() {
+                let _ = runtime.worker_tx.send(AppState::shutdown_command());
+            }
+            *worker = Some(spawn_worker(*root_config, app)?);
+        }
+        action => {
+            if let Some(runtime) = worker.as_ref() {
+                runtime.worker_tx.send(app.into_worker_command(action))?;
+            }
+        }
+    }
     Ok(())
 }
 

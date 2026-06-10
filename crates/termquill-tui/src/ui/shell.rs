@@ -2,7 +2,7 @@ use std::path::Path;
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -15,8 +15,9 @@ use crate::view_model::{FooterViewModel, LivePanelViewModel, UiViewModel};
 use super::{
     approval::render_approval_modal,
     composer::{composer_cursor_origin, render_input},
-    geometry::{inset_rect, sidebar_width_for_terminal},
+    geometry::inset_rect,
     info_rail::render_info_rail,
+    layout_snapshot::shell_layout,
     live_panel::render_live_panel,
     modal::render_modal,
     setup_config::{render_config, render_setup},
@@ -40,24 +41,10 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         frame.area(),
     );
 
-    let sidebar_width = sidebar_width_for_terminal(frame.area().width as usize) as u16;
-    let shell = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(10), Constraint::Length(sidebar_width)])
-        .split(frame.area());
-
-    let footer_height = app.footer_strip_height();
-    let main = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(footer_height),
-            Constraint::Length(1),
-        ])
-        .split(shell[0]);
+    let shell = shell_layout(frame.area(), app.footer_strip_height());
 
     let view_model = UiViewModel::from_app(app);
-    let live_inner = inset_rect(main[0], 1, 0);
+    let live_inner = inset_rect(shell.live_panel, 1, 0);
     let live_transcript_rows = live_inner
         .height
         .saturating_sub(if app.live_activity_summary().is_some() {
@@ -68,12 +55,12 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         .max(1) as usize;
     let live_view_model = LivePanelViewModel::from_app(app, live_transcript_rows);
 
-    render_live_panel(frame, main[0], &live_view_model);
-    render_input(frame, main[1], &view_model.composer);
-    render_footer_status(frame, main[2], &view_model.footer);
-    render_slash_selector_overlay(frame, main[0], main[1], app);
-    if sidebar_width > 0 {
-        render_info_rail(frame, shell[1], &view_model.info_rail);
+    render_live_panel(frame, shell.live_panel, &live_view_model);
+    render_input(frame, shell.composer, &view_model.composer);
+    render_footer_status(frame, shell.footer, &view_model.footer);
+    render_slash_selector_overlay(frame, shell.live_panel, shell.composer, app);
+    if shell.info_rail.width > 0 {
+        render_info_rail(frame, shell.info_rail, &view_model.info_rail);
     }
 
     if app.pending_approval.is_some() {
@@ -82,7 +69,9 @@ pub fn render(frame: &mut Frame, app: &AppState) {
 
     if app.active_pane == PaneFocus::Composer && !app.has_modal() {
         let (cursor_col, _) = view_model.composer.cursor_position;
-        if let Some((cursor_x, cursor_y)) = composer_cursor_origin(main[1], &view_model.composer) {
+        if let Some((cursor_x, cursor_y)) =
+            composer_cursor_origin(shell.composer, &view_model.composer)
+        {
             frame.set_cursor_position((cursor_x.saturating_add(cursor_col), cursor_y));
         }
     }
