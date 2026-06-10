@@ -172,10 +172,10 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
     assert!(rendered.contains("Provider 1/5"));
-    assert!(rendered.contains("selected: Model"));
-    assert!(rendered.contains("key: model"));
-    assert!(rendered.contains("controls: Tab section"));
-    assert!(rendered.contains("actions: Down to actions"));
+    assert!(rendered.contains("focus Model"));
+    assert!(rendered.contains("key model"));
+    assert!(rendered.contains("keys Tab section"));
+    assert!(rendered.contains("actions Down to actions"));
     assert!(rendered.contains("state saved"));
     assert!(!rendered.contains("Status"));
     assert!(!rendered.contains("Actions"));
@@ -188,9 +188,9 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/5", "selected: Model"),
-            (2, "Memory 3/5", "selected: Memory"),
-            (3, "Compaction 4/5", "selected: Auto compact"),
+            (0, "Provider 1/5", "focus Model"),
+            (2, "Memory 3/5", "focus Memory"),
+            (3, "Compaction 4/5", "focus Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
             app.input = "/config".to_owned();
@@ -460,7 +460,7 @@ fn render_config_form_rows_align_value_column() -> anyhow::Result<()> {
                     row.contains(label)
                         && row.contains(':')
                         && !row.contains("field:")
-                        && !row.contains("selected:")
+                        && !row.contains("focus ")
                 })
                 .and_then(|row| char_index_of(row, ":"))
                 .unwrap_or_else(|| panic!("{label} row should render with a colon"))
@@ -483,20 +483,30 @@ fn render_config_form_action_chips_align_to_action_column() -> anyhow::Result<()
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render(frame, &app))?;
-    let model_action_x = rendered_rows(&terminal)
+    let rows = rendered_rows(&terminal);
+    let model_action_x = rows
         .iter()
-        .find(|row| row.contains("Model") && row.contains("[Enter choose]"))
-        .and_then(|row| char_index_of(row, "[Enter choose]"))
+        .find(|row| row.contains("Model") && row.contains("[choose]"))
+        .and_then(|row| char_index_of(row, "[choose]"))
         .expect("model action chip should render");
+    assert!(
+        !rows.iter().any(|row| row.contains("[Enter choose]")),
+        "main config form should keep shortcut text out of action chips"
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     terminal.draw(|frame| render(frame, &app))?;
-    let endpoint_action_x = rendered_rows(&terminal)
+    let rows = rendered_rows(&terminal);
+    let endpoint_action_x = rows
         .iter()
-        .find(|row| row.contains("Endpoint") && row.contains("[Enter input]"))
-        .and_then(|row| char_index_of(row, "[Enter input]"))
+        .find(|row| row.contains("Endpoint") && row.contains("[input]"))
+        .and_then(|row| char_index_of(row, "[input]"))
         .expect("endpoint action chip should render");
+    assert!(
+        !rows.iter().any(|row| row.contains("[Enter input]")),
+        "main config form should keep shortcut text out of action chips"
+    );
 
     assert_eq!(
         model_action_x, endpoint_action_x,
@@ -564,15 +574,15 @@ fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Re
     let rows = rendered_rows(&terminal);
     let selected_detail_row = rows
         .iter()
-        .position(|row| row.contains("selected: Model"))
+        .position(|row| row.contains("focus Model"))
         .expect("selected field detail should render");
     let controls_row = rows
         .iter()
-        .position(|row| row.contains("controls: Tab section"))
+        .position(|row| row.contains("keys Tab section"))
         .expect("controls detail should render");
     let key_row = rows
         .iter()
-        .position(|row| row.contains("meta key: model"))
+        .position(|row| row.contains("key model"))
         .expect("key metadata detail should render");
     let help_row = rows
         .iter()
@@ -600,7 +610,7 @@ fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Re
 
     assert!(selected_bg_cells > 20);
     assert!((15..25).contains(&command_token_cells));
-    assert!(rows[key_row].contains("meta key: model"));
+    assert!(rows[key_row].contains("key model"));
     assert!(rows[help_row].contains("..."));
     assert!(
         !rendered_content(&terminal)
@@ -645,7 +655,7 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Endpoint"));
     assert!(rendered.contains("OpenAI-compatible DeepSeek endpoint"));
-    assert!(rendered.contains("meta key: base_url"));
+    assert!(rendered.contains("key base_url"));
     assert!(rendered.contains("value: https://api.deepseek.com"));
     Ok(())
 }
@@ -778,7 +788,7 @@ fn render_config_screen_keeps_single_panel_on_narrow_terminals() -> anyhow::Resu
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("details"));
     assert!(!rendered.contains("Details"));
-    assert!(rendered.contains("selected: Model"));
+    assert!(rendered.contains("focus Model"));
     Ok(())
 }
 
@@ -814,11 +824,11 @@ fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Resul
     let rows = rendered_rows(&terminal);
     let selected_detail_row = rows
         .iter()
-        .position(|row| row.contains("selected: Model"))
+        .position(|row| row.contains("focus Model"))
         .expect("narrow selected detail should render");
     let controls_row = rows
         .iter()
-        .position(|row| row.contains("controls: Tab section"))
+        .position(|row| row.contains("keys Tab section"))
         .expect("narrow controls detail should render");
     let buffer = terminal.backend().buffer();
     let selected_bg_cells = (0..buffer.area.width)
@@ -841,8 +851,8 @@ fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Resul
         .count();
 
     assert!(selected_bg_cells > 20);
-    assert!((8..20).contains(&command_token_cells));
-    assert!(!rows[controls_row].contains("Enter edit"));
+    assert!((12..24).contains(&command_token_cells));
+    assert!(rows[controls_row].contains("Enter edit"));
     Ok(())
 }
 

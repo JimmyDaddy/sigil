@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn config_context_commands_truncate_to_content_width() {
-    let line = render_config_context_line(CONFIG_CONTROLS_HINT, 36);
+    let line = render_config_context_line(CONFIG_CONTROLS_HINT, 30);
     let text = line_text(&line);
     let highlighted_width = line
         .spans
@@ -13,11 +13,12 @@ fn config_context_commands_truncate_to_content_width() {
         .map(|span| span.content.chars().count())
         .sum::<usize>();
 
-    assert!(text.chars().count() <= 36);
-    assert!(text.contains("controls: Tab section"));
+    assert!(text.chars().count() <= 30);
+    assert!(text.contains("keys Tab section"));
+    assert!(!text.contains("controls:"));
     assert!(text.contains("..."));
     assert!(!text.contains("Enter edit"));
-    assert!((10..20).contains(&highlighted_width));
+    assert!((12..20).contains(&highlighted_width));
 }
 
 #[test]
@@ -35,9 +36,10 @@ fn config_context_metadata_uses_chip_and_truncates_value() {
         .sum::<usize>();
 
     assert!(text.chars().count() <= 32);
-    assert!(text.contains("meta key:"));
+    assert!(text.contains("key a-very"));
+    assert!(!text.contains("meta key:"));
     assert!(text.contains("..."));
-    assert_eq!(highlighted_width, "meta ".chars().count());
+    assert_eq!(highlighted_width, "key ".chars().count());
 }
 
 #[test]
@@ -57,6 +59,17 @@ fn config_context_status_uses_state_chip() {
 }
 
 #[test]
+fn config_context_selected_field_uses_focus_chip() {
+    let line = render_config_context_line("selected: Model", 24);
+    let text = line_text(&line);
+    let highlighted_width = highlighted_width(&line);
+
+    assert!(text.contains("focus Model"));
+    assert!(!text.contains("selected:"));
+    assert_eq!(highlighted_width, "focus ".chars().count());
+}
+
+#[test]
 fn config_header_notice_uses_hint_and_note_chips() {
     let hint_line = Line::from(render_config_header_notice(CONFIG_HEADER_NOTICE, 32));
     let note_line = Line::from(render_config_header_notice("opened config", 32));
@@ -71,6 +84,20 @@ fn config_header_notice_uses_hint_and_note_chips() {
     assert_eq!(note_chip_width, "note ".chars().count());
 }
 
+#[test]
+fn config_step_line_only_highlights_selected_step() {
+    let line = render_config_step_line("[provider] permissions memory", theme::config_primary());
+    let text = line_text(&line);
+    let selected_width = background_width(&line, theme::config_primary());
+    let inactive_width = background_width(&line, theme::config_tab_bg());
+
+    assert!(text.contains(" provider "));
+    assert!(text.contains("permissions"));
+    assert!(text.contains("memory"));
+    assert_eq!(selected_width, " provider ".chars().count());
+    assert_eq!(inactive_width, 0);
+}
+
 fn line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()
@@ -82,6 +109,14 @@ fn highlighted_width(line: &Line<'_>) -> usize {
     line.spans
         .iter()
         .filter(|span| span.style.bg == Some(theme::config_tab_bg()))
+        .map(|span| span.content.chars().count())
+        .sum()
+}
+
+fn background_width(line: &Line<'_>, background: Color) -> usize {
+    line.spans
+        .iter()
+        .filter(|span| span.style.bg == Some(background))
         .map(|span| span.content.chars().count())
         .sum()
 }

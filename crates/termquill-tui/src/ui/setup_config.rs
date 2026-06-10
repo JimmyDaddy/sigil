@@ -709,16 +709,17 @@ fn render_config_context_line(line: &str, content_width: usize) -> Line<'static>
 fn render_config_context_pair(label: &str, value: &str, content_width: usize) -> Line<'static> {
     match label {
         "selected" => {
+            let marker = "focus ";
             let value = fit_config_value(
                 value,
-                available_config_value_width(content_width, "selected: ".chars().count(), 0),
+                available_config_value_width(content_width, marker.chars().count(), 0),
             );
             Line::from(vec![
                 Span::styled(
-                    "selected: ",
+                    marker,
                     Style::default()
-                        .fg(theme::config_detail())
-                        .bg(theme::config_selected_bg())
+                        .fg(theme::dim())
+                        .bg(theme::config_tab_bg())
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -735,9 +736,7 @@ fn render_config_context_pair(label: &str, value: &str, content_width: usize) ->
             render_config_context_commands(label, value, content_width)
         }
         "status" => render_config_status_line(value, content_width),
-        "key" | "advanced" | "override" => {
-            render_config_metadata_line("meta ", label, value, content_width)
-        }
+        "key" | "advanced" | "override" => render_config_metadata_line(label, value, content_width),
         _ => {
             let label_text = format!("{label}: ");
             let value = fit_config_value(
@@ -758,14 +757,20 @@ fn render_config_context_pair(label: &str, value: &str, content_width: usize) ->
 }
 
 fn render_config_context_commands(label: &str, value: &str, content_width: usize) -> Line<'static> {
-    let label_text = format!("{label}: ");
-    let mut remaining = content_width.saturating_sub(label_text.chars().count());
-    let mut spans = vec![Span::styled(
-        label_text,
-        Style::default()
-            .fg(theme::config_detail())
-            .add_modifier(Modifier::BOLD),
-    )];
+    let marker = config_context_command_marker(label);
+    let marker_width = marker.chars().count();
+    let marker_style = Style::default()
+        .fg(theme::dim())
+        .bg(theme::config_tab_bg())
+        .add_modifier(Modifier::BOLD);
+    if content_width <= marker_width {
+        return Line::from(vec![Span::styled(
+            fit_config_value(marker, content_width),
+            marker_style,
+        )]);
+    }
+    let mut remaining = content_width.saturating_sub(marker_width);
+    let mut spans = vec![Span::styled(marker, marker_style)];
     for (index, token) in value.split(" · ").enumerate() {
         if remaining == 0 {
             break;
@@ -791,6 +796,15 @@ fn render_config_context_commands(label: &str, value: &str, content_width: usize
         remaining = remaining.saturating_sub(separator_width + rendered_width);
     }
     Line::from(spans)
+}
+
+fn config_context_command_marker(label: &str) -> &'static str {
+    match label {
+        "controls" => "keys ",
+        "actions" => "actions ",
+        "mcp" => "mcp ",
+        _ => "cmd ",
+    }
 }
 
 fn push_config_command_token(
@@ -852,20 +866,11 @@ fn render_config_context_info_line(line: &str, content_width: usize) -> Line<'st
     ])
 }
 
-fn render_config_metadata_line(
-    marker: &'static str,
-    label: &str,
-    value: &str,
-    content_width: usize,
-) -> Line<'static> {
-    let label_text = format!("{label}: ");
+fn render_config_metadata_line(label: &str, value: &str, content_width: usize) -> Line<'static> {
+    let marker = config_metadata_marker(label);
     let value = fit_config_value(
         value,
-        available_config_value_width(
-            content_width,
-            marker.chars().count() + label_text.chars().count(),
-            0,
-        ),
+        available_config_value_width(content_width, marker.chars().count(), 0),
     );
     Line::from(vec![
         Span::styled(
@@ -875,9 +880,17 @@ fn render_config_metadata_line(
                 .bg(theme::config_tab_bg())
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(label_text, Style::default().fg(theme::dim())),
         Span::styled(value, Style::default().fg(theme::muted())),
     ])
+}
+
+fn config_metadata_marker(label: &str) -> &'static str {
+    match label {
+        "key" => "key ",
+        "advanced" => "advanced ",
+        "override" => "source ",
+        _ => "meta ",
+    }
 }
 
 fn render_config_status_line(value: &str, content_width: usize) -> Line<'static> {
@@ -1072,9 +1085,8 @@ fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<L
     } else {
         Style::default().fg(theme::dim())
     };
-    let action_width = action
-        .as_ref()
-        .map_or(0, |action| 2 + config_action_chip_width(action));
+    let action_display = action.as_deref().map(config_action_display_label);
+    let action_width = action_display.map_or(0, |action| 2 + config_action_chip_width(action));
     let value_width =
         available_config_value_width(content_width, 2 + label_width + 2, action_width);
     let value = fit_config_value(value, value_width);
@@ -1086,7 +1098,7 @@ fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<L
         Span::styled(": ", colon_style),
         Span::styled(value, value_style),
     ];
-    if let Some(action) = action {
+    if let Some(action) = action_display {
         let action_gap = value_width.saturating_sub(value_len).saturating_add(2);
         spans.push(if selected {
             Span::styled(" ".repeat(action_gap), Style::default().bg(row_bg))
@@ -1106,6 +1118,10 @@ fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<L
         ));
     }
     Some(finish_form_line(spans, selected, row_bg))
+}
+
+fn config_action_display_label(action: &str) -> &str {
+    action.strip_prefix("Enter ").unwrap_or(action)
 }
 
 fn config_form_label_width(content_width: usize, label: &str) -> usize {
@@ -1202,28 +1218,22 @@ fn render_config_title_line(line: &str) -> Line<'static> {
 
 fn render_config_step_line(line: &str, accent: Color) -> Line<'static> {
     let mut spans = Vec::new();
-    for token in line.split_whitespace() {
+    for (index, token) in line.split_whitespace().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
         let (text, style) = if token.starts_with('[') && token.ends_with(']') {
             (
-                token
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_owned(),
+                format!(" {} ", token.trim_start_matches('[').trim_end_matches(']')),
                 Style::default()
                     .fg(Color::Black)
                     .bg(accent)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            (
-                token.to_owned(),
-                Style::default()
-                    .fg(theme::muted())
-                    .bg(theme::config_tab_bg()),
-            )
+            (token.to_owned(), Style::default().fg(theme::muted()))
         };
-        spans.push(Span::styled(format!(" {text} "), style));
-        spans.push(Span::raw(" "));
+        spans.push(Span::styled(text, style));
     }
     Line::from(spans)
 }
