@@ -59,6 +59,11 @@ where
         Self { provider, tools }
     }
 
+    /// Returns the registered tool surface used by this agent.
+    pub fn tool_registry(&self) -> &ToolRegistry {
+        &self.tools
+    }
+
     /// Runs the agent with automatic tool approval.
     ///
     /// # Errors

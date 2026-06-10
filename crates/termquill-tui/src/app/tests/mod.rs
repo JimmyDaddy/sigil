@@ -1,4 +1,5 @@
 mod approval_flow_tests;
+mod command_dispatch_tests;
 mod common;
 mod config_flow_tests;
 mod input_flow_tests;

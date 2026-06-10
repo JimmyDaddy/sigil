@@ -237,6 +237,7 @@ impl AppState {
             }
             AppAction::CancelRun => WorkerCommand::CancelRun,
             AppAction::CompactNow => WorkerCommand::CompactNow,
+            AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
             AppAction::SwitchSession { session_log_path } => {
                 WorkerCommand::SwitchSession { session_log_path }
             }

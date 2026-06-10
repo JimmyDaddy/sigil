@@ -1,4 +1,5 @@
 mod approval_bridge;
+mod diagnostics;
 mod event_bridge;
 mod protocol;
 mod session_flow;

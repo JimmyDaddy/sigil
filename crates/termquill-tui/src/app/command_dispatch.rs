@@ -1,6 +1,29 @@
 use super::*;
 
 impl AppState {
+    pub(super) fn request_changed_files_diagnostics(&mut self) -> Option<AppAction> {
+        if self.pending_approval.is_some() {
+            self.last_notice =
+                Some("finish the pending approval before checking changes".to_owned());
+            return None;
+        }
+        if self.is_busy {
+            self.last_notice = Some("wait for the active run before checking changes".to_owned());
+            return None;
+        }
+        if self.config_snapshot.as_ref().is_some_and(|config| {
+            !config.code_intelligence.enabled
+                || config.code_intelligence.startup == CodeIntelStartup::Off
+        }) {
+            self.last_notice = Some("code intelligence is off".to_owned());
+            return None;
+        }
+
+        self.last_notice = Some("checking changed files".to_owned());
+        self.push_event("code:check", "changed files");
+        Some(AppAction::CheckChangedFilesDiagnostics)
+    }
+
     pub(super) fn handle_ui_command(&mut self, command: UiCommand) -> bool {
         if command == UiCommand::OpenKeyboardHelp {
             self.open_keyboard_help();
@@ -24,7 +47,8 @@ impl AppState {
             | UiCommand::ToggleThinking
             | UiCommand::OpenKeyboardHelp
             | UiCommand::OpenConfig
-            | UiCommand::CompactNow => false,
+            | UiCommand::CompactNow
+            | UiCommand::CheckChangedFilesDiagnostics => false,
         }
     }
 }

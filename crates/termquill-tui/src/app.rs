@@ -168,6 +168,7 @@ pub enum AppAction {
     },
     CancelRun,
     CompactNow,
+    CheckChangedFilesDiagnostics,
     SwitchSession {
         session_log_path: PathBuf,
     },
@@ -592,6 +593,9 @@ impl AppState {
         }
 
         if let Some(command) = command_for_key_event(key) {
+            if command == UiCommand::CheckChangedFilesDiagnostics {
+                return Ok(self.request_changed_files_diagnostics());
+            }
             self.handle_ui_command(command);
             return Ok(None);
         }

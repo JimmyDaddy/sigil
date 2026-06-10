@@ -9,6 +9,7 @@ pub(crate) enum UiCommand {
     OpenKeyboardHelp,
     OpenConfig,
     CompactNow,
+    CheckChangedFilesDiagnostics,
     FocusLatestToolCard,
     SelectNextToolCard,
     SelectPreviousToolCard,
@@ -96,6 +97,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
+        command: UiCommand::CheckChangedFilesDiagnostics,
+        keys: &[KeyBinding { label: "Alt-D" }],
+        slash: None,
+        label: "Check changes",
+        help: "Run code diagnostics for changed source files.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
         command: UiCommand::FocusLatestToolCard,
         keys: &[KeyBinding { label: "Ctrl-G" }],
         slash: None,
@@ -152,6 +161,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         KeyCode::Char('k') | KeyCode::Char('K') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::SelectPreviousToolCard)
         }
+        KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::CheckChangedFilesDiagnostics)
+        }
         _ => None,
     }
 }
@@ -167,6 +179,8 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
             "Ctrl-C: quit".to_owned()
         },
         control_hint(UiCommand::ToggleThinking).expect("thinking metadata exists"),
+        control_hint(UiCommand::CheckChangedFilesDiagnostics)
+            .expect("check changes metadata exists"),
     ];
     hints.retain(|hint| !hint.is_empty());
     hints

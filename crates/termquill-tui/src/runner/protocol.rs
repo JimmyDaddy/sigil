@@ -16,6 +16,7 @@ pub enum WorkerCommand {
     },
     CancelRun,
     CompactNow,
+    CheckChangedFilesDiagnostics,
     SwitchSession {
         session_log_path: PathBuf,
     },

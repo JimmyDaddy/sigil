@@ -11,6 +11,7 @@ use crate::context_window::effective_compaction_config;
 
 use super::{
     approval_bridge::{ApprovalSignal, ChannelApprovalHandler},
+    diagnostics::{changed_source_files, check_changed_files_diagnostics, diagnostics_tool_event},
     event_bridge::ChannelEventHandler,
     protocol::{CompactionTrigger, WorkerCommand, WorkerMessage},
     session_flow::{auto_compact_session, load_session, session_compacted_message},
@@ -242,6 +243,50 @@ pub(super) fn run_worker_loop<P>(
                     }
                     Err(error) => {
                         current_session = Some(session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    }
+                }
+            }
+            Ok(WorkerCommand::CheckChangedFilesDiagnostics) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot check changes while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+                let changed_paths = match changed_source_files(&options.workspace_root) {
+                    Ok(paths) => paths,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        continue;
+                    }
+                };
+                if changed_paths.is_empty() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "no changed source files to check".to_owned(),
+                    ));
+                    continue;
+                }
+                let Some(session) = current_session.as_mut() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+                match check_changed_files_diagnostics(
+                    &runtime,
+                    agent.tool_registry(),
+                    session,
+                    &options,
+                    root_config.code_intelligence.max_results,
+                    changed_paths,
+                ) {
+                    Ok(result) => {
+                        let _ = message_tx.send(WorkerMessage::Event(Box::new(
+                            diagnostics_tool_event(result),
+                        )));
+                    }
+                    Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                     }
                 }
