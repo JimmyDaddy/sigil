@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, path::Path};
 
 use super::{
-    CompactionConfig, CompactionThresholdStatus, McpServerStartup, McpTrustClass, RootConfig,
-    preferred_config_path, resolve_workspace_root,
+    CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, McpServerStartup, McpTrustClass,
+    RootConfig, preferred_config_path, resolve_workspace_root,
 };
 use crate::{AgentConfig, ApprovalMode, WorkspaceConfig};
 
@@ -56,6 +56,7 @@ fn root_config_save_roundtrips() {
         permission: Default::default(),
         memory: Default::default(),
         compaction: Default::default(),
+        code_intelligence: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     };
@@ -116,6 +117,44 @@ pin_version = true
     assert!(optional.trust.egress_logging);
     assert!(!optional.trust.allow_secrets);
     assert!(optional.trust.pin_version);
+}
+
+#[test]
+fn root_config_loads_code_intelligence_config() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[code_intelligence]
+enabled = true
+startup = "lazy"
+default_timeout_ms = 2500
+max_results = 50
+max_payload_bytes = 32768
+
+[[code_intelligence.servers]]
+name = "rust-analyzer"
+languages = ["rust"]
+command = "rust-analyzer"
+root_markers = ["Cargo.toml"]
+file_extensions = ["rs"]
+trust_required = true
+
+[code_intelligence.servers.initialization_options]
+check = { command = "check" }
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("code intelligence config should parse");
+
+    assert!(config.code_intelligence.enabled);
+    assert_eq!(config.code_intelligence.startup, CodeIntelStartup::Lazy);
+    assert_eq!(config.code_intelligence.default_timeout_ms, 2500);
+    assert_eq!(config.code_intelligence.servers[0].name, "rust-analyzer");
+    assert_eq!(
+        config.code_intelligence.servers[0].initialization_options["check"]["command"],
+        "check"
+    );
 }
 
 #[test]

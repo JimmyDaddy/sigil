@@ -11,7 +11,8 @@ pub mod tool;
 pub use agent::{Agent, AgentRunOptions, AgentRunResult};
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
 pub use config::{
-    AgentConfig, CompactionConfig, CompactionThresholdStatus, McpServerConfig, McpServerStartup,
+    AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
+    CompactionThresholdStatus, LanguageServerConfig, McpServerConfig, McpServerStartup,
     McpServerTrustPolicy, McpTrustClass, MemoryConfig, RootConfig, SessionConfig, WorkspaceConfig,
     default_user_config_dir, default_user_config_path, preferred_config_path,
     resolve_workspace_root,

@@ -1,0 +1,144 @@
+use std::fs;
+
+use serde_json::json;
+use termquill_kernel::{
+    CodeIntelStartup, CodeIntelligenceConfig, LanguageServerConfig, ToolCall, ToolContext,
+    ToolRegistry,
+};
+
+use super::*;
+
+fn enabled_config() -> CodeIntelligenceConfig {
+    CodeIntelligenceConfig {
+        enabled: true,
+        startup: CodeIntelStartup::Lazy,
+        default_timeout_ms: 50,
+        max_results: 10,
+        max_payload_bytes: 64 * 1024,
+        servers: vec![LanguageServerConfig {
+            name: "missing-rust-analyzer".to_owned(),
+            languages: vec!["rust".to_owned()],
+            command: "definitely-missing-termquill-lsp".to_owned(),
+            args: Vec::new(),
+            env: Default::default(),
+            root_markers: vec!["Cargo.toml".to_owned()],
+            file_extensions: vec!["rs".to_owned()],
+            initialization_options: serde_json::Value::Null,
+            trust_required: true,
+            startup_timeout_ms: 50,
+        }],
+    }
+}
+
+fn bounded_payload_config() -> CodeIntelligenceConfig {
+    CodeIntelligenceConfig {
+        max_results: 50,
+        max_payload_bytes: 900,
+        ..enabled_config()
+    }
+}
+
+#[test]
+fn register_code_intelligence_tools_skips_disabled_config() {
+    let mut registry = ToolRegistry::new();
+    let temp = tempfile::tempdir().expect("tempdir should build");
+
+    let service = register_code_intelligence_tools(
+        &mut registry,
+        &Default::default(),
+        temp.path().to_path_buf(),
+    );
+
+    assert!(service.is_none());
+    assert!(registry.spec_for("code_symbols").is_none());
+}
+
+#[tokio::test]
+async fn code_symbols_tool_returns_bounded_json_envelope() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 1,
+            },
+            ToolCall {
+                id: "call-code".to_owned(),
+                name: "code_symbols".to_owned(),
+                args_json: json!({ "path": "lib.rs", "query": "hello", "max_results": 5 })
+                    .to_string(),
+            },
+        )
+        .await
+        .expect("tool should execute");
+
+    assert!(!result.is_error());
+    assert_eq!(result.metadata.returned_entries, Some(1));
+    let content: serde_json::Value =
+        serde_json::from_str(&result.content).expect("content should be json");
+    assert_eq!(content["tool"], "code_symbols");
+    assert_eq!(content["server"], "tree-sitter-rust");
+    assert_eq!(content["symbols"][0]["name"], "hello");
+}
+
+#[tokio::test]
+async fn code_symbols_tool_enforces_payload_byte_limit() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let source = (0..40)
+        .map(|index| format!("pub fn symbol_{index}_with_long_suffix_name() {{}}\n"))
+        .collect::<String>();
+    fs::write(temp.path().join("lib.rs"), source).expect("source should write");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(
+        &mut registry,
+        &bounded_payload_config(),
+        temp.path().to_path_buf(),
+    );
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 1,
+            },
+            ToolCall {
+                id: "call-code".to_owned(),
+                name: "code_symbols".to_owned(),
+                args_json: json!({ "path": "lib.rs", "max_results": 50 }).to_string(),
+            },
+        )
+        .await
+        .expect("tool should execute");
+
+    assert!(result.content.len() <= 900);
+    assert!(result.metadata.truncated);
+    assert!(result.metadata.returned_entries.unwrap_or(50) < 40);
+}
+
+#[test]
+fn code_symbols_permission_subject_rejects_external_path() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let outside = tempfile::NamedTempFile::new().expect("outside file should build");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+
+    let error = registry
+        .permission_subjects(
+            &ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 1,
+            },
+            &ToolCall {
+                id: "call-code".to_owned(),
+                name: "code_symbols".to_owned(),
+                args_json: json!({ "path": outside.path() }).to_string(),
+            },
+        )
+        .expect_err("outside path should fail");
+
+    assert!(error.to_string().contains("outside workspace"));
+}

@@ -26,9 +26,89 @@ pub struct RootConfig {
     #[serde(default)]
     pub compaction: CompactionConfig,
     #[serde(default)]
+    pub code_intelligence: CodeIntelligenceConfig,
+    #[serde(default)]
     pub providers: BTreeMap<String, Value>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+}
+
+/// Local code intelligence configuration.
+///
+/// This config is parsed by the shared root config so entrypoints preserve it while
+/// `termquill-code-intel` owns the actual LSP lifecycle and language analysis behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct CodeIntelligenceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub startup: CodeIntelStartup,
+    #[serde(default = "default_code_intel_timeout_ms")]
+    pub default_timeout_ms: u64,
+    #[serde(default = "default_code_intel_max_results")]
+    pub max_results: usize,
+    #[serde(default = "default_code_intel_max_payload_bytes")]
+    pub max_payload_bytes: usize,
+    #[serde(default)]
+    pub servers: Vec<LanguageServerConfig>,
+}
+
+impl Default for CodeIntelligenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            startup: CodeIntelStartup::default(),
+            default_timeout_ms: default_code_intel_timeout_ms(),
+            max_results: default_code_intel_max_results(),
+            max_payload_bytes: default_code_intel_max_payload_bytes(),
+            servers: Vec::new(),
+        }
+    }
+}
+
+/// Code intelligence service startup strategy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeIntelStartup {
+    Off,
+    #[default]
+    Lazy,
+    Eager,
+}
+
+impl CodeIntelStartup {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Lazy => "lazy",
+            Self::Eager => "eager",
+        }
+    }
+}
+
+/// One configured language server process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct LanguageServerConfig {
+    pub name: String,
+    #[serde(default)]
+    pub languages: Vec<String>,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub root_markers: Vec<String>,
+    #[serde(default)]
+    pub file_extensions: Vec<String>,
+    #[serde(default)]
+    pub initialization_options: Value,
+    #[serde(default = "default_lsp_trust_required")]
+    pub trust_required: bool,
+    #[serde(default = "default_lsp_startup_timeout_ms")]
+    pub startup_timeout_ms: u64,
 }
 
 impl RootConfig {
@@ -398,6 +478,26 @@ fn default_mcp_server_required() -> bool {
 
 fn default_mcp_egress_logging() -> bool {
     true
+}
+
+fn default_code_intel_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_code_intel_max_results() -> usize {
+    100
+}
+
+fn default_code_intel_max_payload_bytes() -> usize {
+    64 * 1024
+}
+
+fn default_lsp_trust_required() -> bool {
+    true
+}
+
+fn default_lsp_startup_timeout_ms() -> u64 {
+    10_000
 }
 
 fn default_memory_enabled() -> bool {
