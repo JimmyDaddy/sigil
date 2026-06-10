@@ -176,7 +176,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     assert!(rendered.contains("key: model"));
     assert!(rendered.contains("controls: Tab section"));
     assert!(rendered.contains("actions: Down to actions"));
-    assert!(rendered.contains("status: saved"));
+    assert!(rendered.contains("state saved"));
     assert!(!rendered.contains("Status"));
     assert!(!rendered.contains("Actions"));
     assert!(!rendered.contains("provider settings · Tab"));
@@ -290,7 +290,7 @@ fn render_config_header_uses_segmented_summary() -> anyhow::Result<()> {
     assert!(title_row.contains(" saved "));
     assert!(title_row.contains("field: Model"));
     assert!(!title_row.contains("Provider · saved"));
-    assert!(file_row.contains("opened config"));
+    assert!(file_row.contains("note opened config"));
     Ok(())
 }
 
@@ -346,11 +346,11 @@ fn render_config_footer_uses_toolbar_layout_on_wide_terminals() -> anyhow::Resul
     let rows = rendered_rows(&terminal);
     let footer_y = rows
         .iter()
-        .position(|row| row.contains("[save]") && row.contains("status: saved"))
+        .position(|row| row.contains("[save]") && row.contains("state saved"))
         .expect("config footer toolbar should render");
     let footer_row = &rows[footer_y];
     let close_x = char_index_of(footer_row, "[close]").expect("close action should render");
-    let status_x = char_index_of(footer_row, "status: saved").expect("status should render");
+    let status_x = char_index_of(footer_row, "state saved").expect("status should render");
     let chip_bg_cells = (0..terminal.backend().buffer().area.width)
         .filter(|x| {
             terminal
@@ -364,7 +364,7 @@ fn render_config_footer_uses_toolbar_layout_on_wide_terminals() -> anyhow::Resul
         .count();
 
     assert!(status_x > close_x + 32);
-    assert!(footer_row.trim_end().ends_with("status: saved"));
+    assert!(footer_row.trim_end().ends_with("state saved"));
     assert!(chip_bg_cells > 30);
     Ok(())
 }
@@ -921,7 +921,7 @@ fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Resul
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("status: unsaved - save before close"));
+    assert!(rendered.contains("state unsaved - save before close"));
     assert!(rendered.contains("[save]"));
     assert!(rendered.contains("[save+close]"));
     assert!(rendered.contains("[close]"));
@@ -930,7 +930,7 @@ fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Resul
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("status: confirm close - Esc discards"));
+    assert!(rendered.contains("state confirm close - Esc discards"));
     assert!(rendered.contains("> save <"));
     Ok(())
 }
@@ -953,7 +953,7 @@ fn render_config_footer_compacts_on_narrow_terminals() -> anyhow::Result<()> {
     assert!(rendered.contains("[save+close]"));
     assert!(rendered.contains("[close]"));
     assert!(rendered.contains("..."));
-    assert!(!rendered.contains("status: confirm close - Esc discards"));
+    assert!(!rendered.contains("state confirm close - Esc discards"));
     Ok(())
 }
 

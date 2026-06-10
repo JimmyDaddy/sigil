@@ -188,23 +188,21 @@ fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
     );
     push_config_header_pair(&mut summary_spans, &mut remaining, "field", field);
 
+    let notice_min_width = "hint ".chars().count() + 12;
     let file_value_width = content_width
-        .saturating_sub("file ".chars().count() + 2 + 20)
+        .saturating_sub("file ".chars().count() + 2 + notice_min_width)
         .min(content_width / 3);
     let file_value = fit_config_value(&file_label, file_value_width);
     let notice_width = content_width.saturating_sub(
         "file ".chars().count() + file_value.chars().count() + "  ".chars().count(),
     );
-    let notice = fit_config_value(notice, notice_width);
-    let lines = vec![
-        Line::from(summary_spans),
-        Line::from(vec![
-            Span::styled("file ", Style::default().fg(theme::dim())),
-            Span::styled(file_value, Style::default().fg(theme::muted())),
-            Span::raw("  "),
-            Span::styled(notice, Style::default().fg(theme::config_warning())),
-        ]),
+    let mut file_spans = vec![
+        Span::styled("file ", Style::default().fg(theme::dim())),
+        Span::styled(file_value, Style::default().fg(theme::muted())),
+        Span::raw("  "),
     ];
+    file_spans.extend(render_config_header_notice(notice, notice_width));
+    let lines = vec![Line::from(summary_spans), Line::from(file_spans)];
     let header = Paragraph::new(Text::from(lines))
         .style(Style::default().bg(panel_bg))
         .wrap(Wrap { trim: false });
@@ -217,6 +215,37 @@ fn config_file_label(app: &AppState) -> String {
         .and_then(|value| value.to_str())
         .unwrap_or("config")
         .to_owned()
+}
+
+fn render_config_header_notice(notice: &str, width: usize) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let (marker, value_style) = if notice == CONFIG_HEADER_NOTICE {
+        ("hint ", Style::default().fg(theme::muted()))
+    } else {
+        (
+            "note ",
+            Style::default()
+                .fg(theme::config_warning())
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let marker_width = marker.chars().count();
+    let marker_style = Style::default()
+        .fg(theme::dim())
+        .bg(theme::config_tab_bg())
+        .add_modifier(Modifier::BOLD);
+    if width <= marker_width {
+        return vec![Span::styled(fit_config_value(marker, width), marker_style)];
+    }
+    vec![
+        Span::styled(marker, marker_style),
+        Span::styled(
+            fit_config_value(notice, width.saturating_sub(marker_width)),
+            value_style,
+        ),
+    ]
 }
 
 fn push_config_header_gap(spans: &mut Vec<Span<'static>>, remaining: &mut usize) -> bool {
@@ -516,7 +545,7 @@ fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
     let gap_width = if compact {
         " | ".chars().count()
     } else {
-        let preferred_status_width = app.config_footer_hint().chars().count() + 2;
+        let preferred_status_width = footer_status_width(&app.config_footer_hint());
         area.width
             .saturating_sub(actions_width as u16)
             .saturating_sub(preferred_status_width as u16)
@@ -525,21 +554,16 @@ fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
     let status_width = (area.width as usize)
         .saturating_sub(actions_width)
         .saturating_sub(gap_width);
-    let status_text = footer_status_text(&app.config_footer_hint(), status_width);
     let status_style = if app.config_close_guard_armed() {
         Style::default()
             .fg(theme::config_danger())
-            .bg(theme::config_tab_bg())
             .add_modifier(Modifier::BOLD)
     } else if app.config_is_dirty() {
         Style::default()
             .fg(theme::config_warning())
-            .bg(theme::config_tab_bg())
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(theme::muted())
-            .bg(theme::config_tab_bg())
+        Style::default().fg(theme::muted())
     };
     let gap = if compact {
         " | ".to_owned()
@@ -548,7 +572,11 @@ fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
     };
     let mut spans = action_spans;
     spans.push(Span::raw(gap));
-    spans.push(Span::styled(status_text, status_style));
+    spans.extend(footer_status_spans(
+        &app.config_footer_hint(),
+        status_width,
+        status_style,
+    ));
     let line = Line::from(spans);
     let footer = Paragraph::new(Text::from(vec![line]))
         .style(Style::default().bg(panel_bg))
@@ -594,15 +622,35 @@ fn footer_action_text(label: &'static str, selected: bool, compact: bool) -> Str
     }
 }
 
-fn footer_status_text(value: &str, width: usize) -> String {
+fn footer_status_width(value: &str) -> usize {
+    "state ".chars().count() + footer_status_value(value).chars().count()
+}
+
+fn footer_status_spans(value: &str, width: usize, value_style: Style) -> Vec<Span<'static>> {
     if width == 0 {
-        return String::new();
+        return Vec::new();
     }
-    if width <= 2 {
-        return fit_config_value(value, width);
+    let marker = "state ";
+    let marker_width = marker.chars().count();
+    let marker_style = Style::default()
+        .fg(theme::dim())
+        .bg(theme::config_tab_bg())
+        .add_modifier(Modifier::BOLD);
+    if width <= marker_width {
+        return vec![Span::styled(fit_config_value(marker, width), marker_style)];
     }
-    let value = fit_config_value(value, width - 2);
-    format!(" {value} ")
+    let value = fit_config_value(
+        footer_status_value(value),
+        width.saturating_sub(marker_width),
+    );
+    vec![
+        Span::styled(marker, marker_style),
+        Span::styled(value, value_style),
+    ]
+}
+
+fn footer_status_value(value: &str) -> &str {
+    value.strip_prefix("status: ").unwrap_or(value)
 }
 
 fn render_config_line(index: usize, line: &str, content_width: usize) -> Line<'static> {
