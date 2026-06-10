@@ -5,6 +5,32 @@ impl AppState {
         self.tool_activity_entries().is_some()
     }
 
+    pub(crate) fn tool_activity_entry_indices(&self) -> Vec<usize> {
+        self.tool_activity_entries()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    pub(crate) fn select_tool_activity_entry(&mut self, entry_index: usize) -> bool {
+        let Some(entries) = self.tool_activity_entries() else {
+            return false;
+        };
+        let Some((selected_index, selected_key)) =
+            entries.iter().find(|(index, _)| *index == entry_index)
+        else {
+            return false;
+        };
+        let previous_index = self.selected_tool_entry_index(&entries);
+        self.selected_tool_activity_key = Some(selected_key.clone());
+        self.rerender_tool_selection_change(previous_index, *selected_index);
+        self.refresh_usage_sidebar_cache();
+        self.push_event("tool:focus", "mouse");
+        self.last_notice = Some(self.tool_card_status_line());
+        true
+    }
+
     pub(super) fn focus_latest_tool_card(&mut self) -> bool {
         let Some(entries) = self.tool_activity_entries() else {
             self.last_notice = Some("no activities yet".to_owned());

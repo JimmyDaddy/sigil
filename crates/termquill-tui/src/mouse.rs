@@ -34,6 +34,7 @@ pub enum HitTarget {
     ApprovalModal,
     SlashOverlay,
     SlashCandidate { index: usize },
+    ToolCard { entry_index: usize },
     Composer,
     LivePanel,
     InfoRail,

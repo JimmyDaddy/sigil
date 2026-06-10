@@ -31,6 +31,44 @@ fn slash_candidate_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
     )
 }
 
+fn tool_card_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .tool_cards
+        .iter()
+        .find(|area| area.entry_index == entry_index)
+        .expect("expected visible tool card hit area");
+    (hit_area.area.x, hit_area.area.y)
+}
+
+fn push_sample_tool_cards(app: &mut AppState) {
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-first",
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "first 1/1 lines - 8 B",
+  "preview_lines": ["[\".git\"]"],
+  "preview_value": [".git"],
+  "hidden_lines": 0
+}"#,
+    );
+    app.push_timeline(
+        TimelineRole::Tool,
+        r#"{
+  "call_id": "call-second",
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "first 1/1 lines - 11 B",
+  "preview_lines": ["[\"src/lib.rs\"]"],
+  "preview_value": ["src/lib.rs"],
+  "hidden_lines": 0
+}"#,
+    );
+}
+
 #[test]
 fn layout_snapshot_hits_main_regions() {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
@@ -66,6 +104,23 @@ fn layout_snapshot_hits_slash_candidate_over_live_panel() {
 }
 
 #[test]
+fn layout_snapshot_hits_visible_tool_cards_over_live_panel() {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_point(&layout, first_entry_index);
+
+    assert_eq!(
+        layout.hit_target(column, row),
+        HitTarget::ToolCard {
+            entry_index: first_entry_index
+        }
+    );
+}
+
+#[test]
 fn mouse_click_composer_focuses_composer() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.set_terminal_size(120, 20);
@@ -77,6 +132,29 @@ fn mouse_click_composer_focuses_composer() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.active_pane, PaneFocus::Composer);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_tool_card_selects_without_toggling() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "draft".to_owned();
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_point(&layout, first_entry_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.selected_tool_activity_key,
+        Some("call:call-first".to_owned())
+    );
+    assert_eq!(app.input, "draft");
+    assert!(app.expanded_tool_activity_keys.is_empty());
+    assert!(app.collapsed_tool_activity_keys.is_empty());
     Ok(())
 }
 

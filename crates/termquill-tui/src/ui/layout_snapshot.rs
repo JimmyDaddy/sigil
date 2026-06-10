@@ -5,7 +5,10 @@ use crate::{
     mouse::HitTarget,
 };
 
-use super::geometry::{centered_rect, sidebar_width_for_terminal};
+use super::{
+    geometry::{centered_rect, inset_rect, sidebar_width_for_terminal},
+    live_panel::{LIVE_PANEL_BOTTOM_PADDING, LIVE_PROGRESS_ROWS},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
@@ -14,7 +17,7 @@ pub enum LayoutMode {
     Config,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutSnapshot {
     pub screen: Rect,
     pub mode: LayoutMode,
@@ -22,8 +25,15 @@ pub struct LayoutSnapshot {
     pub composer: Rect,
     pub footer: Rect,
     pub info_rail: Rect,
+    pub tool_cards: Vec<ToolCardHitArea>,
     pub slash_overlay: Option<SlashOverlayHitAreas>,
     pub approval_modal: Option<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolCardHitArea {
+    pub entry_index: usize,
+    pub area: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +70,7 @@ impl LayoutSnapshot {
             composer: shell.composer,
             footer: shell.footer,
             info_rail: shell.info_rail,
+            tool_cards: tool_card_hit_areas(shell.live_panel, app),
             slash_overlay: slash_overlay_hit_areas(shell.live_panel, shell.composer, app),
             approval_modal: app
                 .approval_modal_view()
@@ -75,6 +86,7 @@ impl LayoutSnapshot {
             composer: Rect::default(),
             footer: Rect::default(),
             info_rail: Rect::default(),
+            tool_cards: Vec::new(),
             slash_overlay: None,
             approval_modal: None,
         }
@@ -102,6 +114,13 @@ impl LayoutSnapshot {
         if contains(self.composer, column, row) {
             return HitTarget::Composer;
         }
+        for tool_card in &self.tool_cards {
+            if contains(tool_card.area, column, row) {
+                return HitTarget::ToolCard {
+                    entry_index: tool_card.entry_index,
+                };
+            }
+        }
         if contains(self.live_panel, column, row) {
             return HitTarget::LivePanel;
         }
@@ -126,6 +145,79 @@ impl SlashOverlayHitAreas {
         let index = self.window_start.saturating_add(candidate_offset);
         (index < self.window_end).then_some(index)
     }
+}
+
+fn tool_card_hit_areas(live_area: Rect, app: &AppState) -> Vec<ToolCardHitArea> {
+    if live_area.width == 0 || live_area.height == 0 {
+        return Vec::new();
+    }
+    let inner = inset_rect(live_area, 1, 0);
+    if inner.width == 0 || inner.height == 0 {
+        return Vec::new();
+    }
+
+    let content_frame = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width,
+        inner
+            .height
+            .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
+            .max(1),
+    );
+    let progress_rows = if app.live_activity_summary().is_some() {
+        LIVE_PROGRESS_ROWS as usize
+    } else {
+        0
+    };
+    let transcript_rows = inner
+        .height
+        .saturating_sub(if progress_rows > 0 {
+            LIVE_PROGRESS_ROWS
+        } else {
+            0
+        })
+        .max(1) as usize;
+    let requested_timeline_range = app.visible_timeline_render_range(transcript_rows);
+    if requested_timeline_range.is_empty() {
+        return Vec::new();
+    }
+
+    let requested_timeline_rows = requested_timeline_range.end - requested_timeline_range.start;
+    let total_rows = requested_timeline_rows.saturating_add(progress_rows);
+    let content_capacity = content_frame.height as usize;
+    let dropped_rows = total_rows.saturating_sub(content_capacity);
+    let dropped_timeline_rows = dropped_rows.min(requested_timeline_rows);
+    let visible_timeline_start = requested_timeline_range
+        .start
+        .saturating_add(dropped_timeline_rows);
+    let visible_timeline_end = requested_timeline_range.end;
+    if visible_timeline_start >= visible_timeline_end {
+        return Vec::new();
+    }
+
+    let rendered_rows = total_rows.min(content_capacity);
+    let content_y = content_frame
+        .y
+        .saturating_add(content_frame.height.saturating_sub(rendered_rows as u16));
+
+    app.tool_activity_entry_indices()
+        .into_iter()
+        .filter_map(|entry_index| {
+            let range = app.timeline_entry_render_range(entry_index)?;
+            let start = range.start.max(visible_timeline_start);
+            let end = range.end.min(visible_timeline_end);
+            (start < end).then(|| ToolCardHitArea {
+                entry_index,
+                area: Rect::new(
+                    content_frame.x,
+                    content_y.saturating_add((start - visible_timeline_start) as u16),
+                    content_frame.width,
+                    (end - start) as u16,
+                ),
+            })
+        })
+        .collect()
 }
 
 pub(super) fn approval_modal_area(screen: Rect, view: &ApprovalModalView) -> Rect {

@@ -18,7 +18,7 @@ use super::{
     geometry::inset_rect,
     info_rail::render_info_rail,
     layout_snapshot::shell_layout,
-    live_panel::render_live_panel,
+    live_panel::{LIVE_PROGRESS_ROWS, render_live_panel},
     modal::render_modal,
     setup_config::{render_config, render_setup},
     slash_overlay::render_slash_selector_overlay,
@@ -48,7 +48,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     let live_transcript_rows = live_inner
         .height
         .saturating_sub(if app.live_activity_summary().is_some() {
-            3
+            LIVE_PROGRESS_ROWS
         } else {
             0
         })

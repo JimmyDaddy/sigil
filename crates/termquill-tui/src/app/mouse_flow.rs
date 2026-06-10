@@ -23,6 +23,15 @@ impl AppState {
                         Ok(crate::mouse::AppMouseOutcome::Noop)
                     }
                 }
+                crate::mouse::HitTarget::ToolCard { entry_index }
+                    if self.pending_approval.is_none() =>
+                {
+                    if self.select_tool_activity_entry(entry_index) {
+                        Ok(crate::mouse::AppMouseOutcome::Redraw)
+                    } else {
+                        Ok(crate::mouse::AppMouseOutcome::Noop)
+                    }
+                }
                 crate::mouse::HitTarget::Composer if self.pending_approval.is_none() => {
                     self.active_pane = PaneFocus::Composer;
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
@@ -65,6 +74,10 @@ impl AppState {
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::LivePanel | crate::mouse::HitTarget::Background => {
+                self.handle_mouse_scroll(upward);
+                Ok(crate::mouse::AppMouseOutcome::Redraw)
+            }
+            crate::mouse::HitTarget::ToolCard { .. } => {
                 self.handle_mouse_scroll(upward);
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }

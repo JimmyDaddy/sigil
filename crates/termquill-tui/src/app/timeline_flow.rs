@@ -402,13 +402,10 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    pub(crate) fn transcript_lines(&self, max_lines: usize) -> Vec<Line<'static>> {
+    pub(crate) fn visible_timeline_render_range(&self, max_lines: usize) -> Range<usize> {
         let effective_len = self.effective_timeline_render_len();
         if effective_len == 0 {
-            return vec![
-                Line::from("no messages yet"),
-                Line::from("send a prompt to start"),
-            ];
+            return 0..0;
         }
         let viewport = max_lines.max(1);
         let scroll_back = self
@@ -416,7 +413,22 @@ impl AppState {
             .min(effective_len.saturating_sub(viewport));
         let end = effective_len.saturating_sub(scroll_back);
         let start = end.saturating_sub(viewport);
-        self.timeline_render_cache[start..end].to_vec()
+        start..end
+    }
+
+    pub(crate) fn timeline_entry_render_range(&self, entry_index: usize) -> Option<Range<usize>> {
+        self.timeline_render_ranges.get(entry_index).cloned()
+    }
+
+    pub(crate) fn transcript_lines(&self, max_lines: usize) -> Vec<Line<'static>> {
+        let visible_range = self.visible_timeline_render_range(max_lines);
+        if visible_range.is_empty() {
+            return vec![
+                Line::from("no messages yet"),
+                Line::from("send a prompt to start"),
+            ];
+        }
+        self.timeline_render_cache[visible_range].to_vec()
     }
 
     pub fn timeline_revision(&self) -> u64 {

@@ -17,7 +17,8 @@ use super::{
     theme::{ink, phase_accent, shell_bg},
 };
 
-const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
+pub(crate) const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
+pub(crate) const LIVE_PROGRESS_ROWS: u16 = 3;
 
 pub(crate) fn render_live_panel(frame: &mut Frame, area: Rect, view_model: &LivePanelViewModel) {
     frame.render_widget(
