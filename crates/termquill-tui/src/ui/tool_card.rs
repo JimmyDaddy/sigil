@@ -227,6 +227,14 @@ fn render_tool_preview_body(
     if tool_name_matches(&summary.tool_name, "read_file") {
         return render_read_file_preview(summary, accent, max_content_width);
     }
+    if tool_name_matches(&summary.tool_name, "code_symbols")
+        || tool_name_matches(&summary.tool_name, "code_workspace_symbols")
+        || tool_name_matches(&summary.tool_name, "code_definition")
+        || tool_name_matches(&summary.tool_name, "code_references")
+        || tool_name_matches(&summary.tool_name, "code_diagnostics")
+    {
+        return render_code_intelligence_preview(summary, accent, max_content_width);
+    }
     render_generic_tool_preview(summary, accent, max_content_width)
 }
 
@@ -472,6 +480,157 @@ fn render_file_change_preview(
         ));
     }
     Some(lines)
+}
+
+fn render_code_intelligence_preview(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+) -> Vec<Line<'static>> {
+    let Some(value) = &summary.preview_value else {
+        return render_generic_tool_preview(summary, accent, max_content_width);
+    };
+    let server = value
+        .get("server")
+        .and_then(Value::as_str)
+        .or(summary.metadata.code_server.as_deref())
+        .unwrap_or("code");
+    let capability = value
+        .get("capability")
+        .and_then(Value::as_str)
+        .or(summary.metadata.code_capability.as_deref())
+        .unwrap_or("inspect");
+    let returned = value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("returned"))
+        .and_then(Value::as_u64)
+        .or(summary.metadata.returned_entries)
+        .unwrap_or(0);
+    let total = value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("total"))
+        .and_then(Value::as_u64)
+        .or(summary.metadata.total_entries)
+        .unwrap_or(returned);
+    let mut lines = vec![timeline_section_line(
+        accent,
+        code_intelligence_section(summary),
+        accent_blue(),
+        vec![Span::styled(
+            format!("{returned}/{total} · {server} · {capability}"),
+            Style::default().fg(dim()),
+        )],
+    )];
+    if let Some(items) = code_intelligence_items(summary, value) {
+        for item in items.into_iter().take(16) {
+            lines.push(timeline_content_line(accent, item));
+        }
+        let hidden = total
+            .saturating_sub(returned)
+            .saturating_add(returned.saturating_sub(16));
+        lines.extend(render_tool_hidden_tail(accent, hidden as usize));
+    } else {
+        lines.extend(render_generic_tool_preview(
+            summary,
+            accent,
+            max_content_width,
+        ));
+    }
+    lines
+}
+
+fn code_intelligence_section(summary: &ToolCardRender) -> &'static str {
+    if tool_name_matches(&summary.tool_name, "code_diagnostics") {
+        "diagnostics"
+    } else if tool_name_matches(&summary.tool_name, "code_definition") {
+        "definition"
+    } else if tool_name_matches(&summary.tool_name, "code_references") {
+        "references"
+    } else {
+        "symbols"
+    }
+}
+
+fn code_intelligence_items(
+    summary: &ToolCardRender,
+    value: &Value,
+) -> Option<Vec<Vec<Span<'static>>>> {
+    let key = if tool_name_matches(&summary.tool_name, "code_diagnostics") {
+        "diagnostics"
+    } else if tool_name_matches(&summary.tool_name, "code_definition") {
+        "definition"
+    } else if tool_name_matches(&summary.tool_name, "code_references") {
+        "references"
+    } else if tool_name_matches(&summary.tool_name, "code_workspace_symbols") {
+        "workspace_symbols"
+    } else {
+        "symbols"
+    };
+    let array = value
+        .get(key)
+        .or_else(|| value.get("results"))
+        .and_then(Value::as_array)?;
+    let rows = array
+        .iter()
+        .filter_map(|entry| code_intelligence_row(summary, entry))
+        .collect::<Vec<_>>();
+    Some(rows)
+}
+
+fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<Span<'static>>> {
+    if tool_name_matches(&summary.tool_name, "code_diagnostics") {
+        let severity = entry.get("severity")?.as_str()?.to_owned();
+        let path = entry.get("path")?.as_str()?.to_owned();
+        let message = entry.get("message")?.as_str()?.to_owned();
+        let line = range_start_line(entry);
+        return Some(vec![
+            section_badge(&severity, accent_rose()),
+            Span::raw(" "),
+            Span::styled(format!("{path}:{line}"), Style::default().fg(accent_blue())),
+            Span::raw(" "),
+            Span::styled(
+                truncate_inline_text(&message, 120),
+                Style::default().fg(ink()),
+            ),
+        ]);
+    }
+    let path = entry.get("path")?.as_str()?.to_owned();
+    let line = range_start_line(entry);
+    let label = entry
+        .get("kind")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            if tool_name_matches(&summary.tool_name, "code_definition") {
+                Some("def")
+            } else if tool_name_matches(&summary.tool_name, "code_references") {
+                Some("ref")
+            } else {
+                None
+            }
+        })
+        .unwrap_or("code")
+        .to_owned();
+    let name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("preview").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_owned();
+    Some(vec![
+        section_badge(&label, accent_teal()),
+        Span::raw(" "),
+        Span::styled(format!("{path}:{line}"), Style::default().fg(accent_blue())),
+        Span::raw(" "),
+        Span::styled(truncate_inline_text(&name, 120), Style::default().fg(ink())),
+    ])
+}
+
+fn range_start_line(entry: &Value) -> u64 {
+    entry
+        .get("range")
+        .and_then(|range| range.get("start_line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
 }
 
 fn file_change_count_label(summary: &ToolCardRender) -> &'static str {
@@ -915,6 +1074,10 @@ struct ToolCardMetadata {
     changed_files: Vec<String>,
     call_summary: Option<String>,
     action: Option<String>,
+    code_server: Option<String>,
+    code_capability: Option<String>,
+    returned_entries: Option<u64>,
+    total_entries: Option<u64>,
 }
 
 struct ToolCardDisplay {
@@ -1054,6 +1217,41 @@ fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
     }
     if tool_name_matches(&summary.tool_name, "ls") {
         return ToolCardTitle::new("Listed", primary_path(summary), None);
+    }
+    if tool_name_matches(&summary.tool_name, "code_symbols") {
+        return ToolCardTitle::new(
+            "Inspected",
+            primary_path(summary),
+            Some("symbols".to_owned()),
+        );
+    }
+    if tool_name_matches(&summary.tool_name, "code_workspace_symbols") {
+        return ToolCardTitle::new(
+            "Searched",
+            call_argument(summary, "query").unwrap_or_else(|| "symbols".to_owned()),
+            Some("workspace".to_owned()),
+        );
+    }
+    if tool_name_matches(&summary.tool_name, "code_definition") {
+        return ToolCardTitle::new(
+            "Located",
+            primary_path(summary),
+            Some("definition".to_owned()),
+        );
+    }
+    if tool_name_matches(&summary.tool_name, "code_references") {
+        return ToolCardTitle::new(
+            "Searched",
+            primary_path(summary),
+            Some("references".to_owned()),
+        );
+    }
+    if tool_name_matches(&summary.tool_name, "code_diagnostics") {
+        return ToolCardTitle::new(
+            "Checked",
+            primary_path(summary),
+            Some("diagnostics".to_owned()),
+        );
     }
     match &summary.metadata.call_summary {
         Some(call_summary) => ToolCardTitle::new(
@@ -1635,6 +1833,38 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(|details| details.get("action"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        code_server: object
+            .get("details")
+            .and_then(|details| details.get("code_intelligence"))
+            .and_then(|details| details.get("server"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        code_capability: object
+            .get("details")
+            .and_then(|details| details.get("code_intelligence"))
+            .and_then(|details| details.get("capability"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        returned_entries: object
+            .get("returned_entries")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                object
+                    .get("details")
+                    .and_then(|details| details.get("code_intelligence"))
+                    .and_then(|details| details.get("returned"))
+                    .and_then(Value::as_u64)
+            }),
+        total_entries: object
+            .get("total_entries")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                object
+                    .get("details")
+                    .and_then(|details| details.get("code_intelligence"))
+                    .and_then(|details| details.get("total"))
+                    .and_then(Value::as_u64)
+            }),
     }
 }
 

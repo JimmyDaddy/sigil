@@ -23,9 +23,10 @@ use anyhow::{Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use termquill_kernel::{
-    AgentConfig, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
-    MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig, Session, SessionConfig,
-    SessionLogEntry, SessionStats, ToolPreviewSnapshot, WorkspaceConfig, resolve_workspace_root,
+    AgentConfig, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
+    CompactionRecord, CompactionThresholdStatus, MemoryConfig, PermissionConfig, ReasoningEffort,
+    RootConfig, Session, SessionConfig, SessionLogEntry, SessionStats, ToolPreviewSnapshot,
+    WorkspaceConfig, resolve_workspace_root,
 };
 use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQUILL_API_KEY_ENV};
 use uuid::Uuid;
@@ -66,6 +67,14 @@ use self::session_flow::{current_focus_label, short_session_token};
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
 
+fn code_intelligence_config_status(config: &CodeIntelligenceConfig) -> String {
+    if !config.enabled || config.startup == CodeIntelStartup::Off {
+        "off".to_owned()
+    } else {
+        config.startup.as_str().to_owned()
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub config_path: PathBuf,
@@ -79,6 +88,7 @@ pub struct AppState {
     pub memory_document_count: usize,
     pub memory_last_status: String,
     pub compaction_status: String,
+    pub code_intelligence_status: String,
     pub session_id: String,
     pub input: String,
     pub input_history: Vec<String>,
@@ -180,6 +190,8 @@ impl AppState {
         .threshold_status(0)
         .as_str()
         .to_owned();
+        let initial_code_intelligence_status =
+            code_intelligence_config_status(&root_config.code_intelligence);
 
         let mut app = Self {
             config_path: config_path.to_path_buf(),
@@ -193,6 +205,7 @@ impl AppState {
             memory_document_count: 0,
             memory_last_status: "pending".to_owned(),
             compaction_status: initial_compaction_status,
+            code_intelligence_status: initial_code_intelligence_status,
             session_id,
             input: String::new(),
             input_history: Vec::new(),
@@ -287,6 +300,7 @@ impl AppState {
             memory_document_count: 0,
             memory_last_status: "pending".to_owned(),
             compaction_status: CompactionThresholdStatus::NotAvailable.as_str().to_owned(),
+            code_intelligence_status: "off".to_owned(),
             session_id,
             input: String::new(),
             input_history: Vec::new(),
@@ -378,6 +392,7 @@ impl AppState {
             ),
         );
         self.push_event("compaction", self.compaction_status.clone());
+        self.push_event("code_intelligence", self.code_intelligence_status.clone());
         self.push_event("session_log", self.session_log_path.display().to_string());
         self.push_event("focus", self.active_pane.label());
         self.reset_scroll();

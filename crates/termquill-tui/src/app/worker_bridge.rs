@@ -5,7 +5,9 @@ use crate::provider_status::{
     BalanceSnapshot, fetch_provider_balance_snapshot, resolve_provider_api_key,
 };
 use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
-use termquill_kernel::{ControlEntry, EventHandler, RunEvent, ToolDiffBudget, ToolPreviewSnapshot};
+use termquill_kernel::{
+    ControlEntry, EventHandler, RunEvent, ToolDiffBudget, ToolPreviewSnapshot, ToolResult,
+};
 
 impl AppState {
     pub fn poll_background_tasks(&mut self) -> bool {
@@ -245,6 +247,62 @@ impl AppState {
             ),
         }
     }
+
+    fn apply_code_intelligence_tool_status(&mut self, result: &ToolResult) {
+        if !result.tool_name.starts_with("code_") {
+            return;
+        }
+        if let Some(status_line) = code_diagnostics_status_line(result) {
+            self.code_intelligence_status = status_line;
+        } else if let Some(status_line) = result
+            .metadata
+            .details
+            .get("code_intelligence")
+            .and_then(|details| details.get("status_line"))
+            .and_then(serde_json::Value::as_str)
+        {
+            self.code_intelligence_status = status_line.to_owned();
+        } else if result.is_error() {
+            self.code_intelligence_status = "degraded tool error".to_owned();
+        } else {
+            self.code_intelligence_status = "ready".to_owned();
+        }
+        self.push_event("code_intelligence", self.code_intelligence_status.clone());
+    }
+}
+
+fn code_diagnostics_status_line(result: &ToolResult) -> Option<String> {
+    if result.tool_name != "code_diagnostics" || result.is_error() {
+        return None;
+    }
+    let content = serde_json::from_str::<serde_json::Value>(&result.content).ok()?;
+    let diagnostics = content
+        .get("diagnostics")
+        .or_else(|| content.get("results"))?
+        .as_array()?;
+    let errors = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic
+                .get("severity")
+                .and_then(serde_json::Value::as_str)
+                == Some("error")
+        })
+        .count();
+    let warnings = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic
+                .get("severity")
+                .and_then(serde_json::Value::as_str)
+                == Some("warning")
+        })
+        .count();
+    if errors == 0 && warnings == 0 {
+        Some("diagnostics clean".to_owned())
+    } else {
+        Some(format!("diagnostics {errors} errors {warnings} warnings"))
+    }
 }
 
 impl EventHandler for AppState {
@@ -352,6 +410,7 @@ impl EventHandler for AppState {
                 self.streaming_reasoning_index = None;
                 self.push_phase_marker(format!("tool|{}", result.tool_name));
                 let status = if result.is_error() { "error" } else { "ok" };
+                self.apply_code_intelligence_tool_status(&result);
                 let preview = self.tool_preview_snapshots.get(&result.call_id);
                 self.push_timeline(
                     TimelineRole::Tool,

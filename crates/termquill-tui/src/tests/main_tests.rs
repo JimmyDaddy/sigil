@@ -29,6 +29,7 @@ fn test_config() -> RootConfig {
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         compaction: CompactionConfig::default(),
+        code_intelligence: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     }

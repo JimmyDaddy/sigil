@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, path::Path};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use termquill_kernel::{
-    AgentConfig, CompactionConfig, EventHandler, MemoryConfig, PermissionConfig, RootConfig,
-    RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolResult,
-    ToolResultMeta, ToolSpec, WorkspaceConfig,
+    AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig, EventHandler,
+    MemoryConfig, PermissionConfig, RootConfig, RunEvent, SessionConfig, ToolAccess, ToolCall,
+    ToolCategory, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::*;
@@ -27,6 +27,7 @@ fn test_config() -> RootConfig {
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         compaction: CompactionConfig::default(),
+        code_intelligence: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     }
@@ -54,6 +55,13 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     assert!(
         view_model
             .info_rail
+            .code_lines
+            .iter()
+            .any(|line| line == "status: off")
+    );
+    assert!(
+        view_model
+            .info_rail
             .controls
             .iter()
             .any(|line| line == "F1: keyboard help")
@@ -65,6 +73,78 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
             .iter()
             .any(|line| line == "Ctrl-C: quit")
     );
+}
+
+#[test]
+fn ui_view_model_projects_enabled_code_intelligence_status() {
+    let mut config = test_config();
+    config.code_intelligence = CodeIntelligenceConfig {
+        enabled: true,
+        startup: CodeIntelStartup::Lazy,
+        ..CodeIntelligenceConfig::default()
+    };
+    let app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &config);
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(
+        view_model
+            .info_rail
+            .code_lines
+            .iter()
+            .any(|line| line == "status: lazy")
+    );
+}
+
+#[test]
+fn code_tool_result_updates_code_intelligence_status() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-code",
+        "code_symbols",
+        "{}",
+        ToolResultMeta {
+            details: json!({
+                "code_intelligence": {
+                    "status_line": "ready rust-analyzer"
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    assert_eq!(app.code_intelligence_status, "ready rust-analyzer");
+    Ok(())
+}
+
+#[test]
+fn code_diagnostics_tool_result_projects_diagnostic_counts() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-code",
+        "code_diagnostics",
+        json!({
+            "diagnostics": [
+                { "severity": "error" },
+                { "severity": "warning" },
+                { "severity": "warning" }
+            ]
+        })
+        .to_string(),
+        ToolResultMeta {
+            details: json!({
+                "code_intelligence": {
+                    "status_line": "ready rust-analyzer"
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    assert_eq!(
+        app.code_intelligence_status,
+        "diagnostics 1 errors 2 warnings"
+    );
+    Ok(())
 }
 
 #[test]

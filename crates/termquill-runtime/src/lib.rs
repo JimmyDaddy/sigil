@@ -35,6 +35,11 @@ pub async fn build_tool_registry(
 ) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     termquill_tools_builtin::register_builtin_tools(&mut registry);
+    termquill_code_intel::register_code_intelligence_tools(
+        &mut registry,
+        &root_config.code_intelligence,
+        workspace_root.clone(),
+    );
     termquill_mcp::register_mcp_tools_with_capabilities_and_roots(
         &mut registry,
         &root_config.mcp_servers,

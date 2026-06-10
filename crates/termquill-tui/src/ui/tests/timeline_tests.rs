@@ -71,6 +71,66 @@ fn render_timeline_entry_lines_separates_tool_header_and_json_body() {
 }
 
 #[test]
+fn render_timeline_entry_lines_shows_code_intelligence_tool_card() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: serde_json::json!({
+            "tool_name": "code_symbols",
+            "status": "ok",
+            "call_id": "call-code",
+            "summary": "1 lines · 100 B",
+            "preview_kind": "json",
+            "preview_lines": [],
+            "hidden_lines": 0,
+            "metadata": {
+                "returned_entries": 1,
+                "total_entries": 1,
+                "details": {
+                    "call": { "summary": "path=src/lib.rs query=AppState" },
+                    "code_intelligence": {
+                        "server": "tree-sitter-rust",
+                        "capability": "tree_sitter/document_symbols"
+                    }
+                }
+            },
+            "preview_value": {
+                "tool": "code_symbols",
+                "server": "tree-sitter-rust",
+                "capability": "tree_sitter/document_symbols",
+                "symbols": [{
+                    "name": "AppState",
+                    "kind": "struct",
+                    "path": "src/lib.rs",
+                    "range": {
+                        "start_line": 3,
+                        "start_character": 0,
+                        "end_line": 3,
+                        "end_character": 18
+                    }
+                }],
+                "metadata": { "returned": 1, "total": 1, "truncated": false, "elapsed_ms": 1 }
+            }
+        })
+        .to_string(),
+    };
+
+    let lines = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            expand_tool_previews: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let plain = rendered_plain_lines(&lines).join("\n");
+
+    assert!(plain.contains("Inspected"));
+    assert!(plain.contains("symbols"));
+    assert!(plain.contains("src/lib.rs:3"));
+    assert!(plain.contains("AppState"));
+}
+
+#[test]
 fn render_timeline_entry_lines_styles_basic_markdown() {
     let entry = TimelineEntry {
         role: TimelineRole::Assistant,

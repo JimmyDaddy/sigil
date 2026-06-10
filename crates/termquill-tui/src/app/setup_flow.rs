@@ -304,6 +304,7 @@ fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
             context_window_tokens: Some(128000),
             tail_messages: 6,
         },
+        code_intelligence: Default::default(),
         providers: std::collections::BTreeMap::from([("deepseek".to_owned(), provider_value)]),
         mcp_servers: Vec::new(),
     })

@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::Result;
 use serde_json::json;
 use termquill_kernel::{
-    AgentConfig, InteractionMode, MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig,
-    SessionConfig, WorkspaceConfig,
+    AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, InteractionMode, LanguageServerConfig,
+    MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig, SessionConfig, WorkspaceConfig,
 };
 
 use super::{build_provider, build_run_options, build_tool_registry, load_deepseek_config};
@@ -26,6 +26,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
         compaction: termquill_kernel::CompactionConfig::default(),
+        code_intelligence: termquill_kernel::CodeIntelligenceConfig::default(),
         providers: BTreeMap::from([(
             "deepseek".to_owned(),
             json!({
@@ -98,5 +99,35 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
 
     assert!(registry.specs().iter().any(|spec| spec.name == "read_file"));
     assert!(registry.specs().iter().any(|spec| spec.name == "bash"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.code_intelligence = CodeIntelligenceConfig {
+        enabled: true,
+        startup: CodeIntelStartup::Lazy,
+        servers: vec![LanguageServerConfig {
+            name: "rust-analyzer".to_owned(),
+            languages: vec!["rust".to_owned()],
+            command: "rust-analyzer".to_owned(),
+            args: Vec::new(),
+            env: Default::default(),
+            root_markers: vec!["Cargo.toml".to_owned()],
+            file_extensions: vec!["rs".to_owned()],
+            initialization_options: serde_json::Value::Null,
+            trust_required: true,
+            startup_timeout_ms: 100,
+        }],
+        ..CodeIntelligenceConfig::default()
+    };
+
+    let registry =
+        build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await?;
+
+    assert!(registry.spec_for("code_symbols").is_some());
+    assert!(registry.spec_for("code_diagnostics").is_some());
     Ok(())
 }

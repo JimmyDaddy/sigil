@@ -63,8 +63,15 @@ pub(crate) fn render_info_rail(frame: &mut Frame, area: Rect, view_model: &InfoR
     );
     push_info_section(
         &mut lines,
-        "usage",
+        "LSP",
         accent_teal(),
+        view_model.code_lines.iter().cloned(),
+        inner.width as usize,
+    );
+    push_info_section(
+        &mut lines,
+        "usage",
+        accent_blue(),
         view_model.usage_lines.iter().cloned(),
         inner.width as usize,
     );
