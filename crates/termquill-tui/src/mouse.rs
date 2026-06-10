@@ -29,6 +29,17 @@ pub enum AppMouseOutcome {
     Action(AppAction),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitTarget {
+    ApprovalModal,
+    SlashOverlay,
+    SlashCandidate { index: usize },
+    Composer,
+    LivePanel,
+    InfoRail,
+    Background,
+}
+
 impl From<MouseEvent> for MouseInput {
     fn from(event: MouseEvent) -> Self {
         Self {

@@ -10,6 +10,7 @@ use crate::app::AppState;
 
 use super::{
     geometry::{selector_window_range, shadow_rect},
+    layout_snapshot::slash_selector_overlay_rect,
     theme::{accent_blue, accent_rose, muted, selector_accent, selector_bg, selector_shadow_bg},
 };
 
@@ -142,34 +143,6 @@ fn selector_title_line(title: &str) -> Line<'static> {
             Style::default().fg(muted()).bg(selector_bg()),
         ),
     ])
-}
-
-fn slash_selector_overlay_rect(
-    live_area: Rect,
-    composer_area: Rect,
-    visible_rows: usize,
-) -> Option<Rect> {
-    let height = visible_rows.min(live_area.height as usize) as u16;
-    if height == 0 {
-        return None;
-    }
-
-    let x = composer_area.x.saturating_add(1);
-    let right = live_area.x.saturating_add(live_area.width);
-    let width = composer_area
-        .width
-        .saturating_sub(2)
-        .min(right.saturating_sub(x));
-    if width == 0 {
-        return None;
-    }
-
-    let mut y = composer_area.y.saturating_sub(height);
-    if y < live_area.y {
-        y = live_area.y;
-    }
-
-    Some(Rect::new(x, y, width, height))
 }
 
 #[cfg(test)]

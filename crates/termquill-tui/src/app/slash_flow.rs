@@ -286,6 +286,20 @@ impl AppState {
         }
     }
 
+    pub(super) fn select_slash_candidate(&mut self, index: usize) -> bool {
+        let rows = self.slash_selector_entries();
+        if rows.is_empty() {
+            return false;
+        }
+
+        let selected = index.min(rows.len().saturating_sub(1));
+        self.slash_selector_index = selected;
+        if let Some(entry) = rows.get(selected) {
+            self.last_notice = Some(format!("slash selected {}", entry.label));
+        }
+        true
+    }
+
     pub(super) fn accept_slash_selector(&mut self) {
         let Some(entry) = self.selected_slash_entry() else {
             return;

@@ -3,6 +3,7 @@ mod common;
 mod config_flow_tests;
 mod input_flow_tests;
 mod modal_flow_tests;
+mod mouse_flow_tests;
 mod session_flow_tests;
 mod slash_flow_tests;
 mod timeline_flow_tests;

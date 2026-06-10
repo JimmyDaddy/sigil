@@ -16,7 +16,8 @@ use super::{
         DiffLineKind, diff_line_number_text, diff_line_number_width, diff_line_style,
         number_unified_diff_lines,
     },
-    geometry::{centered_rect, halo_rect, shadow_rect},
+    geometry::{halo_rect, shadow_rect},
+    layout_snapshot::approval_modal_area,
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_options},
 };
 
@@ -24,26 +25,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     let Some(view) = app.approval_modal_view() else {
         return;
     };
-    let diff_width = view
-        .diff_lines
-        .iter()
-        .map(|line| line.text.chars().count().saturating_add(12))
-        .max()
-        .unwrap_or(0);
-    let inner_width = [
-        72usize,
-        diff_width.saturating_add(12),
-        view.preview_title.chars().count().saturating_add(10),
-    ]
-    .into_iter()
-    .max()
-    .unwrap_or(72)
-    .min(frame.area().width.saturating_sub(8).max(36) as usize);
-    let area = centered_rect(
-        inner_width as u16 + 2,
-        frame.area().height.saturating_sub(4).min(30),
-        frame.area(),
-    );
+    let area = approval_modal_area(frame.area(), &view);
     let backdrop = halo_rect(area, frame.area(), 5, 2);
     if backdrop.width > 0 && backdrop.height > 0 {
         frame.render_widget(Clear, backdrop);
@@ -82,7 +64,7 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
         return;
     }
 
-    let header_lines = approval_header_lines(&view, inner_width);
+    let header_lines = approval_header_lines(&view, area.width.saturating_sub(2) as usize);
     let footer_lines = approval_footer_lines(&view);
     let layout = Layout::default()
         .direction(Direction::Vertical)
