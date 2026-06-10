@@ -31,9 +31,9 @@ use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
 use crate::slash::SLASH_COMMANDS;
 
 use super::{
-    AppAction, AppState, ApprovalAction, ApprovalDiffLineKind, ConfigField, ConfigSection,
-    ModalState, ModelPickerRefresh, ModelPickerTarget, PaneFocus, RunPhase, SessionHistoryRow,
-    SessionViewMode, SetupField, TimelineRole,
+    AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary, ApprovalDiffLineKind,
+    ConfigField, ConfigSection, ModalState, ModelPickerRefresh, ModelPickerTarget, PaneFocus,
+    RunPhase, SessionHistoryRow, SessionViewMode, SetupField, TimelineRole,
 };
 
 use common::*;

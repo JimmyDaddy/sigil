@@ -66,7 +66,7 @@ TUI 当前支持：
 - tool result 默认以独立 brief activity 展示；bash 成功无输出会显示 `(no output)`，失败会突出 exit code 并优先展示诊断输出；存在 activity 后右侧 `Info rail / Controls` 会显示 `Ctrl-G` 聚焦最新 activity、`Alt-J` / `Alt-K` 切换 activity、`Ctrl-T` 展开/收起聚焦 activity，composer 为空时 `Esc` 清除 activity focus
 - `write_file` / `edit_file` / `delete_file` 的结果 activity 默认展开执行时捕获的 bounded unified diff，diff 行会显示旧/新行号；activity 正文会跳过重复的 `@@` hunk header，并在文件头汇总 hunk 数；仍可用 `Ctrl-T` 收起，大 diff 会显示 `diff truncated · N lines hidden`，折叠态保留 diff stats 和隐藏提示
 - 工具调用审批改为居中 review card：固定 `Summary / Files / Diff / Actions` 四区，composer 不会因为审批而消失；`Actions` 支持 `Left/Right` 选择 allow/deny 后 `Enter` 确认，也保留 `Y/N` 直达；审批通道 5 分钟无决策会自动 deny，避免 worker 永久等待
-- `write_file` / `edit_file` / `delete_file` diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换
+- `write_file` / `edit_file` / `delete_file` diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换；如果最近一次 `code_diagnostics` 覆盖了 affected file，审批 Files 列和 Diff 状态行会显示对应 errors / warnings 摘要
 - `/compact` 手动压缩当前会话的 provider 可见上下文
 - `/model <flash|pro|id>` 切换运行时模型，并开启一个 fresh session，避免把旧 session identity 和新模型混在一起
 - `/effort <low|medium|high|max>` 切换下一轮 agent run 的 reasoning effort

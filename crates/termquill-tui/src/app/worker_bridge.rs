@@ -266,6 +266,9 @@ impl AppState {
             self.code_intelligence_diagnostics_line = Some(code_diagnostics_sidebar_line(
                 &self.code_intelligence_status,
             ));
+            if let Some(summaries) = code_diagnostics_by_path(result) {
+                self.code_intelligence_diagnostics_by_path = summaries;
+            }
         } else if let Some(status_line) = result
             .metadata
             .details
@@ -374,6 +377,55 @@ fn code_diagnostics_status_line(result: &ToolResult) -> Option<String> {
     } else {
         Some(format!("diagnostics {errors} errors {warnings} warnings"))
     }
+}
+
+fn code_diagnostics_by_path(
+    result: &ToolResult,
+) -> Option<BTreeMap<String, ApprovalDiagnosticSummary>> {
+    if result.tool_name != "code_diagnostics" || result.is_error() {
+        return None;
+    }
+    let content = serde_json::from_str::<serde_json::Value>(&result.content).ok()?;
+    let mut summaries = BTreeMap::<String, ApprovalDiagnosticSummary>::new();
+    if let Some(paths) = content
+        .get("query")
+        .and_then(|query| query.get("paths"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for path in paths.iter().filter_map(serde_json::Value::as_str) {
+            summaries
+                .entry(normalize_diagnostic_path(path))
+                .or_default();
+        }
+    }
+
+    let diagnostics = content
+        .get("diagnostics")
+        .or_else(|| content.get("results"))?
+        .as_array()?;
+    for diagnostic in diagnostics {
+        let Some(path) = diagnostic
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(normalize_diagnostic_path)
+        else {
+            continue;
+        };
+        let summary = summaries.entry(path).or_default();
+        match diagnostic
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("error") => summary.errors += 1,
+            Some("warning") => summary.warnings += 1,
+            _ => {}
+        }
+    }
+    Some(summaries)
+}
+
+fn normalize_diagnostic_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_owned()
 }
 
 fn code_diagnostics_sidebar_line(status_line: &str) -> String {

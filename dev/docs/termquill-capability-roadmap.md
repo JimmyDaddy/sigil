@@ -177,7 +177,7 @@ cargo test -p termquill-kernel permission agent
 
 ### 5.3 TUI code intelligence workflow
 
-交付物：
+交付物（已落地）：
 
 1. 在 activity / info rail 中展示当前诊断摘要。
 2. 在 approval diff 中关联 affected diagnostics。

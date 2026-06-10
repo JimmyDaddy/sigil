@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    AppState, ApprovalAction, ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow,
-    ApprovalModalView,
+    AppState, ApprovalAction, ApprovalDiagnosticSummary, ApprovalDiffLine, ApprovalDiffLineKind,
+    ApprovalFileRow, ApprovalModalView,
 };
 
 use super::{
@@ -319,10 +319,20 @@ fn render_approval_file_row(index: usize, row: &ApprovalFileRow) -> Line<'static
     } else {
         Style::default().fg(Color::White)
     };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!("{marker}{} ", index + 1), style),
         Span::styled(row.path.clone(), style),
-    ])
+    ];
+    if let Some(diagnostics) = row.diagnostics {
+        spans.extend([
+            Span::raw("  "),
+            Span::styled(
+                approval_diagnostics_label(diagnostics),
+                approval_diagnostics_style(diagnostics),
+            ),
+        ]);
+    }
+    Line::from(spans)
 }
 
 fn approval_diff_status_line(view: &ApprovalModalView) -> Line<'static> {
@@ -331,7 +341,7 @@ fn approval_diff_status_line(view: &ApprovalModalView) -> Line<'static> {
     } else {
         format!("hunk {}/{}", view.active_hunk_index, view.hunk_total)
     };
-    Line::from(vec![
+    let mut spans = vec![
         Span::styled("path", Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
         Span::styled(view.diff_label.clone(), Style::default().fg(Color::White)),
@@ -341,7 +351,58 @@ fn approval_diff_status_line(view: &ApprovalModalView) -> Line<'static> {
         Span::styled(view.diff_mode_label, Style::default().fg(Color::Cyan)),
         Span::raw("  "),
         Span::styled(hunk_label, Style::default().fg(Color::Yellow)),
-    ])
+    ];
+    if let Some(diagnostics) = selected_approval_diagnostics(view) {
+        spans.extend([
+            Span::raw("  "),
+            Span::styled("diagnostics", Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(
+                approval_diagnostics_label(diagnostics),
+                approval_diagnostics_style(diagnostics),
+            ),
+        ]);
+    }
+    Line::from(spans)
+}
+
+fn selected_approval_diagnostics(view: &ApprovalModalView) -> Option<ApprovalDiagnosticSummary> {
+    view.file_rows
+        .iter()
+        .find(|row| row.selected)
+        .and_then(|row| row.diagnostics)
+}
+
+fn approval_diagnostics_label(summary: ApprovalDiagnosticSummary) -> String {
+    if summary.is_clean() {
+        return "clean".to_owned();
+    }
+    let mut parts = Vec::new();
+    if summary.errors > 0 {
+        parts.push(count_label(summary.errors, "error", "errors"));
+    }
+    if summary.warnings > 0 {
+        parts.push(count_label(summary.warnings, "warning", "warnings"));
+    }
+    parts.join(" ")
+}
+
+fn approval_diagnostics_style(summary: ApprovalDiagnosticSummary) -> Style {
+    if summary.errors > 0 {
+        Style::default().fg(Color::LightRed)
+    } else if summary.warnings > 0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Green)
+    }
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
 }
 
 fn render_approval_diff_line(
@@ -431,3 +492,7 @@ fn approval_badge(label: &str, color: Color) -> Span<'static> {
             .add_modifier(Modifier::BOLD),
     )
 }
+
+#[cfg(test)]
+#[path = "tests/approval_tests.rs"]
+mod tests;

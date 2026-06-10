@@ -33,7 +33,8 @@ use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQ
 use uuid::Uuid;
 
 pub(crate) use crate::approval::{
-    ApprovalAction, ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
+    ApprovalAction, ApprovalDiagnosticSummary, ApprovalDiffLine, ApprovalDiffLineKind,
+    ApprovalFileRow, ApprovalModalView,
 };
 pub use crate::approval::{ApprovalDiffMode, PendingApproval};
 use crate::commands::{
@@ -93,6 +94,7 @@ pub struct AppState {
     pub code_intelligence_status: String,
     pub code_intelligence_server_lines: BTreeMap<String, String>,
     pub code_intelligence_diagnostics_line: Option<String>,
+    pub(crate) code_intelligence_diagnostics_by_path: BTreeMap<String, ApprovalDiagnosticSummary>,
     pub session_id: String,
     pub input: String,
     pub input_history: Vec<String>,
@@ -218,6 +220,7 @@ impl AppState {
             code_intelligence_status: initial_code_intelligence_status,
             code_intelligence_server_lines: BTreeMap::new(),
             code_intelligence_diagnostics_line: None,
+            code_intelligence_diagnostics_by_path: BTreeMap::new(),
             session_id,
             input: String::new(),
             input_history: Vec::new(),
@@ -320,6 +323,7 @@ impl AppState {
             code_intelligence_status: "off".to_owned(),
             code_intelligence_server_lines: BTreeMap::new(),
             code_intelligence_diagnostics_line: None,
+            code_intelligence_diagnostics_by_path: BTreeMap::new(),
             session_id,
             input: String::new(),
             input_history: Vec::new(),

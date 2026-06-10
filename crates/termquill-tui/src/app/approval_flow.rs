@@ -292,6 +292,7 @@ impl AppState {
                 .map(|(index, file)| ApprovalFileRow {
                     path: file.path.clone(),
                     selected: index == self.approval_selected_file_index,
+                    diagnostics: self.approval_diagnostics_for_path(&file.path),
                 })
                 .collect()
         } else {
@@ -302,6 +303,7 @@ impl AppState {
                 .map(|(index, path)| ApprovalFileRow {
                     path: path.clone(),
                     selected: index == self.approval_selected_file_index,
+                    diagnostics: self.approval_diagnostics_for_path(path),
                 })
                 .collect()
         };
@@ -341,6 +343,12 @@ impl AppState {
             .get(self.approval_selected_file_index)
             .map(|file| file.diff.as_str())
             .or_else(|| (!preview.body.is_empty()).then_some(preview.body.as_str()))
+    }
+
+    fn approval_diagnostics_for_path(&self, path: &str) -> Option<ApprovalDiagnosticSummary> {
+        self.code_intelligence_diagnostics_by_path
+            .get(&normalize_approval_diagnostic_path(path))
+            .copied()
     }
 
     fn approval_hunk_positions(&self) -> Vec<usize> {
@@ -484,4 +492,8 @@ fn approval_diff_line_kind(line: &str) -> ApprovalDiffLineKind {
     } else {
         ApprovalDiffLineKind::Context
     }
+}
+
+fn normalize_approval_diagnostic_path(path: &str) -> String {
+    path.replace('\\', "/").trim_start_matches("./").to_owned()
 }

@@ -35,10 +35,23 @@ pub(crate) struct ApprovalDiffLine {
     pub active_hunk: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ApprovalDiagnosticSummary {
+    pub errors: usize,
+    pub warnings: usize,
+}
+
+impl ApprovalDiagnosticSummary {
+    pub(crate) fn is_clean(self) -> bool {
+        self.errors == 0 && self.warnings == 0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ApprovalFileRow {
     pub path: String,
     pub selected: bool,
+    pub diagnostics: Option<ApprovalDiagnosticSummary>,
 }
 
 #[derive(Debug, Clone)]

@@ -53,6 +53,44 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
 }
 
 #[test]
+fn approval_modal_view_includes_affected_diagnostics_summary() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-code",
+        "code_diagnostics",
+        json!({
+            "query": { "paths": ["note.txt", "clean.rs"] },
+            "diagnostics": [
+                { "path": "note.txt", "severity": "error" },
+                { "path": "note.txt", "severity": "warning" },
+                { "path": "other.rs", "severity": "error" }
+            ]
+        })
+        .to_string(),
+        ToolResultMeta::default(),
+    )))?;
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    let view = app
+        .approval_modal_view()
+        .expect("approval modal view should exist");
+    let row = view
+        .file_rows
+        .iter()
+        .find(|row| row.path == "note.txt")
+        .expect("changed file should be listed");
+
+    assert_eq!(
+        row.diagnostics,
+        Some(ApprovalDiagnosticSummary {
+            errors: 1,
+            warnings: 1,
+        })
+    );
+    Ok(())
+}
+
+#[test]
 fn approval_diff_mode_cycles_to_changed_only() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;
