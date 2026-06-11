@@ -412,3 +412,96 @@ fn resolve_workspace_root_uses_launch_cwd_for_empty_and_absolute_paths() {
         absolute
     );
 }
+
+#[test]
+fn root_config_load_reports_missing_paths_with_context() {
+    let missing = Path::new("/tmp").join(format!(
+        "sigil-config-missing-{}.toml",
+        uuid::Uuid::new_v4()
+    ));
+
+    let error = RootConfig::load(&missing).expect_err("missing config should fail");
+
+    assert!(error.to_string().contains("failed to read config at"));
+    assert!(
+        error.to_string().contains(
+            missing
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("file name should be utf-8")
+        )
+    );
+}
+
+#[test]
+fn root_config_save_reports_parent_creation_and_write_errors() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: "/tmp/workspace".to_owned(),
+        },
+        session: Default::default(),
+        agent: AgentConfig {
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-flash".to_owned(),
+            max_turns: Some(32),
+            tool_timeout_secs: 30,
+        },
+        permission: Default::default(),
+        memory: Default::default(),
+        compaction: Default::default(),
+        code_intelligence: Default::default(),
+        providers: BTreeMap::new(),
+        mcp_servers: Vec::new(),
+    };
+
+    let blocking_parent = temp.path().join("blocking-parent");
+    std::fs::write(&blocking_parent, "file").expect("blocking parent should write");
+    let create_error = config
+        .save(&blocking_parent.join("sigil.toml"))
+        .expect_err("file parent should fail directory creation");
+    assert!(create_error.to_string().contains("failed to create"));
+
+    let output_dir = temp.path().join("output-dir");
+    std::fs::create_dir(&output_dir).expect("output dir should create");
+    let write_error = config
+        .save(&output_dir)
+        .expect_err("writing to a directory should fail");
+    assert!(
+        write_error
+            .to_string()
+            .contains("failed to write config at")
+    );
+}
+
+#[test]
+fn language_server_config_defaults_trust_and_timeout() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[[code_intelligence.servers]]
+name = "rust-analyzer"
+command = "rust-analyzer"
+"#,
+    )
+    .expect("minimal language server config should parse");
+
+    assert!(config.code_intelligence.servers[0].trust_required);
+    assert_eq!(
+        config.code_intelligence.servers[0].startup_timeout_ms,
+        10_000
+    );
+}
+
+#[test]
+fn resolve_workspace_root_uses_current_directory_when_config_has_no_parent() {
+    let cwd = Path::new("/Users/example/work/project");
+
+    assert_eq!(
+        resolve_workspace_root(Path::new("sigil.toml"), cwd, "nested/workspace"),
+        Path::new("nested/workspace")
+    );
+}

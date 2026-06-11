@@ -4,6 +4,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, stream};
 
+use crate::{MessageRole, ModelMessage, ReasoningEffort, ToolCall};
+
 use super::{
     CompletionRequest, Provider, ProviderCapabilities, ProviderChunk, SessionStats, UsageStats,
 };
@@ -111,4 +113,38 @@ async fn boxed_provider_delegates_name_capabilities_and_stream() -> Result<()> {
         ProviderChunk::Done
     ));
     Ok(())
+}
+
+#[test]
+fn provider_helpers_expose_stable_strings_and_message_constructors() {
+    assert_eq!(ReasoningEffort::Low.as_str(), "low");
+    assert_eq!(ReasoningEffort::Medium.as_str(), "medium");
+    assert_eq!(ReasoningEffort::High.as_str(), "high");
+    assert_eq!(ReasoningEffort::Max.as_str(), "max");
+
+    let system = ModelMessage::system("rules");
+    let user = ModelMessage::user("hello");
+    let assistant = ModelMessage::assistant(
+        Some("working".to_owned()),
+        vec![ToolCall {
+            id: "call-1".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    );
+    let tool = ModelMessage::tool("call-1", "ok");
+    let blank = ModelMessage::new(MessageRole::Assistant, None);
+
+    assert_eq!(system.role, MessageRole::System);
+    assert_eq!(user.role, MessageRole::User);
+    assert_eq!(assistant.role, MessageRole::Assistant);
+    assert_eq!(assistant.tool_calls.len(), 1);
+    assert_eq!(tool.role, MessageRole::Tool);
+    assert_eq!(tool.tool_call_id.as_deref(), Some("call-1"));
+    assert!(blank.id.parse::<uuid::Uuid>().is_ok());
+
+    let usage = UsageStats::default();
+    assert_eq!(usage.prompt_tokens, 0);
+    assert_eq!(usage.completion_tokens, 0);
+    assert!(usage.system_fingerprint.is_none());
 }

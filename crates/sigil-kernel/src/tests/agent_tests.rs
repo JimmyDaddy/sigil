@@ -5,7 +5,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -667,6 +667,7 @@ impl Tool for ExecuteFailingWriteTool {
 struct PreviewFallbackProvider;
 struct UnknownToolProvider;
 struct ExecuteFailingProvider;
+struct TextOnlyContinuationProvider;
 
 #[async_trait]
 impl Provider for PreviewFallbackProvider {
@@ -833,6 +834,53 @@ impl Provider for ExecuteFailingProvider {
                 Ok(ProviderChunk::Done),
             ])))
         }
+    }
+}
+
+#[async_trait]
+impl Provider for TextOnlyContinuationProvider {
+    fn name(&self) -> &str {
+        "mock-text-only"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            supports_reasoning_stream: true,
+            supports_tool_stream: false,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: true,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ContinuationState(
+                ProviderContinuationState {
+                    provider_name: "mock-text-only".to_owned(),
+                    state_kind: "mock.cursor".to_owned(),
+                    message_id: None,
+                    opaque_blob: json!({"cursor":"final"}),
+                },
+            )),
+            Ok(ProviderChunk::ReasoningArtifact(ReasoningArtifact {
+                provider_name: "mock-text-only".to_owned(),
+                opaque_blob: json!({"ignored": true}),
+            })),
+            Ok(ProviderChunk::TextDelta("text only".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
     }
 }
 
@@ -2811,6 +2859,89 @@ fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
     assert_eq!(super::stable_json_hash(&json!({"value": "x"}))?.len(), 64);
     assert_eq!(super::stable_text_hash("sigil").len(), 64);
     assert!(super::duration_ms(Instant::now()) < 10_000);
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_binds_text_only_continuation_state_to_final_assistant_message() -> Result<()> {
+    let agent = Agent::new(TextOnlyContinuationProvider, ToolRegistry::new());
+    let mut session = Session::new("mock-text-only", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let result = agent
+        .run(
+            &mut session,
+            "continue",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "text only");
+    let final_assistant_id = session
+        .messages()
+        .last()
+        .map(|message| message.id.clone())
+        .expect("assistant message should exist");
+    let saved_state = session.entries().iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::ContinuationStateSaved(state)) => Some(state),
+        _ => None,
+    });
+    assert_eq!(
+        saved_state.and_then(|state| state.message_id.clone()),
+        Some(final_assistant_id)
+    );
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ContinuationState(state)
+            if state.provider_name == "mock-text-only")
+    }));
+    Ok(())
+}
+
+#[test]
+fn agent_helper_preview_and_hash_edges_cover_normalized_subjects_and_errors() -> Result<()> {
+    let preview = super::external_directory_preview(
+        "write_file",
+        &[ToolSubject::path_with_scope(
+            "outside.txt",
+            "outside.txt",
+            None,
+            ToolSubjectScope::External,
+        )],
+    );
+    assert!(preview.body.contains("outside.txt"));
+
+    struct FailingSerialize;
+
+    impl serde::Serialize for FailingSerialize {
+        fn serialize<S>(&self, _serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom("serialize exploded"))
+        }
+    }
+
+    let error = super::stable_json_hash(&FailingSerialize).expect_err("hash should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to serialize audit payload")
+    );
+
+    let started = Instant::now();
+    std::thread::sleep(Duration::from_millis(1));
+    assert!(super::duration_ms(started) >= 1);
     Ok(())
 }
 
