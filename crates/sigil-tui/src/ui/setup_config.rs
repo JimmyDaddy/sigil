@@ -1004,6 +1004,7 @@ fn render_setup_line(line: &str) -> Line<'static> {
 }
 
 fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<Line<'static>> {
+    let content_width = content_width.min(CONFIG_CONTENT_MAX_WIDTH as usize);
     let row_bg = selected_row_bg(accent);
     let (selected, rest) = if let Some(rest) = line.strip_prefix("> ") {
         (true, rest)

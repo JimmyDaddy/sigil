@@ -2,11 +2,14 @@ use std::{collections::BTreeMap, path::Path};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
+use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
-    WorkspaceConfig,
+    AgentConfig, CompactionConfig, EventHandler, MemoryConfig, PermissionConfig, RootConfig,
+    RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolSpec, WorkspaceConfig,
 };
 
+use crate::app::AppState;
 use crate::timeline::RunPhase;
 
 use super::super::theme::{
@@ -1081,4 +1084,213 @@ fn rendered_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
 fn char_index_of(row: &str, needle: &str) -> Option<usize> {
     row.find(needle)
         .map(|byte_index| row[..byte_index].chars().count())
+}
+
+#[test]
+fn render_main_screen_shows_pending_approval_overlay() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_write_file_approval(&mut app)?;
+    let backend = TestBackend::new(140, 28);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Review Tool Call"));
+    assert!(rendered.contains("Update note.txt"));
+    assert!(rendered.contains("Allow"));
+    assert!(rendered.contains("Deny"));
+    Ok(())
+}
+
+#[test]
+fn render_setup_screen_shows_workspace_notice_and_panel() -> anyhow::Result<()> {
+    let app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new("/tmp/example-workspace").to_path_buf(),
+        Some("set auth then save".to_owned()),
+    );
+    let backend = TestBackend::new(96, 24);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Sigil setup"));
+    assert!(rendered.contains("Quick setup"));
+    assert!(rendered.contains("ws=example-workspace"));
+    assert!(rendered.contains("cfg=sigil.toml"));
+    assert!(rendered.contains("set auth then save"));
+    Ok(())
+}
+
+#[test]
+fn footer_left_line_and_context_width_cover_empty_and_bounded_states() {
+    let footer = FooterViewModel {
+        phase: RunPhase::Idle,
+        is_busy: false,
+        run_label: "ready".to_owned(),
+        hints: "Enter send".to_owned(),
+        context_label: "ctx 12%".to_owned(),
+    };
+
+    assert_eq!(footer_left_line("ready", "", 32), "ready");
+    assert!(footer_left_line("ready", "Enter send", 10).chars().count() <= 10);
+    assert_eq!(footer_context_width(&footer, 20), 0);
+    assert_eq!(footer_context_width(&footer, 24), 7);
+    assert_eq!(
+        footer_context_width(
+            &FooterViewModel {
+                context_label: "context ".repeat(12),
+                ..footer.clone()
+            },
+            160,
+        ),
+        42
+    );
+}
+
+#[test]
+fn short_label_helpers_cover_path_session_pane_and_memory_states() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    assert_eq!(short_path_label(Path::new("/tmp/project")), "project");
+    assert_eq!(short_path_label(Path::new("/")), "/");
+    assert_eq!(short_session_id("1234567890"), "12345678");
+    assert_eq!(short_pane_label(&app), "composer");
+
+    app.active_pane = PaneFocus::Activity;
+    assert_eq!(short_pane_label(&app), "activity");
+
+    app.memory_enabled = false;
+    assert_eq!(memory_badge(&app), "off");
+    app.memory_enabled = true;
+    app.memory_document_count = 7;
+    app.memory_last_status = "ok".to_owned();
+    assert_eq!(memory_badge(&app), "7/ok");
+    app.memory_last_status = "failed".to_owned();
+    assert_eq!(memory_badge(&app), "7/err");
+}
+
+#[test]
+fn render_status_runtime_mode_shows_provider_session_and_runtime_state() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.is_busy = true;
+    app.active_pane = PaneFocus::Activity;
+    app.memory_enabled = false;
+    app.compaction_status = "pending".to_owned();
+    app.session_id = "1234567890abcdef".to_owned();
+    let backend = TestBackend::new(100, 4);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_status(frame, Rect::new(0, 0, 100, 4), &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Sigil TUI"));
+    assert!(rendered.contains("deepseek/deepseek-v4-flash"));
+    assert!(rendered.contains("running"));
+    assert!(rendered.contains("sid=12345678"));
+    assert!(rendered.contains("pane=activity"));
+    assert!(rendered.contains("mem=off"));
+    assert!(rendered.contains("compact=pending"));
+    Ok(())
+}
+
+#[test]
+fn render_footer_status_returns_early_for_zero_and_tiny_areas() -> anyhow::Result<()> {
+    let footer = FooterViewModel {
+        phase: RunPhase::Idle,
+        is_busy: false,
+        run_label: "ready".to_owned(),
+        hints: String::new(),
+        context_label: "ctx 12%".to_owned(),
+    };
+    let backend = TestBackend::new(8, 2);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| {
+        render_footer_status(frame, Rect::new(0, 0, 0, 1), &footer);
+        render_footer_status(frame, Rect::new(0, 1, 3, 1), &footer);
+    })?;
+
+    Ok(())
+}
+
+#[test]
+fn render_footer_status_omits_context_when_width_is_small_or_label_is_empty() -> anyhow::Result<()>
+{
+    let footer = FooterViewModel {
+        phase: RunPhase::Idle,
+        is_busy: false,
+        run_label: "ready".to_owned(),
+        hints: "Enter send".to_owned(),
+        context_label: String::new(),
+    };
+    let backend = TestBackend::new(24, 2);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_footer_status(frame, Rect::new(0, 0, 24, 1), &footer))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("ready"));
+    assert!(!rendered.contains("ctx"));
+    Ok(())
+}
+
+#[test]
+fn render_main_screen_supports_activity_pane_without_cursor_logic() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.active_pane = PaneFocus::Activity;
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Build"));
+    assert!(rendered.contains("ctx"));
+    Ok(())
+}
+
+fn inject_write_file_approval(app: &mut AppState) -> anyhow::Result<()> {
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-1".to_owned(),
+            name: "write_file".to_owned(),
+            args_json: r#"{"path":"note.txt"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "write_file".to_owned(),
+            description: "Write file".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        preview: Some(ToolPreview {
+            title: "Update note.txt".to_owned(),
+            summary: "summary".to_owned(),
+            body: [
+                "--- note.txt",
+                "+++ note.txt",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+            ]
+            .join("\n"),
+            changed_files: vec!["note.txt".to_owned()],
+            file_diffs: vec![ToolPreviewFile {
+                path: "note.txt".to_owned(),
+                diff: [
+                    "--- note.txt",
+                    "+++ note.txt",
+                    "@@ -1 +1 @@",
+                    "-old",
+                    "+new",
+                ]
+                .join("\n"),
+            }],
+        }),
+    })
 }
