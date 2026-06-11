@@ -1,4 +1,5 @@
 use ratatui::style::{Modifier, Style};
+use std::collections::VecDeque;
 
 use super::*;
 
@@ -76,22 +77,26 @@ fn blank_lines_and_cache_hits_cover_internal_paths() {
 
 #[test]
 fn cache_eviction_and_style_conversion_cover_remaining_helpers() {
-    highlight_cache().lock().expect("cache lock").clear();
+    let mut cache = VecDeque::new();
 
     for index in 0..=HIGHLIGHT_CACHE_CAPACITY {
-        cache_highlight(
-            &format!("code {index}"),
-            "rust",
-            vec![vec![Span::raw(format!("line {index}"))]],
+        push_cache_entry(
+            &mut cache,
+            HighlightCacheEntry {
+                code: format!("code {index}"),
+                language: "rust".to_owned(),
+                lines: vec![vec![Span::raw(format!("line {index}"))]],
+            },
         );
     }
 
-    let cache = highlight_cache().lock().expect("cache lock");
     assert_eq!(cache.len(), HIGHLIGHT_CACHE_CAPACITY);
-    drop(cache);
-
-    assert!(cached_highlight("code 0", "rust").is_none());
-    assert!(cached_highlight(&format!("code {HIGHLIGHT_CACHE_CAPACITY}"), "rust").is_some());
+    assert!(cache.iter().all(|entry| entry.code != "code 0"));
+    assert!(
+        cache
+            .iter()
+            .any(|entry| entry.code == format!("code {HIGHLIGHT_CACHE_CAPACITY}"))
+    );
 
     assert_eq!(ansi_palette_color(0x07), RatatuiColor::Gray);
     assert_eq!(ansi_palette_color(0x42), RatatuiColor::Indexed(0x42));

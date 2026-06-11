@@ -109,14 +109,21 @@ fn cache_highlight(code: &str, language: &str, lines: HighlightedLines) {
         Ok(cache) => cache,
         Err(poisoned) => poisoned.into_inner(),
     };
+    push_cache_entry(
+        &mut cache,
+        HighlightCacheEntry {
+            language: language.to_owned(),
+            code: code.to_owned(),
+            lines,
+        },
+    );
+}
+
+fn push_cache_entry(cache: &mut VecDeque<HighlightCacheEntry>, entry: HighlightCacheEntry) {
     if cache.len() >= HIGHLIGHT_CACHE_CAPACITY {
         cache.pop_front();
     }
-    cache.push_back(HighlightCacheEntry {
-        language: language.to_owned(),
-        code: code.to_owned(),
-        lines,
-    });
+    cache.push_back(entry);
 }
 
 fn find_syntax(language: &str) -> Option<&'static SyntaxReference> {
