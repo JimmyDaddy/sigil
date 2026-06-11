@@ -84,6 +84,23 @@ fn initial_sync_seeds_only_first_chunk_for_large_history() {
 }
 
 #[test]
+fn default_initial_sync_seeds_large_history_in_one_pass() {
+    let state = ScrollbackSyncState::default();
+
+    let plan = plan_scrollback_sync(&state, "session-a", 5_000, 0);
+
+    assert_eq!(
+        plan,
+        ScrollbackSyncPlan::Seed {
+            insert_separator: false,
+            from_index: 0,
+            to_index: 5_000,
+            total_line_count: 5_000,
+        }
+    );
+}
+
+#[test]
 fn pending_seed_continues_from_previous_chunk() {
     let state = ScrollbackSyncState {
         session_id: Some("session-a".to_owned()),

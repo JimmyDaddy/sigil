@@ -35,7 +35,9 @@ use unicode_width::UnicodeWidthStr;
 const BUSY_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SCROLLBACK_SEED_POLL_INTERVAL: Duration = Duration::from_millis(16);
-const SCROLLBACK_SEED_CHUNK_LINES: usize = 160;
+// Seed restored scrollback in one pass so startup does not visibly redraw chunk by chunk.
+const SCROLLBACK_SEED_CHUNK_LINES: usize = usize::MAX;
+const MAX_SCROLLBACK_INSERT_ROWS: usize = u16::MAX as usize;
 const SPINNER_FRAME_MILLIS: u128 = 120;
 
 #[derive(Parser)]
@@ -69,8 +71,6 @@ fn main() -> Result<()> {
             viewport: Viewport::Inline(inline_viewport_height),
         },
     )?;
-    terminal.clear()?;
-
     let result = run_app(&mut terminal, &mut app, &mut worker);
 
     if keyboard_enhancement_enabled {
@@ -493,10 +493,12 @@ fn insert_scrollback_lines(
         .iter()
         .flat_map(|line| scrollback_wrapped_rows(line, width))
         .collect::<Vec<_>>();
-    let height = rows.len().max(1) as u16;
-    terminal.insert_before(height, |buf| {
-        render_scrollback_rows(buf, &rows);
-    })?;
+    for chunk in rows.chunks(MAX_SCROLLBACK_INSERT_ROWS) {
+        let height = chunk.len().max(1) as u16;
+        terminal.insert_before(height, |buf| {
+            render_scrollback_rows(buf, chunk);
+        })?;
+    }
     Ok(())
 }
 
