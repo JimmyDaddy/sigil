@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, fs};
 
-use sigil_kernel::{CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig, LanguageServerConfig};
+use sigil_kernel::{
+    CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig, LanguageServerConfig,
+};
 
 use crate::discovery::{DiscoveredLanguageServer, DiscoverySource, ServerAvailability};
 
@@ -55,6 +57,28 @@ fn effective_server_plan_keeps_missing_servers_status_only() {
             .find(|status| status.server == "typescript-language-server")
             .map(|status| status.status.as_str()),
         Some("missing")
+    );
+}
+
+#[test]
+fn effective_server_plan_reports_degraded_status_when_discovery_fails() {
+    let missing_root = std::env::temp_dir().join("sigil-code-intel-missing-root");
+    let config = CodeIntelligenceConfig {
+        enabled: true,
+        discovery: CodeIntelligenceDiscoveryConfig {
+            enabled: true,
+            report_missing: true,
+        },
+        ..CodeIntelligenceConfig::default()
+    };
+
+    let plan = effective_server_plan(&config, &missing_root);
+
+    assert!(plan.servers.contains(&default_rust_analyzer_server()));
+    assert!(
+        plan.statuses.iter().any(|status| {
+            status.server == "discovery" && status.status.starts_with("degraded ")
+        })
     );
 }
 
@@ -146,6 +170,67 @@ fn resolve_workspace_file_rejects_paths_outside_workspace() {
 }
 
 #[test]
+fn config_enabled_respects_enabled_and_startup_flags() {
+    assert!(!config_enabled(&CodeIntelligenceConfig::default()));
+    assert!(!config_enabled(&CodeIntelligenceConfig {
+        enabled: true,
+        startup: CodeIntelStartup::Off,
+        ..CodeIntelligenceConfig::default()
+    }));
+    assert!(config_enabled(&CodeIntelligenceConfig {
+        enabled: true,
+        startup: CodeIntelStartup::Lazy,
+        ..CodeIntelligenceConfig::default()
+    }));
+}
+
+#[test]
+fn canonical_workspace_root_errors_for_missing_directory() {
+    let missing = std::env::temp_dir().join("sigil-code-intel-no-root");
+    let error = canonical_workspace_root(&missing).expect_err("missing workspace root should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to resolve workspace root")
+    );
+}
+
+#[test]
+fn resolve_workspace_file_rejects_empty_and_missing_paths() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+
+    let empty = resolve_workspace_file(temp.path(), "").expect_err("empty path should fail");
+    assert!(empty.to_string().contains("path cannot be empty"));
+
+    let missing =
+        resolve_workspace_file(temp.path(), "missing.rs").expect_err("missing file should fail");
+    assert!(missing.to_string().contains("missing.rs"));
+}
+
+#[test]
+fn language_for_path_prefers_matching_extension_then_defaults() {
+    let multi = test_server("ts", &["typescript", "javascript"], &["ts", "js"]);
+    assert_eq!(
+        language_for_path(&multi, std::path::Path::new("src/lib.rs")),
+        "rust"
+    );
+    assert_eq!(
+        language_for_path(&multi, std::path::Path::new("src/main.ts")),
+        "typescript"
+    );
+
+    let empty = LanguageServerConfig {
+        languages: Vec::new(),
+        ..test_server("empty", &[], &["txt"])
+    };
+    assert_eq!(
+        language_for_path(&empty, std::path::Path::new("notes.txt")),
+        "plaintext"
+    );
+}
+
+#[test]
 fn safe_lsp_command_allows_pathless_command_and_blocks_escape() {
     let temp = tempfile::tempdir().expect("tempdir should build");
 
@@ -153,20 +238,20 @@ fn safe_lsp_command_allows_pathless_command_and_blocks_escape() {
         safe_lsp_command(temp.path(), "rust-analyzer").expect("pathless command should pass"),
         std::path::PathBuf::from("rust-analyzer")
     );
+    assert_eq!(
+        safe_lsp_command(temp.path(), "bin/rust-analyzer")
+            .expect("nested relative command should stay in workspace"),
+        canonical_workspace_root(temp.path())
+            .expect("workspace root should canonicalize")
+            .join("bin/rust-analyzer")
+    );
+    assert!(safe_lsp_command(temp.path(), "").is_err());
+    assert_eq!(
+        safe_lsp_command(temp.path(), "/usr/bin/rust-analyzer")
+            .expect("absolute command should pass through"),
+        std::path::PathBuf::from("/usr/bin/rust-analyzer")
+    );
     assert!(safe_lsp_command(temp.path(), "../bin/lsp").is_err());
-}
-
-#[test]
-fn resolve_workspace_file_rejects_empty_and_missing_paths() {
-    let temp = tempfile::tempdir().expect("tempdir should build");
-
-    let empty_error =
-        resolve_workspace_file(temp.path(), "").expect_err("empty path should be rejected");
-    let missing_error = resolve_workspace_file(temp.path(), "missing.rs")
-        .expect_err("missing path should be rejected");
-
-    assert!(empty_error.to_string().contains("path cannot be empty"));
-    assert!(missing_error.to_string().contains("does not exist"));
 }
 
 #[test]
@@ -268,4 +353,16 @@ fn file_uri_roundtrips_paths_with_spaces() {
     let uri = file_uri_from_path(path);
 
     assert_eq!(path_from_file_uri(&uri), Some(path.to_path_buf()));
+}
+
+#[test]
+fn file_uri_encodes_relative_paths_and_invalid_hex_is_left_literal() {
+    let uri = file_uri_from_path(std::path::Path::new("relative dir/main.rs"));
+
+    assert!(uri.starts_with("file://"));
+    assert!(uri.contains("relative%20dir/main.rs"));
+    assert_eq!(
+        path_from_file_uri("file:///tmp/%ZZ/path"),
+        Some(std::path::PathBuf::from("/tmp/%ZZ/path"))
+    );
 }

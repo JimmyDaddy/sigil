@@ -15,8 +15,8 @@ use tokio::{
 };
 
 use crate::{
-    DeepSeekFimCompletionRequest, DeepSeekPrefixCompletionRequest, request::build_chat_request,
-    stream::test_support::parse_sse_frames,
+    DeepSeekFimCompletionRequest, DeepSeekPrefixCompletionRequest, models::DeepSeekStreamEnvelope,
+    request::build_chat_request, stream::test_support::parse_sse_frames,
 };
 
 use super::DeepSeekProvider;
@@ -90,6 +90,111 @@ fn sse_parser_ignores_comments_and_blanks() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn reasoning_retry_and_mapper_helpers_cover_provider_side_branches() -> Result<()> {
+    let state = crate::reasoning::DeepSeekReasoningReplayPayload {
+        reasoning_content: "step by step".to_owned(),
+    }
+    .into_state();
+    assert_eq!(
+        state.state_kind,
+        crate::reasoning::REASONING_REPLAY_STATE_KIND
+    );
+    assert_eq!(state.opaque_blob["reasoning_content"], "step by step");
+
+    assert!(matches!(
+        crate::retry::classify_status(401, ""),
+        crate::errors::DeepSeekProviderError::Authentication(401)
+    ));
+    assert!(matches!(
+        crate::retry::classify_status(402, ""),
+        crate::errors::DeepSeekProviderError::Billing(402)
+    ));
+    assert!(matches!(
+        crate::retry::classify_status(429, ""),
+        crate::errors::DeepSeekProviderError::RateLimited
+    ));
+    assert!(matches!(
+        crate::retry::classify_status(503, ""),
+        crate::errors::DeepSeekProviderError::RetryableStatus(503)
+    ));
+    assert!(matches!(
+        crate::retry::classify_status(400, "bad input"),
+        crate::errors::DeepSeekProviderError::InvalidRequest(ref body) if body == "bad input"
+    ));
+
+    let mut mapper = crate::mapper::StreamMapper::new("deepseek-v4-flash");
+    let envelope: DeepSeekStreamEnvelope = serde_json::from_value(serde_json::json!({
+        "choices": [{
+            "delta": {
+                "content": "hello",
+                "reasoning_content": "think",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\":\"src/lib.rs\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "prompt_cache_hit_tokens": 4,
+            "prompt_cache_miss_tokens": 6
+        },
+        "system_fingerprint": "fp-1"
+    }))?;
+
+    let chunks = mapper.map_envelope(envelope)?;
+    assert!(matches!(
+        chunks.as_slice(),
+        [
+            ProviderChunk::Usage(_),
+            ProviderChunk::TextDelta(text),
+            ProviderChunk::ReasoningDelta(reasoning),
+            ProviderChunk::ToolCallStart { id, name },
+            ProviderChunk::ToolCallArgsDelta { id: args_id, delta },
+            ProviderChunk::ToolCallComplete(call),
+            ProviderChunk::ContinuationState(state)
+        ] if text == "hello"
+            && reasoning == "think"
+            && id == "call-1"
+            && name == "read_file"
+            && args_id == "call-1"
+            && delta == "{\"path\":\"src/lib.rs\"}"
+            && call.id == "call-1"
+            && call.name == "read_file"
+            && call.args_json == "{\"path\":\"src/lib.rs\"}"
+            && state.state_kind == crate::reasoning::REASONING_REPLAY_STATE_KIND
+    ));
+
+    let stop_envelope: DeepSeekStreamEnvelope = serde_json::from_value(serde_json::json!({
+        "choices": [{
+            "delta": { "reasoning_content": "done" },
+            "finish_reason": "stop"
+        }]
+    }))?;
+    let chunks = mapper.map_envelope(stop_envelope)?;
+    assert!(
+        matches!(chunks.as_slice(), [ProviderChunk::ReasoningDelta(reasoning)] if reasoning == "done")
+    );
+    Ok(())
+}
+
+#[test]
+fn truncate_event_payload_adds_ellipsis_for_large_events() {
+    let short = super::truncate_event_payload("short");
+    assert_eq!(short, "short");
+
+    let long = super::truncate_event_payload(&"x".repeat(300));
+    assert!(long.ends_with("..."));
+    assert!(long.len() < 300);
+}
+
 #[tokio::test]
 async fn provider_retries_400_reasoning_and_yields_chunks() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![
@@ -149,6 +254,40 @@ async fn provider_retries_400_reasoning_and_yields_chunks() -> Result<()> {
             .iter()
             .any(|chunk| matches!(chunk, ProviderChunk::TextDelta(text) if text == "hello"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_reports_missing_api_key_before_network() -> Result<()> {
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: "http://127.0.0.1:9".to_owned(),
+        beta_base_url: "http://127.0.0.1:9".to_owned(),
+        anthropic_base_url: "http://127.0.0.1:9".to_owned(),
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 1,
+    })?;
+
+    let error = match provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {".to_owned(),
+            suffix: "}\n".to_owned(),
+            max_tokens: Some(8),
+            stop: Vec::new(),
+        })
+        .await
+    {
+        Ok(_) => panic!("missing api key should fail"),
+        Err(error) => error,
+    };
+
+    let message = format!("{error:#}");
+    assert!(message.contains("deepseek completion request failed"));
+    assert!(message.contains("missing api key"));
     Ok(())
 }
 
@@ -241,6 +380,93 @@ async fn provider_stream_ends_after_done_without_waiting_for_socket_close() -> R
         .await
         .expect("stream should end after done without waiting for socket close");
     assert!(finished.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_surfaces_invalid_chat_and_completion_events() -> Result<()> {
+    let chat_server = spawn_mock_server(Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        200,
+        "text/event-stream",
+        &format!("data: {{{}}}\n\n", "x".repeat(300)),
+    )]))))
+    .await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: chat_server.clone(),
+        beta_base_url: chat_server.clone(),
+        anthropic_base_url: chat_server.clone(),
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let request = sigil_kernel::CompletionRequest {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        messages: vec![sigil_kernel::ModelMessage::user("hi")],
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        previous_response_handle: None,
+        continuation_states: Vec::new(),
+        traffic_partition_key: None,
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+    };
+    let error = provider
+        .stream(request)
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .next()
+        .expect("stream should yield one error")
+        .expect_err("invalid chat event should fail");
+    assert!(error.to_string().contains("invalid DeepSeek event"));
+    assert!(error.to_string().contains("..."));
+
+    let completion_server =
+        spawn_mock_server(Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+            200,
+            "text/event-stream",
+            "data: {not-json}\n\n",
+        )]))))
+        .await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: completion_server.clone(),
+        beta_base_url: completion_server.clone(),
+        anthropic_base_url: completion_server.clone(),
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let error = provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {\n".to_owned(),
+            suffix: "\n}\n".to_owned(),
+            max_tokens: Some(8),
+            stop: Vec::new(),
+        })
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .next()
+        .expect("stream should yield one error")
+        .expect_err("invalid completion event should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid DeepSeek completion event")
+    );
     Ok(())
 }
 

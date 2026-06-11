@@ -4,14 +4,14 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 use futures::{Stream, stream};
 use sigil_kernel::{
-    EventHandler, ModelMessage, ProviderChunk, ToolAccess, ToolCall, ToolCategory, ToolErrorKind,
-    ToolPreview, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    UsageStats,
+    EventHandler, ModelMessage, ProviderChunk, RunEvent, ToolAccess, ToolCall, ToolCategory,
+    ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, UsageStats,
 };
 
 use super::{
     Cli, Commands, StdoutEventHandler, default_session_path, drain_provider_stream,
-    resolve_workspace_root,
+    render_provider_chunk, render_run_event, resolve_workspace_root,
 };
 
 fn boxed_chunk_stream(
@@ -69,16 +69,195 @@ fn default_session_path_uses_configured_log_dir_and_jsonl_suffix() {
 }
 
 #[test]
-fn cli_parses_run_command_with_explicit_config() -> Result<()> {
-    let cli = Cli::try_parse_from(["sigil", "--config", "custom.toml", "run", "hello"])?;
+fn render_provider_chunk_formats_text_reasoning_usage_and_done() {
+    let text = render_provider_chunk(ProviderChunk::TextDelta("hello".to_owned()));
+    assert_eq!(text.stdout, "hello");
+    assert!(!text.stop);
 
-    assert_eq!(
-        cli.config.as_deref(),
-        Some(std::path::Path::new("custom.toml"))
+    let reasoning = render_provider_chunk(ProviderChunk::ReasoningSummaryDelta("plan".to_owned()));
+    assert_eq!(reasoning.stderr, "[reasoning] plan");
+
+    let usage = render_provider_chunk(ProviderChunk::Usage(UsageStats {
+        prompt_tokens: 7,
+        completion_tokens: 3,
+        cache_hit_tokens: 0,
+        cache_miss_tokens: 0,
+        input_cost: 0.0,
+        output_cost: 0.0,
+        cache_savings: 0.0,
+        system_fingerprint: Some("fp-1".to_owned()),
+    }));
+    assert!(
+        usage
+            .stderr
+            .contains("[usage] prompt=7 completion=3 fingerprint=fp-1")
     );
+
+    let done = render_provider_chunk(ProviderChunk::Done);
+    assert!(done.stop);
+}
+
+#[test]
+fn render_run_event_formats_tool_events_usage_and_notice() {
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: "write_file".to_owned(),
+        args_json: "{\"path\":\"src/main.rs\"}".to_owned(),
+    };
+    let spec = ToolSpec {
+        name: "write_file".to_owned(),
+        description: "write".to_owned(),
+        input_schema: Default::default(),
+        category: ToolCategory::File,
+        access: ToolAccess::Write,
+        preview: ToolPreviewCapability::Required,
+    };
+    let approval = render_run_event(RunEvent::ToolApprovalRequested {
+        call: call.clone(),
+        spec,
+        subjects: vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+        preview: Some(ToolPreview {
+            title: "Write".to_owned(),
+            summary: "1 file changed".to_owned(),
+            body: String::new(),
+            changed_files: vec!["src/main.rs".to_owned()],
+            file_diffs: Vec::new(),
+        }),
+    });
+    assert!(
+        approval
+            .stderr
+            .contains("[tool:approval] write_file (call-1) file write")
+    );
+    assert!(approval.stderr.contains("[tool:preview] 1 file changed"));
+
+    let args = render_run_event(RunEvent::ToolCallArgsDelta {
+        id: "call-1".to_owned(),
+        delta: "{\"path\":\"src/main.rs\"}".to_owned(),
+    });
+    assert!(args.stderr.contains("[tool:args:call-1]"));
+
+    let result = render_run_event(RunEvent::ToolResult(ToolResult::error(
+        "call-1",
+        "write_file",
+        sigil_kernel::ToolErrorKind::PermissionDenied,
+        "denied",
+    )));
+    assert!(
+        result
+            .stderr
+            .contains("[tool:result] write_file error=true denied")
+    );
+
+    let usage = render_run_event(RunEvent::Usage(UsageStats {
+        prompt_tokens: 9,
+        completion_tokens: 4,
+        cache_hit_tokens: 0,
+        cache_miss_tokens: 0,
+        input_cost: 0.0,
+        output_cost: 0.0,
+        cache_savings: 0.0,
+        system_fingerprint: Some("fp-2".to_owned()),
+    }));
+    assert!(
+        usage
+            .stderr
+            .contains("[usage] prompt=9 completion=4 fingerprint=fp-2")
+    );
+
+    let notice = render_run_event(RunEvent::Notice("heads up".to_owned()));
+    assert_eq!(notice.stderr, "[notice] heads up\n");
+}
+
+#[tokio::test]
+async fn drain_provider_stream_and_stdout_event_handler_accept_supported_events() -> Result<()> {
+    let mut provider_stream: std::pin::Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>> =
+        Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("hello".to_owned())),
+            Ok(ProviderChunk::ReasoningDelta("think".to_owned())),
+            Ok(ProviderChunk::Usage(UsageStats {
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                cache_hit_tokens: 0,
+                cache_miss_tokens: 0,
+                input_cost: 0.0,
+                output_cost: 0.0,
+                cache_savings: 0.0,
+                system_fingerprint: Some("fp".to_owned()),
+            })),
+            Ok(ProviderChunk::Done),
+            Ok(ProviderChunk::TextDelta("ignored after done".to_owned())),
+        ]));
+
+    drain_provider_stream(&mut provider_stream).await?;
+
+    let mut handler = StdoutEventHandler;
+    handler.handle(RunEvent::TextDelta("hello".to_owned()))?;
+    handler.handle(RunEvent::ReasoningDelta("think".to_owned()))?;
+    handler.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    handler.handle(RunEvent::ToolCallCompleted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    handler.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-1".to_owned(),
+        approved: false,
+        reason: Some("blocked".to_owned()),
+    })?;
+    handler.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-1",
+        "read_file",
+        "ok",
+        ToolResultMeta::default(),
+    )))?;
+    handler.handle(RunEvent::ContinuationState(
+        sigil_kernel::ProviderContinuationState {
+            provider_name: "deepseek".to_owned(),
+            state_kind: "kind".to_owned(),
+            message_id: None,
+            opaque_blob: Default::default(),
+        },
+    ))?;
+    handler.handle(RunEvent::AssistantMessage(
+        sigil_kernel::ModelMessage::assistant(None, Vec::new()),
+    ))?;
+    Ok(())
+}
+
+#[test]
+fn cli_parses_hidden_fim_command_options() -> Result<()> {
+    let cli = Cli::try_parse_from([
+        "sigil",
+        "fim",
+        "prefix",
+        "--suffix",
+        "tail",
+        "--stop",
+        "<eof>",
+        "--model",
+        "deepseek-test",
+        "--max-tokens",
+        "64",
+    ])?;
+
     assert!(matches!(
         cli.command,
-        Commands::Run { ref prompt } if prompt == "hello"
+        Commands::Fim {
+            ref prompt,
+            ref suffix,
+            ref stop,
+            ref model,
+            max_tokens,
+        } if prompt == "prefix"
+            && suffix == "tail"
+            && stop == &vec!["<eof>".to_owned()]
+            && model.as_deref() == Some("deepseek-test")
+            && max_tokens == Some(64)
     ));
     Ok(())
 }
@@ -113,34 +292,16 @@ fn cli_parses_hidden_prefix_command_options() -> Result<()> {
 }
 
 #[test]
-fn cli_parses_hidden_fim_command_options() -> Result<()> {
-    let cli = Cli::try_parse_from([
-        "sigil",
-        "fim",
-        "prefix",
-        "--suffix",
-        "tail",
-        "--stop",
-        "<eof>",
-        "--model",
-        "deepseek-test",
-        "--max-tokens",
-        "64",
-    ])?;
+fn cli_parses_run_command_with_explicit_config() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "--config", "custom.toml", "run", "hello"])?;
 
+    assert_eq!(
+        cli.config.as_deref(),
+        Some(std::path::Path::new("custom.toml"))
+    );
     assert!(matches!(
         cli.command,
-        Commands::Fim {
-            ref prompt,
-            ref suffix,
-            ref stop,
-            ref model,
-            max_tokens,
-        } if prompt == "prefix"
-            && suffix == "tail"
-            && stop == &vec!["<eof>".to_owned()]
-            && model.as_deref() == Some("deepseek-test")
-            && max_tokens == Some(64)
+        Commands::Run { ref prompt } if prompt == "hello"
     ));
     Ok(())
 }

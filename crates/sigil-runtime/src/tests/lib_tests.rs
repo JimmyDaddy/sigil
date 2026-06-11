@@ -18,7 +18,7 @@ use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
 use super::{
     SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
     build_run_options, build_tool_registry, load_deepseek_config, resolve_deepseek_api_key,
-    secret_redactor_for_root_config,
+    resolve_deepseek_api_key_with_session, secret_redactor_for_root_config,
 };
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -139,6 +139,18 @@ fn build_provider_rejects_unsupported_provider() {
 }
 
 #[test]
+fn build_provider_supports_deepseek_and_missing_provider_config_errors() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    assert_eq!(provider.name(), "deepseek");
+
+    let mut missing = test_root_config("deepseek");
+    missing.providers.clear();
+    let error = load_deepseek_config(&missing).expect_err("missing provider config should fail");
+    assert!(error.to_string().contains("missing [providers.deepseek]"));
+    Ok(())
+}
+
+#[test]
 fn build_run_options_carries_shared_runtime_defaults() {
     let workspace_root = Path::new("/tmp/sigil-runtime-test").to_path_buf();
     let options = build_run_options(
@@ -158,6 +170,40 @@ fn build_run_options_carries_shared_runtime_defaults() {
             .is_some_and(|key| key.starts_with("workspace-"))
     );
     assert_eq!(options.interaction_mode, InteractionMode::Interactive);
+}
+
+#[test]
+fn build_run_options_uses_max_reasoning_for_non_deepseek() {
+    let options = build_run_options(
+        &test_root_config("other"),
+        Path::new("/tmp/sigil-runtime-test").to_path_buf(),
+        InteractionMode::Headless,
+    );
+
+    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::Max));
+}
+
+#[test]
+fn resolve_deepseek_api_key_prefers_session_over_plaintext_and_skips_blank_values() -> Result<()> {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let _scope = EnvScope::set_many(&[
+        (SIGIL_API_KEY_ENV, "   "),
+        (LEGACY_DEEPSEEK_API_KEY_ENV, "   "),
+    ]);
+    let config = load_deepseek_config(&test_root_config("deepseek"))?;
+
+    let resolved = resolve_deepseek_api_key_with_session(&config, Some("  session-secret  "))
+        .expect("session api key should resolve");
+    assert_eq!(resolved.value, "session-secret");
+    assert_eq!(resolved.source, SecretSource::Session);
+
+    let resolved = resolve_deepseek_api_key_with_session(&config, Some("   "))
+        .expect("config fallback should resolve");
+    assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
+    Ok(())
 }
 
 #[tokio::test]

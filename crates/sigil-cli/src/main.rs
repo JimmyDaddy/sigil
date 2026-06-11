@@ -172,25 +172,152 @@ fn default_session_path(workspace_root: &Path, configured_log_dir: &str) -> Path
         .join(format!("session-{}.jsonl", uuid::Uuid::new_v4()))
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RenderedOutput {
+    stdout: String,
+    stderr: String,
+    stop: bool,
+}
+
+fn render_provider_chunk(chunk: ProviderChunk) -> RenderedOutput {
+    match chunk {
+        ProviderChunk::TextDelta(delta) => RenderedOutput {
+            stdout: delta,
+            ..RenderedOutput::default()
+        },
+        ProviderChunk::ReasoningDelta(delta) | ProviderChunk::ReasoningSummaryDelta(delta) => {
+            RenderedOutput {
+                stderr: format!("[reasoning] {delta}"),
+                ..RenderedOutput::default()
+            }
+        }
+        ProviderChunk::Usage(usage) => usage
+            .system_fingerprint
+            .map(|fingerprint| RenderedOutput {
+                stderr: format!(
+                    "\n[usage] prompt={} completion={} fingerprint={fingerprint}\n",
+                    usage.prompt_tokens, usage.completion_tokens
+                ),
+                ..RenderedOutput::default()
+            })
+            .unwrap_or_default(),
+        ProviderChunk::Done => RenderedOutput {
+            stop: true,
+            ..RenderedOutput::default()
+        },
+        _ => RenderedOutput::default(),
+    }
+}
+
+fn render_run_event(event: RunEvent) -> RenderedOutput {
+    match event {
+        RunEvent::TextDelta(delta) => RenderedOutput {
+            stdout: delta,
+            ..RenderedOutput::default()
+        },
+        RunEvent::ReasoningDelta(delta) => RenderedOutput {
+            stderr: format!("[reasoning] {delta}"),
+            ..RenderedOutput::default()
+        },
+        RunEvent::ToolCallStarted(call) => RenderedOutput {
+            stderr: format!("\n[tool:start] {} ({})\n", call.name, call.id),
+            ..RenderedOutput::default()
+        },
+        RunEvent::ToolCallArgsDelta { id, delta } => RenderedOutput {
+            stderr: format!("[tool:args:{id}] {delta}\n"),
+            ..RenderedOutput::default()
+        },
+        RunEvent::ToolCallCompleted(call) => RenderedOutput {
+            stderr: format!("[tool:complete] {} ({})\n", call.name, call.id),
+            ..RenderedOutput::default()
+        },
+        RunEvent::ToolApprovalRequested {
+            call,
+            spec,
+            subjects,
+            preview,
+        } => {
+            let mut stderr = format!(
+                "[tool:approval] {} ({}) {} {} subjects={}\n",
+                call.name,
+                call.id,
+                spec.category.as_str(),
+                spec.access.as_str(),
+                subjects
+                    .iter()
+                    .map(|subject| subject.normalized.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            if let Some(preview) = preview {
+                stderr.push_str(&format!("[tool:preview] {}\n", preview.summary));
+            }
+            RenderedOutput {
+                stderr,
+                ..RenderedOutput::default()
+            }
+        }
+        RunEvent::ToolApprovalResolved {
+            call_id,
+            approved,
+            reason,
+        } => RenderedOutput {
+            stderr: format!(
+                "[tool:approval:{call_id}] {}{}\n",
+                if approved { "approved" } else { "denied" },
+                reason
+                    .map(|value| format!(" ({value})"))
+                    .unwrap_or_default()
+            ),
+            ..RenderedOutput::default()
+        },
+        RunEvent::ToolResult(result) => RenderedOutput {
+            stderr: format!(
+                "[tool:result] {} error={} {}\n",
+                result.tool_name,
+                result.is_error(),
+                result.content
+            ),
+            ..RenderedOutput::default()
+        },
+        RunEvent::Usage(usage) => usage
+            .system_fingerprint
+            .map(|fingerprint| RenderedOutput {
+                stderr: format!(
+                    "\n[usage] prompt={} completion={} fingerprint={fingerprint}\n",
+                    usage.prompt_tokens, usage.completion_tokens
+                ),
+                ..RenderedOutput::default()
+            })
+            .unwrap_or_default(),
+        RunEvent::Notice(note) => RenderedOutput {
+            stderr: format!("[notice] {note}\n"),
+            ..RenderedOutput::default()
+        },
+        RunEvent::ContinuationState(_) | RunEvent::Control(_) | RunEvent::AssistantMessage(_) => {
+            RenderedOutput::default()
+        }
+    }
+}
+
+fn emit_rendered_output(output: RenderedOutput) {
+    if !output.stdout.is_empty() {
+        print!("{}", output.stdout);
+    }
+    if !output.stderr.is_empty() {
+        eprint!("{}", output.stderr);
+    }
+}
+
 async fn drain_provider_stream(
     stream: &mut std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderChunk>> + Send>>,
 ) -> Result<()> {
     while let Some(chunk) = stream.next().await {
-        match chunk? {
-            ProviderChunk::TextDelta(delta) => print!("{delta}"),
-            ProviderChunk::ReasoningDelta(delta) | ProviderChunk::ReasoningSummaryDelta(delta) => {
-                eprint!("[reasoning] {delta}")
-            }
-            ProviderChunk::Usage(usage) => {
-                if let Some(fingerprint) = usage.system_fingerprint {
-                    eprintln!(
-                        "\n[usage] prompt={} completion={} fingerprint={}",
-                        usage.prompt_tokens, usage.completion_tokens, fingerprint
-                    );
-                }
-            }
-            ProviderChunk::Done => break,
-            _ => {}
+        let output = render_provider_chunk(chunk?);
+        let stop = output.stop;
+        emit_rendered_output(output);
+        if stop {
+            break;
         }
     }
     println!();
@@ -202,79 +329,7 @@ struct StdoutEventHandler;
 
 impl EventHandler for StdoutEventHandler {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
-        match event {
-            RunEvent::TextDelta(delta) => {
-                print!("{delta}");
-            }
-            RunEvent::ReasoningDelta(delta) => {
-                eprint!("[reasoning] {delta}");
-            }
-            RunEvent::ToolCallStarted(call) => {
-                eprintln!("\n[tool:start] {} ({})", call.name, call.id);
-            }
-            RunEvent::ToolCallArgsDelta { id, delta } => {
-                eprintln!("[tool:args:{id}] {delta}");
-            }
-            RunEvent::ToolCallCompleted(call) => {
-                eprintln!("[tool:complete] {} ({})", call.name, call.id);
-            }
-            RunEvent::ToolApprovalRequested {
-                call,
-                spec,
-                subjects,
-                preview,
-            } => {
-                eprintln!(
-                    "[tool:approval] {} ({}) {} {} subjects={}",
-                    call.name,
-                    call.id,
-                    spec.category.as_str(),
-                    spec.access.as_str(),
-                    subjects
-                        .iter()
-                        .map(|subject| subject.normalized.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-                if let Some(preview) = preview {
-                    eprintln!("[tool:preview] {}", preview.summary);
-                }
-            }
-            RunEvent::ToolApprovalResolved {
-                call_id,
-                approved,
-                reason,
-            } => {
-                eprintln!(
-                    "[tool:approval:{}] {}{}",
-                    call_id,
-                    if approved { "approved" } else { "denied" },
-                    reason
-                        .map(|value| format!(" ({value})"))
-                        .unwrap_or_default()
-                );
-            }
-            RunEvent::ToolResult(result) => {
-                eprintln!(
-                    "[tool:result] {} error={} {}",
-                    result.tool_name,
-                    result.is_error(),
-                    result.content
-                );
-            }
-            RunEvent::Usage(usage) => {
-                if let Some(fingerprint) = usage.system_fingerprint {
-                    eprintln!(
-                        "\n[usage] prompt={} completion={} fingerprint={}",
-                        usage.prompt_tokens, usage.completion_tokens, fingerprint
-                    );
-                }
-            }
-            RunEvent::Notice(note) => eprintln!("[notice] {note}"),
-            RunEvent::ContinuationState(_)
-            | RunEvent::Control(_)
-            | RunEvent::AssistantMessage(_) => {}
-        }
+        emit_rendered_output(render_run_event(event));
         Ok(())
     }
 }

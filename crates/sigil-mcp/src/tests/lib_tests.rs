@@ -1,7 +1,7 @@
 use std::fs;
 
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{Value, json};
 use sigil_kernel::{
     ApprovalMode, McpServerConfig, McpServerStartup, McpServerTrustPolicy, McpTrustClass,
     ProviderCapabilities, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
@@ -10,7 +10,9 @@ use sigil_kernel::{
 
 use super::{
     McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, activate_lazy_mcp_tools,
-    register_mcp_tools, register_mcp_tools_with_capabilities_roots_and_secrets,
+    activate_lazy_mcp_tools_with_capabilities_roots_and_secrets, register_mcp_tools,
+    register_mcp_tools_with_capabilities_and_roots,
+    register_mcp_tools_with_capabilities_roots_and_secrets,
     register_mcp_tools_with_capabilities_roots_secrets_and_elicitation,
 };
 
@@ -1563,96 +1565,10 @@ while True:
     Ok(())
 }
 
-#[test]
-fn unsupported_elicitation_handler_reports_capability() {
-    let handler = super::unsupported_mcp_elicitation_handler();
-    assert!(!handler.supports_elicitation());
-}
-
 #[tokio::test]
-async fn unsupported_elicitation_handler_rejects_requests() {
-    let handler = super::unsupported_mcp_elicitation_handler();
-    let error = handler
-        .elicit(McpElicitationRequest {
-            server_name: "fake".to_owned(),
-            message: "need input".to_owned(),
-            requested_schema: json!({"type":"object"}),
-        })
-        .await
-        .expect_err("unsupported handler should fail");
-    assert!(error.to_string().contains("not supported"));
-}
-
-#[test]
-fn mcp_name_and_uri_helpers_sanitize_and_encode() {
-    assert_eq!(
-        super::sanitize_provider_name_part("bad name///tool"),
-        "bad_name_tool"
-    );
-    assert_eq!(super::sanitize_provider_name_part("!!!"), "tool");
-    assert_eq!(
-        super::root_name(std::path::Path::new("/tmp/test-root")),
-        "test-root"
-    );
-    assert_eq!(
-        super::file_uri(std::path::Path::new("/tmp/space name.txt")),
-        "file:///tmp/space%20name.txt"
-    );
-}
-
-#[test]
-fn mcp_egress_json_summary_handles_arrays_and_scalars() {
-    let array = super::summarize_egress_json(&json!(["a", 1, true]));
-    assert_eq!(array["type"], "array");
-    assert_eq!(array["item_count"], 3);
-
-    let scalar = super::summarize_egress_json(&json!(true));
-    assert_eq!(scalar["type"], "bool");
-}
-
-#[tokio::test]
-async fn mcp_public_capability_wrappers_handle_empty_server_lists() -> Result<()> {
+async fn capability_and_lazy_wrapper_apis_register_expected_tools() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let capabilities = ProviderCapabilities {
-        tool_name_max_chars: 32,
-        ..test_provider_capabilities()
-    };
-    let mut registry = ToolRegistry::new();
-
-    super::register_mcp_tools_with_capabilities(&mut registry, &[], &capabilities).await?;
-    super::register_mcp_tools_with_capabilities_and_roots(
-        &mut registry,
-        &[],
-        &capabilities,
-        vec![temp.path().to_path_buf()],
-    )
-    .await?;
-    super::activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
-        &mut registry,
-        &[],
-        &capabilities,
-        vec![temp.path().to_path_buf()],
-        SecretRedactor::empty(),
-    )
-    .await?;
-    super::activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
-        &mut registry,
-        &[],
-        &capabilities,
-        vec![temp.path().to_path_buf()],
-        SecretRedactor::empty(),
-        super::unsupported_mcp_elicitation_handler(),
-    )
-    .await?;
-
-    assert!(registry.specs().is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn optional_mcp_server_tools_list_failure_is_skipped() -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let script = temp.path().join("tools_list_error_mcp_server.py");
+    let script = temp.path().join("wrapper_mcp_server.py");
     write_fake_server_script(
         &script,
         r#"#!/usr/bin/env python3
@@ -1688,21 +1604,206 @@ while True:
     elif method == "notifications/initialized":
         pass
     elif method == "tools/list":
-        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"tools are unavailable"}})
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
 "#,
     )?;
 
+    let eager = McpServerConfig {
+        name: "wrapper-eager".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.to_string_lossy().to_string()],
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    };
+    let lazy = McpServerConfig {
+        name: "wrapper-lazy".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.to_string_lossy().to_string()],
+        startup_timeout_secs: 5,
+        startup: McpServerStartup::Lazy,
+        ..McpServerConfig::default()
+    };
     let mut registry = ToolRegistry::new();
-    register_mcp_tools(
+    register_mcp_tools_with_capabilities_and_roots(
         &mut registry,
-        &[McpServerConfig {
-            name: "optional-tools".to_owned(),
-            command: "python3".to_owned(),
-            args: vec![script.to_string_lossy().to_string()],
-            startup_timeout_secs: 5,
-            required: false,
-            ..McpServerConfig::default()
-        }],
+        std::slice::from_ref(&eager),
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+    )
+    .await?;
+    assert!(registry.spec_for("mcp__wrapper_eager__echo").is_some());
+
+    activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
+        &mut registry,
+        &[lazy],
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::empty(),
+    )
+    .await?;
+    assert!(registry.spec_for("mcp__wrapper_lazy__echo").is_some());
+    Ok(())
+}
+
+#[test]
+fn helper_types_cover_defaults_summaries_and_paths() {
+    assert_eq!(
+        McpElicitationResponse::accept(json!({"name":"sigil"})).into_result(),
+        json!({ "action": "accept", "content": { "name": "sigil" } })
+    );
+    assert_eq!(
+        McpElicitationResponse {
+            action: super::McpElicitationAction::Accept,
+            content: None,
+        }
+        .into_result(),
+        json!({ "action": "accept", "content": {} })
+    );
+    assert_eq!(
+        McpElicitationResponse::decline().into_result(),
+        json!({ "action": "decline" })
+    );
+    assert_eq!(
+        McpElicitationResponse::cancel().into_result(),
+        json!({ "action": "cancel" })
+    );
+
+    let handler = super::unsupported_mcp_elicitation_handler();
+    assert!(!handler.supports_elicitation());
+    let request = super::mcp_elicitation_request("demo", &json!({ "params": {} }))
+        .expect("default elicitation request should build");
+    assert_eq!(request.server_name, "demo");
+    assert_eq!(request.message, "MCP server requested input");
+    assert_eq!(
+        request.requested_schema,
+        json!({ "type": "object", "properties": {} })
+    );
+    assert!(super::mcp_elicitation_request("demo", &json!({})).is_err());
+
+    assert_eq!(
+        super::summarize_egress_json(&json!(["a", "b"]))["item_count"],
+        2
+    );
+    assert_eq!(super::summarize_egress_json(&json!(true))["type"], "bool");
+    assert_eq!(super::json_type_label(&Value::Null), "null");
+    assert_eq!(super::sanitize_provider_name_part("!!"), "tool");
+    let hashed = super::provider_name_with_hash("abcdef", "identity", 6);
+    assert!(hashed.len() > 6);
+    assert!(hashed.contains("__"));
+    assert_eq!(super::stable_hash("abc"), super::stable_hash("abc"));
+    assert_eq!(super::root_name(std::path::Path::new("/")), "workspace");
+    assert!(super::file_uri(std::path::Path::new("relative dir/file.rs")).starts_with("file://"));
+}
+
+#[test]
+fn mcp_egress_json_summary_handles_arrays_and_scalars() {
+    let array = super::summarize_egress_json(&json!(["a", 1, true]));
+    assert_eq!(array["type"], "array");
+    assert_eq!(array["item_count"], 3);
+
+    let scalar = super::summarize_egress_json(&json!(true));
+    assert_eq!(scalar["type"], "bool");
+}
+
+#[test]
+fn mcp_elicitation_request_and_response_defaults_are_stable() -> Result<()> {
+    let request = super::mcp_elicitation_request(
+        "server",
+        &json!({
+            "params": {}
+        }),
+    )?;
+    assert_eq!(request.server_name, "server");
+    assert_eq!(request.message, "MCP server requested input");
+    assert_eq!(request.requested_schema["type"], "object");
+
+    let accept_without_content = McpElicitationResponse {
+        action: super::McpElicitationAction::Accept,
+        content: None,
+    }
+    .into_result();
+    assert_eq!(accept_without_content["action"], "accept");
+    assert_eq!(accept_without_content["content"], json!({}));
+
+    assert_eq!(
+        McpElicitationResponse::decline().into_result(),
+        json!({ "action": "decline" })
+    );
+    assert_eq!(
+        McpElicitationResponse::cancel().into_result(),
+        json!({ "action": "cancel" })
+    );
+
+    let error = super::mcp_elicitation_request("server", &json!({}))
+        .expect_err("missing params should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("MCP elicitation/create missing params object")
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_name_and_uri_helpers_sanitize_and_encode() {
+    assert_eq!(
+        super::sanitize_provider_name_part("bad name///tool"),
+        "bad_name_tool"
+    );
+    assert_eq!(super::sanitize_provider_name_part("!!!"), "tool");
+    assert_eq!(
+        super::root_name(std::path::Path::new("/tmp/test-root")),
+        "test-root"
+    );
+    assert_eq!(
+        super::file_uri(std::path::Path::new("/tmp/space name.txt")),
+        "file:///tmp/space%20name.txt"
+    );
+}
+
+#[test]
+fn mcp_name_hashing_handles_extremely_short_provider_limits() {
+    assert_eq!(
+        super::fit_provider_name_with_hash("short", "identity", 16),
+        "short"
+    );
+    let fitted = super::fit_provider_name_with_hash("very_long_provider_tool_name", "identity", 6);
+    assert!(fitted.contains("__"));
+    assert!(fitted.len() > 6);
+}
+
+#[tokio::test]
+async fn mcp_public_capability_wrappers_handle_empty_server_lists() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let capabilities = ProviderCapabilities {
+        tool_name_max_chars: 32,
+        ..test_provider_capabilities()
+    };
+    let mut registry = ToolRegistry::new();
+
+    super::register_mcp_tools_with_capabilities(&mut registry, &[], &capabilities).await?;
+    super::register_mcp_tools_with_capabilities_and_roots(
+        &mut registry,
+        &[],
+        &capabilities,
+        vec![temp.path().to_path_buf()],
+    )
+    .await?;
+    super::activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
+        &mut registry,
+        &[],
+        &capabilities,
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::empty(),
+    )
+    .await?;
+    super::activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+        &mut registry,
+        &[],
+        &capabilities,
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::empty(),
+        super::unsupported_mcp_elicitation_handler(),
     )
     .await?;
 
@@ -1773,52 +1874,83 @@ while True:
     Ok(())
 }
 
-#[test]
-fn mcp_elicitation_request_and_response_defaults_are_stable() -> Result<()> {
-    let request = super::mcp_elicitation_request(
-        "server",
-        &json!({
-            "params": {}
-        }),
+#[tokio::test]
+async fn optional_mcp_server_tools_list_failure_is_skipped() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("tools_list_error_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"tools are unavailable"}})
+"#,
     )?;
-    assert_eq!(request.server_name, "server");
-    assert_eq!(request.message, "MCP server requested input");
-    assert_eq!(request.requested_schema["type"], "object");
 
-    let accept_without_content = McpElicitationResponse {
-        action: super::McpElicitationAction::Accept,
-        content: None,
-    }
-    .into_result();
-    assert_eq!(accept_without_content["action"], "accept");
-    assert_eq!(accept_without_content["content"], json!({}));
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "optional-tools".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            required: false,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
 
-    assert_eq!(
-        McpElicitationResponse::decline().into_result(),
-        json!({ "action": "decline" })
-    );
-    assert_eq!(
-        McpElicitationResponse::cancel().into_result(),
-        json!({ "action": "cancel" })
-    );
-
-    let error = super::mcp_elicitation_request("server", &json!({}))
-        .expect_err("missing params should be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("MCP elicitation/create missing params object")
-    );
+    assert!(registry.specs().is_empty());
     Ok(())
 }
 
+#[tokio::test]
+async fn unsupported_elicitation_handler_rejects_requests() {
+    let handler = super::unsupported_mcp_elicitation_handler();
+    let error = handler
+        .elicit(McpElicitationRequest {
+            server_name: "fake".to_owned(),
+            message: "need input".to_owned(),
+            requested_schema: json!({"type":"object"}),
+        })
+        .await
+        .expect_err("unsupported handler should fail");
+    assert!(error.to_string().contains("not supported"));
+}
+
 #[test]
-fn mcp_name_hashing_handles_extremely_short_provider_limits() {
-    assert_eq!(
-        super::fit_provider_name_with_hash("short", "identity", 16),
-        "short"
-    );
-    let fitted = super::fit_provider_name_with_hash("very_long_provider_tool_name", "identity", 6);
-    assert!(fitted.contains("__"));
-    assert!(fitted.len() > 6);
+fn unsupported_elicitation_handler_reports_capability() {
+    let handler = super::unsupported_mcp_elicitation_handler();
+    assert!(!handler.supports_elicitation());
 }
