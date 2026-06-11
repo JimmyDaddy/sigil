@@ -233,66 +233,271 @@ fn markdown_plain_text_strips_inline_markup() {
 }
 
 #[test]
-fn markdown_options_normalize_small_widths_and_support_plain_empty_code_blocks() {
-    let options = MarkdownRenderOptions::timeline(0);
-    let lines =
-        render_markdown_timeline_lines(Color::Cyan, Style::default(), "```plain\n```", options);
-    let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+fn markdown_render_options_normalize_surface_widths() {
+    let timeline = MarkdownRenderOptions::timeline(0);
+    let preview = MarkdownRenderOptions::tool_preview(3);
+    let modal = MarkdownRenderOptions::modal(19);
 
-    assert_eq!(options.max_content_width, 80);
-    assert!(rows.iter().any(|row| row.contains("plain")));
-    assert!(rows.iter().any(|row| row.starts_with("  │ ")));
+    assert_eq!(timeline.max_content_width, 80);
+    assert_eq!(preview.max_content_width, 20);
+    assert_eq!(modal.max_content_width, 20);
+    assert_eq!(preview.code_wrap, CodeWrapMode::Preserve);
+    assert!(preview.highlight_code);
+    assert!(preview.show_link_urls);
 }
 
 #[test]
-fn markdown_horizontal_rules_and_ordered_items_render_distinct_rows() {
-    let lines = render_markdown_timeline_lines(
+fn markdown_timeline_lines_render_empty_plain_fenced_code_blocks() {
+    let empty = render_markdown_timeline_lines(
         Color::Cyan,
         Style::default(),
-        "1. first item\n---",
-        MarkdownRenderOptions::timeline(18),
+        "```\n```",
+        MarkdownRenderOptions::timeline(21),
     );
-    let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+    let empty_rows = empty.iter().map(line_plain_text).collect::<Vec<_>>();
 
-    assert!(rows.iter().any(|row| row.starts_with("  1. ")));
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("────────────────────────────────"))
-    );
-}
+    assert!(empty_rows.iter().any(|row| row.contains("plain")));
+    assert!(empty_rows.iter().any(|row| row.starts_with("  │ ")));
 
-#[test]
-fn markdown_heading_underlines_respect_minimum_width_on_narrow_panels() {
-    let lines = render_markdown_timeline_lines(
-        Color::Cyan,
-        Style::default(),
-        "## Head",
-        MarkdownRenderOptions::timeline(4),
-    );
-    let underline = line_plain_text(&lines[1]);
-
-    assert_eq!(UnicodeWidthStr::width(underline.as_str()), 8);
-}
-
-#[test]
-fn markdown_can_disable_code_highlighting() {
-    let lines = render_markdown_timeline_lines(
+    let no_highlight = render_markdown_timeline_lines(
         Color::Cyan,
         Style::default(),
         "```rust\nfn main() {}\n```",
         MarkdownRenderOptions {
             highlight_code: false,
-            ..MarkdownRenderOptions::timeline(80)
+            ..MarkdownRenderOptions::timeline(21)
         },
     );
-    let fn_span = lines
+    let code_line = no_highlight
         .iter()
-        .flat_map(|line| line.spans.iter())
-        .find(|span| span.content.as_ref().contains("fn"))
-        .expect("expected code span");
+        .find(|line| line_plain_text(line).starts_with("  │ "))
+        .expect("expected rendered code row");
 
-    assert_eq!(
-        fn_span.style,
-        Style::default().fg(ink()).bg(Color::Rgb(28, 33, 41))
+    assert!(
+        code_line
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref() == "fn main() {}")
     );
+    assert!(
+        !code_line
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref() == "fn")
+    );
+}
+
+#[test]
+fn markdown_inline_markup_leaves_unterminated_sequences_literal() {
+    let spans = render_inline_markdown_spans_with_options(
+        "**bold `code [link](oops",
+        Style::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    let text = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(text, "**bold `code [link](oops");
+}
+
+#[test]
+fn markdown_render_spans_cover_table_dividers_and_fenced_code_state() {
+    let divider = render_markdown_spans(
+        "| --- | :--- |",
+        Style::default(),
+        &mut MarkdownRenderState::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    let divider_text = divider
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert!(divider_text.contains("┄"));
+
+    let code = render_markdown_spans(
+        "let value = 1;",
+        Style::default(),
+        &mut MarkdownRenderState {
+            in_fenced_code: true,
+        },
+        MarkdownRenderOptions::timeline(80),
+    );
+
+    assert_eq!(code[0].content.as_ref(), "│ ");
+    assert_eq!(code[1].content.as_ref(), "let value = 1;");
+}
+
+#[test]
+fn markdown_heading_levels_only_underline_top_sections() {
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        "# Major\n#### Minor",
+        MarkdownRenderOptions::timeline(24),
+    );
+    let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+
+    assert_eq!(rows[0], "Major");
+    assert!(rows[1].chars().all(|character| character == '─'));
+    assert_eq!(rows[2], "Minor");
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
+fn markdown_wrapped_line_helpers_cover_rules_lists_quotes_and_code_blocks() {
+    let options = MarkdownRenderOptions::timeline(24);
+
+    let rule = render_wrapped_markdown_line(Color::Cyan, "***", Style::default(), options);
+    let unchecked =
+        render_wrapped_markdown_line(Color::Cyan, "* [ ] pending item", Style::default(), options);
+    let ordered =
+        render_wrapped_markdown_line(Color::Cyan, "12. ordered", Style::default(), options);
+    let quoted = render_wrapped_markdown_line(Color::Cyan, "> quoted", Style::default(), options);
+    let code = render_wrapped_markdown_line(Color::Cyan, "{ json", Style::default(), options);
+
+    assert!(line_plain_text(&rule[0]).contains("─"));
+    assert!(line_plain_text(&unchecked[0]).contains("[ ] pending item"));
+    assert_eq!(unchecked[0].spans[1].style.fg, Some(accent_gold()));
+    assert!(line_plain_text(&ordered[0]).contains("12. ordered"));
+    assert!(line_plain_text(&quoted[0]).starts_with("  ▌ "));
+    assert!(line_plain_text(&code[0]).starts_with("  │ "));
+}
+
+#[test]
+fn markdown_parser_helpers_cover_rules_lists_tables_and_links() {
+    assert_eq!(fenced_code_language("```rust no_run"), Some("rust no_run"));
+    assert_eq!(markdown_code_language_token("rust no_run"), "rust");
+    assert_eq!(markdown_heading("###### tail"), Some((6, "tail")));
+    assert_eq!(markdown_heading("###   "), None);
+    assert!(markdown_rule("--- ---"));
+    assert_eq!(
+        markdown_task_item("* [ ] pending"),
+        Some((false, "pending"))
+    );
+    assert_eq!(markdown_task_item("* [x] done"), Some((true, "done")));
+    assert_eq!(markdown_bullet_item("* bullet"), Some("bullet"));
+    assert_eq!(markdown_ordered_item("42. answer"), Some(("42", "answer")));
+    assert_eq!(markdown_ordered_item("42 answer"), None);
+    assert_eq!(markdown_list_indent("\t  - item"), 3);
+    assert_eq!(markdown_quote("> quote"), Some("quote"));
+    assert_eq!(markdown_quote(">> quote"), None);
+    assert!(markdown_table_line("| a | b |"));
+    assert_eq!(
+        markdown_link("[docs](https://example.com)"),
+        Some(("docs", "https://example.com", 27))
+    );
+}
+
+#[test]
+fn markdown_inline_and_plain_text_helpers_cover_emphasis_code_and_fallbacks() {
+    let spans = render_inline_markdown_spans_with_options(
+        "*italics* `code` tail",
+        Style::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    let italic = spans
+        .iter()
+        .find(|span| span.content.as_ref() == "italics")
+        .expect("expected italic span");
+    let code = spans
+        .iter()
+        .find(|span| span.content.as_ref() == "code")
+        .expect("expected inline code span");
+
+    assert!(italic.style.add_modifier.contains(Modifier::ITALIC));
+    assert_eq!(code.style.bg, Some(Color::Rgb(35, 40, 48)));
+    assert!(code.style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(markdown_plain_text("`code` _em_"), "code em");
+    assert_eq!(markdown_plain_text("`unterminated"), "`unterminated");
+    assert_eq!(markdown_emphasis("**bold**"), None);
+    assert_eq!(markdown_emphasis("*ok*"), Some(("ok", 4)));
+    assert_eq!(emphasis_end("a_b", '_'), None);
+    assert_eq!(emphasis_end("ok_", '_'), Some(2));
+    assert_eq!(next_inline_marker("text `code`"), Some(5));
+    assert_eq!(next_underscore_marker("a_b _c_"), Some(4));
+}
+
+#[test]
+fn markdown_table_and_code_helpers_cover_padding_empty_and_highlight_paths() {
+    let empty_table = render_markdown_table_block(
+        Color::Cyan,
+        Style::default(),
+        &[],
+        MarkdownRenderOptions::timeline(32),
+    );
+    let loose_table = render_markdown_table_block(
+        Color::Cyan,
+        Style::default(),
+        &["| head |", "| body |"],
+        MarkdownRenderOptions::timeline(32),
+    );
+    let row = markdown_table_row(&["x".to_owned()], &[3]);
+    let row_lines = markdown_table_row_lines(&["alpha beta".to_owned()], &[5, 3]);
+    let empty_code =
+        render_code_line_spans_with_bg("", Color::Cyan, Style::default(), Color::Black);
+    let highlighted_empty =
+        render_highlighted_code_line_spans(&[], Color::Cyan, Style::default(), Color::Black);
+
+    assert!(empty_table.is_empty());
+    assert!(plain_text(&loose_table).contains("1 cols"));
+    assert_eq!(row, "│ x   │");
+    assert!(row_lines.len() > 1);
+    assert_eq!(empty_code[1].content.as_ref(), " ");
+    assert_eq!(highlighted_empty[1].content.as_ref(), " ");
+    assert_eq!(clamp_table_widths(&[], 20), Vec::<usize>::new());
+    assert_eq!(clamp_table_widths(&[4, 4], 5), vec![4, 4]);
+    assert_eq!(markdown_table_total_width(&[]), 0);
+}
+
+#[test]
+fn markdown_span_renderers_cover_headings_tables_and_code_detection_markers() {
+    let heading = render_markdown_heading_block(
+        3,
+        "Heading",
+        Style::default(),
+        MarkdownRenderOptions::timeline(32),
+    );
+    let heading_span = heading[0]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "Heading")
+        .expect("expected heading span");
+    let ordered = render_markdown_spans(
+        "7. seven",
+        Style::default(),
+        &mut MarkdownRenderState::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    let table = render_markdown_spans(
+        "| left | |",
+        Style::default(),
+        &mut MarkdownRenderState::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+
+    assert_eq!(heading_span.style.fg, Some(accent_lime()));
+    assert_eq!(ordered[0].content.as_ref(), "7. ");
+    assert_eq!(ordered[0].style.fg, Some(accent_gold()));
+    assert!(
+        table
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .contains("│ left │   │")
+    );
+
+    assert!(line_looks_like_code("\tindent"));
+    assert!(line_looks_like_code("tree │ line"));
+    assert!(line_looks_like_code("tree └ line"));
+    assert!(line_looks_like_code("tree ├ line"));
+    assert!(line_looks_like_code("tree ┌ line"));
+    assert!(line_looks_like_code("rule ─ line"));
+    assert!(line_looks_like_code("{ object"));
+    assert!(line_looks_like_code("} object"));
+    assert!(line_looks_like_code("[ array"));
+    assert!(line_looks_like_code("] array"));
+    assert!(!line_looks_like_code("plain text"));
 }
