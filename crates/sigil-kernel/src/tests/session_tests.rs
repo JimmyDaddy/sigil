@@ -3,10 +3,10 @@ use std::fs;
 use anyhow::Result;
 
 use crate::{
-    CompactionRecord, MemoryConfig, ProviderContinuationState, ResponseHandle, ToolEgressEntry,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot,
-    ToolResultMeta, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats,
-    provider::ModelMessage,
+    CompactionRecord, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
+    ProviderContinuationState, ResponseHandle, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
+    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats, provider::ModelMessage,
 };
 
 use super::{
@@ -125,6 +125,44 @@ fn tool_egress_control_entry_roundtrips() -> Result<()> {
         decoded,
         SessionLogEntry::Control(ControlEntry::ToolEgress(restored))
             if *restored == entry
+    ));
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_control_entry_roundtrips_without_content_values() -> Result<()> {
+    let entry = McpElicitationEntry::new(
+        "filesystem",
+        "Need an access token for workspace path",
+        &serde_json::json!({
+            "type": "object",
+            "properties": {
+                "token": { "type": "string", "title": "Token" },
+                "path": { "type": "string", "title": "Path" }
+            },
+            "required": ["token"]
+        }),
+        McpElicitationDecision::Accepted,
+        Some(&serde_json::json!({
+            "token": "secret-token-value",
+            "path": "src/lib.rs"
+        })),
+    );
+    let session_entry =
+        SessionLogEntry::Control(ControlEntry::McpElicitation(Box::new(entry.clone())));
+
+    let json = serde_json::to_string(&session_entry)?;
+    let decoded: SessionLogEntry = serde_json::from_str(&json)?;
+
+    assert!(!json.contains("secret-token-value"));
+    assert!(!json.contains("src/lib.rs"));
+    assert!(matches!(
+        decoded,
+        SessionLogEntry::Control(ControlEntry::McpElicitation(restored))
+            if *restored == entry
+                && restored.content_redacted
+                && restored.content_field_names == vec!["path".to_owned(), "token".to_owned()]
+                && restored.required_field_names == vec!["token".to_owned()]
     ));
     Ok(())
 }

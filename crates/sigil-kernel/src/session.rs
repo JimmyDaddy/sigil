@@ -79,6 +79,8 @@ pub enum ControlEntry {
     ToolExecution(Box<ToolExecutionEntry>),
     #[serde(alias = "ToolEgress")]
     ToolEgress(Box<ToolEgressEntry>),
+    #[serde(alias = "McpElicitation")]
+    McpElicitation(Box<McpElicitationEntry>),
     #[serde(alias = "ToolPreviewCaptured")]
     ToolPreviewCaptured(ToolPreviewSnapshot),
     #[serde(alias = "CompactionApplied")]
@@ -150,6 +152,52 @@ pub struct ToolEgressEntry {
     pub subjects: Vec<ToolSubjectAudit>,
     pub payload: serde_json::Value,
     pub redacted: bool,
+}
+
+/// Append-only audit entry for one MCP elicitation decision.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct McpElicitationEntry {
+    pub server_name: String,
+    pub message_preview: String,
+    pub message_hash: String,
+    pub requested_schema_hash: String,
+    pub requested_field_names: Vec<String>,
+    pub required_field_names: Vec<String>,
+    pub action: McpElicitationDecision,
+    pub content_field_names: Vec<String>,
+    pub content_redacted: bool,
+}
+
+impl McpElicitationEntry {
+    pub fn new(
+        server_name: impl Into<String>,
+        message: &str,
+        requested_schema: &serde_json::Value,
+        action: McpElicitationDecision,
+        content: Option<&serde_json::Value>,
+    ) -> Self {
+        Self {
+            server_name: server_name.into(),
+            message_preview: truncate_stable(message, 160),
+            message_hash: stable_text_hash(message),
+            requested_schema_hash: stable_json_hash(requested_schema),
+            requested_field_names: json_object_keys(requested_schema.get("properties")),
+            required_field_names: json_string_array(requested_schema.get("required")),
+            action,
+            content_field_names: content.map(json_top_level_keys).unwrap_or_default(),
+            content_redacted: content.is_some(),
+        }
+    }
+}
+
+/// Stable MCP elicitation user decision persisted in the control log.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpElicitationDecision {
+    Accepted,
+    Declined,
+    Cancelled,
 }
 
 /// Stable execution status for session audit records.
@@ -812,6 +860,47 @@ fn truncate_stable(content: &str, max_chars: usize) -> String {
     }
     let truncated = normalized.chars().take(max_chars).collect::<String>();
     format!("{truncated}...")
+}
+
+fn stable_json_hash(value: &serde_json::Value) -> String {
+    let serialized =
+        serde_json::to_string(value).unwrap_or_else(|_| "<unserializable-json>".to_owned());
+    stable_text_hash(&serialized)
+}
+
+fn stable_text_hash(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    format!("{digest:x}")
+}
+
+fn json_object_keys(value: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(object) = value.and_then(serde_json::Value::as_object) else {
+        return Vec::new();
+    };
+    let mut keys = object.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys
+}
+
+fn json_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(values) = value.and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut strings = values
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    strings.sort();
+    strings
+}
+
+fn json_top_level_keys(value: &serde_json::Value) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut keys = object.keys().cloned().collect::<Vec<_>>();
+    keys.sort();
+    keys
 }
 
 fn session_identity_from_entries(entries: &[SessionLogEntry]) -> Option<(String, String)> {

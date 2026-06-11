@@ -693,6 +693,12 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 tool_execution_status_label(execution.status)
             ),
             ControlEntry::ToolEgress(egress) => render_tool_egress_line(egress),
+            ControlEntry::McpElicitation(elicitation) => format!(
+                "[ctl] mcp elicitation {} action={} fields={}",
+                truncate_session_view_text(&elicitation.server_name, 48),
+                mcp_elicitation_decision_label(elicitation.action),
+                elicitation.requested_field_names.len()
+            ),
             ControlEntry::ToolPreviewCaptured(snapshot) => format!(
                 "[ctl] preview {} {} files={} +{} -{}",
                 snapshot.call_id,
@@ -798,6 +804,14 @@ fn tool_approval_action_label(action: sigil_kernel::ToolApprovalAuditAction) -> 
         sigil_kernel::ToolApprovalAuditAction::Requested => "requested",
         sigil_kernel::ToolApprovalAuditAction::Resolved => "resolved",
         sigil_kernel::ToolApprovalAuditAction::PreviewFailed => "preview_failed",
+    }
+}
+
+fn mcp_elicitation_decision_label(decision: sigil_kernel::McpElicitationDecision) -> &'static str {
+    match decision {
+        sigil_kernel::McpElicitationDecision::Accepted => "accepted",
+        sigil_kernel::McpElicitationDecision::Declined => "declined",
+        sigil_kernel::McpElicitationDecision::Cancelled => "cancelled",
     }
 }
 

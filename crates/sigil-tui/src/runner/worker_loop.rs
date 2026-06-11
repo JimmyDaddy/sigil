@@ -14,7 +14,7 @@ use crate::context_window::effective_compaction_config;
 use super::{
     approval_bridge::{ApprovalSignal, ChannelApprovalHandler},
     diagnostics::{changed_source_files, check_changed_files_diagnostics, diagnostics_tool_event},
-    elicitation_bridge::ChannelMcpElicitationHandler,
+    elicitation_bridge::{ChannelMcpElicitationHandler, McpElicitationAuditBuffer},
     event_bridge::ChannelEventHandler,
     protocol::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage},
     session_flow::{auto_compact_session, load_session, session_compacted_message},
@@ -29,6 +29,7 @@ pub(super) fn run_worker_loop<P>(
     options: AgentRunOptions,
     command_rx: mpsc::Receiver<WorkerCommand>,
     message_tx: mpsc::Sender<WorkerMessage>,
+    elicitation_handler: Arc<ChannelMcpElicitationHandler>,
 ) where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
@@ -55,6 +56,7 @@ pub(super) fn run_worker_loop<P>(
             if discarded_run_ids.remove(&task_result.run_id) {
                 continue;
             }
+            elicitation_handler.set_audit_buffer(None);
             active_run = None;
             current_session = Some(task_result.session);
             let auto_compaction = match current_session.as_mut() {
@@ -126,6 +128,10 @@ pub(super) fn run_worker_loop<P>(
 
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 let agent = Arc::clone(&agent);
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
@@ -148,6 +154,13 @@ pub(super) fn run_worker_loop<P>(
                             .await
                             .map_err(|error| format!("{error:#}"))
                     };
+                    let result = match append_mcp_elicitation_audits(
+                        &mut run_session,
+                        &run_elicitation_audit_buffer,
+                    ) {
+                        Ok(()) => result,
+                        Err(error) => Err(error),
+                    };
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
@@ -159,6 +172,7 @@ pub(super) fn run_worker_loop<P>(
                     run_id,
                     handle,
                     approval_tx,
+                    elicitation_audit_buffer,
                 });
             }
             Ok(WorkerCommand::ApprovalDecision { call_id, approved }) => {
@@ -181,6 +195,7 @@ pub(super) fn run_worker_loop<P>(
             }
             Ok(WorkerCommand::CancelRun) => {
                 if let Some(active_run) = active_run.take() {
+                    elicitation_handler.set_audit_buffer(None);
                     discarded_run_ids.insert(active_run.run_id);
                     let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
                     active_run.handle.abort();
@@ -190,6 +205,15 @@ pub(super) fn run_worker_loop<P>(
                         &current_session_log_path,
                     ) {
                         Ok(session) => {
+                            let mut session = session;
+                            if let Err(error) = append_mcp_elicitation_audits(
+                                &mut session,
+                                &active_run.elicitation_audit_buffer,
+                            ) {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                current_session = Some(session);
+                                continue;
+                            }
                             let entries = session.entries().to_vec();
                             current_session = Some(session);
                             let _ = message_tx.send(WorkerMessage::RunCancelled {
@@ -312,8 +336,6 @@ pub(super) fn run_worker_loop<P>(
                     server_name: server_name.clone(),
                     status: McpActivationStatus::Activating,
                 });
-                let elicitation_handler =
-                    Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
                 match runtime.block_on(
                     sigil_runtime::activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
                         agent.tool_registry_mut(),
@@ -321,7 +343,7 @@ pub(super) fn run_worker_loop<P>(
                         &provider_capabilities,
                         options.workspace_root.clone(),
                         server_name.as_deref(),
-                        elicitation_handler,
+                        elicitation_handler.clone(),
                     ),
                 ) {
                     Ok(result) if result.matched_servers == 0 => {
@@ -404,6 +426,7 @@ pub(super) fn run_worker_loop<P>(
             }
             Ok(WorkerCommand::Shutdown) => {
                 if let Some(active_run) = active_run.take() {
+                    elicitation_handler.set_audit_buffer(None);
                     discarded_run_ids.insert(active_run.run_id);
                     let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
                     active_run.handle.abort();
@@ -420,10 +443,29 @@ struct ActiveRun {
     run_id: u64,
     handle: tokio::task::JoinHandle<()>,
     approval_tx: mpsc::Sender<ApprovalSignal>,
+    elicitation_audit_buffer: McpElicitationAuditBuffer,
 }
 
 struct RunTaskResult {
     run_id: u64,
     session: Session,
     result: std::result::Result<AgentRunResult, String>,
+}
+
+fn append_mcp_elicitation_audits(
+    session: &mut Session,
+    audit_buffer: &McpElicitationAuditBuffer,
+) -> std::result::Result<(), String> {
+    let controls = {
+        let mut buffer = audit_buffer
+            .lock()
+            .map_err(|_| "failed to lock MCP elicitation audit buffer".to_owned())?;
+        std::mem::take(&mut *buffer)
+    };
+    for control in controls {
+        session
+            .append_control(control)
+            .map_err(|error| format!("failed to append MCP elicitation audit: {error:#}"))?;
+    }
+    Ok(())
 }

@@ -55,7 +55,7 @@ pub fn spawn_agent_worker(
                     &root_config,
                     &provider_capabilities,
                     workspace_root.clone(),
-                    elicitation_handler,
+                    elicitation_handler.clone(),
                 )) {
                     Ok(registry) => registry,
                     Err(error) => {
@@ -73,6 +73,7 @@ pub fn spawn_agent_worker(
                 options,
                 command_rx,
                 message_tx,
+                elicitation_handler,
             );
         })
         .context("failed to spawn sigil agent worker")?;
