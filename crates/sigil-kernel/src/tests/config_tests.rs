@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, path::Path};
 
 use super::{
-    CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, McpServerStartup, McpTrustClass,
-    RootConfig, default_user_config_path, preferred_config_path, resolve_workspace_root,
+    CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, McpServerConfig,
+    McpServerStartup, McpTrustClass, RootConfig, default_user_config_dir, default_user_config_path,
+    preferred_config_path, resolve_workspace_root,
 };
 use crate::{AgentConfig, ApprovalMode, WorkspaceConfig};
 
@@ -313,5 +314,101 @@ fn resolve_workspace_root_handles_blank_and_absolute_paths() {
     assert_eq!(
         resolve_workspace_root(config_path, cwd, "/tmp/explicit"),
         Path::new("/tmp/explicit")
+    );
+}
+
+#[test]
+fn config_default_user_paths_and_preferred_fallback_are_stable() {
+    let config_dir = default_user_config_dir().expect("user config dir should resolve");
+    let config_path = default_user_config_path().expect("user config path should resolve");
+    assert_eq!(config_path, config_dir.join("sigil.toml"));
+
+    if cfg!(target_os = "macos") {
+        assert!(config_dir.ends_with("Library/Application Support/sigil"));
+    } else if cfg!(target_os = "windows") {
+        assert!(config_dir.ends_with("sigil"));
+    } else {
+        assert!(config_dir.ends_with(".config/sigil"));
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    assert_eq!(
+        preferred_config_path(None, temp.path()).expect("fallback config should resolve"),
+        config_path
+    );
+}
+
+#[test]
+fn config_labels_and_defaults_are_stable() {
+    assert_eq!(CodeIntelStartup::Off.as_str(), "off");
+    assert_eq!(CodeIntelStartup::Lazy.as_str(), "lazy");
+    assert_eq!(CodeIntelStartup::Eager.as_str(), "eager");
+
+    assert_eq!(CompactionThresholdStatus::Off.as_str(), "off");
+    assert_eq!(CompactionThresholdStatus::NotAvailable.as_str(), "n/a");
+    assert_eq!(CompactionThresholdStatus::Ready.as_str(), "ready");
+    assert_eq!(CompactionThresholdStatus::Soft.as_str(), "soft");
+    assert_eq!(CompactionThresholdStatus::Hard.as_str(), "hard");
+
+    assert_eq!(McpServerStartup::Eager.as_str(), "eager");
+    assert_eq!(McpServerStartup::Lazy.as_str(), "lazy");
+
+    assert_eq!(McpTrustClass::Official.as_str(), "official");
+    assert_eq!(McpTrustClass::SelfHosted.as_str(), "self_hosted");
+    assert_eq!(McpTrustClass::ThirdParty.as_str(), "third_party");
+
+    let server = McpServerConfig::default();
+    assert_eq!(server.startup_timeout_secs, 10);
+    assert!(server.required);
+    assert_eq!(server.startup, McpServerStartup::Eager);
+    assert_eq!(server.trust.trust_class, McpTrustClass::SelfHosted);
+    assert_eq!(server.trust.approval_default, ApprovalMode::Ask);
+    assert!(server.trust.egress_logging);
+    assert!(!server.trust.allow_secrets);
+    assert!(!server.trust.pin_version);
+}
+
+#[test]
+fn config_compaction_threshold_status_handles_off_and_missing_windows() {
+    let disabled = CompactionConfig {
+        enabled: false,
+        ..CompactionConfig::default()
+    };
+    assert_eq!(
+        disabled.threshold_status(10),
+        CompactionThresholdStatus::Off
+    );
+
+    let unavailable = CompactionConfig {
+        enabled: true,
+        context_window_tokens: None,
+        ..CompactionConfig::default()
+    };
+    assert_eq!(
+        unavailable.threshold_status(10),
+        CompactionThresholdStatus::NotAvailable
+    );
+
+    let zero_window = CompactionConfig {
+        enabled: true,
+        context_window_tokens: Some(0),
+        ..CompactionConfig::default()
+    };
+    assert_eq!(
+        zero_window.threshold_status(10),
+        CompactionThresholdStatus::NotAvailable
+    );
+}
+
+#[test]
+fn resolve_workspace_root_uses_launch_cwd_for_empty_and_absolute_paths() {
+    let config_path = Path::new("/Users/example/.config/sigil/sigil.toml");
+    let cwd = Path::new("/Users/example/work/project");
+    let absolute = Path::new("/tmp/sigil-workspace");
+
+    assert_eq!(resolve_workspace_root(config_path, cwd, "  "), cwd);
+    assert_eq!(
+        resolve_workspace_root(config_path, cwd, absolute.to_str().expect("utf8 path")),
+        absolute
     );
 }

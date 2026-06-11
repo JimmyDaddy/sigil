@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, path::Path};
 
 use anyhow::Result;
 use serde_json::json;
@@ -997,4 +997,227 @@ fn diff_and_text_limit_helpers_handle_noop_and_head_limits() {
     assert!(!unchanged.truncated);
     assert_eq!(unchanged.content, "short");
     assert_eq!(unchanged.omitted_bytes, 0);
+}
+
+#[tokio::test]
+async fn write_file_execute_creates_parent_dirs_and_reports_bytes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    let result = WriteFileTool
+        .execute(
+            ctx,
+            "write".to_owned(),
+            json!({ "path": "nested/dir/note.txt", "content": "hello" }),
+        )
+        .await?;
+
+    assert_eq!(
+        fs::read_to_string(temp.path().join("nested/dir/note.txt"))?,
+        "hello"
+    );
+    assert_eq!(result.metadata.changed_files, vec!["nested/dir/note.txt"]);
+    assert_eq!(result.metadata.bytes, Some(5));
+    Ok(())
+}
+
+#[tokio::test]
+async fn edit_file_execute_and_preview_reject_missing_and_ambiguous_matches() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let file = temp.path().join("note.txt");
+    fs::write(&file, "hello old old\n")?;
+
+    let ambiguous = EditFileTool
+        .execute(
+            ctx.clone(),
+            "edit".to_owned(),
+            json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
+        )
+        .await
+        .expect_err("ambiguous replacements should fail");
+    assert!(ambiguous.to_string().contains("ambiguous"));
+
+    let missing = EditFileTool
+        .preview(
+            ctx,
+            json!({ "path": "note.txt", "old_text": "missing", "new_text": "new" }),
+        )
+        .await
+        .expect_err("missing replacements should fail");
+    assert!(missing.to_string().contains("not found"));
+    Ok(())
+}
+
+#[test]
+fn builtin_text_limit_and_path_helpers_cover_multibyte_edges() -> Result<()> {
+    let limited = super::limit_text_head("one\ntwo\nthree", 7, 5);
+    assert!(limited.truncated);
+    assert!(limited.content.contains("output truncated"));
+
+    let tail = super::limit_text_head_tail("abcdef", 5);
+    assert!(tail.truncated);
+    assert!(tail.content.contains("omitted"));
+    assert!(tail.content.contains('\n'));
+
+    let long_line = "x".repeat(super::MAX_MODEL_LINE_CHARS + 1);
+    let truncated = super::truncate_line_for_model(&long_line);
+    assert!(truncated.ends_with("[sigil: line truncated]"));
+
+    let mut notice_only = String::new();
+    super::append_truncation_notice(&mut notice_only);
+    assert!(notice_only.starts_with("[sigil: output truncated"));
+
+    let value = "a中b";
+    assert_eq!(&value[..super::floor_char_boundary(value, 2)], "a");
+    assert_eq!(&value[super::ceil_char_boundary(value, 2)..], "b");
+
+    assert_eq!(
+        super::lexically_normalize_path(Path::new("./notes/../draft.txt"))?,
+        Path::new("draft.txt")
+    );
+    assert_eq!(
+        super::lexically_normalize_path(Path::new("notes/../../draft.txt"))?,
+        Path::new("../draft.txt")
+    );
+
+    let workspace = tempfile::tempdir()?;
+    let resolved = super::resolve_existing_prefix(&workspace.path().join("missing/child.txt"))?;
+    assert_eq!(
+        resolved,
+        workspace.path().canonicalize()?.join("missing/child.txt")
+    );
+
+    let missing_root = workspace.path().join("does-not-exist");
+    assert!(
+        super::canonical_workspace_root(&missing_root)
+            .expect_err("missing workspaces should fail")
+            .to_string()
+            .contains("failed to resolve workspace root")
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_file_and_path_resolution_helpers_cover_external_and_symlink_paths() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let workspace_file = workspace.path().join("note.txt");
+    let outside_file = outside.path().join("secret.txt");
+    fs::write(&workspace_file, "hello")?;
+    fs::write(&outside_file, "secret")?;
+
+    let target = super::resolve_delete_file_target(
+        workspace.path(),
+        workspace_file.to_str().expect("utf8 path"),
+    )?;
+    assert_eq!(target.path, workspace_file);
+    assert_eq!(target.display_path, target.path.display().to_string());
+
+    let outside_error = super::resolve_delete_file_target(
+        workspace.path(),
+        outside_file.to_str().expect("utf8 path"),
+    )
+    .expect_err("external delete targets should be rejected");
+    assert!(outside_error.to_string().contains("outside workspace"));
+
+    symlink(&outside_file, workspace.path().join("link.txt"))?;
+    let symlink_error =
+        super::validate_delete_file_target(&workspace.path().join("link.txt"), "link.txt")
+            .expect_err("symlink delete targets should be rejected");
+    assert!(
+        symlink_error
+            .to_string()
+            .contains("does not support symlink")
+    );
+    Ok(())
+}
+
+#[test]
+fn bash_and_shell_helper_functions_cover_parser_edges() -> Result<()> {
+    assert!(!super::bash_command_is_safe_readonly(r#""""#));
+    assert!(super::contains_unsupported_safe_shell_syntax("echo $HOME"));
+    assert!(!super::bash_segment_is_safe_readonly(&[]));
+    assert!(!super::bash_segment_is_safe_readonly(&[
+        "cat".to_owned(),
+        ">".to_owned(),
+        "out.txt".to_owned(),
+    ]));
+    assert!(!super::git_segment_is_safe_readonly(&["git".to_owned()]));
+    assert!(super::git_segment_is_safe_readonly(&[
+        "git".to_owned(),
+        "branch".to_owned(),
+        "--list".to_owned(),
+    ]));
+
+    let tokens =
+        super::tokenize_shell_subject_words(r#"echo "a b" foo\ bar && cat file || ls; pwd"#);
+    assert_eq!(
+        tokens,
+        vec![
+            "echo", "a b", "foo bar", "&&", "cat", "file", "||", "ls", ";", "pwd",
+        ]
+    );
+    assert_eq!(super::redirection_target("1>out.txt"), Some("out.txt"));
+    assert!(!super::is_path_argument("git", "--help"));
+    assert!(super::is_path_argument("cat", "Cargo.toml"));
+    assert!(!super::is_path_argument("echo", "Cargo.toml"));
+    assert_eq!(
+        super::render_unified_diff("same\n", "same\n", "a", "b"),
+        "No textual changes detected."
+    );
+
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("note.txt"), "note")?;
+    let workspace_root = workspace.path().canonicalize()?;
+
+    let mut cwd = workspace_root.clone();
+    let mut subjects = Vec::new();
+    super::collect_bash_segment_subjects(&workspace_root, &mut cwd, &[], &mut subjects)?;
+    assert!(subjects.is_empty());
+
+    super::collect_bash_segment_subjects(
+        &workspace_root,
+        &mut cwd,
+        &["cd".to_owned(), "-".to_owned()],
+        &mut subjects,
+    )?;
+    assert_eq!(cwd, workspace_root);
+
+    super::collect_bash_segment_subjects(
+        &workspace_root,
+        &mut cwd,
+        &[
+            "cat".to_owned(),
+            "./note.txt".to_owned(),
+            "1>out.txt".to_owned(),
+            ">".to_owned(),
+            "nested/out.txt".to_owned(),
+        ],
+        &mut subjects,
+    )?;
+    assert_eq!(subjects.len(), 3);
+    assert!(
+        subjects
+            .iter()
+            .any(|subject| subject.normalized == "note.txt")
+    );
+    assert!(
+        subjects
+            .iter()
+            .any(|subject| subject.normalized == "out.txt")
+    );
+    assert!(
+        subjects
+            .iter()
+            .any(|subject| subject.normalized == "nested/out.txt")
+    );
+    Ok(())
 }

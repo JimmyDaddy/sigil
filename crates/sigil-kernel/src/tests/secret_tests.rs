@@ -58,3 +58,47 @@ fn detects_known_and_secret_like_values_for_egress() {
     assert!(redactor.value_contains_secret(&json!({ "headers": "Authorization: Bearer sk" })));
     assert!(!redactor.value_contains_secret(&json!({ "value": "ordinary" })));
 }
+
+#[test]
+fn secret_redactor_ignores_short_duplicates_and_empty_inputs() {
+    let mut redactor = SecretRedactor::empty();
+    redactor.add_secret("abc");
+    redactor.add_secret("sk-live-123");
+    redactor.add_secret("sk-live-123");
+
+    assert_eq!(redactor.redact_text(""), "");
+    assert_eq!(
+        redactor.redact_text("token sk-live-123"),
+        format!("token {REDACTED_SECRET}")
+    );
+}
+
+#[test]
+fn secret_helpers_cover_boundaries_empty_values_and_passthrough_cases() {
+    assert!(super::secret_like_key("API-Key"));
+    assert!(!super::secret_like_key("username"));
+
+    assert!(!super::value_has_non_empty_data(&serde_json::Value::Null));
+    assert!(super::value_has_non_empty_data(&json!(false)));
+    assert!(!super::value_has_non_empty_data(&json!("   ")));
+    assert!(super::value_has_non_empty_data(&json!(["token"])));
+    assert!(super::value_has_non_empty_data(&json!({"nested": []})));
+
+    assert_eq!(
+        super::redact_bearer_tokens("foobearer abc"),
+        "foobearer abc"
+    );
+    assert_eq!(super::redact_bearer_tokens("Bearer "), "Bearer ");
+
+    assert_eq!(
+        super::redact_secret_assignments("mytoken=value token:"),
+        "mytoken=value token:"
+    );
+    assert_eq!(
+        super::redact_secret_assignments("token='value' api_key = plain"),
+        format!("token='{REDACTED_SECRET}' api_key = {REDACTED_SECRET}")
+    );
+
+    let redactor = SecretRedactor::empty();
+    assert_eq!(redactor.redact_value(&json!(42)), json!(42));
+}

@@ -719,3 +719,218 @@ fn load_from_store_does_not_duplicate_closed_tool_execution() -> Result<()> {
     assert_eq!(interrupted_count, 0);
     Ok(())
 }
+
+#[test]
+fn jsonl_session_store_ignores_blank_lines_and_reports_parse_context() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    fs::write(
+        &path,
+        format!(
+            "\n{}\nnot-json\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("hello")))?,
+        ),
+    )?;
+
+    let error = JsonlSessionStore::read_entries(&path).expect_err("invalid json should fail");
+    assert!(error.to_string().contains("line 3"));
+    assert!(error.to_string().contains("session.jsonl"));
+
+    fs::write(
+        &path,
+        format!(
+            "\n{}\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("hello")))?,
+        ),
+    )?;
+    let entries = JsonlSessionStore::read_entries(&path)?;
+    assert_eq!(entries.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn session_compaction_helpers_cover_disabled_and_insufficient_history_paths() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let disabled = CompactionConfig {
+        enabled: false,
+        ..CompactionConfig::default()
+    };
+    let enabled = CompactionConfig {
+        enabled: true,
+        ..CompactionConfig::default()
+    };
+
+    assert!(!session.can_compact(&disabled));
+    assert!(
+        session
+            .compact_now(&disabled)
+            .expect_err("disabled compaction should fail")
+            .to_string()
+            .contains("disabled")
+    );
+    assert!(
+        session
+            .compaction_preview(&disabled)
+            .expect_err("disabled compaction preview should fail")
+            .to_string()
+            .contains("disabled")
+    );
+    assert!(session.compaction_preview(&enabled)?.is_none());
+
+    session.append_user_message(ModelMessage::user("hello"))?;
+    assert!(
+        session
+            .compact_now(&enabled)
+            .expect_err("single-message history should be insufficient")
+            .to_string()
+            .contains("enough history")
+    );
+    assert!(!session.can_compact(&enabled));
+
+    assert_eq!(session.store_path(), None);
+    session.stats_mut().last_prompt_tokens = 9;
+    assert_eq!(session.stats().last_prompt_tokens, 9);
+    Ok(())
+}
+
+#[test]
+fn session_projection_helpers_repair_orphans_and_ignore_empty_compaction_records() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_assistant_message(ModelMessage::assistant(
+        None,
+        vec![crate::ToolCall {
+            id: "call-1".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    ))?;
+    session.append_control(ControlEntry::CompactionApplied(CompactionRecord {
+        summary: "   ".to_owned(),
+        compacted_message_count: 1,
+        retained_tail_message_count: 1,
+    }))?;
+
+    let projected = session.messages();
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected[1].tool_call_id.as_deref(), Some("call-1"));
+
+    let summary = super::compaction_summary_message(&CompactionRecord {
+        summary: "summary".to_owned(),
+        compacted_message_count: 2,
+        retained_tail_message_count: 1,
+    });
+    assert_eq!(summary.role, crate::MessageRole::Assistant);
+    assert_eq!(summary.content.as_deref(), Some("summary"));
+    assert!(summary.id.starts_with("compaction:"));
+    Ok(())
+}
+
+#[test]
+fn session_boundary_summary_and_identity_helpers_cover_tool_edges() {
+    assert_eq!(super::compaction_boundary(&[], 2), 0);
+
+    let assistant_call = ModelMessage::assistant(
+        None,
+        vec![crate::ToolCall {
+            id: "call-1".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    );
+    let tool_message = ModelMessage::tool("call-1", "result");
+    let user_message = ModelMessage::user("follow up");
+    let boundary =
+        super::compaction_boundary(&[assistant_call.clone(), tool_message, user_message], 1);
+    assert_eq!(boundary, 0);
+
+    let summary = super::summarize_messages(&[
+        ModelMessage::system("system prompt"),
+        ModelMessage::user("hello\nworld"),
+        assistant_call.clone(),
+        ModelMessage {
+            id: "tool-no-id".to_owned(),
+            role: crate::MessageRole::Tool,
+            content: Some("content".repeat(80)),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        },
+    ]);
+    assert!(summary.contains("01. system system prompt"));
+    assert!(summary.contains("03. assistant tool_calls [read_file]"));
+    assert!(summary.contains("04. tool unknown =>"));
+    assert!(summary.contains("..."));
+
+    assert_eq!(super::truncate_stable("a   b", 10), "a b");
+    assert!(super::truncate_stable(&"x".repeat(200), 12).ends_with("..."));
+
+    let identity_entries = vec![SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4".to_owned(),
+    })];
+    assert_eq!(
+        super::session_identity_from_entries(&identity_entries),
+        Some(("deepseek".to_owned(), "deepseek-v4".to_owned()))
+    );
+}
+
+#[test]
+fn interrupted_tool_executions_only_keep_open_started_records() {
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "open".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: Some(5),
+            subjects: Vec::new(),
+            changed_files: vec!["note.txt".to_owned()],
+            metadata: ToolResultMeta {
+                changed_files: vec!["note.txt".to_owned()],
+                ..ToolResultMeta::default()
+            },
+            error: None,
+            model_content_hash: Some("hash".to_owned()),
+        }))),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "done".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        }))),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "done".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Completed,
+            duration_ms: Some(1),
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: Some("done".to_owned()),
+        }))),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "cancelled".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Cancelled,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        }))),
+    ];
+
+    let interrupted = super::interrupted_tool_executions(&entries);
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].call_id, "open");
+    assert_eq!(interrupted[0].status, ToolExecutionStatus::Interrupted);
+    assert!(interrupted[0].changed_files.is_empty());
+    assert!(interrupted[0].metadata.changed_files.is_empty());
+    assert!(interrupted[0].error.is_some());
+    assert_eq!(interrupted[0].model_content_hash, None);
+}

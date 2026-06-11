@@ -470,3 +470,74 @@ fn permission_external_directory_rule_requires_absolute_or_home_anchored_glob() 
     assert!(error.to_string().contains("must be absolute"));
     Ok(())
 }
+
+#[test]
+fn permission_helper_matchers_cover_any_missing_subject_and_invalid_external_rules() -> Result<()> {
+    let any_rule = PermissionRule {
+        tool_name: None,
+        subject_glob: None,
+        mode: ApprovalMode::Allow,
+    };
+    let any_compiled = super::CompiledPermissionRule::new(&any_rule);
+    assert!(any_compiled.matches_subject("read_file", None)?);
+
+    let subject_rule = PermissionRule {
+        tool_name: Some("read_file".to_owned()),
+        subject_glob: Some("src/**".to_owned()),
+        mode: ApprovalMode::Allow,
+    };
+    let subject_compiled = super::CompiledPermissionRule::new(&subject_rule);
+    let error = subject_compiled
+        .matches_subject("read_file", None)
+        .expect_err("subject-specific rules should require a subject");
+    assert!(error.to_string().contains("requires a subject"));
+
+    let invalid_external_rule = ExternalDirectoryRule {
+        path_glob: "relative/**".to_owned(),
+        mode: ApprovalMode::Allow,
+    };
+    let invalid_compiled = super::CompiledExternalDirectoryRule::new(&invalid_external_rule);
+    let temp = tempfile::tempdir()?;
+    let external_path = temp.path().canonicalize()?.join("note.txt");
+    let invalid_error = invalid_compiled
+        .matches_subject(&external_path_subject(external_path))
+        .expect_err("relative external rules should stay invalid");
+    assert!(invalid_error.to_string().contains("must be absolute"));
+
+    assert!(!invalid_compiled.matches_subject(&path_subject("src/main.rs"))?);
+    assert!(super::CompiledMatcher::Any.is_match("/tmp")?);
+    Ok(())
+}
+
+#[test]
+fn permission_external_path_helpers_expand_home_and_validate_patterns() -> Result<()> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .expect("HOME should be available in tests");
+    assert_eq!(
+        super::expand_external_rule_path("~")?,
+        home.display().to_string()
+    );
+    assert_eq!(
+        super::expand_external_rule_path("~/sigil")?,
+        home.join("sigil").display().to_string()
+    );
+    assert_eq!(
+        super::expand_external_rule_path("$HOME/sigil")?,
+        home.join("sigil").display().to_string()
+    );
+    assert_eq!(super::home_dir()?, home);
+
+    let unsupported = super::expand_external_rule_path("$TMP/sigil")
+        .expect_err("only HOME expansion should be accepted");
+    assert!(unsupported.to_string().contains("only supports $HOME"));
+
+    let absolute_rule = format!("{}/**/*.txt", home.display());
+    let pattern = super::canonical_external_rule_pattern(&absolute_rule)?;
+    assert!(pattern.starts_with(&home.display().to_string()));
+
+    let relative = super::canonical_external_rule_pattern("notes/**")
+        .expect_err("relative patterns should be rejected");
+    assert!(relative.to_string().contains("must be absolute"));
+    Ok(())
+}

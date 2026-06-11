@@ -5,23 +5,24 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, stream};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     ApprovalHandler, ApprovalMode, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
     CompactionConfig, CompletionRequest, ControlEntry, EventHandler, ExternalDirectoryConfig,
     ExternalDirectoryRule, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
-    PermissionConfig, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
-    ReasoningEffort, ResponseHandle, RunEvent, Session, SessionLogEntry, Tool, ToolAccess,
-    ToolApproval, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory,
-    ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject,
-    ToolSubjectScope,
+    PermissionConfig, PermissionDecision, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ResponseHandle, RunEvent,
+    Session, SessionLogEntry, Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
 };
 
 use super::{Agent, AgentRunOptions};
@@ -2352,4 +2353,675 @@ async fn agent_wraps_provider_stream_errors_with_context() {
             .chain()
             .any(|cause| cause.to_string().contains("socket closed"))
     );
+}
+
+#[derive(Clone)]
+struct ScriptedToolProvider {
+    initial_chunks: Vec<ProviderChunk>,
+    final_text: String,
+}
+
+#[async_trait]
+impl Provider for ScriptedToolProvider {
+    fn name(&self) -> &str {
+        "mock-scripted"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            supports_reasoning_stream: true,
+            supports_tool_stream: true,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: true,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        if tool_used {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta(self.final_text.clone())),
+                Ok(ProviderChunk::Done),
+            ])))
+        } else {
+            Ok(Box::pin(stream::iter(
+                self.initial_chunks
+                    .clone()
+                    .into_iter()
+                    .map(Ok::<_, anyhow::Error>),
+            )))
+        }
+    }
+}
+
+struct AccessErrorTool;
+
+struct DefaultModeErrorTool;
+
+struct EgressAuditErrorTool;
+
+struct ExecuteErrorTool;
+
+fn path_tool_spec(name: &str, access: ToolAccess) -> crate::ToolSpec {
+    crate::ToolSpec {
+        name: name.to_owned(),
+        description: name.to_owned(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"}
+            },
+            "required": ["path"]
+        }),
+        category: ToolCategory::File,
+        access,
+        preview: ToolPreviewCapability::None,
+    }
+}
+
+fn path_tool_subject(args: &serde_json::Value) -> Result<Vec<ToolSubject>> {
+    let path = args
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+    Ok(vec![ToolSubject::path(path, path)])
+}
+
+#[async_trait]
+impl Tool for AccessErrorTool {
+    fn spec(&self) -> crate::ToolSpec {
+        path_tool_spec("access_error", ToolAccess::Write)
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        path_tool_subject(args)
+    }
+
+    fn permission_access(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<ToolAccess> {
+        anyhow::bail!("access exploded");
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.spec().name,
+            "unreachable",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for DefaultModeErrorTool {
+    fn spec(&self) -> crate::ToolSpec {
+        path_tool_spec("default_mode_error", ToolAccess::Write)
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        path_tool_subject(args)
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Option<ApprovalMode>> {
+        anyhow::bail!("default mode exploded");
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.spec().name,
+            "unreachable",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for EgressAuditErrorTool {
+    fn spec(&self) -> crate::ToolSpec {
+        path_tool_spec("egress_error", ToolAccess::Read)
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        path_tool_subject(args)
+    }
+
+    fn egress_audit(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Option<ToolEgressAudit>> {
+        anyhow::bail!("egress exploded");
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.spec().name,
+            "unreachable",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for ExecuteErrorTool {
+    fn spec(&self) -> crate::ToolSpec {
+        path_tool_spec("execute_error", ToolAccess::Read)
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        path_tool_subject(args)
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        _call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        anyhow::bail!("tool exploded");
+    }
+}
+
+#[test]
+fn agent_exposes_provider_capabilities_and_mutable_tool_registry() {
+    let mut agent = Agent::new(MockProvider, ToolRegistry::new());
+
+    assert!(agent.tool_registry().specs().is_empty());
+    assert!(agent.provider_capabilities().supports_tool_stream);
+
+    agent.tool_registry_mut().register(Arc::new(EchoTool));
+    assert!(agent.tool_registry().spec_for("echo").is_some());
+}
+
+#[test]
+fn agent_context_helpers_attach_and_truncate_metadata() {
+    let call = ToolCall {
+        id: "call-ctx".to_owned(),
+        name: "bash".to_owned(),
+        args_json: serde_json::to_string(&json!({
+            "command": format!("  echo   {}  ", "x".repeat(220)),
+            "path": "notes/file.txt",
+            "pattern": "needle",
+        }))
+        .expect("json should serialize"),
+    };
+    let external = std::env::temp_dir().join("outside.txt");
+    let subjects = vec![
+        ToolSubject::path_with_scope(
+            "notes/file.txt",
+            "notes/file.txt",
+            Some(std::env::temp_dir().join("notes/file.txt")),
+            ToolSubjectScope::Workspace,
+        ),
+        ToolSubject::path_with_scope(
+            external.display().to_string(),
+            external.display().to_string(),
+            Some(external.clone()),
+            ToolSubjectScope::External,
+        ),
+        ToolSubject::path("simple", "simple"),
+        ToolSubject::command("git status --short", "git status --short"),
+        ToolSubject::mcp_tool("mcp__echo"),
+        ToolSubject::mcp_trust_class("server", "third_party"),
+        ToolSubject::path("ignored", "ignored"),
+    ];
+
+    let context = super::tool_call_context(&call, &subjects)
+        .and_then(|value| value.as_object().cloned())
+        .expect("context should be derived");
+    assert!(
+        context["command"]
+            .as_str()
+            .is_some_and(|value| value.ends_with("..."))
+    );
+    assert_eq!(context["path"], "notes/file.txt");
+    assert_eq!(context["pattern"], "needle");
+    assert_eq!(context["subjects"].as_array().map(Vec::len), Some(6));
+    assert!(
+        context["summary"]
+            .as_str()
+            .is_some_and(|value| value.contains("command="))
+    );
+
+    let subject_only_context = super::tool_call_context(
+        &ToolCall {
+            args_json: "{}".to_owned(),
+            ..call.clone()
+        },
+        &subjects[..1],
+    )
+    .expect("subjects should still yield context");
+    assert!(
+        subject_only_context["summary"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("subject="))
+    );
+
+    assert!(
+        super::tool_call_context(
+            &ToolCall {
+                args_json: "{".to_owned(),
+                ..call.clone()
+            },
+            &[],
+        )
+        .is_none()
+    );
+
+    let mut null_details = ToolResult::ok("call-ctx", "bash", "ok", ToolResultMeta::default());
+    super::attach_tool_call_context(&mut null_details, &call, &subjects);
+    assert_eq!(
+        null_details.metadata.details["call"]["path"],
+        "notes/file.txt"
+    );
+
+    let mut object_details = ToolResult::ok("call-ctx", "bash", "ok", ToolResultMeta::default());
+    object_details.metadata.details = json!({ "existing": true });
+    super::attach_tool_call_context(&mut object_details, &call, &subjects);
+    assert_eq!(object_details.metadata.details["existing"], true);
+    assert_eq!(object_details.metadata.details["call"]["pattern"], "needle");
+
+    let mut string_details = ToolResult::ok("call-ctx", "bash", "ok", ToolResultMeta::default());
+    string_details.metadata.details = Value::String("previous".to_owned());
+    super::attach_tool_call_context(&mut string_details, &call, &subjects);
+    assert_eq!(string_details.metadata.details["tool"], "previous");
+    assert_eq!(
+        string_details.metadata.details["call"]["path"],
+        "notes/file.txt"
+    );
+}
+
+#[test]
+fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: "write_file".to_owned(),
+        args_json: r#"{"path":"note.txt"}"#.to_owned(),
+    };
+    let external_path = std::env::temp_dir().join("outside/note.txt");
+    let subjects = vec![ToolSubject::path_with_scope(
+        external_path.display().to_string(),
+        external_path.display().to_string(),
+        Some(external_path.clone()),
+        ToolSubjectScope::External,
+    )];
+    let decision = PermissionDecision {
+        access: ToolAccess::Write,
+        mode: ApprovalMode::Ask,
+        subjects: subjects.clone(),
+        external_directory_required: true,
+    };
+
+    super::append_reasoning_trace(&mut session, "")?;
+    super::append_reasoning_trace(&mut session, "trace details")?;
+    let note = session
+        .entries()
+        .last()
+        .expect("reasoning trace note should be appended");
+    assert!(matches!(
+        note,
+        SessionLogEntry::Control(ControlEntry::Note { kind, data })
+            if kind == "reasoning_trace"
+                && data.get("text").and_then(serde_json::Value::as_str) == Some("trace details")
+    ));
+
+    let empty_preview = super::external_directory_preview("write_file", &[]);
+    assert!(empty_preview.body.contains("No external path subjects"));
+    let preview = super::external_directory_preview("write_file", &subjects);
+    assert!(preview.title.contains("External directory access"));
+    assert!(preview.body.contains(&external_path.display().to_string()));
+
+    super::append_tool_approval_audit(
+        &mut session,
+        &call,
+        &decision,
+        ToolApprovalAuditAction::Requested,
+        None,
+        None,
+        Some("preview-hash".to_owned()),
+    )?;
+    super::append_tool_execution_audit(
+        &mut session,
+        &call,
+        &subjects,
+        ToolExecutionStatus::Started,
+        None,
+        None,
+    )?;
+    let result = ToolResult::error(
+        "call-1",
+        "write_file",
+        ToolErrorKind::PermissionDenied,
+        "denied",
+    )
+    .with_error_details(true, json!({"reason": "policy"}));
+    super::append_tool_execution_audit(
+        &mut session,
+        &call,
+        &subjects,
+        ToolExecutionStatus::Failed,
+        Some(12),
+        Some(&result),
+    )?;
+    session.append_control(super::tool_egress_control_entry(
+        &call,
+        &subjects,
+        ToolEgressAudit {
+            destination: "mcp:test".to_owned(),
+            operation: "tools/call".to_owned(),
+            payload: json!({"shape": "path-only"}),
+            redacted: true,
+        },
+    ))?;
+
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-1"
+                    && approval.preview_hash.as_deref() == Some("preview-hash")
+                    && approval.external_directory_required
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-1"
+                    && execution.status == ToolExecutionStatus::Started
+                    && execution.model_content_hash.is_none()
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-1"
+                    && execution.status == ToolExecutionStatus::Failed
+                    && execution.model_content_hash.is_some()
+                    && execution.error.as_ref().is_some_and(|error| error.retryable)
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolEgress(egress))
+                if egress.tool_name == "write_file"
+                    && egress.destination == "mcp:test"
+                    && egress.redacted
+        )
+    }));
+
+    assert_eq!(super::stable_json_hash(&json!({"value": "x"}))?.len(), 64);
+    assert_eq!(super::stable_text_hash("sigil").len(), 64);
+    assert!(super::duration_ms(Instant::now()) < 10_000);
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_surfaces_invalid_permission_access_with_usage_snapshot() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(AccessErrorTool));
+    let agent = Agent::new(
+        ScriptedToolProvider {
+            initial_chunks: vec![
+                ProviderChunk::Usage(UsageStats {
+                    prompt_tokens: 7,
+                    ..UsageStats::default()
+                }),
+                ProviderChunk::ReasoningArtifact(ReasoningArtifact {
+                    provider_name: "mock-scripted".to_owned(),
+                    opaque_blob: json!({"artifact": true}),
+                }),
+                ProviderChunk::ToolCallStart {
+                    id: "call-access".to_owned(),
+                    name: "access_error".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "call-access".to_owned(),
+                    delta: r#"{"path":"note.txt"}"#.to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-access".to_owned(),
+                    name: "access_error".to_owned(),
+                    args_json: r#"{"path":"note.txt"}"#.to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+            final_text: "done".to_owned(),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-scripted", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+    let result = agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::UsageSnapshot(usage))
+                if usage.prompt_tokens == 7
+        )
+    }));
+    assert!(session.messages().iter().any(|message| {
+        message.tool_call_id.as_deref() == Some("call-access")
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains(r#""kind":"invalid_input""#))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_surfaces_invalid_tool_default_mode_and_egress_audit_errors() -> Result<()> {
+    for (tool_name, tool) in [
+        (
+            "default_mode_error",
+            Arc::new(DefaultModeErrorTool) as Arc<dyn Tool>,
+        ),
+        (
+            "egress_error",
+            Arc::new(EgressAuditErrorTool) as Arc<dyn Tool>,
+        ),
+    ] {
+        let mut registry = ToolRegistry::new();
+        registry.register(tool);
+        let agent = Agent::new(
+            ScriptedToolProvider {
+                initial_chunks: vec![
+                    ProviderChunk::ToolCallStart {
+                        id: format!("call-{tool_name}"),
+                        name: tool_name.to_owned(),
+                    },
+                    ProviderChunk::ToolCallArgsDelta {
+                        id: format!("call-{tool_name}"),
+                        delta: r#"{"path":"note.txt"}"#.to_owned(),
+                    },
+                    ProviderChunk::ToolCallComplete(ToolCall {
+                        id: format!("call-{tool_name}"),
+                        name: tool_name.to_owned(),
+                        args_json: r#"{"path":"note.txt"}"#.to_owned(),
+                    }),
+                    ProviderChunk::Done,
+                ],
+                final_text: "done".to_owned(),
+            },
+            registry,
+        );
+        let mut session = Session::new("mock-scripted", "mock-model");
+        let mut handler = crate::event::NoopEventHandler;
+
+        agent
+            .run(
+                &mut session,
+                "hi",
+                AgentRunOptions {
+                    workspace_root: std::env::temp_dir(),
+                    max_turns: Some(4),
+                    tool_timeout_secs: 5,
+                    reasoning_effort: None,
+                    traffic_partition_key: None,
+                    interaction_mode: InteractionMode::Interactive,
+                    permission_config: PermissionConfig::default(),
+                    memory_config: MemoryConfig { enabled: false },
+                    compaction_config: CompactionConfig::default(),
+                },
+                &mut handler,
+            )
+            .await?;
+
+        assert!(session.messages().iter().any(|message| {
+            message.tool_call_id.as_deref() == Some(&format!("call-{tool_name}"))
+                && message.content.as_deref().is_some_and(|content| {
+                    content.contains(r#""kind":"invalid_input""#)
+                        && content.contains(if tool_name == "default_mode_error" {
+                            "default mode exploded"
+                        } else {
+                            "egress exploded"
+                        })
+                })
+        }));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_wraps_execute_errors_as_internal_tool_results() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExecuteErrorTool));
+    let agent = Agent::new(
+        ScriptedToolProvider {
+            initial_chunks: vec![
+                ProviderChunk::ToolCallStart {
+                    id: "call-execute".to_owned(),
+                    name: "execute_error".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "call-execute".to_owned(),
+                    delta: r#"{"path":"note.txt"}"#.to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-execute".to_owned(),
+                    name: "execute_error".to_owned(),
+                    args_json: r#"{"path":"note.txt"}"#.to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+            final_text: "done".to_owned(),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-scripted", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert!(session.messages().iter().any(|message| {
+        message.tool_call_id.as_deref() == Some("call-execute")
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains(r#""kind":"internal""#) && content.contains("tool exploded")
+            })
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-execute"
+                    && execution.status == ToolExecutionStatus::Failed
+                    && execution.model_content_hash.is_some()
+        )
+    }));
+    Ok(())
 }
