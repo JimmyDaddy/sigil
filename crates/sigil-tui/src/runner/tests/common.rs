@@ -165,6 +165,7 @@ where
 pub(super) enum StreamPlan {
     Chunks(Vec<ProviderChunk>),
     Pending,
+    Fail(&'static str),
 }
 
 #[derive(Clone)]
@@ -219,6 +220,7 @@ impl Provider for PlannedProvider {
                 Box::pin(stream::iter(chunks.into_iter().map(Ok::<_, anyhow::Error>)))
             }
             StreamPlan::Pending => Box::pin(stream::pending()),
+            StreamPlan::Fail(error) => return Err(anyhow!(error.to_owned())),
         };
         Ok(stream)
     }

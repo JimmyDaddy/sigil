@@ -50,16 +50,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
     let config_path = preferred_config_path(cli.config.as_deref(), &cwd)?;
-    let mut worker = None;
-    let mut app = match RootConfig::load(&config_path) {
-        Ok(root_config) => {
-            let mut app = AppState::from_root_config(&config_path, &root_config);
-            app.restore_latest_session_from_disk(&root_config);
-            worker = Some(spawn_worker(root_config.clone(), &app)?);
-            app
-        }
-        Err(error) => AppState::from_setup(config_path.clone(), cwd, Some(error.to_string())),
-    };
+    let (mut app, mut worker) = build_initial_app(
+        cwd,
+        config_path.clone(),
+        RootConfig::load(&config_path),
+        spawn_worker,
+    )?;
 
     enable_raw_mode()?;
     let inline_viewport_height = current_inline_viewport_height()?;
@@ -111,14 +107,7 @@ fn run_app(
 
     loop {
         let mut dirty = needs_render;
-        if let Some(runtime) = worker.as_mut() {
-            app.begin_timeline_render_batch();
-            while let Ok(message) = runtime.worker_rx.try_recv() {
-                app.handle_worker_message(message)?;
-                dirty = true;
-            }
-            dirty |= app.flush_timeline_render_batch();
-        }
+        dirty |= drain_worker_messages(app, worker)?;
         dirty |= app.poll_background_tasks();
 
         let size = terminal.size()?;
@@ -144,8 +133,7 @@ fn run_app(
             break;
         }
 
-        let poll_interval = next_poll_interval(app, &scrollback);
-        if event::poll(poll_interval)? {
+        if event::poll(poll_interval(app, &scrollback))? {
             match event::read()? {
                 CrosstermEvent::Resize(_, _) => {
                     terminal.autoresize()?;
@@ -154,22 +142,12 @@ fn run_app(
                 CrosstermEvent::Mouse(mouse) => {
                     let layout =
                         LayoutSnapshot::from_app(Rect::new(0, 0, size.width, size.height), app);
-                    match app.handle_mouse_event(mouse.into(), &layout)? {
-                        AppMouseOutcome::Noop => {}
-                        AppMouseOutcome::Redraw => {
-                            needs_render = true;
-                        }
-                        AppMouseOutcome::Action(action) => {
-                            process_app_action(app, worker, action)?;
-                            needs_render = true;
-                        }
-                    }
+                    let outcome = app.handle_mouse_event(mouse.into(), &layout)?;
+                    needs_render |= apply_mouse_outcome(app, worker, outcome, spawn_worker)?;
                 }
                 CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    if let Some(action) = app.handle_key_event(key)? {
-                        process_app_action(app, worker, action)?;
-                    }
-                    needs_render = true;
+                    let action = app.handle_key_event(key)?;
+                    needs_render |= apply_key_action(app, worker, action, spawn_worker)?;
                 }
                 _ => {}
             }
@@ -179,11 +157,37 @@ fn run_app(
     Ok(())
 }
 
-fn process_app_action(
+fn build_initial_app<F>(
+    cwd: PathBuf,
+    config_path: PathBuf,
+    load_result: Result<RootConfig>,
+    mut spawn_worker_fn: F,
+) -> Result<(AppState, Option<WorkerRuntime>)>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    let mut worker = None;
+    let app = match load_result {
+        Ok(root_config) => {
+            let mut app = AppState::from_root_config(&config_path, &root_config);
+            app.restore_latest_session_from_disk(&root_config);
+            worker = Some(spawn_worker_fn(root_config, &app)?);
+            app
+        }
+        Err(error) => AppState::from_setup(config_path.clone(), cwd, Some(error.to_string())),
+    };
+    Ok((app, worker))
+}
+
+fn process_app_action_with_spawner<F>(
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
     action: AppAction,
-) -> Result<()> {
+    mut spawn_worker_fn: F,
+) -> Result<()>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
     match action {
         AppAction::SetupCompleted {
             config_path,
@@ -191,14 +195,14 @@ fn process_app_action(
         } => {
             *app = AppState::from_root_config(&config_path, &root_config);
             app.restore_latest_session_from_disk(&root_config);
-            *worker = Some(spawn_worker(*root_config, app)?);
+            *worker = Some(spawn_worker_fn(*root_config, app)?);
         }
         AppAction::ConfigSaved { root_config }
         | AppAction::RuntimeConfigUpdated { root_config } => {
             if let Some(runtime) = worker.take() {
                 let _ = runtime.worker_tx.send(AppState::shutdown_command());
             }
-            *worker = Some(spawn_worker(*root_config, app)?);
+            *worker = Some(spawn_worker_fn(*root_config, app)?);
         }
         action => {
             if let Some(runtime) = worker.as_ref() {
@@ -209,6 +213,15 @@ fn process_app_action(
     Ok(())
 }
 
+#[cfg(test)]
+fn process_app_action(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: AppAction,
+) -> Result<()> {
+    process_app_action_with_spawner(app, worker, action, spawn_worker)
+}
+
 fn live_spinner_tick() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -216,7 +229,54 @@ fn live_spinner_tick() -> u128 {
         .unwrap_or(0)
 }
 
-#[derive(Default)]
+fn drain_worker_messages(app: &mut AppState, worker: &mut Option<WorkerRuntime>) -> Result<bool> {
+    let Some(runtime) = worker.as_mut() else {
+        return Ok(false);
+    };
+    let mut dirty = false;
+    app.begin_timeline_render_batch();
+    while let Ok(message) = runtime.worker_rx.try_recv() {
+        app.handle_worker_message(message)?;
+        dirty = true;
+    }
+    Ok(dirty | app.flush_timeline_render_batch())
+}
+
+fn apply_mouse_outcome<F>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    outcome: AppMouseOutcome,
+    mut spawn_worker_fn: F,
+) -> Result<bool>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    match outcome {
+        AppMouseOutcome::Noop => Ok(false),
+        AppMouseOutcome::Redraw => Ok(true),
+        AppMouseOutcome::Action(action) => {
+            process_app_action_with_spawner(app, worker, action, &mut spawn_worker_fn)?;
+            Ok(true)
+        }
+    }
+}
+
+fn apply_key_action<F>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    action: Option<AppAction>,
+    mut spawn_worker_fn: F,
+) -> Result<bool>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    if let Some(action) = action {
+        process_app_action_with_spawner(app, worker, action, &mut spawn_worker_fn)?;
+    }
+    Ok(true)
+}
+
+#[derive(Debug, Clone, Default)]
 struct ScrollbackSyncState {
     session_id: Option<String>,
     revision: u64,
@@ -235,6 +295,12 @@ impl ScrollbackSyncState {
 struct ScrollbackSeedProgress {
     session_id: String,
     next_line_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedScrollbackSync {
+    line_batches: Vec<Vec<Line<'static>>>,
+    next_state: ScrollbackSyncState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,66 +322,13 @@ fn sync_terminal_scrollback(
     app: &AppState,
     sync_state: &mut ScrollbackSyncState,
 ) -> Result<()> {
-    if !should_sync_terminal_scrollback(app) {
+    let Some(prepared) = prepare_scrollback_sync(app, sync_state) else {
         return Ok(());
+    };
+    for batch in prepared.line_batches {
+        insert_scrollback_lines(terminal, batch)?;
     }
-    if sync_state.session_id.as_deref() == Some(app.session_id.as_str())
-        && sync_state.revision == app.timeline_revision()
-        && sync_state.pending_seed.is_none()
-    {
-        return Ok(());
-    }
-
-    let next_line_count = app.scrollback_line_count();
-    let shared_len = sync_state.line_count.min(next_line_count);
-    let shared_hash = app.scrollback_prefix_hash(shared_len);
-
-    match plan_scrollback_sync(
-        sync_state,
-        app.session_id.as_str(),
-        next_line_count,
-        shared_hash,
-    ) {
-        ScrollbackSyncPlan::Seed {
-            insert_separator,
-            from_index,
-            to_index,
-            total_line_count,
-        } => {
-            if insert_separator {
-                insert_scrollback_lines(
-                    terminal,
-                    vec![scrollback_separator(app), Line::raw(String::new())],
-                )?;
-            }
-            insert_scrollback_lines(terminal, app.scrollback_lines_range(from_index, to_index))?;
-            sync_state.pending_seed = if to_index < total_line_count {
-                Some(ScrollbackSeedProgress {
-                    session_id: app.session_id.clone(),
-                    next_line_index: to_index,
-                })
-            } else {
-                None
-            };
-            sync_state.line_count = to_index;
-            sync_state.sequence_hash = app.scrollback_prefix_hash(to_index);
-        }
-        ScrollbackSyncPlan::Append { from_index } => {
-            let appended = app.scrollback_lines_from(from_index);
-            insert_scrollback_lines(terminal, appended)?;
-            sync_state.pending_seed = None;
-            sync_state.line_count = next_line_count;
-            sync_state.sequence_hash = app.scrollback_prefix_hash(next_line_count);
-        }
-        ScrollbackSyncPlan::Noop => {
-            sync_state.pending_seed = None;
-            sync_state.line_count = next_line_count;
-            sync_state.sequence_hash = app.scrollback_prefix_hash(next_line_count);
-        }
-    }
-
-    sync_state.session_id = Some(app.session_id.clone());
-    sync_state.revision = app.timeline_revision();
+    *sync_state = prepared.next_state;
     Ok(())
 }
 
@@ -323,7 +336,7 @@ fn should_sync_terminal_scrollback(app: &AppState) -> bool {
     !app.is_busy && !app.is_setup_mode() && !app.is_config_mode()
 }
 
-fn next_poll_interval(app: &AppState, scrollback: &ScrollbackSyncState) -> Duration {
+fn poll_interval(app: &AppState, scrollback: &ScrollbackSyncState) -> Duration {
     if app.is_busy {
         BUSY_POLL_INTERVAL
     } else if scrollback.has_pending_seed() && should_sync_terminal_scrollback(app) {
@@ -331,6 +344,80 @@ fn next_poll_interval(app: &AppState, scrollback: &ScrollbackSyncState) -> Durat
     } else {
         IDLE_POLL_INTERVAL
     }
+}
+
+#[cfg(test)]
+fn next_poll_interval(app: &AppState, scrollback: &ScrollbackSyncState) -> Duration {
+    poll_interval(app, scrollback)
+}
+
+fn prepare_scrollback_sync(
+    app: &AppState,
+    sync_state: &ScrollbackSyncState,
+) -> Option<PreparedScrollbackSync> {
+    if !should_sync_terminal_scrollback(app) {
+        return None;
+    }
+    if sync_state.session_id.as_deref() == Some(app.session_id.as_str())
+        && sync_state.revision == app.timeline_revision()
+        && sync_state.pending_seed.is_none()
+    {
+        return None;
+    }
+
+    let next_line_count = app.scrollback_line_count();
+    let shared_len = sync_state.line_count.min(next_line_count);
+    let shared_hash = app.scrollback_prefix_hash(shared_len);
+    let plan = plan_scrollback_sync(
+        sync_state,
+        app.session_id.as_str(),
+        next_line_count,
+        shared_hash,
+    );
+    let mut line_batches = Vec::new();
+    let mut next_state = ScrollbackSyncState {
+        session_id: Some(app.session_id.clone()),
+        revision: app.timeline_revision(),
+        line_count: next_line_count,
+        sequence_hash: app.scrollback_prefix_hash(next_line_count),
+        pending_seed: None,
+    };
+
+    match plan {
+        ScrollbackSyncPlan::Seed {
+            insert_separator,
+            from_index,
+            to_index,
+            total_line_count,
+        } => {
+            if insert_separator {
+                line_batches.push(vec![scrollback_separator(app), Line::raw(String::new())]);
+            }
+            let seeded = app.scrollback_lines_range(from_index, to_index);
+            if !seeded.is_empty() {
+                line_batches.push(seeded);
+            }
+            next_state.pending_seed =
+                (to_index < total_line_count).then(|| ScrollbackSeedProgress {
+                    session_id: app.session_id.clone(),
+                    next_line_index: to_index,
+                });
+            next_state.line_count = to_index;
+            next_state.sequence_hash = app.scrollback_prefix_hash(to_index);
+        }
+        ScrollbackSyncPlan::Append { from_index } => {
+            let appended = app.scrollback_lines_from(from_index);
+            if !appended.is_empty() {
+                line_batches.push(appended);
+            }
+        }
+        ScrollbackSyncPlan::Noop => {}
+    }
+
+    Some(PreparedScrollbackSync {
+        line_batches,
+        next_state,
+    })
 }
 
 fn plan_scrollback_sync(

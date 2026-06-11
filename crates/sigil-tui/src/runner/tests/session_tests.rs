@@ -151,3 +151,54 @@ fn switch_session_while_active_run_reports_error() -> Result<()> {
     worker.shutdown()?;
     Ok(())
 }
+
+#[test]
+fn switch_session_reports_load_error_for_missing_session_file() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
+    let invalid_log_path = temp.path().join(".sigil/sessions");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: invalid_log_path.clone(),
+    })?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error)
+            if error.contains(&invalid_log_path.display().to_string())
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn worker_startup_reports_initial_session_load_failures() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let invalid_session_log_path = temp.path().to_path_buf();
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(
+        root_config,
+        invalid_session_log_path.clone(),
+        agent,
+        workspace_root,
+    )?;
+
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error)
+            if error.contains(&invalid_session_log_path.display().to_string())
+    ));
+    Ok(())
+}

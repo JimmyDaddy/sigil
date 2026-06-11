@@ -283,3 +283,60 @@ fn spawn_agent_worker_reports_provider_build_failure() -> Result<()> {
     ));
     Ok(())
 }
+
+#[test]
+fn submit_prompt_rejects_second_run_while_agent_is_active() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-busy.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "first".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "second".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error) if error == "agent is already running"
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn submit_prompt_surfaces_provider_startup_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-error.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Fail("provider startup failed")]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "hello".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error) if error.contains("provider startup failed")
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}

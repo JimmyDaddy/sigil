@@ -287,7 +287,7 @@ fn git_output(workspace_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     }
 }
 
-fn collect_nul_paths(paths: &mut BTreeSet<String>, output: Vec<u8>) {
+pub(super) fn collect_nul_paths(paths: &mut BTreeSet<String>, output: Vec<u8>) {
     for raw in output.split(|byte| *byte == 0) {
         if raw.is_empty() {
             continue;
@@ -299,7 +299,7 @@ fn collect_nul_paths(paths: &mut BTreeSet<String>, output: Vec<u8>) {
     }
 }
 
-fn is_supported_source_file(workspace_root: &Path, relative_path: &str) -> bool {
+pub(super) fn is_supported_source_file(workspace_root: &Path, relative_path: &str) -> bool {
     let path = workspace_root.join(relative_path);
     if !path.is_file() {
         return false;
@@ -314,7 +314,7 @@ fn is_supported_source_file(workspace_root: &Path, relative_path: &str) -> bool 
     )
 }
 
-fn diagnostics_paths_from_call(call: &ToolCall) -> Result<Vec<String>> {
+pub(super) fn diagnostics_paths_from_call(call: &ToolCall) -> Result<Vec<String>> {
     let args: Value = serde_json::from_str(&call.args_json)
         .with_context(|| format!("invalid tool args for {}", call.name))?;
     let paths = args
@@ -328,7 +328,7 @@ fn diagnostics_paths_from_call(call: &ToolCall) -> Result<Vec<String>> {
         .collect())
 }
 
-fn permission_block_reason(
+pub(super) fn permission_block_reason(
     call: &ToolCall,
     decision: &sigil_kernel::PermissionDecision,
 ) -> (ToolErrorKind, String) {
@@ -430,7 +430,7 @@ fn audit_subjects(subjects: &[ToolSubject]) -> Vec<ToolSubjectAudit> {
     subjects.iter().map(ToolSubjectAudit::from).collect()
 }
 
-fn attach_diagnostics_context(result: &mut ToolResult, paths: &[String]) {
+pub(super) fn attach_diagnostics_context(result: &mut ToolResult, paths: &[String]) {
     let sample_paths = paths
         .iter()
         .take(24)
@@ -459,7 +459,7 @@ fn attach_diagnostics_context(result: &mut ToolResult, paths: &[String]) {
     }
 }
 
-fn duration_ms(started_at: Instant) -> u64 {
+pub(super) fn duration_ms(started_at: Instant) -> u64 {
     started_at
         .elapsed()
         .as_millis()

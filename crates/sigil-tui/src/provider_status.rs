@@ -5,7 +5,7 @@ use reqwest::blocking::Client as BlockingClient;
 use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::resolve_deepseek_api_key;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct BalanceSnapshot {
     pub(crate) total: Option<f64>,
     pub(crate) currency: Option<String>,
@@ -14,15 +14,8 @@ pub(crate) struct BalanceSnapshot {
 }
 
 pub(crate) fn fetch_remote_model_ids(config: &DeepSeekProviderConfig) -> Result<Vec<String>> {
-    let Some(api_key) = resolve_provider_api_key(config) else {
-        bail!("missing auth");
-    };
-    let url = format!("{}/models", config.base_url.trim_end_matches('/'));
-    let timeout_secs = config.request_timeout_secs.clamp(1, 5);
-    let client = BlockingClient::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-        .map_err(|error| anyhow!("failed to build model-list client: {error}"))?;
+    let (api_key, url, timeout_secs) = provider_status_request_parts(config, "models")?;
+    let client = build_provider_status_client(timeout_secs, "model-list")?;
     let response = client
         .get(url)
         .bearer_auth(api_key)
@@ -43,15 +36,8 @@ pub(crate) fn fetch_remote_model_ids(config: &DeepSeekProviderConfig) -> Result<
 pub(crate) fn fetch_provider_balance_snapshot(
     config: &DeepSeekProviderConfig,
 ) -> Result<BalanceSnapshot> {
-    let Some(api_key) = resolve_provider_api_key(config) else {
-        bail!("missing auth");
-    };
-    let url = format!("{}/user/balance", config.base_url.trim_end_matches('/'));
-    let timeout_secs = config.request_timeout_secs.clamp(1, 5);
-    let client = BlockingClient::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-        .map_err(|error| anyhow!("failed to build balance client: {error}"))?;
+    let (api_key, url, timeout_secs) = provider_status_request_parts(config, "user/balance")?;
+    let client = build_provider_status_client(timeout_secs, "balance")?;
     let payload = client
         .get(url)
         .bearer_auth(api_key)
@@ -61,8 +47,56 @@ pub(crate) fn fetch_provider_balance_snapshot(
         .map_err(|error| anyhow!("failed to fetch balance: {error}"))?
         .json::<serde_json::Value>()
         .map_err(|error| anyhow!("failed to decode balance payload: {error}"))?;
-
     parse_balance_snapshot(&payload)
+}
+
+fn parse_remote_model_ids(payload: &serde_json::Value) -> Vec<String> {
+    let Some(items) = payload.get("data").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut model_ids = Vec::new();
+    for item in items {
+        let Some(model_id) = item.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !model_ids.iter().any(|existing| existing == model_id) {
+            model_ids.push(model_id.to_owned());
+        }
+    }
+    model_ids
+}
+
+fn provider_request_timeout_secs(config: &DeepSeekProviderConfig) -> u64 {
+    config.request_timeout_secs.clamp(1, 5)
+}
+
+fn provider_status_request_parts(
+    config: &DeepSeekProviderConfig,
+    path_suffix: &str,
+) -> Result<(String, String, u64)> {
+    let api_key = require_provider_auth(resolve_provider_api_key(config))?;
+    let url = provider_status_url(config, path_suffix);
+    let timeout_secs = provider_request_timeout_secs(config);
+    Ok((api_key, url, timeout_secs))
+}
+
+fn require_provider_auth(api_key: Option<String>) -> Result<String> {
+    api_key.ok_or_else(|| anyhow!("missing auth"))
+}
+
+fn provider_status_url(config: &DeepSeekProviderConfig, path_suffix: &str) -> String {
+    format!(
+        "{}/{}",
+        config.base_url.trim_end_matches('/'),
+        path_suffix.trim_start_matches('/')
+    )
+}
+
+fn build_provider_status_client(timeout_secs: u64, label: &str) -> Result<BlockingClient> {
+    BlockingClient::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|error| anyhow!("failed to build {label} client: {error}"))
 }
 
 fn parse_balance_snapshot(payload: &serde_json::Value) -> Result<BalanceSnapshot> {
@@ -101,22 +135,6 @@ fn parse_balance_snapshot(payload: &serde_json::Value) -> Result<BalanceSnapshot
             "unavailable".to_owned()
         },
     })
-}
-
-fn parse_remote_model_ids(payload: &serde_json::Value) -> Vec<String> {
-    let Some(items) = payload.get("data").and_then(serde_json::Value::as_array) else {
-        return Vec::new();
-    };
-    let mut model_ids = Vec::new();
-    for item in items {
-        let Some(model_id) = item.get("id").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if !model_ids.iter().any(|existing| existing == model_id) {
-            model_ids.push(model_id.to_owned());
-        }
-    }
-    model_ids
 }
 
 pub(crate) fn resolve_provider_api_key(config: &DeepSeekProviderConfig) -> Option<String> {

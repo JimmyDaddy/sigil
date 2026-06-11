@@ -1,5 +1,6 @@
-use std::{collections::BTreeMap, path::Path, sync::mpsc, time::Duration};
+use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::mpsc, time::Duration};
 
+use anyhow::{Result, anyhow};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -7,20 +8,22 @@ use ratatui::{
     text::{Line, Span},
 };
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
-    WorkspaceConfig,
+    AgentConfig, CompactionConfig, MemoryConfig, ModelMessage, PermissionConfig, RootConfig,
+    SessionConfig, SessionLogEntry, WorkspaceConfig,
 };
 use sigil_tui::{
     app::{AppAction, AppState},
-    runner::WorkerCommand,
+    runner::{WorkerCommand, WorkerMessage},
 };
 
 use super::{
-    BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, SCROLLBACK_SEED_POLL_INTERVAL, ScrollbackSeedProgress,
-    ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime, next_poll_interval,
-    plan_scrollback_sync, plan_scrollback_sync_with_chunk_size, process_app_action,
+    AppMouseOutcome, BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, SCROLLBACK_SEED_POLL_INTERVAL,
+    ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
+    apply_key_action, apply_mouse_outcome, build_initial_app, drain_worker_messages,
+    next_poll_interval, plan_scrollback_sync, plan_scrollback_sync_with_chunk_size, poll_interval,
+    prepare_scrollback_sync, process_app_action, process_app_action_with_spawner,
     render_scrollback_rows, scrollback_plain_line, scrollback_row_style, scrollback_separator,
-    should_sync_terminal_scrollback, wrap_scrollback_text,
+    scrollback_wrapped_rows, should_sync_terminal_scrollback, wrap_scrollback_text,
 };
 
 fn test_config() -> RootConfig {
@@ -359,5 +362,349 @@ fn process_app_action_ignores_worker_command_without_runtime() -> anyhow::Result
     process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
 
     assert!(worker.is_none());
+    Ok(())
+}
+
+fn fake_worker_runtime() -> (
+    WorkerRuntime,
+    mpsc::Receiver<sigil_tui::runner::WorkerCommand>,
+) {
+    let (worker_tx, worker_rx) = mpsc::channel();
+    let (_message_tx, message_rx) = mpsc::channel::<WorkerMessage>();
+    (
+        WorkerRuntime {
+            worker_tx,
+            worker_rx: message_rx,
+        },
+        worker_rx,
+    )
+}
+
+fn app_with_scrollback() -> AppState {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let _ = app.set_terminal_size(48, 6);
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path: PathBuf::from(".sigil/sessions/session-restored.jsonl"),
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries: vec![
+            SessionLogEntry::User(ModelMessage::user("hello")),
+            SessionLogEntry::Assistant(ModelMessage::assistant(
+                Some(
+                    "restored answer with enough wrapped content to overflow the live panel"
+                        .to_owned(),
+                ),
+                Vec::new(),
+            )),
+        ],
+    })
+    .expect("session switch should restore timeline");
+    app.handle_worker_message(WorkerMessage::Notice("checking".to_owned()))
+        .expect("notice should render");
+    app.handle_worker_message(WorkerMessage::RunStarted {
+        prompt: "follow-up".to_owned(),
+    })
+    .expect("run started should render");
+    app
+}
+
+#[test]
+fn poll_interval_prefers_busy_then_seed_then_idle() {
+    let mut busy_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    busy_app.is_busy = true;
+    assert_eq!(
+        poll_interval(&busy_app, &ScrollbackSyncState::default()),
+        BUSY_POLL_INTERVAL
+    );
+
+    let seeded_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let seeded_state = ScrollbackSyncState {
+        pending_seed: Some(ScrollbackSeedProgress {
+            session_id: seeded_app.session_id.clone(),
+            next_line_index: 1,
+        }),
+        ..ScrollbackSyncState::default()
+    };
+    assert_eq!(
+        poll_interval(&seeded_app, &seeded_state),
+        SCROLLBACK_SEED_POLL_INTERVAL
+    );
+
+    let setup_app = AppState::from_setup(
+        PathBuf::from("sigil.toml"),
+        PathBuf::from("."),
+        Some("broken".to_owned()),
+    );
+    assert_eq!(poll_interval(&setup_app, &seeded_state), IDLE_POLL_INTERVAL);
+}
+
+#[test]
+fn prepare_scrollback_sync_returns_none_when_scrollback_is_disabled_or_unchanged() {
+    let setup_app = AppState::from_setup(
+        PathBuf::from("sigil.toml"),
+        PathBuf::from("."),
+        Some("broken".to_owned()),
+    );
+    assert!(prepare_scrollback_sync(&setup_app, &ScrollbackSyncState::default()).is_none());
+
+    let app = app_with_scrollback();
+    let line_count = app.scrollback_line_count();
+    let synced = ScrollbackSyncState {
+        session_id: Some(app.session_id.clone()),
+        revision: app.timeline_revision(),
+        line_count,
+        sequence_hash: app.scrollback_prefix_hash(line_count),
+        pending_seed: None,
+    };
+    assert!(prepare_scrollback_sync(&app, &synced).is_none());
+}
+
+#[test]
+fn prepare_scrollback_sync_reseeds_and_appends_expected_batches() {
+    let app = app_with_scrollback();
+    let line_count = app.scrollback_line_count();
+    assert!(line_count > 0);
+
+    let reseed = prepare_scrollback_sync(
+        &app,
+        &ScrollbackSyncState {
+            session_id: Some("previous-session".to_owned()),
+            revision: 1,
+            line_count: 1,
+            sequence_hash: 7,
+            pending_seed: None,
+        },
+    )
+    .expect("expected reseed");
+    assert!(!reseed.line_batches.is_empty());
+    assert_eq!(
+        scrollback_plain_line(&reseed.line_batches[0][0]),
+        scrollback_plain_line(&scrollback_separator(&app))
+    );
+    assert_eq!(reseed.next_state.session_id, Some(app.session_id.clone()));
+
+    let append = prepare_scrollback_sync(
+        &app,
+        &ScrollbackSyncState {
+            session_id: Some(app.session_id.clone()),
+            revision: app.timeline_revision().saturating_sub(1),
+            line_count: line_count.saturating_sub(1),
+            sequence_hash: app.scrollback_prefix_hash(line_count.saturating_sub(1)),
+            pending_seed: None,
+        },
+    )
+    .expect("expected append");
+    assert!(append.line_batches.len() <= 1);
+    assert_eq!(append.next_state.line_count, line_count);
+    assert!(append.next_state.pending_seed.is_none());
+}
+
+#[test]
+fn scrollback_plain_and_wrapped_rows_preserve_style_metadata() {
+    let line = Line::from(vec![
+        Span::styled(
+            "Alert",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" body"),
+    ]);
+
+    assert_eq!(scrollback_plain_line(&line), "Alert body");
+
+    let style = scrollback_row_style(&line);
+    assert_eq!(style.fg, Some(Color::Yellow));
+    assert!(style.add_modifier.contains(Modifier::BOLD));
+
+    let wrapped = scrollback_wrapped_rows(&line, 5);
+    assert_eq!(wrapped.len(), 2);
+    assert_eq!(wrapped[0].0, "Alert");
+    assert_eq!(wrapped[0].1.fg, Some(Color::Yellow));
+}
+
+#[test]
+fn scrollback_separator_mentions_session_provider_and_model() {
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let separator = scrollback_plain_line(&scrollback_separator(&app));
+
+    assert!(separator.contains("---- session "));
+    assert!(separator.contains(&app.provider_name));
+    assert!(separator.contains(&app.model_name));
+}
+
+#[test]
+fn build_initial_app_enters_setup_mode_when_config_load_fails() -> Result<()> {
+    let (app, worker) = build_initial_app(
+        PathBuf::from("/tmp/workspace"),
+        PathBuf::from("/tmp/workspace/sigil.toml"),
+        Err(anyhow!("broken config")),
+        |_root_config, _app| Err(anyhow!("spawner should not run")),
+    )?;
+
+    assert!(app.is_setup_mode());
+    assert!(worker.is_none());
+    Ok(())
+}
+
+#[test]
+fn build_initial_app_spawns_worker_for_loaded_config() -> Result<()> {
+    let (app, worker) = build_initial_app(
+        PathBuf::from("."),
+        PathBuf::from("sigil.toml"),
+        Ok(test_config()),
+        |_root_config, _app| Ok(fake_worker_runtime().0),
+    )?;
+
+    assert!(!app.is_setup_mode());
+    assert!(worker.is_some());
+    Ok(())
+}
+
+#[test]
+fn process_app_action_restarts_worker_for_config_save() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (old_runtime, old_commands) = fake_worker_runtime();
+    let mut worker = Some(old_runtime);
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::ConfigSaved {
+            root_config: Box::new(test_config()),
+        },
+        |_root_config, _app| Ok(fake_worker_runtime().0),
+    )?;
+
+    let shutdown = old_commands.recv()?;
+    assert!(matches!(
+        shutdown,
+        sigil_tui::runner::WorkerCommand::Shutdown
+    ));
+    assert!(worker.is_some());
+    Ok(())
+}
+
+#[test]
+fn process_app_action_forwards_runtime_commands_to_worker() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (runtime, commands) = fake_worker_runtime();
+    let mut worker = Some(runtime);
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::SubmitPrompt("hello".to_owned()),
+        |_root_config, _app| Err(anyhow!("spawner should not run")),
+    )?;
+
+    let command = commands.recv()?;
+    assert!(matches!(
+        command,
+        sigil_tui::runner::WorkerCommand::SubmitPrompt { ref prompt, reasoning_effort: _ }
+            if prompt == "hello"
+    ));
+    Ok(())
+}
+
+#[test]
+fn process_app_action_bootstraps_app_after_setup_completion() -> Result<()> {
+    let mut app = AppState::from_setup(
+        PathBuf::from("sigil.toml"),
+        PathBuf::from("."),
+        Some("missing".to_owned()),
+    );
+    let mut worker = None;
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::SetupCompleted {
+            config_path: PathBuf::from("sigil.toml"),
+            root_config: Box::new(test_config()),
+        },
+        |_root_config, _app| Ok(fake_worker_runtime().0),
+    )?;
+
+    assert!(!app.is_setup_mode());
+    assert!(worker.is_some());
+    assert_eq!(app.provider_name, "deepseek");
+    Ok(())
+}
+
+#[test]
+fn drain_worker_messages_marks_dirty_when_messages_arrive() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (worker_tx, _command_rx) = mpsc::channel();
+    let (message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+    });
+    message_tx.send(WorkerMessage::RunStarted {
+        prompt: "hello".to_owned(),
+    })?;
+
+    assert!(drain_worker_messages(&mut app, &mut worker)?);
+    Ok(())
+}
+
+#[test]
+fn apply_mouse_outcome_handles_noop_redraw_and_actions() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (runtime, commands) = fake_worker_runtime();
+    let mut worker = Some(runtime);
+
+    assert!(!apply_mouse_outcome(
+        &mut app,
+        &mut worker,
+        AppMouseOutcome::Noop,
+        |_root_config, _app| Err(anyhow!("spawner should not run"))
+    )?);
+    assert!(apply_mouse_outcome(
+        &mut app,
+        &mut worker,
+        AppMouseOutcome::Redraw,
+        |_root_config, _app| Err(anyhow!("spawner should not run"))
+    )?);
+    assert!(apply_mouse_outcome(
+        &mut app,
+        &mut worker,
+        AppMouseOutcome::Action(AppAction::CheckChangedFilesDiagnostics),
+        |_root_config, _app| Err(anyhow!("spawner should not run"))
+    )?);
+
+    let command = commands.recv()?;
+    assert!(matches!(
+        command,
+        sigil_tui::runner::WorkerCommand::CheckChangedFilesDiagnostics
+    ));
+    Ok(())
+}
+
+#[test]
+fn apply_key_action_always_requests_render_and_forwards_actions() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (runtime, commands) = fake_worker_runtime();
+    let mut worker = Some(runtime);
+
+    assert!(apply_key_action(
+        &mut app,
+        &mut worker,
+        None,
+        |_root_config, _app| Err(anyhow!("spawner should not run"))
+    )?);
+    assert!(apply_key_action(
+        &mut app,
+        &mut worker,
+        Some(AppAction::CancelRun),
+        |_root_config, _app| Err(anyhow!("spawner should not run"))
+    )?);
+
+    let command = commands.recv()?;
+    assert!(matches!(
+        command,
+        sigil_tui::runner::WorkerCommand::CancelRun
+    ));
     Ok(())
 }

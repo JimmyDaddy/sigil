@@ -4,8 +4,10 @@ use sigil_provider_deepseek::{
 };
 
 use super::{
-    BalanceSnapshot, fetch_provider_balance_snapshot, fetch_remote_model_ids,
-    parse_balance_snapshot, parse_remote_model_ids, resolve_provider_api_key,
+    BalanceSnapshot, build_provider_status_client, fetch_provider_balance_snapshot,
+    fetch_remote_model_ids, parse_balance_snapshot, parse_remote_model_ids,
+    provider_request_timeout_secs, provider_status_request_parts, provider_status_url,
+    require_provider_auth, resolve_provider_api_key,
 };
 
 fn provider_config(api_key: Option<&str>) -> DeepSeekProviderConfig {
@@ -145,4 +147,119 @@ fn parse_balance_snapshot_rejects_missing_or_unparseable_infos() {
             .to_string(),
         "provider returned no parseable balances"
     );
+}
+
+fn test_provider_config(timeout_secs: u64) -> DeepSeekProviderConfig {
+    DeepSeekProviderConfig {
+        base_url: "https://example.com".to_owned(),
+        beta_base_url: "https://example.com/beta".to_owned(),
+        anthropic_base_url: "https://example.com/anthropic".to_owned(),
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test-key".to_owned()),
+        user_id_strategy: Some("stable_per_end_user".to_owned()),
+        strict_tools_mode: sigil_provider_deepseek::StrictToolsMode::Auto,
+        request_timeout_secs: timeout_secs,
+    }
+}
+
+#[test]
+fn parse_remote_model_ids_returns_empty_when_payload_has_no_data_array() {
+    assert!(parse_remote_model_ids(&json!({"data": null})).is_empty());
+    assert!(parse_remote_model_ids(&json!({"missing": true})).is_empty());
+}
+
+#[test]
+fn provider_request_timeout_secs_clamps_to_fast_status_window() {
+    assert_eq!(provider_request_timeout_secs(&test_provider_config(0)), 1);
+    assert_eq!(provider_request_timeout_secs(&test_provider_config(3)), 3);
+    assert_eq!(provider_request_timeout_secs(&test_provider_config(30)), 5);
+}
+
+#[test]
+fn require_provider_auth_rejects_missing_secret() {
+    let error = require_provider_auth(None).expect_err("expected missing auth");
+
+    assert!(error.to_string().contains("missing auth"));
+}
+
+#[test]
+fn provider_status_url_normalizes_slashes() {
+    let config = test_provider_config(3);
+
+    assert_eq!(
+        provider_status_url(&config, "/models"),
+        "https://example.com/models"
+    );
+    assert_eq!(
+        provider_status_url(&config, "user/balance"),
+        "https://example.com/user/balance"
+    );
+}
+
+#[test]
+fn provider_status_request_parts_return_auth_url_and_timeout() {
+    let config = test_provider_config(12);
+    let (api_key, url, timeout_secs) =
+        provider_status_request_parts(&config, "/models").expect("expected request parts");
+
+    assert_eq!(api_key, "test-key");
+    assert_eq!(url, "https://example.com/models");
+    assert_eq!(timeout_secs, 5);
+}
+
+#[test]
+fn parse_balance_snapshot_marks_unavailable_without_total_label() {
+    let snapshot = parse_balance_snapshot(&json!({
+        "is_available": false,
+        "balance_infos": [
+            {"currency": "USD", "total_balance": "3.25"}
+        ]
+    }))
+    .expect("expected parseable balance");
+
+    assert_eq!(
+        snapshot,
+        BalanceSnapshot {
+            total: Some(3.25),
+            currency: Some("USD".to_owned()),
+            available: false,
+            status: "unavailable".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn parse_balance_snapshot_rejects_missing_balance_infos() {
+    let error = parse_balance_snapshot(&json!({"is_available": true}))
+        .expect_err("expected missing balance info error");
+
+    assert!(
+        error
+            .to_string()
+            .contains("provider returned no balance infos")
+    );
+}
+
+#[test]
+fn parse_balance_snapshot_rejects_unparseable_items() {
+    let error = parse_balance_snapshot(&json!({
+        "is_available": true,
+        "balance_infos": [
+            {"currency": "USD", "total_balance": "oops"},
+            {"currency": 12, "total_balance": "1.0"}
+        ]
+    }))
+    .expect_err("expected parseable balance error");
+
+    assert!(
+        error
+            .to_string()
+            .contains("provider returned no parseable balances")
+    );
+}
+
+#[test]
+fn build_provider_status_client_accepts_small_timeout_values() {
+    build_provider_status_client(1, "balance").expect("expected blocking client");
 }
