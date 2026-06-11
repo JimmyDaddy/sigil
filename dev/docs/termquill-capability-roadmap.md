@@ -249,14 +249,15 @@ cargo test -p termquill-tui timeline_flow_tests
 
 当前事实：
 
-- `required = false` 且 `startup = "lazy"` 当前不启动、不注册工具。
-- required lazy 当前明确报错。
+- `startup = "lazy"` 的 server 在普通启动阶段不启动、不注册工具，不拖慢 TUI/CLI registry 构建。
+- crate 层已有显式 lazy activation API：activation 时启动 lazy server、执行 `tools/list`，成功后把真实工具加入 registry，失败按 required / optional 策略处理。
+- TUI lifecycle 还没有用户可触发的 MCP activation 面板；模型也不会在 activation 前看到不可调用伪工具。
 
 交付物：
 
-1. 启动时注册 lazy placeholder metadata，但不暴露伪工具给模型。
-2. 用户或模型需要某 MCP capability 时触发 activation。
-3. activation 成功后工具进入 registry；失败按 required / optional 策略处理。
+1. 启动时注册 lazy placeholder metadata，但不暴露伪工具给模型。（crate activation API 已落地；TUI metadata 待接入）
+2. 用户或模型需要某 MCP capability 时触发 activation。（TUI 触发面待接入）
+3. activation 成功后工具进入 registry；失败按 required / optional 策略处理。（crate API 已落地）
 4. TUI 显示 MCP server lifecycle。
 
 验收标准：

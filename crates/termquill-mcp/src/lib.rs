@@ -70,12 +70,52 @@ pub async fn register_mcp_tools_with_capabilities_roots_and_secrets(
     .await
 }
 
+pub async fn activate_lazy_mcp_tools(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+) -> Result<()> {
+    activate_lazy_mcp_tools_with_name_limit(registry, servers, DEFAULT_PROVIDER_TOOL_NAME_MAX_CHARS)
+        .await
+}
+
+pub async fn activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<PathBuf>,
+    secret_redactor: SecretRedactor,
+) -> Result<()> {
+    activate_lazy_mcp_tools_with_name_limit_and_roots(
+        registry,
+        servers,
+        capabilities.tool_name_max_chars,
+        roots,
+        secret_redactor,
+    )
+    .await
+}
+
 async fn register_mcp_tools_with_name_limit(
     registry: &mut ToolRegistry,
     servers: &[McpServerConfig],
     provider_tool_name_max_chars: usize,
 ) -> Result<()> {
     register_mcp_tools_with_name_limit_and_roots(
+        registry,
+        servers,
+        provider_tool_name_max_chars,
+        default_mcp_roots()?,
+        SecretRedactor::empty(),
+    )
+    .await
+}
+
+async fn activate_lazy_mcp_tools_with_name_limit(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    provider_tool_name_max_chars: usize,
+) -> Result<()> {
+    activate_lazy_mcp_tools_with_name_limit_and_roots(
         registry,
         servers,
         provider_tool_name_max_chars,
@@ -92,20 +132,57 @@ async fn register_mcp_tools_with_name_limit_and_roots(
     roots: Vec<PathBuf>,
     secret_redactor: SecretRedactor,
 ) -> Result<()> {
-    let mut used_provider_names = BTreeSet::new();
+    register_mcp_tools_for_startup(
+        registry,
+        servers,
+        provider_tool_name_max_chars,
+        roots,
+        secret_redactor,
+        McpServerStartup::Eager,
+    )
+    .await
+}
+
+async fn activate_lazy_mcp_tools_with_name_limit_and_roots(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    provider_tool_name_max_chars: usize,
+    roots: Vec<PathBuf>,
+    secret_redactor: SecretRedactor,
+) -> Result<()> {
+    register_mcp_tools_for_startup(
+        registry,
+        servers,
+        provider_tool_name_max_chars,
+        roots,
+        secret_redactor,
+        McpServerStartup::Lazy,
+    )
+    .await
+}
+
+async fn register_mcp_tools_for_startup(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    provider_tool_name_max_chars: usize,
+    roots: Vec<PathBuf>,
+    secret_redactor: SecretRedactor,
+    startup: McpServerStartup,
+) -> Result<()> {
+    let mut used_provider_names = registry
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<BTreeSet<_>>();
     for server in servers {
-        if server.startup == McpServerStartup::Lazy {
-            if server.required {
-                bail!(
-                    "MCP server {} is required but lazy startup is not implemented yet",
-                    server.name
+        if server.startup != startup {
+            if startup == McpServerStartup::Eager && server.startup == McpServerStartup::Lazy {
+                warn!(
+                    server = %server.name,
+                    trust_class = server.trust.trust_class.as_str(),
+                    "lazy MCP server startup is deferred until explicit activation"
                 );
             }
-            warn!(
-                server = %server.name,
-                trust_class = server.trust.trust_class.as_str(),
-                "lazy MCP server startup is configured but lazy activation is not implemented yet"
-            );
             continue;
         }
 

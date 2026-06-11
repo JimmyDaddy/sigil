@@ -7,7 +7,10 @@ use termquill_kernel::{
     ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 
-use super::{register_mcp_tools, register_mcp_tools_with_capabilities_roots_and_secrets};
+use super::{
+    activate_lazy_mcp_tools, register_mcp_tools,
+    register_mcp_tools_with_capabilities_roots_and_secrets,
+};
 
 fn write_fake_server_script(path: &std::path::Path, body: &str) -> Result<()> {
     fs::write(path, body)?;
@@ -635,9 +638,22 @@ if message and message.get("method") == "initialize":
 }
 
 #[tokio::test]
-async fn required_lazy_mcp_server_errors_until_lazy_activation_exists() -> Result<()> {
+async fn required_lazy_mcp_server_is_deferred_until_activation() -> Result<()> {
     let mut registry = ToolRegistry::new();
-    let error = register_mcp_tools(
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "required-lazy".to_owned(),
+            command: "/definitely/missing/termquill-mcp-server".to_owned(),
+            startup: McpServerStartup::Lazy,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    assert!(registry.specs().is_empty());
+
+    let error = activate_lazy_mcp_tools(
         &mut registry,
         &[McpServerConfig {
             name: "required-lazy".to_owned(),
@@ -647,12 +663,12 @@ async fn required_lazy_mcp_server_errors_until_lazy_activation_exists() -> Resul
         }],
     )
     .await
-    .expect_err("required lazy server should not be silently skipped");
+    .expect_err("required lazy activation should surface startup failure");
 
     assert!(
-        error.to_string().contains(
-            "MCP server required-lazy is required but lazy startup is not implemented yet"
-        )
+        error
+            .to_string()
+            .contains("failed to spawn MCP server required-lazy")
     );
     Ok(())
 }
@@ -673,6 +689,88 @@ async fn lazy_mcp_servers_are_not_started_or_registered() -> Result<()> {
     .await?;
 
     assert!(registry.specs().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn lazy_mcp_server_activation_registers_and_calls_real_tools() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("lazy_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]}})
+    elif method == "tools/call":
+        value = message["params"]["arguments"]["value"]
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":"lazy:" + value}]}})
+"#,
+    )?;
+
+    let server = McpServerConfig {
+        name: "lazy".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.to_string_lossy().to_string()],
+        startup: McpServerStartup::Lazy,
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    };
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(&mut registry, std::slice::from_ref(&server)).await?;
+    assert!(
+        registry.spec_for("mcp__lazy__echo").is_none(),
+        "lazy registration should not expose pseudo tools"
+    );
+
+    activate_lazy_mcp_tools(&mut registry, &[server]).await?;
+    assert!(registry.spec_for("mcp__lazy__echo").is_some());
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            termquill_kernel::ToolCall {
+                id: "call-lazy".to_owned(),
+                name: "mcp__lazy__echo".to_owned(),
+                args_json: r#"{"value":"ok"}"#.to_owned(),
+            },
+        )
+        .await?;
+
+    assert_eq!(result.content, "lazy:ok");
     Ok(())
 }
 
