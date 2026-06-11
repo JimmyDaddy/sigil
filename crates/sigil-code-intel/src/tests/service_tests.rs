@@ -32,6 +32,101 @@ fn fake_config() -> CodeIntelligenceConfig {
     }
 }
 
+fn fake_lsp_server_config(script_path: &std::path::Path) -> CodeIntelligenceConfig {
+    CodeIntelligenceConfig {
+        enabled: true,
+        startup: CodeIntelStartup::Lazy,
+        default_timeout_ms: 5_000,
+        max_results: 20,
+        max_payload_bytes: 64 * 1024,
+        discovery: CodeIntelligenceDiscoveryConfig {
+            enabled: false,
+            report_missing: true,
+        },
+        servers: vec![LanguageServerConfig {
+            name: "rust-analyzer".to_owned(),
+            languages: vec!["rust".to_owned()],
+            command: "python3".to_owned(),
+            args: vec![script_path.to_string_lossy().to_string()],
+            env: Default::default(),
+            root_markers: vec!["Cargo.toml".to_owned()],
+            file_extensions: vec!["rs".to_owned()],
+            initialization_options: serde_json::Value::Null,
+            trust_required: true,
+            startup_timeout_ms: 5_000,
+        }],
+    }
+}
+
+fn write_fake_lsp_server(path: &std::path::Path) {
+    fs::write(
+        path,
+        r#"
+import json
+import sys
+
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode("ascii").split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers.get("content-length", "0"))
+    if length == 0:
+        return None
+    return json.loads(sys.stdin.buffer.read(length))
+
+
+def write_message(message):
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize":
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"capabilities": {"documentSymbolProvider": True}},
+        })
+    elif method == "textDocument/documentSymbol":
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": [{
+                "name": "hello",
+                "kind": 12,
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 17},
+                },
+                "selectionRange": {
+                    "start": {"line": 0, "character": 7},
+                    "end": {"line": 0, "character": 12},
+                },
+            }],
+        })
+    elif method == "shutdown":
+        write_message({"jsonrpc": "2.0", "id": request_id, "result": None})
+    elif method == "exit":
+        break
+"#,
+    )
+    .expect("fake LSP server script should write");
+}
+
 #[tokio::test]
 async fn disabled_service_reports_off_status() {
     let temp = tempfile::tempdir().expect("tempdir should build");
@@ -102,8 +197,8 @@ async fn document_symbols_falls_back_to_tree_sitter_when_lsp_is_unavailable() {
 }
 
 #[tokio::test]
-async fn document_symbols_uses_discovered_rust_analyzer_when_available() {
-    if std::process::Command::new("rust-analyzer")
+async fn document_symbols_uses_configured_lsp_server_when_available() {
+    if std::process::Command::new("python3")
         .arg("--version")
         .output()
         .is_err()
@@ -122,23 +217,17 @@ async fn document_symbols_uses_discovered_rust_analyzer_when_available() {
         "pub fn hello() {}\n",
     )
     .expect("source should write");
+    let server_script = temp.path().join("fake_lsp.py");
+    write_fake_lsp_server(&server_script);
     let service = CodeIntelligenceService::new(
         temp.path().to_path_buf(),
-        CodeIntelligenceConfig {
-            enabled: true,
-            startup: CodeIntelStartup::Lazy,
-            default_timeout_ms: 10_000,
-            max_results: 20,
-            max_payload_bytes: 64 * 1024,
-            discovery: Default::default(),
-            servers: Vec::new(),
-        },
+        fake_lsp_server_config(&server_script),
     );
 
     let result = service
         .document_symbols("src/lib.rs", Some("hello"), 10)
         .await
-        .expect("rust-analyzer symbols should succeed");
+        .expect("fake LSP symbols should succeed");
 
     assert_eq!(result.server, "rust-analyzer");
     assert!(
