@@ -4,7 +4,7 @@ use super::*;
 use crate::provider_status::{
     BalanceSnapshot, fetch_provider_balance_snapshot, resolve_provider_api_key,
 };
-use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
+use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 use termquill_kernel::{
     ControlEntry, EventHandler, RunEvent, ToolDiffBudget, ToolPreviewSnapshot, ToolResult,
 };
@@ -205,6 +205,12 @@ impl AppState {
                 self.push_timeline(TimelineRole::Notice, message.clone());
                 self.push_event("worker", message);
             }
+            WorkerMessage::McpActivationStatus {
+                server_name,
+                status,
+            } => {
+                self.apply_mcp_activation_status(server_name, status);
+            }
             WorkerMessage::RunFailed(error) => {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
@@ -220,6 +226,33 @@ impl AppState {
             }
         }
         Ok(())
+    }
+
+    fn apply_mcp_activation_status(
+        &mut self,
+        server_name: Option<String>,
+        status: McpActivationStatus,
+    ) {
+        let Some(server_name) = server_name else {
+            self.push_event("mcp", mcp_activation_event_detail(None, &status));
+            return;
+        };
+        let runtime_status = match &status {
+            McpActivationStatus::Activating => McpServerRuntimeStatus::Activating,
+            McpActivationStatus::Deferred => McpServerRuntimeStatus::Deferred,
+            McpActivationStatus::Ready { added_tools } => McpServerRuntimeStatus::Ready {
+                tool_count: Some(*added_tools),
+            },
+            McpActivationStatus::Failed { error } => McpServerRuntimeStatus::Failed {
+                message: error.clone(),
+            },
+        };
+        self.mcp_server_statuses
+            .insert(server_name.clone(), runtime_status);
+        self.push_event(
+            "mcp",
+            mcp_activation_event_detail(Some(&server_name), &status),
+        );
     }
 
     pub fn shutdown_command() -> WorkerCommand {
@@ -299,6 +332,19 @@ impl AppState {
         }
         self.push_event("code_intelligence", self.code_intelligence_status.clone());
     }
+}
+
+fn mcp_activation_event_detail(server_name: Option<&str>, status: &McpActivationStatus) -> String {
+    let scope = server_name
+        .map(|name| format!("server={name} "))
+        .unwrap_or_default();
+    let status = match status {
+        McpActivationStatus::Activating => "activating".to_owned(),
+        McpActivationStatus::Deferred => "deferred".to_owned(),
+        McpActivationStatus::Ready { added_tools } => format!("ready tools={added_tools}"),
+        McpActivationStatus::Failed { error } => format!("failed {}", summarize_error(error)),
+    };
+    format!("{scope}{status}")
 }
 
 fn code_intelligence_server_lines(result: &ToolResult) -> Option<Vec<(String, String)>> {

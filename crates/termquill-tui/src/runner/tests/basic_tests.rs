@@ -1,11 +1,12 @@
 use anyhow::Result;
 use tempfile::tempdir;
 use termquill_kernel::{
-    Agent, ProviderChunk, ReasoningEffort, RunEvent, SessionLogEntry, ToolRegistry,
+    Agent, McpServerConfig, McpServerStartup, ProviderChunk, ReasoningEffort, RunEvent,
+    SessionLogEntry, ToolRegistry,
 };
 
 use super::{
-    super::{WorkerCommand, WorkerMessage},
+    super::{McpActivationStatus, WorkerCommand, WorkerMessage},
     common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
 };
 
@@ -72,6 +73,22 @@ fn activate_lazy_mcp_reports_notice_when_no_lazy_servers_match() -> Result<()> {
     worker.send(WorkerCommand::ActivateLazyMcp {
         server_name: Some("missing".to_owned()),
     })?;
+    let status = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::McpActivationStatus {
+                status: McpActivationStatus::Deferred,
+                ..
+            }
+        )
+    })?;
+    assert!(matches!(
+        status,
+        WorkerMessage::McpActivationStatus {
+            server_name: Some(ref server_name),
+            status: McpActivationStatus::Deferred,
+        } if server_name == "missing"
+    ));
     let notice = worker.recv_until(|message| matches!(message, WorkerMessage::Notice(_)))?;
 
     assert!(matches!(
@@ -105,6 +122,47 @@ fn activate_lazy_mcp_is_rejected_while_run_is_active() -> Result<()> {
         failure,
         WorkerMessage::RunFailed(ref error)
             if error == "cannot activate MCP while the agent is running"
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn activate_lazy_mcp_reports_failed_status_for_required_server_error() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".termquill/sessions/session-worker.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    root_config.mcp_servers.push(McpServerConfig {
+        name: "required-lazy".to_owned(),
+        command: "/definitely/missing/termquill-mcp-server".to_owned(),
+        startup: McpServerStartup::Lazy,
+        ..McpServerConfig::default()
+    });
+    let provider = PlannedProvider::new(Vec::new());
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::ActivateLazyMcp {
+        server_name: Some("required-lazy".to_owned()),
+    })?;
+    let status = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::McpActivationStatus {
+                status: McpActivationStatus::Failed { .. },
+                ..
+            }
+        )
+    })?;
+
+    assert!(matches!(
+        status,
+        WorkerMessage::McpActivationStatus {
+            server_name: Some(ref server_name),
+            status: McpActivationStatus::Failed { ref error },
+        } if server_name == "required-lazy" && error.contains("failed to spawn MCP server required-lazy")
     ));
 
     worker.shutdown()?;

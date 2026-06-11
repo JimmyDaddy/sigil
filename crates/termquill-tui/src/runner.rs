@@ -6,7 +6,7 @@ mod session_flow;
 mod spawn;
 mod worker_loop;
 
-pub use protocol::{CompactionTrigger, WorkerCommand, WorkerMessage};
+pub use protocol::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 pub use spawn::spawn_agent_worker;
 
 #[cfg(test)]

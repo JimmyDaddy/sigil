@@ -139,6 +139,9 @@ fn config_mcp_footer_activate_returns_lazy_activation_action() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("Runtime"));
+    assert!(detail.contains("deferred"));
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
@@ -149,6 +152,58 @@ fn config_mcp_footer_activate_returns_lazy_activation_action() -> Result<()> {
         }) if server_name == "filesystem"
     ));
     assert_eq!(app.last_notice(), Some("activating MCP filesystem"));
+    assert_eq!(
+        app.mcp_server_runtime_status_label("filesystem").as_deref(),
+        Some("activating")
+    );
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("activating"));
+    Ok(())
+}
+
+#[test]
+fn config_mcp_lifecycle_updates_from_worker_activation_status() -> Result<()> {
+    let mut config = test_config();
+    config.mcp_servers.push(termquill_kernel::McpServerConfig {
+        name: "filesystem".to_owned(),
+        command: "mcp-filesystem".to_owned(),
+        required: false,
+        startup: McpServerStartup::Lazy,
+        ..Default::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: Some("filesystem".to_owned()),
+        status: McpActivationStatus::Ready { added_tools: 3 },
+    })?;
+
+    assert_eq!(
+        app.mcp_server_runtime_status_label("filesystem").as_deref(),
+        Some("ready 3 tools")
+    );
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("ready 3 tools"));
+
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: Some("filesystem".to_owned()),
+        status: McpActivationStatus::Failed {
+            error: "MCP server filesystem tools/list failed: bad response".to_owned(),
+        },
+    })?;
+
+    let label = app
+        .mcp_server_runtime_status_label("filesystem")
+        .expect("status should exist");
+    assert!(label.contains("failed:"));
+    assert!(label.contains("bad response"));
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("failed:"));
     Ok(())
 }
 

@@ -16,8 +16,9 @@ use termquill_kernel::{
 use termquill_provider_deepseek::{LEGACY_TERMQUILL_DEEPSEEK_API_KEY_ENV, TERMQUILL_API_KEY_ENV};
 
 use super::{
-    SecretSource, activate_lazy_mcp_tools, build_provider, build_run_options, build_tool_registry,
-    load_deepseek_config, resolve_deepseek_api_key, secret_redactor_for_root_config,
+    SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
+    build_run_options, build_tool_registry, load_deepseek_config, resolve_deepseek_api_key,
+    secret_redactor_for_root_config,
 };
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -254,6 +255,33 @@ async fn activate_lazy_mcp_tools_returns_zero_when_optional_server_is_skipped() 
 
     assert_eq!(added, 0);
     assert!(registry.specs().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn activate_lazy_mcp_tools_detailed_reports_matched_servers() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        name: "optional-lazy".to_owned(),
+        command: "/definitely/missing/termquill-mcp-server".to_owned(),
+        required: false,
+        startup: McpServerStartup::Lazy,
+        ..McpServerConfig::default()
+    });
+    let mut registry = ToolRegistry::new();
+
+    let result = activate_lazy_mcp_tools_detailed(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        std::env::current_dir()?,
+        Some("optional-lazy"),
+    )
+    .await?;
+
+    assert_eq!(result.matched_servers, 1);
+    assert_eq!(result.added_tools, 0);
     Ok(())
 }
 

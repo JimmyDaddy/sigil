@@ -28,7 +28,7 @@ use termquill_kernel::{
     ToolSubjectKind, ToolSubjectScope, UsageStats, WorkspaceConfig,
 };
 
-use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};
+use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 use crate::slash::SLASH_COMMANDS;
 
 use super::{

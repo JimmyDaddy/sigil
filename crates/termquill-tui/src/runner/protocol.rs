@@ -57,6 +57,10 @@ pub enum WorkerMessage {
         trigger: CompactionTrigger,
         entries: Vec<SessionLogEntry>,
     },
+    McpActivationStatus {
+        server_name: Option<String>,
+        status: McpActivationStatus,
+    },
     RunFailed(String),
 }
 
@@ -64,4 +68,12 @@ pub enum WorkerMessage {
 pub enum CompactionTrigger {
     Manual,
     AutomaticHardThreshold,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpActivationStatus {
+    Activating,
+    Deferred,
+    Ready { added_tools: usize },
+    Failed { error: String },
 }

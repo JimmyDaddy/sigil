@@ -25,9 +25,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use termquill_kernel::{
     AgentConfig, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
-    CompactionRecord, CompactionThresholdStatus, MemoryConfig, PermissionConfig, ReasoningEffort,
-    RootConfig, SecretRedactor, Session, SessionConfig, SessionLogEntry, SessionStats,
-    ToolPreviewSnapshot, WorkspaceConfig, resolve_workspace_root,
+    CompactionRecord, CompactionThresholdStatus, McpServerConfig, McpServerStartup, MemoryConfig,
+    PermissionConfig, ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig,
+    SessionLogEntry, SessionStats, ToolPreviewSnapshot, WorkspaceConfig, resolve_workspace_root,
 };
 use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQUILL_API_KEY_ENV};
 use uuid::Uuid;
@@ -100,6 +100,45 @@ fn count_label(count: usize, singular: &str, plural: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum McpServerRuntimeStatus {
+    Deferred,
+    Activating,
+    Ready { tool_count: Option<usize> },
+    Failed { message: String },
+}
+
+impl McpServerRuntimeStatus {
+    fn label(&self) -> String {
+        match self {
+            Self::Deferred => "deferred".to_owned(),
+            Self::Activating => "activating".to_owned(),
+            Self::Ready { tool_count: None } => "ready".to_owned(),
+            Self::Ready {
+                tool_count: Some(count),
+            } => format!("ready {}", count_label(*count, "tool", "tools")),
+            Self::Failed { message } => format!("failed: {}", summarize_error(message)),
+        }
+    }
+}
+
+fn initial_mcp_server_statuses(
+    root_config: &RootConfig,
+) -> BTreeMap<String, McpServerRuntimeStatus> {
+    root_config
+        .mcp_servers
+        .iter()
+        .map(|server| (server.name.clone(), initial_mcp_server_status(server)))
+        .collect()
+}
+
+fn initial_mcp_server_status(server: &McpServerConfig) -> McpServerRuntimeStatus {
+    match server.startup {
+        McpServerStartup::Eager => McpServerRuntimeStatus::Ready { tool_count: None },
+        McpServerStartup::Lazy => McpServerRuntimeStatus::Deferred,
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub config_path: PathBuf,
@@ -117,6 +156,7 @@ pub struct AppState {
     pub code_intelligence_server_lines: BTreeMap<String, String>,
     pub code_intelligence_diagnostics_line: Option<String>,
     pub(crate) code_intelligence_diagnostics_by_path: BTreeMap<String, ApprovalDiagnosticSummary>,
+    pub(crate) mcp_server_statuses: BTreeMap<String, McpServerRuntimeStatus>,
     pub session_id: String,
     pub input: String,
     pub input_history: Vec<String>,
@@ -246,6 +286,7 @@ impl AppState {
             code_intelligence_server_lines: BTreeMap::new(),
             code_intelligence_diagnostics_line: None,
             code_intelligence_diagnostics_by_path: BTreeMap::new(),
+            mcp_server_statuses: initial_mcp_server_statuses(root_config),
             session_id,
             input: String::new(),
             input_history: Vec::new(),
@@ -349,6 +390,7 @@ impl AppState {
             code_intelligence_server_lines: BTreeMap::new(),
             code_intelligence_diagnostics_line: None,
             code_intelligence_diagnostics_by_path: BTreeMap::new(),
+            mcp_server_statuses: BTreeMap::new(),
             session_id,
             input: String::new(),
             input_history: Vec::new(),

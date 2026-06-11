@@ -69,6 +69,36 @@ pub async fn activate_lazy_mcp_tools(
     workspace_root: PathBuf,
     server_name: Option<&str>,
 ) -> Result<usize> {
+    Ok(activate_lazy_mcp_tools_detailed(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+    )
+    .await?
+    .added_tools)
+}
+
+/// Detailed result for one lazy MCP activation attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LazyMcpActivationResult {
+    pub matched_servers: usize,
+    pub added_tools: usize,
+}
+
+/// Activates lazy MCP servers and reports both matched server and added tool counts.
+///
+/// # Errors
+///
+/// Returns an error when a required lazy MCP server cannot be started, initialized, or queried.
+pub async fn activate_lazy_mcp_tools_detailed(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: Option<&str>,
+) -> Result<LazyMcpActivationResult> {
     let servers = root_config
         .mcp_servers
         .iter()
@@ -77,7 +107,10 @@ pub async fn activate_lazy_mcp_tools(
         .cloned()
         .collect::<Vec<_>>();
     if servers.is_empty() {
-        return Ok(0);
+        return Ok(LazyMcpActivationResult {
+            matched_servers: 0,
+            added_tools: 0,
+        });
     }
 
     let before = registry.specs().len();
@@ -89,7 +122,10 @@ pub async fn activate_lazy_mcp_tools(
         secret_redactor_for_root_config(root_config),
     )
     .await?;
-    Ok(registry.specs().len().saturating_sub(before))
+    Ok(LazyMcpActivationResult {
+        matched_servers: servers.len(),
+        added_tools: registry.specs().len().saturating_sub(before),
+    })
 }
 
 /// Builds shared agent run options for CLI, TUI, and future entrypoints.

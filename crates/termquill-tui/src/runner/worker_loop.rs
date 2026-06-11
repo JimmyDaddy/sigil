@@ -15,7 +15,7 @@ use super::{
     approval_bridge::{ApprovalSignal, ChannelApprovalHandler},
     diagnostics::{changed_source_files, check_changed_files_diagnostics, diagnostics_tool_event},
     event_bridge::ChannelEventHandler,
-    protocol::{CompactionTrigger, WorkerCommand, WorkerMessage},
+    protocol::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage},
     session_flow::{auto_compact_session, load_session, session_compacted_message},
 };
 
@@ -307,14 +307,22 @@ pub(super) fn run_worker_loop<P>(
                     ));
                     continue;
                 };
-                match runtime.block_on(termquill_runtime::activate_lazy_mcp_tools(
+                let _ = message_tx.send(WorkerMessage::McpActivationStatus {
+                    server_name: server_name.clone(),
+                    status: McpActivationStatus::Activating,
+                });
+                match runtime.block_on(termquill_runtime::activate_lazy_mcp_tools_detailed(
                     agent.tool_registry_mut(),
                     &root_config,
                     &provider_capabilities,
                     options.workspace_root.clone(),
                     server_name.as_deref(),
                 )) {
-                    Ok(0) => {
+                    Ok(result) if result.matched_servers == 0 => {
+                        let _ = message_tx.send(WorkerMessage::McpActivationStatus {
+                            server_name: server_name.clone(),
+                            status: McpActivationStatus::Deferred,
+                        });
                         let detail = server_name
                             .as_deref()
                             .map(|name| format!(" for {name}"))
@@ -323,17 +331,37 @@ pub(super) fn run_worker_loop<P>(
                             "no lazy MCP tools activated{detail}"
                         )));
                     }
-                    Ok(count) => {
+                    Ok(result) => {
+                        let _ = message_tx.send(WorkerMessage::McpActivationStatus {
+                            server_name: server_name.clone(),
+                            status: McpActivationStatus::Ready {
+                                added_tools: result.added_tools,
+                            },
+                        });
                         let detail = server_name
                             .as_deref()
                             .map(|name| format!(" for {name}"))
                             .unwrap_or_default();
                         let _ = message_tx.send(WorkerMessage::Notice(format!(
-                            "activated {count} lazy MCP tools{detail}"
+                            "activated {} lazy MCP tools{detail}",
+                            result.added_tools
                         )));
                     }
                     Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        let error = format!("{error:#}");
+                        let _ = message_tx.send(WorkerMessage::McpActivationStatus {
+                            server_name: server_name.clone(),
+                            status: McpActivationStatus::Failed {
+                                error: error.clone(),
+                            },
+                        });
+                        let detail = server_name
+                            .as_deref()
+                            .map(|name| format!(" for {name}"))
+                            .unwrap_or_default();
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "MCP activation failed{detail}: {error}"
+                        )));
                     }
                 }
             }

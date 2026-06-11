@@ -284,7 +284,10 @@ impl AppState {
                         ));
                         lines.push(String::new());
                         lines.push("[lifecycle]".to_owned());
-                        lines.extend(render_mcp_lifecycle_summary(config_state));
+                        lines.extend(render_mcp_lifecycle_summary(
+                            config_state,
+                            &self.selected_mcp_runtime_status_label(config_state),
+                        ));
                     }
                 }
                 lines.push(String::new());
@@ -746,6 +749,8 @@ impl AppState {
         }
 
         let server_name = server.name.clone();
+        self.mcp_server_statuses
+            .insert(server_name.clone(), McpServerRuntimeStatus::Activating);
         self.last_notice = Some(format!("activating MCP {server_name}"));
         self.push_event("mcp", format!("activate {server_name}"));
         Ok(Some(AppAction::ActivateLazyMcp {
@@ -764,6 +769,7 @@ impl AppState {
         self.code_intelligence_server_lines.clear();
         self.code_intelligence_diagnostics_line = None;
         self.code_intelligence_diagnostics_by_path.clear();
+        self.mcp_server_statuses = initial_mcp_server_statuses(root_config);
         if self.current_session_entries.is_empty() {
             self.provider_name = root_config.agent.provider.clone();
             self.model_name = root_config.agent.model.clone();
@@ -771,6 +777,29 @@ impl AppState {
         self.refresh_memory_summary();
         self.recompute_compaction_status(false);
         self.refresh_usage_sidebar_cache();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mcp_server_runtime_status_label(&self, server_name: &str) -> Option<String> {
+        self.mcp_server_statuses
+            .get(server_name)
+            .map(McpServerRuntimeStatus::label)
+    }
+
+    fn selected_mcp_runtime_status_label(&self, config_state: &ConfigState) -> String {
+        let Some(config) = config_state
+            .draft
+            .base_root_config
+            .mcp_servers
+            .get(config_state.selected_mcp_server_index)
+        else {
+            return "unsaved".to_owned();
+        };
+        self.mcp_server_statuses
+            .get(&config.name)
+            .cloned()
+            .unwrap_or_else(|| initial_mcp_server_status(config))
+            .label()
     }
 }
 
@@ -879,7 +908,7 @@ fn render_permission_rule_summary(config_state: &ConfigState) -> Vec<String> {
     lines
 }
 
-fn render_mcp_lifecycle_summary(config_state: &ConfigState) -> Vec<String> {
+fn render_mcp_lifecycle_summary(config_state: &ConfigState, runtime_status: &str) -> Vec<String> {
     let config = config_state
         .draft
         .base_root_config
@@ -889,6 +918,7 @@ fn render_mcp_lifecycle_summary(config_state: &ConfigState) -> Vec<String> {
         .unwrap_or_default();
 
     vec![
+        render_config_readonly_row("Runtime", runtime_status),
         render_config_readonly_row("Required", bool_summary(config.required)),
         render_config_readonly_row("Startup", config.startup.as_str()),
         render_config_readonly_row("Trust", config.trust.trust_class.as_str()),

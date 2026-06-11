@@ -37,7 +37,7 @@
 | 优先级 | 能力 | 当前状态 | 推荐目标 |
 | --- | --- | --- | --- |
 | P0 | Code intelligence / LSP | Rust MVP 和多语言自动发现已落地；默认关闭，支持 LSP + Tree-sitter fallback | 扩展 workspace trust UI、code action/rename 审批闭环 |
-| P0 | MCP 完整闭环 | tools 可用；trust enforcement 与 TUI 手动 lazy activation 已落地；elicitation 未完成 | 支持安全 elicitation、MCP lifecycle status 和按需 server 激活 |
+| P0 | MCP 完整闭环 | tools 可用；trust enforcement、TUI 手动 lazy activation 与 lifecycle status 已落地；elicitation 未完成 | 支持安全 elicitation 和模型按需 server 激活 |
 | P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key | 增加 secret 存储、迁移与 redaction 审计 |
 | P1 | 多 provider | runtime 只支持 `deepseek` | 增加 OpenAI-compatible provider，再扩 Anthropic / Gemini |
 | P1 | 鼠标交互 | 只有滚轮 | 实现区域命中、低风险点击、approval 安全点击 |
@@ -251,15 +251,15 @@ cargo test -p termquill-tui timeline_flow_tests
 
 - `startup = "lazy"` 的 server 在普通启动阶段不启动、不注册工具，不拖慢 TUI/CLI registry 构建。
 - crate 层已有显式 lazy activation API：activation 时启动 lazy server、执行 `tools/list`，成功后把真实工具加入 registry，失败按 required / optional 策略处理。
-- TUI `/config` 的 MCP section 已在 footer actions 中提供 `activate`；worker 空闲时可把已保存的 lazy server 热接入当前 agent registry，运行中会拒绝并给出可诊断错误。
+- TUI `/config` 的 MCP section 已在 footer actions 中提供 `activate`；worker 空闲时可把已保存的 lazy server 热接入当前 agent registry，运行中会拒绝并给出可诊断错误，lifecycle summary 会展示 `deferred` / `activating` / `ready` / `failed` 运行态。
 - 模型不会在 activation 前看到不可调用伪工具。
 
 交付物：
 
-1. 启动时记录 lazy server 配置状态，但不暴露伪工具给模型。（crate activation API 已落地；TUI lifecycle metadata 可继续细化）
+1. 启动时记录 lazy server 配置状态，但不暴露伪工具给模型。（crate activation API 和 TUI lifecycle metadata 已落地）
 2. 用户或模型需要某 MCP capability 时触发 activation。（TUI 手动触发已落地；模型触发待设计）
 3. activation 成功后工具进入 registry；失败按 required / optional 策略处理。（已落地）
-4. TUI 显示 MCP server lifecycle。（配置页 summary 已落地；运行态 status 可继续细化）
+4. TUI 显示 MCP server lifecycle。（配置页 summary 和运行态 status 已落地）
 
 验收标准：
 
