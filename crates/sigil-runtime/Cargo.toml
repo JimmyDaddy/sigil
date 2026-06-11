@@ -1,0 +1,21 @@
+[package]
+name = "sigil-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sigil-kernel = { path = "../sigil-kernel" }
+sigil-code-intel = { path = "../sigil-code-intel" }
+sigil-mcp = { path = "../sigil-mcp" }
+sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
+sigil-tools-builtin = { path = "../sigil-tools-builtin" }
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

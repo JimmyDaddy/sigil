@@ -1683,6 +1683,150 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "sigil-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "sigil-kernel",
+ "sigil-provider-deepseek",
+ "sigil-runtime",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "sigil-code-intel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ignore",
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-rust",
+]
+
+[[package]]
+name = "sigil-kernel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "globset",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "sigil-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sigil-kernel",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sigil-provider-deepseek"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "sigil-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "sha2",
+ "sigil-code-intel",
+ "sigil-kernel",
+ "sigil-mcp",
+ "sigil-provider-deepseek",
+ "sigil-tools-builtin",
+ "tokio",
+]
+
+[[package]]
+name = "sigil-tools-builtin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "globset",
+ "ignore",
+ "regex",
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "similar",
+ "tempfile",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
+name = "sigil-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "crossterm 0.29.0",
+ "futures",
+ "ratatui",
+ "reqwest",
+ "serde_json",
+ "sigil-kernel",
+ "sigil-provider-deepseek",
+ "sigil-runtime",
+ "syntect",
+ "tempfile",
+ "tokio",
+ "toml",
+ "two-face",
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
+ "uuid",
+]
+
+[[package]]
 name = "signal-hook"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1862,150 +2006,6 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "termquill-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "futures",
- "termquill-kernel",
- "termquill-provider-deepseek",
- "termquill-runtime",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "termquill-code-intel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "ignore",
- "serde",
- "serde_json",
- "tempfile",
- "termquill-kernel",
- "thiserror",
- "tokio",
- "tracing",
- "tree-sitter",
- "tree-sitter-rust",
-]
-
-[[package]]
-name = "termquill-kernel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "globset",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "termquill-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "termquill-kernel",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "termquill-provider-deepseek"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "termquill-kernel",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "termquill-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde_json",
- "sha2",
- "termquill-code-intel",
- "termquill-kernel",
- "termquill-mcp",
- "termquill-provider-deepseek",
- "termquill-tools-builtin",
- "tokio",
-]
-
-[[package]]
-name = "termquill-tools-builtin"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "globset",
- "ignore",
- "regex",
- "serde",
- "serde_json",
- "similar",
- "tempfile",
- "termquill-kernel",
- "tokio",
- "walkdir",
-]
-
-[[package]]
-name = "termquill-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "crossterm 0.29.0",
- "futures",
- "ratatui",
- "reqwest",
- "serde_json",
- "syntect",
- "tempfile",
- "termquill-kernel",
- "termquill-provider-deepseek",
- "termquill-runtime",
- "tokio",
- "toml",
- "two-face",
- "unicode-segmentation",
- "unicode-width 0.2.0",
- "uuid",
 ]
 
 [[package]]

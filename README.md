@@ -1,39 +1,39 @@
-# Termquill
+# Sigil
 
-`termquill` 是一个 **TUI-first** 的 Rust AI coding agent。它的目标不是做一组零散命令，而是提供一个可复用的 agent 内核，并优先把真正面向用户的终端交互壳做好。
+`sigil` 是一个 **TUI-first** 的 Rust AI coding agent。它的目标不是做一组零散命令，而是提供一个可复用的 agent 内核，并优先把真正面向用户的终端交互壳做好。
 
 当前仓库已经具备这些核心能力：
 
 - 通用 `kernel`：统一承载 provider、tool、session、approval、event 契约
-- 共享 `runtime`：TUI / CLI 统一通过 `termquill-runtime` 装配 provider、内置工具、MCP 工具和 run options
+- 共享 `runtime`：TUI / CLI 统一通过 `sigil-runtime` 装配 provider、内置工具、MCP 工具和 run options
 - `DeepSeek-first` provider：优先支持 DeepSeek 流式对话、工具调用、reasoning replay 与 Beta 扩展点
 - 内置工具注册表：文件读写、编辑、搜索、shell 执行
 - Code intelligence：可选 LSP / Tree-sitter 代码智能，提供符号、定义、引用和诊断只读工具
 - stdio MCP 工具接入：远程工具通过统一 `ToolRegistry` 暴露给 agent
 - 权限策略：只读工具默认放行，其它访问默认审批；headless `ask` 会回灌结构化 `approval_required` 错误而不是静默执行
-- 文档 memory boot：工作区根下 `TERMQUILL.md` / `AGENTS.md` / `CLAUDE.md` / `TERMQUILL.local.md` 与 `@path` 导入
+- 文档 memory boot：工作区根下 `SIGIL.md` / `AGENTS.md` / `CLAUDE.md` / `SIGIL.local.md` 与 `@path` 导入
 - context compaction：soft threshold 提示、hard threshold 在 idle 边界自动压缩，append-only 审计日志不改写
 - TUI 主入口：消息区、事件流、审批流、session 恢复、diff 预览、`/compact`、`/model`、`/effort`、Quick Setup、`/config`
 
 ## 仓库结构
 
 ```text
-termquill/
+sigil/
   crates/
-    termquill-kernel/              # 通用 agent 内核与领域契约
-    termquill-provider-deepseek/   # DeepSeek provider 实现
-    termquill-tools-builtin/       # 内置工具
-    termquill-code-intel/          # LSP client、Tree-sitter fallback 与 code intelligence tools
-    termquill-mcp/                 # stdio MCP client 与工具适配
-    termquill-runtime/             # 入口共享的 provider / tool / run options 装配
-    termquill-cli/                 # 薄 CLI 启动器与调试入口
-    termquill-tui/                 # 第一用户入口
+    sigil-kernel/              # 通用 agent 内核与领域契约
+    sigil-provider-deepseek/   # DeepSeek provider 实现
+    sigil-tools-builtin/       # 内置工具
+    sigil-code-intel/          # LSP client、Tree-sitter fallback 与 code intelligence tools
+    sigil-mcp/                 # stdio MCP client 与工具适配
+    sigil-runtime/             # 入口共享的 provider / tool / run options 装配
+    sigil-cli/                 # 薄 CLI 启动器与调试入口
+    sigil-tui/                 # 第一用户入口
   dev/governance/                # 开发约束、代码规范、工程规范
   dev/docs/                      # 架构与技术方案
-  termquill.toml                   # 本地配置示例
+  sigil.toml                   # 本地配置文件，默认被 .gitignore 忽略
 ```
 
-`termquill-tui` 当前保持 `src/app.rs` 作为 `AppState` façade；具体状态流拆在 `src/app/*_flow.rs`、`tool_focus.rs`、`worker_bridge.rs` 和 `formatting.rs`，对应测试拆在 `src/app/tests/*_tests.rs`。新增 TUI 行为时优先落到对应 flow 和同域测试，不要把状态机重新堆回 `app.rs`。
+`sigil-tui` 当前保持 `src/app.rs` 作为 `AppState` façade；具体状态流拆在 `src/app/*_flow.rs`、`tool_focus.rs`、`worker_bridge.rs` 和 `formatting.rs`，对应测试拆在 `src/app/tests/*_tests.rs`。新增 TUI 行为时优先落到对应 flow 和同域测试，不要把状态机重新堆回 `app.rs`。
 
 ## 当前入口
 
@@ -42,7 +42,7 @@ termquill/
 推荐优先使用 TUI：
 
 ```bash
-cargo run -p termquill-tui
+cargo run -p sigil-tui
 ```
 
 TUI 当前支持：
@@ -61,7 +61,7 @@ TUI 当前支持：
 - 运行中 live transcript 底部会显示紧凑的 loading progress block，例如 `▰▱▱▱ Thinking...`、`Bash...`、`Read...` 和当前 reasoning/tool/streaming 摘要；这些运行态提示只做渲染层投影，不写回 durable transcript
 - 右侧 `Info rail` 独立占据整列，展示 `Session / Permissions / Agents / LSP / Usage / Controls` 六组状态，而不是挤进 composer 旁边的一个小角落；`LSP` 会按 language/server 保留最近状态，例如 `rust: ready rust-analyzer`，跨语言 workspace symbol 查询会合并多个 server 的结果和状态；最近一次 diagnostics 会在这里保留文件级 errors / warnings / clean 摘要
 - `ctx`、compaction status 和 auto-compaction 统一按同一个 effective context window 计算：已知模型窗口优先，其次才回退到 `compaction.fallback_context_window_tokens`
-- assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成 action-first activity 展示，例如 `Ran cargo test -p termquill-tui`、`Searched needle in src/main.rs`、`Read README.md`、`Deleted note.txt`；activity header 会区分动作词、命令/路径和参数；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file / code_symbols / code_workspace_symbols / code_definition / code_references / code_diagnostics` 走专用 renderer，其中 code intelligence 卡片会展示 LSP/Tree-sitter 来源、server、capability、server breakdown 和结果位置；简单只读 `rg / grep / fd / find` bash 命令会识别为 `Searched`，其他结构化 payload 走树形 fallback，不直接 dump 原始 JSON 或 call id
+- assistant / tool 输出继续走线性展开：assistant markdown 按段落展开，tool result 改成 action-first activity 展示，例如 `Ran cargo test -p sigil-tui`、`Searched needle in src/main.rs`、`Read README.md`、`Deleted note.txt`；activity header 会区分动作词、命令/路径和参数；`read_file / ls / glob / grep / bash / write_file / edit_file / delete_file / code_symbols / code_workspace_symbols / code_definition / code_references / code_diagnostics` 走专用 renderer，其中 code intelligence 卡片会展示 LSP/Tree-sitter 来源、server、capability、server breakdown 和结果位置；简单只读 `rg / grep / fd / find` bash 命令会识别为 `Searched`，其他结构化 payload 走树形 fallback，不直接 dump 原始 JSON 或 call id
 - live phase 只保留在运行态和事件流里，不再固化成 chat transcript；reasoning delta 会写入 append-only control log，用于取消或重启后的 thinking block 恢复；completed thinking 默认显示前几行预览，用 `Ctrl-T` 完整展开或收起
 - tool result 默认以独立 brief activity 展示；bash 成功无输出会显示 `(no output)`，失败会突出 exit code 并优先展示诊断输出；存在 activity 后右侧 `Info rail / Controls` 会显示 `Ctrl-G` 聚焦最新 activity、`Alt-J` / `Alt-K` 切换 activity、`Ctrl-T` 展开/收起聚焦 activity，composer 为空时 `Esc` 清除 activity focus
 - `write_file` / `edit_file` / `delete_file` 的结果 activity 默认展开执行时捕获的 bounded unified diff，diff 行会显示旧/新行号；activity 正文会跳过重复的 `@@` hunk header，并在文件头汇总 hunk 数；仍可用 `Ctrl-T` 收起，大 diff 会显示 `diff truncated · N lines hidden`，折叠态保留 diff stats 和隐藏提示
@@ -82,7 +82,7 @@ TUI 当前支持：
 CLI 目前主要是自动化和调试入口：
 
 ```bash
-cargo run -p termquill-cli -- run "总结一下当前仓库"
+cargo run -p sigil-cli -- run "总结一下当前仓库"
 ```
 
 默认只暴露 `run`。`prefix` / `fim` 等 provider 专项入口保留在实现层，但不作为普通用户主心智。
@@ -91,43 +91,43 @@ cargo run -p termquill-cli -- run "总结一下当前仓库"
 
 ### 1. 准备配置
 
-仓库根目录已经有一个示例配置文件：
+仓库根目录不会跟踪真实 `sigil.toml`，避免误提交本地密钥。可以直接启动 TUI 走 Quick Setup 生成配置，也可以手动创建：
 
-`/Users/jimmydaddy/study/turbods/termquill.toml`
+`./sigil.toml`
 
 至少需要准备：
 
-- `TERMQUILL_API_KEY`
-- 如果你想手写配置，再准备 `termquill.toml` 中的 provider / workspace / session / permission / memory / compaction 配置
+- `SIGIL_API_KEY`
+- 如果你想手写配置，再按下方“配置要点”准备 provider / workspace / session / permission / memory / compaction 配置
 
 TUI / CLI 当前按这个顺序找配置：
 
 1. `--config <path>`
-2. 当前工作目录下的 `./termquill.toml`
-3. 标准用户配置目录里的 `termquill.toml`
+2. 当前工作目录下的 `./sigil.toml`
+3. 标准用户配置目录里的 `sigil.toml`
 
 标准用户配置路径：
 
-- macOS：`~/Library/Application Support/termquill/termquill.toml`
-- Linux：`$XDG_CONFIG_HOME/termquill/termquill.toml` 或 `~/.config/termquill/termquill.toml`
-- Windows：`%APPDATA%\\termquill\\termquill.toml`
+- macOS：`~/Library/Application Support/sigil/sigil.toml`
+- Linux：`$XDG_CONFIG_HOME/sigil/sigil.toml` 或 `~/.config/sigil/sigil.toml`
+- Windows：`%APPDATA%\\sigil\\sigil.toml`
 
-如果 TUI 启动时没有可用配置，或配置加载失败，它不会直接退出，而是进入 Quick Setup，把配置写回上述目标路径。首配只要求授权当前目录、从候选里选择模型并填好认证；认证可以直接录入 `api_key` 并以 plaintext 形式持久化到本地配置文件，也可以预先导出 `TERMQUILL_API_KEY` 在运行时覆盖。配置文件默认应放在用户配置目录或被仓库 `.gitignore` 忽略的 `termquill.toml`，不要提交到版本库。如果要用自定义模型 id，可以先 `Esc` 退出选择器后手动输入。后续 `/config` 继续只暴露高频项；更细的 provider 兼容字段改走配置文件或环境变量。
+如果 TUI 启动时没有可用配置，或配置加载失败，它不会直接退出，而是进入 Quick Setup，把配置写回上述目标路径。首配只要求授权当前目录、从候选里选择模型并填好认证；认证可以直接录入 `api_key` 并以 plaintext 形式持久化到本地配置文件，也可以预先导出 `SIGIL_API_KEY` 在运行时覆盖。配置文件默认应放在用户配置目录或被仓库 `.gitignore` 忽略的 `sigil.toml`，不要提交到版本库。如果要用自定义模型 id，可以先 `Esc` 退出选择器后手动输入。后续 `/config` 继续只暴露高频项；更细的 provider 兼容字段改走配置文件或环境变量。
 
 ### 2. 启动方式
 
 ```bash
 # 推荐
-cargo run -p termquill-tui
+cargo run -p sigil-tui
 
 # 自动化 / 脚本场景
-cargo run -p termquill-cli -- run "read README and summarize the repo"
+cargo run -p sigil-cli -- run "read README and summarize the repo"
 ```
 
 如果想把配置写到自定义位置：
 
 ```bash
-cargo run -p termquill-tui -- --config /absolute/path/to/termquill.toml
+cargo run -p sigil-tui -- --config /absolute/path/to/sigil.toml
 ```
 
 ### 3. Session 持久化
@@ -135,7 +135,7 @@ cargo run -p termquill-tui -- --config /absolute/path/to/termquill.toml
 默认 session log 落在：
 
 ```text
-.termquill/sessions/
+.sigil/sessions/
 ```
 
 当前实现采用 append-only JSONL，便于审计、恢复与 provider continuation state 持久化。
@@ -204,14 +204,14 @@ report_missing = true
 - `compaction.*`：控制 `/compact` 手动压缩、soft threshold 提示和 hard threshold 的 idle 自动 compaction；若当前模型已有已知 context window，会优先按模型窗口计算阈值，否则回退到 `fallback_context_window_tokens`；旧配置里的 `context_window_tokens` 会继续兼容读取，但保存时会写成新的 fallback 字段
 - `code_intelligence.*`：默认关闭；开启后 runtime 会注册 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具，并允许 TUI 用 `Alt-D` 对 git changed source files 触发 diagnostics 检查。工具结果同时受 `max_results` 和 `max_payload_bytes` 约束。`discovery.enabled = true` 时会按 workspace 自动发现常见语言和 PATH 上可用的安全 LSP server；手写 `code_intelligence.servers` 只作为高级覆盖或补充。Rust 项目默认使用 `rust-analyzer`；没有可用 LSP server 时，符号和语法诊断会回退到 Tree-sitter Rust outline / syntax diagnostics，不阻塞普通 chat 和工具调用。配置或发现多个 language server 时，文件型工具按扩展名路由，`code_workspace_symbols` 会查询所有可用 server 并合并结果；`report_missing = true` 会在 TUI `LSP` 区显示已发现但未安装的 server
 - `/config`：当前已支持在 TUI 内按 section 编辑 provider 常用项、permissions、memory、compaction，以及 MCP server 的 `name / command / args_csv / startup_timeout_secs`；配置页使用产品化字段标签、选中字段详情和统一快捷键提示，顶部 status strip 会做宽度自适应截断；宽终端会把配置内容限制在居中最大宽度，并把 Details 作为右侧说明栏展示，窄终端会把说明内联到选中字段附近，真实配置 key 会在 Details 中显示；TUI 新增的 MCP server 默认保存为 `required = true`、`startup = "eager"`、`trust.trust_class = "self_hosted"`；`Actions` 栏跟随配置面板负责保存和退出，MCP section 会额外提供 `activate` 来手动启动已保存的 lazy server，并在 lifecycle summary 中展示 `deferred` / `activating` / `ready` / `failed` 运行态，窄终端会切换到紧凑动作文案
-- `model` / `fim_model` 默认优先走 picker；`api_key` 默认优先走 secret modal，并会在保存时以 plaintext 写回本地配置文件；`TERMQUILL_API_KEY` 始终可以在运行时覆盖配置值
+- `model` / `fim_model` 默认优先走 picker；`api_key` 默认优先走 secret modal，并会在保存时以 plaintext 写回本地配置文件；`SIGIL_API_KEY` 始终可以在运行时覆盖配置值
 - 弹窗内 `Enter` 只应用当前字段；`Ctrl-S` 会应用当前字段并保存，`F2` / `F3` 仍可作为可选快捷键
 - config 页可以先 `Down` 到底部 actions，再 `Left/Right` 选中动作并 `Enter` 执行；如果有未保存改动，第一次 `Esc` 会把焦点拉到 `save` 并提示，第二次 `Esc` 才会丢弃草稿退出
 
 另外，`workspace.root = "."` 有一个专门约定：
 
 - 如果配置文件在当前仓库里，`.` 仍然表示该配置文件旁边的工作区
-- 如果配置文件在用户配置目录里，`.` 会在启动时解析成你运行 `termquill-tui` 或 `termquill-cli` 时所在的目录
+- 如果配置文件在用户配置目录里，`.` 会在启动时解析成你运行 `sigil-tui` 或 `sigil-cli` 时所在的目录
 
 注意：permission 只负责 allow / ask / deny 策略判断，不等同于 shell sandbox。文件类内置工具会 canonicalize workspace root，并拒绝 `..`、绝对路径和指向 workspace 外的 symlink；`bash` 仍不提供更强进程隔离。
 
@@ -249,17 +249,17 @@ pin_version = false
 
 除了可以在配置文件里保存 `api_key`，当前还支持这些运行时 override：
 
-- `TERMQUILL_MODEL`
-- `TERMQUILL_API_KEY`
-- `TERMQUILL_BASE_URL`
-- `TERMQUILL_BETA_BASE_URL`
-- `TERMQUILL_ANTHROPIC_BASE_URL`
-- `TERMQUILL_FIM_MODEL`
-- `TERMQUILL_USER_ID_STRATEGY`
-- `TERMQUILL_REQUEST_TIMEOUT_SECS`
-- `TERMQUILL_STRICT_TOOLS_MODE`
+- `SIGIL_MODEL`
+- `SIGIL_API_KEY`
+- `SIGIL_BASE_URL`
+- `SIGIL_BETA_BASE_URL`
+- `SIGIL_ANTHROPIC_BASE_URL`
+- `SIGIL_FIM_MODEL`
+- `SIGIL_USER_ID_STRATEGY`
+- `SIGIL_REQUEST_TIMEOUT_SECS`
+- `SIGIL_STRICT_TOOLS_MODE`
 
-`TERMQUILL_API_KEY` 优先级最高；`TERMQUILL_DEEPSEEK_API_KEY` 和 `DEEPSEEK_API_KEY` 作为 legacy fallback 继续兼容读取。
+`SIGIL_API_KEY` 优先级最高；`DEEPSEEK_API_KEY` 作为 DeepSeek provider 的备用来源继续兼容读取。
 
 主 TUI 配置页不会继续暴露 `anthropic_base_url`、`request_timeout_secs`、`strict_tools_mode`，以及 `beta_base_url` / `user_id_strategy` 这类 provider 专项低频项；它们保留给配置文件和环境变量层处理。
 
@@ -282,18 +282,18 @@ cargo clippy --all-targets -- -D warnings
 
 ```bash
 # 启动 TUI
-cargo run -p termquill-tui
+cargo run -p sigil-tui
 
 # 启动 CLI
-cargo run -p termquill-cli -- run "hello"
+cargo run -p sigil-cli -- run "hello"
 
 # 只测某个 crate
-cargo test -p termquill-tui
+cargo test -p sigil-tui
 ```
 
 ## 文档索引
 
-- 架构方案：[`dev/docs/termquill-rust-agent-core-technical-solution.md`](dev/docs/termquill-rust-agent-core-technical-solution.md)
+- 架构方案：[`dev/docs/sigil-rust-agent-core-technical-solution.md`](dev/docs/sigil-rust-agent-core-technical-solution.md)
 - 代码规范：[`dev/governance/code-standards.md`](dev/governance/code-standards.md)
 - 工程规范：[`dev/governance/engineering-standards.md`](dev/governance/engineering-standards.md)
 - 仓库内协作说明：[`AGENTS.md`](AGENTS.md)

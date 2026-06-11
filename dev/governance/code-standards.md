@@ -1,20 +1,20 @@
-# Termquill 代码规范
+# Sigil 代码规范
 
-本文档定义 `termquill` 的编码约束。`AGENTS.md` 会直接引用本文件；如果个人习惯与本文冲突，以本文为准。
+本文档定义 `sigil` 的编码约束。`AGENTS.md` 会直接引用本文件；如果个人习惯与本文冲突，以本文为准。
 
 ## 1. 总体原则
 
 ### 1.1 TUI-first，不是 command-first
 
-- 面向普通用户的主要产品表面是 `termquill-tui`
+- 面向普通用户的主要产品表面是 `sigil-tui`
 - CLI 可以存在，但默认只承担自动化、调试、脚本入口
 - 新能力优先考虑如何进入 TUI 交互，而不是先加顶层命令
 
 ### 1.2 kernel 保持通用
 
-- `crates/termquill-kernel` 只能承载通用概念
+- `crates/sigil-kernel` 只能承载通用概念
 - 不要把 `DeepSeek`、`beta endpoint`、`reasoning_content` 这类 provider 私有术语直接做成 kernel 公共 API
-- provider-specific 行为应留在 `crates/termquill-provider-deepseek`
+- provider-specific 行为应留在 `crates/sigil-provider-deepseek`
 
 ### 1.3 append-only 与可审计
 
@@ -68,19 +68,19 @@
 
 ## 3. 分层与模块约束
 
-### 3.1 `termquill-kernel`
+### 3.1 `sigil-kernel`
 
 - 负责：agent loop、session、approval、event、provider/tool 契约
 - 不负责：DeepSeek 私有协议细节、具体 HTTP 端点拼装、UI 展示逻辑
 - 公共类型修改时，必须先判断是否仍适合未来多 provider 复用
 
-### 3.2 `termquill-provider-deepseek`
+### 3.2 `sigil-provider-deepseek`
 
 - 负责：DeepSeek 请求构造、SSE 解析、retry、reasoning replay、Beta 扩展点
 - 不要把 kernel 可以表达的通用能力重新定义一套
 - provider 特有 quirk 应集中表达，不要散落在多个 crate 的临时判断里
 
-### 3.3 `termquill-tools-builtin`
+### 3.3 `sigil-tools-builtin`
 
 - 工具必须有稳定 `ToolSpec`
 - `ToolSpec` 必须表达 provider-neutral 的 `category / access / preview`，不要退回 read/write 二分
@@ -95,7 +95,7 @@
 - 工具失败必须结构化返回，不能 panic
 - provider-visible tool result 必须使用 `ToolResult::to_model_content()` 的 JSON envelope，不要在 session 历史里写裸文本结果
 
-### 3.4 `termquill-mcp`
+### 3.4 `sigil-mcp`
 
 - MCP 工具名必须带 server 前缀并限制在 provider 能接受的长度内，冲突时使用稳定 hash 后缀
 - MCP client 暴露给 server 的 `roots/list` 必须来自入口已解析的 workspace root，不要用配置文件路径猜测
@@ -104,7 +104,7 @@
 - MCP server 配置必须保留 lifecycle/trust 边界：默认 `required = true`、`startup = "eager"`；`startup = "lazy"` 在普通 registry 构建时只能跳过启动和注册，不要伪造 lazy 工具；显式 activation 时再启动 server、查询真实 tools，并按 required / optional 策略处理失败；`required = false` 的 eager server 失败时可以降级为 warning 并跳过
 - MCP trust policy 必须可配置、可序列化，至少表达 `trust_class / approval_default / egress_logging / allow_secrets / pin_version`；已接入运行时的字段必须有测试覆盖，尚未接入更细粒度 enforcement 的字段不要写成已经生效的安全保证
 
-### 3.5 `termquill-tui`
+### 3.5 `sigil-tui`
 
 - 优先分离“状态模型”和“渲染”
 - `app.rs` 保持 `AppState` façade、字段定义、bootstrap、顶层 key routing 和跨状态编排；具体状态流维护在 `app/input_flow.rs`、`app/slash_flow.rs`、`app/modal_flow.rs`、`app/config_flow.rs`、`app/session_flow.rs`、`app/timeline_flow.rs`、`app/tool_focus.rs`、`app/approval_flow.rs`、`app/worker_bridge.rs`、`app/command_dispatch.rs`
@@ -120,7 +120,7 @@
 - 新增或修改快捷键 / slash command 时必须同步 `commands.rs` metadata、info rail controls、README 和状态转换测试
 - 能用 TUI 焦点和快捷键自然表达的能力，不优先新增 slash command；hidden command 必须有明确退场计划和删除条件
 
-### 3.6 `termquill-runtime`
+### 3.6 `sigil-runtime`
 
 - 负责 TUI、CLI 和未来入口共享的 provider、tool registry、run options 装配
 - 入口层不应各自硬编码 DeepSeek provider、built-in tools 或 MCP 注册流程
@@ -206,8 +206,8 @@
 
 已按状态域拆分的 façade 模块继续使用专属目录：
 
-- `crates/termquill-tui/src/app/tests/*_tests.rs`
-- `crates/termquill-tui/src/runner/tests/*_tests.rs`
+- `crates/sigil-tui/src/app/tests/*_tests.rs`
+- `crates/sigil-tui/src/runner/tests/*_tests.rs`
 
 测试共享代码放置规则：
 

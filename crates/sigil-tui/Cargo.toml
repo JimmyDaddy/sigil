@@ -1,0 +1,31 @@
+[package]
+name = "sigil-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json.workspace = true
+syntect.workspace = true
+toml.workspace = true
+tokio.workspace = true
+sigil-kernel = { path = "../sigil-kernel" }
+sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
+sigil-runtime = { path = "../sigil-runtime" }
+two-face.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

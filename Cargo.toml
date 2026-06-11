@@ -1,13 +1,13 @@
 [workspace]
 members = [
-    "crates/termquill-kernel",
-    "crates/termquill-provider-deepseek",
-    "crates/termquill-tools-builtin",
-    "crates/termquill-code-intel",
-    "crates/termquill-mcp",
-    "crates/termquill-runtime",
-    "crates/termquill-cli",
-    "crates/termquill-tui",
+    "crates/sigil-kernel",
+    "crates/sigil-provider-deepseek",
+    "crates/sigil-tools-builtin",
+    "crates/sigil-code-intel",
+    "crates/sigil-mcp",
+    "crates/sigil-runtime",
+    "crates/sigil-cli",
+    "crates/sigil-tui",
 ]
 resolver = "2"
 

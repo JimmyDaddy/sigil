@@ -16,7 +16,7 @@ allow-unwrap-in-tests = false
 
 # Append repo-specific terms to Clippy's default doc-markdown allowlist.
 doc-valid-idents = [
-  "Termquill",
+  "Sigil",
   "DeepSeek",
   "OpenAI",
   "MCP",
@@ -27,7 +27,7 @@ doc-valid-idents = [
   "FIM",
   "MSRV",
   "AGENTS",
-  "TERMQUILL",
+  "SIGIL",
   "..",
 ]
 

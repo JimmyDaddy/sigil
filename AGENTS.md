@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件约束在 `termquill` 内协作的 coding agent、自动化脚本与辅助开发工具。
+本文件约束在 `sigil` 内协作的 coding agent、自动化脚本与辅助开发工具。
 
 ## 先读这些文档
 
@@ -8,19 +8,19 @@
 
 1. 代码规范：[`dev/governance/code-standards.md`](dev/governance/code-standards.md)
 2. 工程规范：[`dev/governance/engineering-standards.md`](dev/governance/engineering-standards.md)
-3. 架构方案：[`dev/docs/termquill-rust-agent-core-technical-solution.md`](dev/docs/termquill-rust-agent-core-technical-solution.md)
+3. 架构方案：[`dev/docs/sigil-rust-agent-core-technical-solution.md`](dev/docs/sigil-rust-agent-core-technical-solution.md)
 
 其中 `dev/governance/code-standards.md` 是本仓库的直接编码约束；如果实现与习惯冲突，以该文档为准。
 
 ## 仓库定位
 
-`termquill` 是一个 **TUI-first** 的 Rust AI coding agent。
+`sigil` 是一个 **TUI-first** 的 Rust AI coding agent。
 
 协作时请守住这几个高优先级原则：
 
 - 不要把项目继续推成“命令越做越多的 command-only 工具”
 - 优先保护 TUI 作为第一用户表面的体验与信息架构
-- `termquill-kernel` 必须保持通用，不引入 DeepSeek 专属术语到公共 API
+- `sigil-kernel` 必须保持通用，不引入 DeepSeek 专属术语到公共 API
 - provider 专项行为留在 provider crate 内解释
 - session / control state 必须是 append-only、可持久化、可审计的
 
@@ -35,13 +35,13 @@
 
 ## 目录职责
 
-- `crates/termquill-kernel`：通用领域契约、agent loop、approval、event、session
-- `crates/termquill-provider-deepseek`：DeepSeek provider 与相关专项行为
-- `crates/termquill-tools-builtin`：内置工具与 preview/diff 预览
-- `crates/termquill-mcp`：stdio MCP client 与工具适配
-- `crates/termquill-runtime`：CLI/TUI 共享的 provider、tool registry 与 run options 装配
-- `crates/termquill-cli`：薄 CLI、调试入口、自动化入口
-- `crates/termquill-tui`：第一用户入口
+- `crates/sigil-kernel`：通用领域契约、agent loop、approval、event、session
+- `crates/sigil-provider-deepseek`：DeepSeek provider 与相关专项行为
+- `crates/sigil-tools-builtin`：内置工具与 preview/diff 预览
+- `crates/sigil-mcp`：stdio MCP client 与工具适配
+- `crates/sigil-runtime`：CLI/TUI 共享的 provider、tool registry 与 run options 装配
+- `crates/sigil-cli`：薄 CLI、调试入口、自动化入口
+- `crates/sigil-tui`：第一用户入口
 - `dev/governance`：开发规范
 - `dev/docs`：架构与技术方案
 
@@ -75,7 +75,7 @@
 
 ## 不要这样做
 
-- 不要把 DeepSeek 专属字段直接塞进 `termquill-kernel` 的公共类型
+- 不要把 DeepSeek 专属字段直接塞进 `sigil-kernel` 的公共类型
 - 不要把隐藏调试入口写成 README 的主入口
 - 不要绕过审批流直接让写工具静默生效
 - 不要引入没有测试覆盖的会话恢复或持久化行为变更
