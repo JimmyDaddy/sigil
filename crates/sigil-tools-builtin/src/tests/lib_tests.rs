@@ -699,3 +699,100 @@ async fn grep_skips_non_utf8_files_without_panicking() -> Result<()> {
     assert!(!result.content.contains("binary.bin"));
     Ok(())
 }
+
+#[tokio::test]
+async fn write_file_execute_creates_missing_parent_directories() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    let result = WriteFileTool
+        .execute(
+            ctx,
+            "write".to_owned(),
+            json!({ "path": "nested/deep/note.txt", "content": "hello" }),
+        )
+        .await?;
+
+    assert_eq!(
+        fs::read_to_string(temp.path().join("nested/deep/note.txt"))?,
+        "hello"
+    );
+    assert_eq!(result.metadata.changed_files, vec!["nested/deep/note.txt"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn edit_file_errors_for_missing_and_ambiguous_old_text() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    fs::write(temp.path().join("note.txt"), "repeat old repeat old")?;
+
+    let missing = EditFileTool
+        .execute(
+            ctx.clone(),
+            "edit-missing".to_owned(),
+            json!({ "path": "note.txt", "old_text": "absent", "new_text": "new" }),
+        )
+        .await
+        .expect_err("missing old_text should fail");
+    assert!(missing.to_string().contains("old_text not found"));
+
+    let ambiguous = EditFileTool
+        .execute(
+            ctx,
+            "edit-ambiguous".to_owned(),
+            json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
+        )
+        .await
+        .expect_err("ambiguous old_text should fail");
+    assert!(ambiguous.to_string().contains("old_text is ambiguous"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn delete_file_rejects_symlink_target() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let outside_file = outside.path().join("secret.txt");
+    fs::write(&outside_file, "secret")?;
+    symlink(&outside_file, workspace.path().join("linked.txt"))?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    let error = DeleteFileTool
+        .execute(
+            ctx,
+            "delete-link".to_owned(),
+            json!({ "path": "linked.txt" }),
+        )
+        .await
+        .expect_err("symlink deletes should fail");
+
+    assert!(error.to_string().contains("outside workspace"));
+    assert_eq!(fs::read_to_string(outside_file)?, "secret");
+    Ok(())
+}
+
+#[test]
+fn builtin_path_and_truncation_helpers_preserve_boundaries() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let subject = super::tool_path_subject(temp.path(), ".")?;
+    assert_eq!(subject.scope, ToolSubjectScope::Workspace);
+    assert_eq!(subject.normalized, ".");
+
+    let repeated = "é".repeat(80);
+    let truncated = super::limit_text_head_tail(&repeated, 32);
+    assert!(truncated.truncated);
+    assert!(truncated.content.contains("output truncated"));
+    assert!(std::str::from_utf8(truncated.content.as_bytes()).is_ok());
+    Ok(())
+}

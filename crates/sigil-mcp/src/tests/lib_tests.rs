@@ -1,6 +1,7 @@
 use std::fs;
 
 use anyhow::Result;
+use serde_json::json;
 use sigil_kernel::{
     ApprovalMode, McpServerConfig, McpServerStartup, McpServerTrustPolicy, McpTrustClass,
     ProviderCapabilities, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
@@ -1560,4 +1561,51 @@ while True:
     assert!(registry.spec_for("mcp__server_a__echo").is_some());
     assert!(registry.spec_for("mcp__server_b__echo").is_some());
     Ok(())
+}
+
+#[test]
+fn unsupported_elicitation_handler_reports_capability() {
+    let handler = super::unsupported_mcp_elicitation_handler();
+    assert!(!handler.supports_elicitation());
+}
+
+#[tokio::test]
+async fn unsupported_elicitation_handler_rejects_requests() {
+    let handler = super::unsupported_mcp_elicitation_handler();
+    let error = handler
+        .elicit(McpElicitationRequest {
+            server_name: "fake".to_owned(),
+            message: "need input".to_owned(),
+            requested_schema: json!({"type":"object"}),
+        })
+        .await
+        .expect_err("unsupported handler should fail");
+    assert!(error.to_string().contains("not supported"));
+}
+
+#[test]
+fn mcp_name_and_uri_helpers_sanitize_and_encode() {
+    assert_eq!(
+        super::sanitize_provider_name_part("bad name///tool"),
+        "bad_name_tool"
+    );
+    assert_eq!(super::sanitize_provider_name_part("!!!"), "tool");
+    assert_eq!(
+        super::root_name(std::path::Path::new("/tmp/test-root")),
+        "test-root"
+    );
+    assert_eq!(
+        super::file_uri(std::path::Path::new("/tmp/space name.txt")),
+        "file:///tmp/space%20name.txt"
+    );
+}
+
+#[test]
+fn mcp_egress_json_summary_handles_arrays_and_scalars() {
+    let array = super::summarize_egress_json(&json!(["a", 1, true]));
+    assert_eq!(array["type"], "array");
+    assert_eq!(array["item_count"], 3);
+
+    let scalar = super::summarize_egress_json(&json!(true));
+    assert_eq!(scalar["type"], "bool");
 }

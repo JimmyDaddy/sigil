@@ -19,3 +19,7 @@ impl DeepSeekReasoningReplayPayload {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/reasoning_tests.rs"]
+mod tests;

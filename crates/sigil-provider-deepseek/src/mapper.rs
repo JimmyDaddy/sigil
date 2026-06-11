@@ -133,3 +133,7 @@ impl StreamMapper {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/mapper_tests.rs"]
+mod tests;

@@ -9,3 +9,7 @@ pub fn classify_status(status: u16, body: &str) -> DeepSeekProviderError {
         _ => DeepSeekProviderError::InvalidRequest(body.to_owned()),
     }
 }
+
+#[cfg(test)]
+#[path = "tests/retry_tests.rs"]
+mod tests;
