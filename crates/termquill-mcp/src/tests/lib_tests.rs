@@ -1062,6 +1062,81 @@ while True:
 }
 
 #[tokio::test]
+async fn mcp_roots_list_blocks_secret_when_trust_disallows_secrets() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace_root = temp.path().join("project-sk-secret");
+    fs::create_dir_all(&workspace_root)?;
+    let script = temp.path().join("secret_roots_request_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":"server-roots-secret","method":"roots/list","params":{}})
+        roots_response = read_message()
+        error_message = roots_response.get("error", {}).get("message", "missing roots error")
+        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":error_message}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    let error = super::register_mcp_tools_with_name_limit_and_roots(
+        &mut registry,
+        &[McpServerConfig {
+            name: "secret_roots".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                allow_secrets: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        64,
+        vec![workspace_root],
+        SecretRedactor::from_values(["sk-secret"]),
+    )
+    .await
+    .expect_err("secret-bearing roots/list should fail registration");
+
+    let message = error.to_string();
+    assert!(message.contains("roots/list would expose a secret"));
+    assert!(message.contains("allow_secrets = false"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn mcp_client_rejects_elicitation_requests_without_hanging() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let script = temp.path().join("elicitation_request_mcp_server.py");

@@ -861,7 +861,7 @@ pub struct McpServerPinnedIdentity {
 - `SelfHosted`：默认 `approval_default = Ask`、`egress_logging = true`、`allow_secrets = false`
 - `ThirdParty`：建议逐次审批、记录出境数据、默认不透传高敏凭据
 
-当前 `approval_default` 已参与逐调用 permission decision；`egress_logging` 已写入安全出境摘要；`allow_secrets = false` 已阻断 MCP tool args 中的已解析 secret。`pin_version = true` 会校验 `trust.pinned` 中的 command fingerprint、protocol version、server name 和 server version；缺少 pinned identity 时会明确失败并输出 observed pin 供用户写入配置。
+当前 `approval_default` 已参与逐调用 permission decision；`egress_logging` 已写入安全出境摘要；`allow_secrets = false` 已阻断 MCP tool args 与 `roots/list` payload 中的已解析 secret。`pin_version = true` 会校验 `trust.pinned` 中的 command fingerprint、protocol version、server name 和 server version；缺少 pinned identity 时会明确失败并输出 observed pin 供用户写入配置。prompts/resources 协议入口落地时必须复用同一 secret egress gate，不能把它们宣传为已完成安全面。
 
 ### 11.5 协议版本与能力协商
 

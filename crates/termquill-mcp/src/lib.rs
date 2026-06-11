@@ -109,19 +109,20 @@ async fn register_mcp_tools_with_name_limit_and_roots(
             continue;
         }
 
-        let client = match McpClient::spawn(server.clone(), roots.clone()).await {
-            Ok(client) => Arc::new(client),
-            Err(error) if !server.required => {
-                warn!(
-                    server = %server.name,
-                    trust_class = server.trust.trust_class.as_str(),
-                    error = %error,
-                    "optional MCP server failed to start and will be skipped"
-                );
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
+        let client =
+            match McpClient::spawn(server.clone(), roots.clone(), secret_redactor.clone()).await {
+                Ok(client) => Arc::new(client),
+                Err(error) if !server.required => {
+                    warn!(
+                        server = %server.name,
+                        trust_class = server.trust.trust_class.as_str(),
+                        error = %error,
+                        "optional MCP server failed to start and will be skipped"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
         let tools = match client.list_tools().await {
             Ok(tools) => tools,
             Err(error) if !server.required => {
@@ -263,6 +264,9 @@ struct McpServerInfo {
 struct McpClient {
     _child: Mutex<Child>,
     connection: Mutex<Connection>,
+    server_name: String,
+    trust: McpServerTrustPolicy,
+    secret_redactor: SecretRedactor,
     roots: Vec<PathBuf>,
     identity: McpServerObservedIdentity,
 }
@@ -274,7 +278,11 @@ struct Connection {
 }
 
 impl McpClient {
-    async fn spawn(config: McpServerConfig, roots: Vec<PathBuf>) -> Result<Self> {
+    async fn spawn(
+        config: McpServerConfig,
+        roots: Vec<PathBuf>,
+        secret_redactor: SecretRedactor,
+    ) -> Result<Self> {
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
@@ -302,6 +310,9 @@ impl McpClient {
                 stdout: BufReader::new(stdout),
                 next_id: 0,
             }),
+            server_name: config.name.clone(),
+            trust: config.trust.clone(),
+            secret_redactor,
             roots,
             identity: McpServerObservedIdentity {
                 command_fingerprint: String::new(),
@@ -447,7 +458,14 @@ impl McpClient {
                         })
                     })
                     .collect::<Vec<_>>();
-                write_success_response(connection, id, json!({ "roots": roots })).await
+                let payload = json!({ "roots": roots });
+                if !self.trust.allow_secrets && self.secret_redactor.value_contains_secret(&payload)
+                {
+                    let message = "MCP roots/list would expose a secret and this server has allow_secrets = false";
+                    write_error_response(connection, id, -32000, message).await?;
+                    bail!("MCP server {} {message}", self.server_name);
+                }
+                write_success_response(connection, id, payload).await
             }
             "elicitation/create" => {
                 write_error_response(

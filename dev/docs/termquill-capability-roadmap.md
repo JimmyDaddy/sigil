@@ -200,16 +200,16 @@ cargo test -p termquill-kernel permission agent
 - `permission_subjects` 已包含 `mcp_trust_class:<class>`，permission rules 可以按 trust class 匹配 MCP 调用。
 - `approval_default` 已作为 MCP server 工具的默认审批模式参与逐调用 permission decision。
 - `egress_logging = true` 已在 MCP tools/call 审批通过后、执行前写入安全出境摘要到 append-only control state。
-- `allow_secrets = false` 已阻断 MCP tool args 中的已解析 secret，并对 MCP 结果做本地脱敏。
+- `allow_secrets = false` 已阻断 MCP tool args 和 `roots/list` payload 中的已解析 secret，并对 MCP 结果做本地脱敏。
 - `pin_version = true` 已校验 `trust.pinned` 中的 command fingerprint、protocol version、server name 和 server version；缺少 pinned identity 时会失败并输出 observed pin。
-- roots / prompts / resources 级别的 secret gate 仍不是完整安全保证。
+- prompts / resources 级别的 secret gate 仍不是完整安全保证；当前还没有 prompts/resources 协议入口。
 
 交付物：
 
 1. MCP tool wrapper 在 `permission_subjects` 中带上 server trust class。（已落地）
 2. `approval_default` 参与逐调用审批决策。（已落地）
 3. `egress_logging = true` 时记录安全的出境摘要到 control state。（已落地）
-4. `allow_secrets = false` 时对 tool args、roots、prompts/resources 做 secret egress gate。（tool args 已落地）
+4. `allow_secrets = false` 时对 tool args、roots、prompts/resources 做 secret egress gate。（tool args 与 roots 已落地）
 5. `pin_version = true` 时记录并校验 server identity / command fingerprint / protocol version。（已落地）
 
 验收标准：
