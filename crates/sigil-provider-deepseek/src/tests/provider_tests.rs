@@ -195,6 +195,95 @@ fn truncate_event_payload_adds_ellipsis_for_large_events() {
     assert!(long.len() < 300);
 }
 
+#[test]
+fn provider_trait_methods_and_frame_helpers_cover_remaining_branches() -> Result<()> {
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: "http://primary.test".to_owned(),
+        beta_base_url: "http://beta.test".to_owned(),
+        anthropic_base_url: "http://anthropic.test".to_owned(),
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 1,
+    })?;
+
+    assert_eq!(provider.name(), "deepseek");
+    let capabilities = provider.capabilities();
+    assert!(capabilities.supports_reasoning_stream);
+    assert!(capabilities.supports_tool_stream);
+    assert!(capabilities.supports_infill_completion);
+    assert!(capabilities.supports_system_fingerprint);
+    assert!(capabilities.tool_name_max_chars > 0);
+    assert_eq!(
+        provider.base_url_for_endpoint(crate::endpoint::DeepSeekEndpointClass::AnthropicCompat),
+        "http://anthropic.test"
+    );
+
+    let mut mapper = crate::mapper::StreamMapper::new("deepseek-v4-flash");
+    let mut pending = VecDeque::new();
+    assert!(!super::enqueue_chat_frame(
+        &mut mapper,
+        &mut pending,
+        crate::response::DeepSeekSseFrame::Comment,
+    )?);
+    assert!(pending.is_empty());
+    assert!(super::enqueue_chat_frame(
+        &mut mapper,
+        &mut pending,
+        crate::response::DeepSeekSseFrame::Done,
+    )?);
+    assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
+
+    let mut pending = VecDeque::new();
+    assert!(!super::enqueue_completion_frame(
+        &mut pending,
+        crate::response::DeepSeekSseFrame::Blank,
+        "deepseek-v4-flash",
+    )?);
+    assert!(super::enqueue_completion_frame(
+        &mut pending,
+        crate::response::DeepSeekSseFrame::Done,
+        "deepseek-v4-flash",
+    )?);
+    assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn prefix_completion_rejects_unsupported_user_id_strategy() -> Result<()> {
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: "http://127.0.0.1:9".to_owned(),
+        beta_base_url: "http://127.0.0.1:9".to_owned(),
+        anthropic_base_url: "http://127.0.0.1:9".to_owned(),
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: Some("unsupported".to_owned()),
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 1,
+    })?;
+
+    let error = match provider
+        .stream_prefix_completion(DeepSeekPrefixCompletionRequest {
+            model: None,
+            prompt: "write code".to_owned(),
+            assistant_prefix: "```rust\n".to_owned(),
+            stop: Vec::new(),
+            reasoning_effort: None,
+            traffic_partition_key: Some("workspace-123".to_owned()),
+        })
+        .await
+    {
+        Ok(_) => panic!("unsupported user id strategies should fail before transport"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("unsupported user_id strategy"));
+    Ok(())
+}
+
 #[tokio::test]
 async fn provider_retries_400_reasoning_and_yields_chunks() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![
@@ -765,6 +854,44 @@ async fn provider_surfaces_invalid_utf8_chat_chunks() -> Result<()> {
 }
 
 #[tokio::test]
+async fn fim_completion_surfaces_invalid_utf8_chunks() -> Result<()> {
+    let server = spawn_invalid_utf8_completion_streaming_server().await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let mut stream = provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {\n".to_owned(),
+            suffix: "\n}\n".to_owned(),
+            max_tokens: Some(32),
+            stop: Vec::new(),
+        })
+        .await?;
+
+    let error = stream
+        .next()
+        .await
+        .expect("stream should yield one error")
+        .expect_err("invalid utf-8 should fail");
+
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.to_string().to_lowercase().contains("utf-8"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_surfaces_invalid_chat_event_payloads() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
         200,
@@ -1058,6 +1185,23 @@ async fn spawn_completion_stream_without_done_server() -> Result<String> {
 }
 
 async fn spawn_invalid_utf8_streaming_server() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let header =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        let _ = socket.write_all(header.as_bytes()).await;
+        let _ = socket.write_all(&[0xff, 0xfe, 0xfd]).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_invalid_utf8_completion_streaming_server() -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     tokio::spawn(async move {

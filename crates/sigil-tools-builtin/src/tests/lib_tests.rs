@@ -1221,3 +1221,60 @@ fn bash_and_shell_helper_functions_cover_parser_edges() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn bash_path_subjects_and_tokenizer_cover_segmented_and_quoted_edges() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::create_dir(workspace.path().join("src"))?;
+    fs::write(
+        workspace.path().join("src").join("lib.rs"),
+        "pub fn hello() {}\n",
+    )?;
+    fs::write(workspace.path().join("Cargo.toml"), "[package]\nname='x'\n")?;
+    let workspace_root = workspace.path().canonicalize()?;
+
+    let tokens =
+        super::tokenize_shell_subject_words(r#"echo "a\"b" && cat src/lib.rs || ls Cargo.toml"#);
+    assert_eq!(
+        tokens,
+        vec![
+            "echo",
+            "a\"b",
+            "&&",
+            "cat",
+            "src/lib.rs",
+            "||",
+            "ls",
+            "Cargo.toml",
+        ]
+    );
+
+    let subjects =
+        super::bash_path_subjects(workspace.path(), "cd src && cat lib.rs || ls ../Cargo.toml")?;
+
+    assert_eq!(subjects.len(), 3);
+    assert_eq!(
+        subjects[0].canonical_path.as_deref(),
+        Some(workspace_root.join("src").as_path())
+    );
+    assert!(
+        subjects
+            .iter()
+            .any(|subject| subject.normalized == "src/lib.rs")
+    );
+    assert!(
+        subjects
+            .iter()
+            .any(|subject| subject.normalized == "Cargo.toml")
+    );
+    Ok(())
+}
+
+#[test]
+fn lexical_normalize_path_returns_dot_for_current_directory() -> Result<()> {
+    assert_eq!(
+        super::lexically_normalize_path(Path::new("."))?,
+        Path::new(".")
+    );
+    Ok(())
+}

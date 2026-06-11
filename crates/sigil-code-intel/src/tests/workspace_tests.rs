@@ -120,6 +120,55 @@ fn configured_servers_override_discovered_profile_by_name() {
     );
 }
 
+#[test]
+fn effective_server_plan_tracks_disabled_and_extra_configured_servers() {
+    let configured_override = LanguageServerConfig {
+        command: "custom-ts-lsp".to_owned(),
+        ..test_server("typescript-language-server", &["typescript"], &["ts"])
+    };
+    let configured_extra = test_server("python-lsp", &["python"], &["py"]);
+    let config = CodeIntelligenceConfig {
+        servers: vec![configured_override.clone(), configured_extra.clone()],
+        ..CodeIntelligenceConfig::default()
+    };
+    let discovered = vec![
+        discovered_server(
+            test_server("typescript-language-server", &["typescript"], &["ts"]),
+            ServerAvailability::Installed,
+        ),
+        discovered_server(
+            test_server("go-lsp", &["go"], &["go"]),
+            ServerAvailability::Disabled,
+        ),
+    ];
+
+    let plan = effective_server_plan_from_discovered(&config, discovered);
+
+    assert!(plan.servers.contains(&configured_override));
+    assert!(plan.servers.contains(&configured_extra));
+    assert_eq!(
+        plan.statuses
+            .iter()
+            .find(|status| status.server == "typescript-language-server")
+            .map(|status| status.status.as_str()),
+        Some("configured")
+    );
+    assert_eq!(
+        plan.statuses
+            .iter()
+            .find(|status| status.server == "go-lsp")
+            .map(|status| status.status.as_str()),
+        Some("disabled")
+    );
+    assert_eq!(
+        plan.statuses
+            .iter()
+            .find(|status| status.server == "python-lsp")
+            .map(|status| status.status.as_str()),
+        Some("configured")
+    );
+}
+
 fn discovered_server(
     config: LanguageServerConfig,
     availability: ServerAvailability,
@@ -364,5 +413,14 @@ fn file_uri_encodes_relative_paths_and_invalid_hex_is_left_literal() {
     assert_eq!(
         path_from_file_uri("file:///tmp/%ZZ/path"),
         Some(std::path::PathBuf::from("/tmp/%ZZ/path"))
+    );
+}
+
+#[test]
+fn lexical_normalize_handles_curdir_and_parent_before_any_root() {
+    assert_eq!(
+        super::lexical_normalize(std::path::Path::new("./../tools/../lsp"))
+            .expect("relative paths should normalize"),
+        std::path::PathBuf::from("../lsp")
     );
 }

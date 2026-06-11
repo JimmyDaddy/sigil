@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, sync::OnceLock};
 
 use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig, LanguageServerConfig,
@@ -64,6 +64,13 @@ fn legacy_fake_lsp_server_config(script_path: &std::path::Path) -> CodeIntellige
 
 fn missing_server_config() -> CodeIntelligenceConfig {
     fake_config()
+}
+
+async fn fake_lsp_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
 
 fn write_legacy_fake_lsp_server(path: &std::path::Path) {
@@ -453,6 +460,7 @@ async fn document_symbols_uses_configured_lsp_server_when_available() {
     {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
@@ -673,6 +681,7 @@ async fn lsp_service_caches_document_symbols_and_supports_shutdown() {
     {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
 
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
@@ -716,6 +725,7 @@ async fn definition_references_workspace_symbols_and_diagnostics_use_lsp() {
     {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
 
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
@@ -816,6 +826,27 @@ async fn ensure_client_by_name_locked_reports_disabled_and_unknown_server() {
             .to_string()
             .contains("unknown language server other")
     );
+}
+
+#[test]
+fn initial_server_plan_marks_configured_servers_while_lazy_discovery_is_pending() {
+    let config = CodeIntelligenceConfig {
+        enabled: true,
+        discovery: CodeIntelligenceDiscoveryConfig {
+            enabled: true,
+            report_missing: true,
+        },
+        ..fake_config()
+    };
+
+    let plan = initial_server_plan(&config, std::path::Path::new("."));
+
+    assert_eq!(plan.servers, config.servers);
+    assert!(!plan.discovery_loaded);
+    assert_eq!(plan.discovery_statuses.len(), 1);
+    assert_eq!(plan.discovery_statuses[0].server, "missing-rust-analyzer");
+    assert_eq!(plan.discovery_statuses[0].status, "configured");
+    assert_eq!(plan.discovery_statuses[0].languages, vec!["rust"]);
 }
 
 #[tokio::test]
@@ -934,6 +965,15 @@ async fn service_helper_functions_cover_defaults_and_truncation() {
     assert_eq!(symbols.len(), 2);
     assert_eq!(symbols[0].range.start_line, 1);
     assert_eq!(symbols[1].container_name.as_deref(), Some("hello"));
+    let mut ignored = Vec::new();
+    collect_lsp_symbols(
+        &json!({"name":"not-an-array"}),
+        "src.rs",
+        None,
+        &mut ignored,
+    );
+    collect_lsp_symbols(&json!([{ "kind": 12 }]), "src.rs", None, &mut ignored);
+    assert!(ignored.is_empty());
 
     let diagnostic = parse_diagnostic_value(
         temp.path(),
@@ -961,9 +1001,14 @@ async fn service_helper_functions_cover_defaults_and_truncation() {
         2
     );
     assert!(parse_range(&json!({ "start": {} })).is_none());
+    assert_eq!(lsp_symbol_kind(Some(1)), "file");
+    assert_eq!(lsp_symbol_kind(Some(24)), "event");
+    assert_eq!(lsp_symbol_kind(Some(25)), "operator");
+    assert_eq!(lsp_symbol_kind(Some(26)), "type_parameter");
     assert_eq!(lsp_symbol_kind(Some(23)), "struct");
     assert_eq!(lsp_symbol_kind(None), "symbol");
     assert_eq!(lsp_diagnostic_severity(Some(1)), "error");
+    assert_eq!(lsp_diagnostic_severity(Some(3)), "information");
     assert_eq!(lsp_diagnostic_severity(None), "unknown");
     assert_eq!(preview_line(&file, 2).await.as_deref(), Some("second line"));
     assert!(preview_line(&file, 99).await.is_none());
@@ -973,10 +1018,102 @@ async fn service_helper_functions_cover_defaults_and_truncation() {
 }
 
 #[tokio::test]
+async fn lsp_helpers_report_unsupported_capabilities_and_missing_servers() {
+    if !python3_available() {
+        return;
+    }
+    let _guard = fake_lsp_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .expect("cargo file should write");
+    let rust_path = temp.path().join("src").join("lib.rs");
+    let python_path = temp.path().join("script.py");
+    fs::write(&rust_path, "pub fn hello() {}\n").expect("rust source should write");
+    fs::write(&python_path, "print('hi')\n").expect("python source should write");
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("unsupported-scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": { "result": { "capabilities": {} } },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let service = CodeIntelligenceService::new(
+        temp.path().to_path_buf(),
+        fake_lsp_server_config(&server_script, &scenario_path),
+    );
+
+    let doc_error = service
+        .lsp_document_symbols(&rust_path, None, 10, Instant::now())
+        .await
+        .expect_err("document symbols should require capability");
+    assert!(doc_error.to_string().contains("documentSymbol"));
+
+    let definition_error = service
+        .definition("src/lib.rs", 1, 0, 10)
+        .await
+        .expect_err("definition should require capability");
+    assert!(
+        definition_error
+            .to_string()
+            .contains("textDocument/definition")
+    );
+
+    let references_error = service
+        .references("src/lib.rs", 1, 0, true, 10)
+        .await
+        .expect_err("references should require capability");
+    assert!(
+        references_error
+            .to_string()
+            .contains("textDocument/references")
+    );
+
+    let workspace_error = service
+        .lsp_workspace_symbols_for_server_locked(&mut BTreeMap::new(), "rust-analyzer", "hello")
+        .await
+        .expect_err("workspace symbols should require capability");
+    assert!(workspace_error.to_string().contains("workspace/symbol"));
+
+    let no_server_error = match service
+        .ensure_client_locked(&mut BTreeMap::new(), &python_path)
+        .await
+    {
+        Ok(_) => panic!("non-rust files should not match rust-analyzer"),
+        Err(error) => error,
+    };
+    assert!(no_server_error.to_string().contains("script.py"));
+
+    service.shutdown().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn lsp_workspace_symbols_errors_when_no_servers_are_configured() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let service = CodeIntelligenceService::new(temp.path().to_path_buf(), Default::default());
+
+    let error = service
+        .lsp_workspace_symbols("hello", 10, Instant::now())
+        .await
+        .expect_err("private lsp query should fail without server configs");
+
+    assert!(error.to_string().contains("disabled"));
+}
+
+#[tokio::test]
 async fn definition_filters_malformed_and_external_locations() {
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
@@ -1063,6 +1200,7 @@ async fn definition_startup_failure_marks_service_degraded() {
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
@@ -1106,6 +1244,7 @@ async fn diagnostics_uses_publish_diagnostics_when_pull_is_unavailable() {
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
@@ -1178,6 +1317,7 @@ async fn diagnostics_wait_for_publish_notifications_when_pull_response_is_empty(
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
@@ -1218,6 +1358,7 @@ async fn document_symbols_cache_key_changes_when_query_changes() {
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
@@ -1266,6 +1407,7 @@ async fn document_symbols_falls_back_when_lsp_returns_malformed_payload() {
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
@@ -1308,6 +1450,7 @@ async fn document_symbols_returns_cached_result_for_repeat_query() {
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::write(
         temp.path().join("Cargo.toml"),
@@ -1375,6 +1518,7 @@ async fn document_symbols_uses_lsp_cache_for_identical_requests() {
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
@@ -1452,6 +1596,7 @@ async fn workspace_symbols_filter_external_and_malformed_entries() {
     if !python3_available() {
         return;
     }
+    let _guard = fake_lsp_test_guard().await;
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::create_dir(temp.path().join("src")).expect("src dir should build");
     fs::write(
