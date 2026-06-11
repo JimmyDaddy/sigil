@@ -146,6 +146,19 @@ fn resolve_workspace_file_rejects_paths_outside_workspace() {
 }
 
 #[test]
+fn resolve_workspace_file_rejects_empty_and_missing_paths() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+
+    let empty_error =
+        resolve_workspace_file(temp.path(), "  ").expect_err("empty path should be rejected");
+    assert!(empty_error.to_string().contains("path cannot be empty"));
+
+    let missing_error = resolve_workspace_file(temp.path(), "missing.rs")
+        .expect_err("missing path should be rejected");
+    assert!(missing_error.to_string().contains("missing.rs"));
+}
+
+#[test]
 fn safe_lsp_command_allows_pathless_command_and_blocks_escape() {
     let temp = tempfile::tempdir().expect("tempdir should build");
 
@@ -154,6 +167,24 @@ fn safe_lsp_command_allows_pathless_command_and_blocks_escape() {
         std::path::PathBuf::from("rust-analyzer")
     );
     assert!(safe_lsp_command(temp.path(), "../bin/lsp").is_err());
+}
+
+#[test]
+fn safe_lsp_command_allows_relative_command_within_workspace() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir_all(temp.path().join("tools")).expect("tools dir should build");
+
+    let command = safe_lsp_command(temp.path(), "tools/custom-lsp")
+        .expect("workspace-relative command should pass");
+
+    assert_eq!(
+        command,
+        temp.path()
+            .canonicalize()
+            .expect("root should canonicalize")
+            .join("tools")
+            .join("custom-lsp")
+    );
 }
 
 #[test]
@@ -173,4 +204,62 @@ fn file_uri_roundtrips_paths_with_spaces() {
     let uri = file_uri_from_path(path);
 
     assert_eq!(path_from_file_uri(&uri), Some(path.to_path_buf()));
+}
+
+#[test]
+fn language_for_path_prefers_matching_extension_and_falls_back_to_first_language() {
+    let server = LanguageServerConfig {
+        languages: vec!["typescript".to_owned(), "javascript".to_owned()],
+        file_extensions: vec!["ts".to_owned(), "js".to_owned()],
+        ..test_server(
+            "typescript-language-server",
+            &["typescript", "javascript"],
+            &["ts", "js"],
+        )
+    };
+
+    assert_eq!(
+        language_for_path(&server, std::path::Path::new("src/index.ts")),
+        "typescript"
+    );
+    assert_eq!(
+        language_for_path(&server, std::path::Path::new("src/index.jsx")),
+        "typescript"
+    );
+}
+
+#[test]
+fn find_server_root_returns_workspace_when_markers_are_present_or_missing() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\n",
+    )
+    .expect("cargo file should write");
+    let server = LanguageServerConfig {
+        root_markers: vec!["Cargo.toml".to_owned(), "rust-project.json".to_owned()],
+        ..default_rust_analyzer_server()
+    };
+
+    let root_with_marker =
+        find_server_root(temp.path(), &server).expect("root marker lookup should succeed");
+    assert_eq!(
+        root_with_marker,
+        temp.path()
+            .canonicalize()
+            .expect("root should canonicalize")
+    );
+
+    let no_marker_server = LanguageServerConfig {
+        root_markers: vec!["missing.marker".to_owned()],
+        ..server
+    };
+    let root_without_marker =
+        find_server_root(temp.path(), &no_marker_server).expect("fallback root should succeed");
+    assert_eq!(
+        root_without_marker,
+        temp.path()
+            .canonicalize()
+            .expect("root should canonicalize")
+    );
 }
