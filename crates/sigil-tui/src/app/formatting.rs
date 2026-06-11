@@ -749,3 +749,7 @@ pub(super) fn char_to_byte_index(value: &str, char_index: usize) -> usize {
 pub(super) fn persisted_root_config(root_config: &RootConfig) -> RootConfig {
     root_config.clone()
 }
+
+#[cfg(test)]
+#[path = "tests/formatting_detail_tests.rs"]
+mod tests;

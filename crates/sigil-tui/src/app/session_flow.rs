@@ -842,3 +842,7 @@ fn render_compaction_preview_lines(preview: &CompactionPreview) -> Vec<String> {
     }
     lines
 }
+
+#[cfg(test)]
+#[path = "tests/session_flow_detail_tests.rs"]
+mod tests;

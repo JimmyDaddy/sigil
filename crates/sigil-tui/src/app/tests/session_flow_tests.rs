@@ -44,70 +44,6 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
 }
 
 #[test]
-fn restore_latest_session_returns_false_when_history_is_empty() {
-    let config = test_config();
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-
-    assert!(!app.restore_latest_session_from_disk(&config));
-}
-
-#[test]
-fn restore_session_path_returns_false_for_invalid_log() -> Result<()> {
-    let temp = tempdir()?;
-    let config = RootConfig {
-        workspace: WorkspaceConfig {
-            root: temp.path().display().to_string(),
-        },
-        ..test_config()
-    };
-    let invalid_path = temp.path().join(".sigil/sessions/bad.jsonl");
-    std::fs::create_dir_all(
-        invalid_path
-            .parent()
-            .expect("session log path should have a parent"),
-    )?;
-    std::fs::write(&invalid_path, "{\"not\":\"a session entry\"}\n")?;
-
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-
-    assert!(!app.restore_session_path_from_disk(
-        invalid_path,
-        "fallback-provider",
-        "fallback-model",
-        "restore failed"
-    ));
-    assert_ne!(app.last_notice(), Some("restore failed"));
-    Ok(())
-}
-
-#[test]
-fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
-    let temp = tempdir()?;
-    let config = RootConfig {
-        workspace: WorkspaceConfig {
-            root: temp.path().display().to_string(),
-        },
-        ..test_config()
-    };
-    let session_dir = temp.path().join(".sigil/sessions");
-    std::fs::create_dir_all(&session_dir)?;
-    let alpha = session_dir.join("session-alpha.jsonl");
-    let alpha_copy = session_dir.join("session-alpha-copy.jsonl");
-    let current = session_dir.join("session-current.jsonl");
-    std::fs::write(&alpha, "")?;
-    std::fs::write(&alpha_copy, "")?;
-    std::fs::write(&current, "")?;
-
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.session_log_path = current;
-    app.refresh_session_history();
-
-    assert_eq!(app.resolve_resume_target("alpha"), None);
-    assert_eq!(app.resolve_resume_target("latest"), Some(alpha_copy));
-    Ok(())
-}
-
-#[test]
 fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
@@ -815,6 +751,281 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
 }
 
 #[test]
+fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = temp.path().join(".sigil/sessions");
+    std::fs::create_dir_all(&session_dir)?;
+
+    let current_path = session_dir.join("session-current.jsonl");
+    write_session_log(
+        &current_path,
+        &restored_entries("current-provider", "current-model"),
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let alpha_path = session_dir.join("session-alpha.jsonl");
+    write_session_log(
+        &alpha_path,
+        &[
+            SessionLogEntry::User(ModelMessage::user("alpha title")),
+            SessionLogEntry::Assistant(ModelMessage::assistant(
+                Some("done".to_owned()),
+                Vec::new(),
+            )),
+        ],
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let beta_path = session_dir.join("session-beta.jsonl");
+    let oversized = "x".repeat(300_000);
+    std::fs::write(
+        &beta_path,
+        format!(
+            "{oversized}\n{}\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("beta plan")))?
+        ),
+    )?;
+
+    let mut app = AppState::from_root_config(temp.path().join("sigil.toml").as_path(), &config);
+    app.session_log_path = current_path.clone();
+    app.refresh_session_history();
+
+    assert!(
+        app.session_history
+            .iter()
+            .any(|entry| entry.path == alpha_path && entry.title.as_deref() == Some("alpha title"))
+    );
+    assert!(
+        app.session_history
+            .iter()
+            .any(|entry| entry.path == beta_path && entry.title.as_deref() == Some("beta plan"))
+    );
+
+    assert_eq!(app.resolve_resume_target("latest"), Some(beta_path.clone()));
+    assert_eq!(app.resolve_resume_target("1"), Some(beta_path.clone()));
+    assert_eq!(
+        app.resolve_resume_target(beta_path.to_str().unwrap_or_default()),
+        Some(beta_path.clone())
+    );
+    assert_eq!(
+        app.resolve_resume_target("alpha title"),
+        Some(alpha_path.clone())
+    );
+
+    app.session_history_filter = "beta".to_owned();
+    let rows = app.recent_session_rows();
+    assert!(matches!(
+        rows.first(),
+        Some(SessionHistoryRow::SessionHeader { total, .. }) if *total == 1
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_view_audit_renders_control_entries() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let preview = ToolPreviewSnapshot::from_preview(
+        "call-write-1",
+        "write_file",
+        &sample_approval_preview(),
+        sigil_kernel::ToolDiffBudget::default(),
+        None,
+    );
+    app.current_session_entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::Control(ControlEntry::ContinuationStateSaved(
+            sigil_kernel::ProviderContinuationState {
+                provider_name: "deepseek".to_owned(),
+                state_kind: "cursor".to_owned(),
+                message_id: Some("msg-1".to_owned()),
+                opaque_blob: json!({"cursor": "abc"}),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::ResponseHandleTracked(
+            sigil_kernel::ResponseHandle {
+                provider_name: "deepseek".to_owned(),
+                response_id: "response-1234567890".to_owned(),
+                continuation_cursor: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::BackgroundTaskTracked(
+            sigil_kernel::BackgroundTaskHandle {
+                provider_name: "deepseek".to_owned(),
+                task_id: "task-1".to_owned(),
+                resumable: true,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(
+            sigil_kernel::PrefixSnapshot {
+                materialized_text: "system".to_owned(),
+                sha256: "abcdef1234567890".to_owned(),
+                provider_name: "deepseek".to_owned(),
+                model_name: "deepseek-v4-flash".to_owned(),
+                memory_fingerprint: "memory-fingerprint".to_owned(),
+                tool_schema_fingerprint: "tool-fingerprint".to_owned(),
+                skill_index_fingerprint: "skill-fingerprint".to_owned(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            cache_hit_tokens: 3,
+            cache_miss_tokens: 7,
+            input_cost: 0.0,
+            output_cost: 0.0,
+            cache_savings: 0.0,
+            system_fingerprint: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::ToolApproval(
+            sigil_kernel::ToolApprovalEntry {
+                action: sigil_kernel::ToolApprovalAuditAction::Requested,
+                call_id: "call-write-1".to_owned(),
+                tool_name: "write_file".to_owned(),
+                access: ToolAccess::Write,
+                subjects: Vec::new(),
+                policy_decision: ApprovalMode::Ask,
+                external_directory_required: false,
+                user_decision: None,
+                reason: None,
+                preview_hash: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "call-write-1".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Completed,
+            duration_ms: Some(4),
+            subjects: Vec::new(),
+            changed_files: vec!["note.txt".to_owned()],
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        }))),
+        SessionLogEntry::Control(ControlEntry::ToolEgress(Box::new(ToolEgressEntry {
+            call_id: "call-net-1".to_owned(),
+            tool_name: "fetch_url".to_owned(),
+            destination: "https://example.com/very/long/path".to_owned(),
+            operation: "GET /resource".to_owned(),
+            subjects: Vec::new(),
+            payload: json!({"ok": true}),
+            redacted: true,
+        }))),
+        SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(preview)),
+        SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
+            summary: "summary".to_owned(),
+            compacted_message_count: 3,
+            retained_tail_message_count: 2,
+        })),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "checkpoint".to_owned(),
+            data: serde_json::Value::Null,
+        }),
+    ];
+    app.session_view_mode = SessionViewMode::Audit;
+
+    let rendered = app.session_view_lines().join("\n");
+    assert!(rendered.contains("[ctl] session deepseek/deepseek-v4-flash"));
+    assert!(rendered.contains("[ctl] cont cursor msg=msg-1"));
+    assert!(rendered.contains("[ctl] response response-1234567890"));
+    assert!(rendered.contains("[ctl] task task-1"));
+    assert!(rendered.contains("[ctl] prefix sha=abcdef1234567890"));
+    assert!(rendered.contains("[ctl] usage p=10 c=5 hit=3 miss=7"));
+    assert!(rendered.contains("[ctl] approval call-write-1 write_file action=requested"));
+    assert!(rendered.contains("[ctl] execution call-write-1 write_file status=completed"));
+    assert!(rendered.contains("[ctl] egress call-net-1 fetch_url"));
+    assert!(rendered.contains("[ctl] preview call-write-1 write_file"));
+    assert!(rendered.contains("[ctl] compacted=3 tail=2"));
+    assert!(rendered.contains("[ctl] note checkpoint"));
+    Ok(())
+}
+
+#[test]
+fn restored_failed_tool_execution_and_reasoning_trace_render_in_session_view() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_trace".to_owned(),
+            data: json!({"text": "trace line"}),
+        }),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "call-bash-1".to_owned(),
+            tool_name: "bash".to_owned(),
+            status: ToolExecutionStatus::Failed,
+            duration_ms: Some(2),
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        }))),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let rendered = plain_transcript(&app, 20);
+    assert!(rendered.contains("trace line"));
+    let tool_entry = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("expected restored tool entry");
+    let payload: serde_json::Value = serde_json::from_str(&tool_entry.text)?;
+    assert_eq!(payload["status"], "error");
+    assert!(
+        payload["preview_lines"][0]
+            .as_str()
+            .is_some_and(|line| line.contains("tool execution ended with status failed"))
+    );
+    Ok(())
+}
+
+#[test]
+fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = temp.path().join(".sigil/sessions");
+    std::fs::create_dir_all(&session_dir)?;
+    let alpha = session_dir.join("session-alpha.jsonl");
+    let alpha_copy = session_dir.join("session-alpha-copy.jsonl");
+    let current = session_dir.join("session-current.jsonl");
+    std::fs::write(&alpha, "")?;
+    std::fs::write(&alpha_copy, "")?;
+    std::fs::write(&current, "")?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.session_log_path = current;
+    app.refresh_session_history();
+
+    assert_eq!(app.resolve_resume_target("alpha"), None);
+    assert_eq!(app.resolve_resume_target("latest"), Some(alpha_copy));
+    Ok(())
+}
+
+#[test]
 fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.session_log_path = Path::new("session-current.jsonl").to_path_buf();
@@ -835,4 +1046,41 @@ fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
         },
     ];
     assert_eq!(app.resolve_resume_target("prompt"), None);
+}
+
+#[test]
+fn restore_latest_session_returns_false_when_history_is_empty() {
+    let config = test_config();
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert!(!app.restore_latest_session_from_disk(&config));
+}
+
+#[test]
+fn restore_session_path_returns_false_for_invalid_log() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let invalid_path = temp.path().join(".sigil/sessions/bad.jsonl");
+    std::fs::create_dir_all(
+        invalid_path
+            .parent()
+            .expect("session log path should have a parent"),
+    )?;
+    std::fs::write(&invalid_path, "{\"not\":\"a session entry\"}\n")?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert!(!app.restore_session_path_from_disk(
+        invalid_path,
+        "fallback-provider",
+        "fallback-model",
+        "restore failed"
+    ));
+    assert_ne!(app.last_notice(), Some("restore failed"));
+    Ok(())
 }

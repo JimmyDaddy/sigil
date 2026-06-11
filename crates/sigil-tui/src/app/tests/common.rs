@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn test_config() -> RootConfig {
+pub(crate) fn test_config() -> RootConfig {
     RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
@@ -23,7 +23,7 @@ pub(super) fn test_config() -> RootConfig {
     }
 }
 
-pub(super) fn restored_entries(provider_name: &str, model_name: &str) -> Vec<SessionLogEntry> {
+pub(crate) fn restored_entries(provider_name: &str, model_name: &str) -> Vec<SessionLogEntry> {
     vec![
         SessionLogEntry::Control(ControlEntry::SessionIdentity {
             provider_name: provider_name.to_owned(),
@@ -38,7 +38,7 @@ pub(super) fn restored_entries(provider_name: &str, model_name: &str) -> Vec<Ses
     ]
 }
 
-pub(super) fn select_root_slash_command(app: &mut AppState, command: &str) -> Result<()> {
+pub(crate) fn select_root_slash_command(app: &mut AppState, command: &str) -> Result<()> {
     let index = app
         .slash_selector_rows()
         .iter()
@@ -50,7 +50,7 @@ pub(super) fn select_root_slash_command(app: &mut AppState, command: &str) -> Re
     Ok(())
 }
 
-pub(super) fn write_session_log(path: &Path, entries: &[SessionLogEntry]) -> Result<()> {
+pub(crate) fn write_session_log(path: &Path, entries: &[SessionLogEntry]) -> Result<()> {
     let store = JsonlSessionStore::new(path)?;
     for entry in entries {
         store.append(entry)?;
@@ -58,7 +58,7 @@ pub(super) fn write_session_log(path: &Path, entries: &[SessionLogEntry]) -> Res
     Ok(())
 }
 
-pub(super) fn sample_approval_preview() -> ToolPreview {
+pub(crate) fn sample_approval_preview() -> ToolPreview {
     ToolPreview {
         title: "Update note.txt".to_owned(),
         summary: "Preview summary".to_owned(),
@@ -71,7 +71,7 @@ pub(super) fn sample_approval_preview() -> ToolPreview {
     }
 }
 
-pub(super) fn sample_delete_approval_preview() -> ToolPreview {
+pub(crate) fn sample_delete_approval_preview() -> ToolPreview {
     ToolPreview {
         title: "Delete note.txt".to_owned(),
         summary: "Delete 2 lines from note.txt".to_owned(),
@@ -86,7 +86,7 @@ pub(super) fn sample_delete_approval_preview() -> ToolPreview {
     }
 }
 
-pub(super) fn multi_file_approval_preview() -> ToolPreview {
+pub(crate) fn multi_file_approval_preview() -> ToolPreview {
     ToolPreview {
         title: "Update multiple files".to_owned(),
         summary: "Multi-file preview".to_owned(),
@@ -105,7 +105,7 @@ pub(super) fn multi_file_approval_preview() -> ToolPreview {
     }
 }
 
-pub(super) fn inject_write_file_approval(app: &mut AppState, preview: ToolPreview) -> Result<()> {
+pub(crate) fn inject_write_file_approval(app: &mut AppState, preview: ToolPreview) -> Result<()> {
     app.handle(RunEvent::ToolApprovalRequested {
         call: ToolCall {
             id: "call-1".to_owned(),

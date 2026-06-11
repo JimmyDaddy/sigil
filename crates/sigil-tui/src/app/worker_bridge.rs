@@ -676,3 +676,7 @@ impl EventHandler for AppState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/worker_bridge_detail_tests.rs"]
+mod tests;

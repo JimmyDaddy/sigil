@@ -302,17 +302,121 @@ fn approval_modal_view_tracks_selected_hunk() -> Result<()> {
 }
 
 #[test]
-fn slash_prefix_during_pending_approval_returns_to_composer() -> Result<()> {
+fn approval_resolved_updates_timeline_for_allow_and_deny() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.active_pane = PaneFocus::Activity;
     inject_write_file_approval(&mut app, sample_approval_preview())?;
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+    app.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-1".to_owned(),
+        approved: false,
+        reason: Some("policy denied".to_owned()),
+    })?;
+    assert!(app.pending_approval.is_none());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("Denied call-1: policy denied"))
+    );
 
-    assert!(action.is_none());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-1".to_owned(),
+        approved: true,
+        reason: None,
+    })?;
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("Approved call-1."))
+    );
+    Ok(())
+}
+
+#[test]
+fn approval_preview_handles_empty_preview_body_and_slash_shortcut() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_write_file_approval(
+        &mut app,
+        ToolPreview {
+            title: "Preview".to_owned(),
+            summary: "Summary".to_owned(),
+            body: String::new(),
+            changed_files: vec!["note.txt".to_owned()],
+            file_diffs: Vec::new(),
+        },
+    )?;
+
+    let view = app
+        .approval_modal_view()
+        .expect("approval modal should exist");
+    assert_eq!(view.diff_lines[0].text, "No preview body available.");
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?
+            .is_none()
+    );
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert_eq!(app.input, "/");
-    assert!(app.pending_approval.is_some());
+    Ok(())
+}
+
+#[test]
+fn approval_preview_lines_cover_changed_files_scroll_keys_and_escape() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-plain-1".to_owned(),
+            name: "write_file".to_owned(),
+            args_json: r#"{"path":"note.txt"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "write_file".to_owned(),
+            description: "Write file".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        preview: Some(ToolPreview {
+            title: "Plain preview".to_owned(),
+            summary: String::new(),
+            body: "plain body".to_owned(),
+            changed_files: vec!["note.txt".to_owned()],
+            file_diffs: Vec::new(),
+        }),
+    })?;
+
+    let lines = app.approval_preview_lines().join("\n");
+    assert!(lines.contains("changed: note.txt"));
+    assert!(lines.contains("hunk 0/0"));
+
+    for code in [
+        KeyCode::Char('['),
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::Char('x'),
+        KeyCode::Backspace,
+        KeyCode::Tab,
+        KeyCode::BackTab,
+    ] {
+        assert!(
+            app.handle_key_event(KeyEvent::new(code, KeyModifiers::NONE))?
+                .is_none()
+        );
+    }
+
+    app.active_pane = PaneFocus::Composer;
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(app.active_pane, PaneFocus::Activity);
     Ok(())
 }
 
@@ -328,5 +432,20 @@ fn escape_in_pending_approval_only_changes_focus() -> Result<()> {
     assert_eq!(app.active_pane, PaneFocus::Activity);
     assert!(app.pending_approval.is_some());
     assert!(app.approval_modal_view().is_some());
+    Ok(())
+}
+
+#[test]
+fn slash_prefix_during_pending_approval_returns_to_composer() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.active_pane = PaneFocus::Activity;
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert_eq!(app.input, "/");
+    assert!(app.pending_approval.is_some());
     Ok(())
 }

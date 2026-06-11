@@ -446,37 +446,6 @@ fn config_mode_closes_on_escape() -> Result<()> {
 }
 
 #[test]
-fn config_mcp_shortcuts_outside_mcp_section_show_guidance() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.open_config_panel();
-    assert_eq!(app.config_section_title(), Some("Provider"));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("Ctrl-N: MCP only"));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("Ctrl-D: MCP only"));
-    Ok(())
-}
-
-#[test]
-fn config_mcp_paging_without_servers_reports_empty_state() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.open_config_panel();
-    app.config_state
-        .as_mut()
-        .expect("config state should still exist")
-        .set_section(ConfigSection::Mcp);
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("no MCP server to select"));
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("no MCP server to select"));
-    Ok(())
-}
-
-#[test]
 fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
@@ -1029,6 +998,364 @@ fn setup_save_requires_credentials() -> Result<()> {
 }
 
 #[test]
+fn config_compaction_details_render_provider_fallback_and_unknown_windows() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist after opening /config");
+    state.set_section(ConfigSection::Compaction);
+
+    let provider_lines = app.config_detail_lines().join("\n");
+    assert!(provider_lines.contains("1,000,000 tokens  source=provider"));
+
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.draft.provider_model = "custom-model".to_owned();
+    state.draft.compaction_context_window_tokens = "2048".to_owned();
+
+    let fallback_lines = app.config_detail_lines().join("\n");
+    assert!(fallback_lines.contains("2,048 tokens  source=fallback"));
+
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.draft.compaction_context_window_tokens = "0".to_owned();
+
+    let unknown_lines = app.config_detail_lines().join("\n");
+    assert!(unknown_lines.contains("unknown  source=none"));
+    Ok(())
+}
+
+#[test]
+fn config_permission_and_mcp_details_render_rule_and_pin_summaries() -> Result<()> {
+    let mut config = test_config();
+    config.permission.rules = vec![
+        sigil_kernel::PermissionRule {
+            tool_name: Some("read_file".to_owned()),
+            subject_glob: Some("src/**".to_owned()),
+            mode: ApprovalMode::Allow,
+        },
+        sigil_kernel::PermissionRule {
+            tool_name: Some("write_file".to_owned()),
+            subject_glob: Some("docs/**".to_owned()),
+            mode: ApprovalMode::Ask,
+        },
+        sigil_kernel::PermissionRule {
+            tool_name: Some("bash".to_owned()),
+            subject_glob: Some("tests/**".to_owned()),
+            mode: ApprovalMode::Deny,
+        },
+        sigil_kernel::PermissionRule {
+            tool_name: Some("grep".to_owned()),
+            subject_glob: Some("**/*.rs".to_owned()),
+            mode: ApprovalMode::Allow,
+        },
+        sigil_kernel::PermissionRule {
+            tool_name: Some("glob".to_owned()),
+            subject_glob: Some("**/*.md".to_owned()),
+            mode: ApprovalMode::Ask,
+        },
+    ];
+    config.mcp_servers = vec![
+        sigil_kernel::McpServerConfig {
+            name: "off".to_owned(),
+            command: "mcp-off".to_owned(),
+            trust: sigil_kernel::McpServerTrustPolicy {
+                pin_version: false,
+                allow_secrets: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        sigil_kernel::McpServerConfig {
+            name: "pinned".to_owned(),
+            command: "mcp-pinned".to_owned(),
+            trust: sigil_kernel::McpServerTrustPolicy {
+                pin_version: true,
+                pinned: Some(sigil_kernel::McpServerPinnedIdentity {
+                    command_fingerprint: "sha256:abc".to_owned(),
+                    protocol_version: "2024-11-05".to_owned(),
+                    server_name: "pinned".to_owned(),
+                    server_version: "1.0.0".to_owned(),
+                }),
+                allow_secrets: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        sigil_kernel::McpServerConfig {
+            name: "missing".to_owned(),
+            command: "mcp-missing".to_owned(),
+            trust: sigil_kernel::McpServerTrustPolicy {
+                pin_version: true,
+                pinned: None,
+                allow_secrets: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    ];
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Permissions);
+    let permission_lines = app.config_detail_lines().join("\n");
+    assert!(permission_lines.contains("Rule overrides"));
+    assert!(permission_lines.contains("5 configured"));
+    assert!(permission_lines.contains("... 1 more rules in config file"));
+
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.set_section(ConfigSection::Mcp);
+    state.selected_mcp_server_index = 0;
+    assert!(app.config_detail_lines().join("\n").contains("Pin: off"));
+
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.selected_mcp_server_index = 1;
+    let pinned_lines = app.config_detail_lines().join("\n");
+    assert!(pinned_lines.contains("Pin: pinned"));
+    assert!(pinned_lines.contains("Secrets: allowed"));
+
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.selected_mcp_server_index = 2;
+    let missing_lines = app.config_detail_lines().join("\n");
+    assert!(missing_lines.contains("Pin: missing"));
+    assert!(missing_lines.contains("Secrets: blocked"));
+    Ok(())
+}
+
+#[test]
+fn config_ctrl_c_quits_from_panel() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert!(app.should_quit);
+    assert!(!app.is_config_mode());
+    Ok(())
+}
+
+#[test]
+fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("Ctrl-N: MCP only"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("Ctrl-D: MCP only"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert_eq!(app.config_section_title(), Some("Permissions"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
+    assert_eq!(app.config_section_title(), Some("Provider"));
+
+    let mut config = test_config();
+    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        name: "filesystem".to_owned(),
+        command: "mcp-filesystem".to_owned(),
+        ..Default::default()
+    });
+    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        name: "git".to_owned(),
+        command: "mcp-git".to_owned(),
+        ..Default::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Mcp);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_mcp_server_index,
+        1
+    );
+    assert_eq!(app.last_notice(), Some("mcp server 2/2"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_mcp_server_index,
+        0
+    );
+    assert_eq!(app.last_notice(), Some("mcp server 1/2"));
+
+    let mut empty_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    empty_app.open_config_panel();
+    empty_app
+        .config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Mcp);
+
+    let _ = empty_app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(empty_app.last_notice(), Some("no MCP server to select"));
+    Ok(())
+}
+
+#[test]
+fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Permissions);
+        state.selected_field = Some(ConfigField::PermissionsDefaultMode);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(state.draft.permission_default_mode, ApprovalMode::Deny);
+    assert!(state.dirty);
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Memory);
+        state.selected_field = Some(ConfigField::MemoryEnabled);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .memory_enabled
+    );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Compaction);
+        state.selected_field = Some(ConfigField::CompactionEnabled);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .compaction_enabled
+    );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        state.selected_field = Some(ConfigField::ProviderFimModel);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(app.modal_title(), Some("FIM Model"));
+    app.modal_state = None;
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::ProviderApiKey);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    assert_eq!(app.modal_title(), Some("API Key"));
+    let ModalState::SecretInput(state) =
+        app.modal_state.as_ref().expect("secret modal should open")
+    else {
+        panic!("expected secret input modal");
+    };
+    assert_eq!(state.buffer, "x");
+    app.modal_state = None;
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::ProviderModel);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))?;
+    assert_eq!(app.modal_title(), Some("Model"));
+    let ModalState::TextInput(state) = app.modal_state.as_ref().expect("text modal should open")
+    else {
+        panic!("expected text input modal");
+    };
+    assert_eq!(state.buffer, "z");
+    app.modal_state = None;
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::CompactionTailMessages);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE))?;
+    let ModalState::TextInput(state) = app.modal_state.as_ref().expect("text modal should open")
+    else {
+        panic!("expected text input modal");
+    };
+    assert_eq!(state.buffer, "5");
+    Ok(())
+}
+
+#[test]
+fn config_modal_f3_saves_and_closes_from_text_input() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    test_config().save(&config_path)?;
+
+    let mut app = AppState::from_root_config(&config_path, &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::ProviderBaseUrl);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE))?;
+
+    assert!(matches!(action, Some(AppAction::ConfigSaved { .. })));
+    assert!(!app.is_config_mode());
+    assert_eq!(app.last_notice(), Some("saved config and closed"));
+    Ok(())
+}
+
+#[test]
 fn config_command_is_unavailable_in_setup_mode() -> Result<()> {
     let mut app = AppState::from_setup(
         Path::new("sigil.toml").to_path_buf(),
@@ -1045,5 +1372,36 @@ fn config_command_is_unavailable_in_setup_mode() -> Result<()> {
         app.last_notice(),
         Some("config is unavailable in setup mode")
     );
+    Ok(())
+}
+
+#[test]
+fn config_mcp_paging_without_servers_reports_empty_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("no MCP server to select"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("no MCP server to select"));
+    Ok(())
+}
+
+#[test]
+fn config_mcp_shortcuts_outside_mcp_section_show_guidance() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    assert_eq!(app.config_section_title(), Some("Provider"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.last_notice(), Some("Ctrl-N: MCP only"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.last_notice(), Some("Ctrl-D: MCP only"));
     Ok(())
 }

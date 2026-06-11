@@ -952,3 +952,7 @@ fn bool_summary(value: bool) -> &'static str {
 fn render_config_hint_row(text: &str) -> String {
     format!("i {text}")
 }
+
+#[cfg(test)]
+#[path = "tests/config_flow_detail_tests.rs"]
+mod tests;

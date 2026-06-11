@@ -1088,3 +1088,7 @@ fn elicitation_content_from_fields(
     }
     Ok(serde_json::Value::Object(object))
 }
+
+#[cfg(test)]
+#[path = "tests/modal_flow_detail_tests.rs"]
+mod tests;

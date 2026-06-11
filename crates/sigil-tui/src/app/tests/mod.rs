@@ -1,6 +1,6 @@
 mod approval_flow_tests;
 mod command_dispatch_tests;
-mod common;
+pub(crate) mod common;
 mod config_flow_tests;
 mod formatting_tests;
 mod input_flow_tests;

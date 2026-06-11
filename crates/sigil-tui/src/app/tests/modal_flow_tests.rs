@@ -1,3 +1,4 @@
+use super::super::modal_flow::ModalOutcome;
 use super::*;
 
 #[test]
@@ -628,6 +629,241 @@ fn setup_modal_ctrl_s_applies_field_and_saves_config() -> Result<()> {
             .and_then(|value| value.get("api_key"))
             .and_then(|value| value.as_str()),
         Some("setup-saved-key")
+    );
+    Ok(())
+}
+
+#[test]
+fn model_picker_refresh_ignores_stale_results_and_reports_fallbacks() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+
+    assert!(!app.apply_model_picker_refresh(ModelPickerRefresh {
+        target: ModelPickerTarget::Setup,
+        current: "custom-model".to_owned(),
+        base_url: "https://example.com".to_owned(),
+        result: Ok(vec!["remote-model".to_owned()]),
+    }));
+
+    assert!(app.apply_model_picker_refresh(ModelPickerRefresh {
+        target: ModelPickerTarget::Provider,
+        current: "custom-model".to_owned(),
+        base_url: "https://example.com".to_owned(),
+        result: Ok(Vec::new()),
+    }));
+    assert_eq!(app.last_notice(), Some("using local model list"));
+
+    assert!(app.apply_model_picker_refresh(ModelPickerRefresh {
+        target: ModelPickerTarget::Provider,
+        current: "custom-model".to_owned(),
+        base_url: "https://example.com".to_owned(),
+        result: Err("network down".to_owned()),
+    }));
+    assert_eq!(
+        app.last_notice(),
+        Some("using local model list: network down")
+    );
+    Ok(())
+}
+
+#[test]
+fn text_input_modal_rejects_invalid_characters_for_numeric_fields() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_text_input(
+        super::super::modal_flow::TextInputTarget::ConfigField(
+            ConfigField::CompactionContextWindowTokens,
+        ),
+        "",
+    );
+
+    assert!(matches!(
+        app.handle_modal_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
+    assert_eq!(app.last_notice(), Some("value does not accept 'x'"));
+    assert!(app.modal_lines().join("\n").contains("value: |"));
+
+    assert!(matches!(
+        app.handle_modal_key_event(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
+    assert!(app.modal_lines().join("\n").contains("value: 4|"));
+}
+
+#[test]
+fn mcp_elicitation_validates_required_and_numeric_fields() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "filesystem".to_owned(),
+            message: "Need parameters".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "title": "Path" },
+                    "retries": { "type": "integer", "title": "Retries" },
+                    "threshold": { "type": "number", "title": "Threshold" },
+                    "mode": { "enum": ["safe", "fast"], "title": "Mode" }
+                },
+                "required": ["path"]
+            }),
+        },
+        response_tx,
+    })?;
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("Path is required"));
+    assert!(app.has_modal());
+
+    if let Some(ModalState::McpElicitation(state)) = app.modal_state.as_mut() {
+        state
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "path")
+            .expect("path field should exist")
+            .buffer = "src/lib.rs".to_owned();
+        state
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "retries")
+            .expect("retries field should exist")
+            .buffer = "abc".to_owned();
+    }
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("Retries must be an integer"));
+
+    if let Some(ModalState::McpElicitation(state)) = app.modal_state.as_mut() {
+        state
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "retries")
+            .expect("retries field should exist")
+            .buffer = "3".to_owned();
+        state
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "threshold")
+            .expect("threshold field should exist")
+            .buffer = "1e999".to_owned();
+    }
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("Threshold must be a finite number"));
+
+    if let Some(ModalState::McpElicitation(state)) = app.modal_state.as_mut() {
+        state
+            .fields
+            .iter_mut()
+            .find(|field| field.name == "threshold")
+            .expect("threshold field should exist")
+            .buffer = "0.25".to_owned();
+    }
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(!app.has_modal());
+    assert_eq!(app.last_notice(), Some("submitted MCP input to filesystem"));
+
+    let response = futures::executor::block_on(response_rx)?;
+    assert_eq!(response.action, McpElicitationAction::Accept);
+    assert_eq!(
+        response.content,
+        Some(json!({
+            "mode": "safe",
+            "path": "src/lib.rs",
+            "retries": 3,
+            "threshold": 0.25
+        }))
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_cycles_boolean_and_enum_fields() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "planner".to_owned(),
+            message: "Choose execution mode".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "confirm": {
+                        "type": "boolean",
+                        "title": "Confirm",
+                        "description": "Allow execution"
+                    },
+                    "mode": {
+                        "enum": ["safe", "fast"],
+                        "title": "Mode",
+                        "description": "Execution mode"
+                    }
+                }
+            }),
+        },
+        response_tx,
+    })?;
+
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("selected: Allow execution"));
+    assert_eq!(app.modal_input_cursor(), Some(("Confirm".to_owned(), 5, 5)));
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(app.modal_lines().join("\n").contains("Confirm: true|"));
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("editing Mode"));
+    assert!(
+        app.modal_lines()
+            .join("\n")
+            .contains("selected: Execution mode")
+    );
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(app.modal_lines().join("\n").contains("Mode: fast|"));
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?
+            .is_none()
+    );
+    assert!(app.modal_lines().join("\n").contains("Mode: safe|"));
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
+    let response = futures::executor::block_on(response_rx)?;
+    assert_eq!(
+        response.content,
+        Some(json!({
+            "confirm": true,
+            "mode": "safe"
+        }))
     );
     Ok(())
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::approval::PendingApproval;
 
 #[test]
 fn normal_input_creates_user_and_running_state() -> Result<()> {
@@ -210,37 +211,406 @@ fn esc_interrupts_active_run() -> Result<()> {
 }
 
 #[test]
-fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
+fn poll_background_tasks_applies_latest_balance_and_model_refresh() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "work".to_owned();
-    assert!(matches!(
-        app.submit_input()?,
-        Some(AppAction::SubmitPrompt(prompt)) if prompt == "work"
-    ));
-    inject_write_file_approval(&mut app, sample_approval_preview())?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
-    assert!(app.has_modal());
-    assert!(app.pending_approval.is_some());
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+
+    let (balance_tx, balance_rx) = std::sync::mpsc::channel();
+    balance_tx.send(crate::provider_status::BalanceSnapshot {
+        total: Some(1.0),
+        currency: Some("USD".to_owned()),
+        available: true,
+        status: "USD 1.00".to_owned(),
+    })?;
+    balance_tx.send(crate::provider_status::BalanceSnapshot {
+        total: Some(2.0),
+        currency: Some("USD".to_owned()),
+        available: true,
+        status: "USD 2.00".to_owned(),
+    })?;
+    app.balance_refresh_rx = Some(balance_rx);
+
+    let (model_tx, model_rx) = std::sync::mpsc::channel();
+    model_tx.send(ModelPickerRefresh {
+        target: ModelPickerTarget::Provider,
+        current: "custom-model".to_owned(),
+        base_url: "https://example.com".to_owned(),
+        result: Ok(vec!["remote-model".to_owned()]),
+    })?;
+    app.model_picker_refresh_rx = Some(model_rx);
+
+    assert!(app.poll_background_tasks());
+    assert_eq!(app.balance_snapshot.status, "USD 2.00");
+    assert!(app.balance_refresh_rx.is_none());
+    assert!(app.model_picker_refresh_rx.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("loaded provider model list (https://example.com)")
+    );
+    assert!(app.modal_lines().join("\n").contains("remote-model"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "balance" && event.detail == "USD 2.00")
+    );
+    Ok(())
+}
+
+#[test]
+fn schedule_balance_refresh_handles_missing_config_and_auth() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.config_snapshot = None;
+    app.schedule_balance_refresh();
+    assert_eq!(app.balance_snapshot.status, "n/a");
+    assert!(app.balance_refresh_rx.is_none());
+
+    app.apply_runtime_config_snapshot(&test_config());
+    app.schedule_balance_refresh();
+    assert_eq!(app.balance_snapshot.status, "missing auth");
+    assert!(app.balance_refresh_rx.is_none());
+
+    let temp = tempdir().expect("tempdir should be created");
+    let mut setup_app = AppState::from_setup(
+        temp.path().join("sigil.toml"),
+        temp.path().join("workspace"),
+        None,
+    );
+    setup_app.schedule_balance_refresh();
+    assert!(setup_app.balance_refresh_rx.is_none());
+}
+
+#[test]
+fn code_intelligence_results_update_status_lines_and_diagnostics() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-code-status",
+        "code_status",
+        "{}".to_owned(),
+        ToolResultMeta {
+            details: json!({
+                "code_intelligence": {
+                    "servers": [
+                        { "server": "rust-analyzer", "status": "ready", "languages": ["rust"] },
+                        { "server": "pyright", "status": "fallback", "languages": ["python"] }
+                    ]
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    assert_eq!(app.code_intelligence_status, "ready");
+    assert_eq!(
+        app.code_intelligence_server_lines.get("rust-analyzer"),
+        Some(&"rust: ready rust-analyzer".to_owned())
+    );
+    assert_eq!(
+        app.code_intelligence_server_lines.get("pyright"),
+        Some(&"python: fallback pyright".to_owned())
+    );
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-code-diag",
+        "code_diagnostics",
+        json!({
+            "query": { "paths": ["./src/main.rs", "src/lib.rs"] },
+            "diagnostics": [
+                { "path": "./src/main.rs", "severity": "error" },
+                { "path": "src/main.rs", "severity": "warning" }
+            ]
+        })
+        .to_string(),
+        ToolResultMeta::default(),
+    )))?;
+
+    assert_eq!(
+        app.code_intelligence_status,
+        "diagnostics 1 errors 1 warnings"
+    );
+    assert_eq!(
+        app.code_intelligence_diagnostics_line.as_deref(),
+        Some("diagnostics: 1 errors 1 warnings")
+    );
+    assert_eq!(
+        app.code_intelligence_diagnostics_by_path.get("src/main.rs"),
+        Some(&ApprovalDiagnosticSummary {
+            errors: 1,
+            warnings: 1,
+        })
+    );
+    assert_eq!(
+        app.code_intelligence_diagnostics_by_path.get("src/lib.rs"),
+        Some(&ApprovalDiagnosticSummary::default())
+    );
+
+    app.handle(RunEvent::ToolResult(ToolResult::error(
+        "call-code-error",
+        "code_search",
+        ToolErrorKind::Protocol,
+        "bad response",
+    )))?;
+    assert_eq!(app.code_intelligence_status, "degraded tool error");
+    assert_eq!(
+        app.code_intelligence_server_lines.get("status"),
+        Some(&"status: degraded tool error".to_owned())
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle_worker_message(WorkerMessage::RunStarted {
+        prompt: "draft plan".to_owned(),
+    })?;
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.last_notice(), Some("thinking"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "run:start" && event.detail == "draft plan")
+    );
+
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: None,
+        status: McpActivationStatus::Deferred,
+    })?;
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "mcp" && event.detail == "deferred")
+    );
+
+    let temp = tempdir()?;
+    let session_log_path = temp.path().join("session-restored.jsonl");
+    let entries = restored_entries("restored-provider", "restored-model");
+    app.handle_worker_message(WorkerMessage::SessionCompacted {
+        session_log_path: session_log_path.clone(),
+        provider_name: "restored-provider".to_owned(),
+        model_name: "restored-model".to_owned(),
+        record: CompactionRecord {
+            summary: "summary".to_owned(),
+            compacted_message_count: 2,
+            retained_tail_message_count: 1,
+        },
+        trigger: CompactionTrigger::Manual,
+        entries,
+    })?;
+
+    assert_eq!(app.session_log_path, session_log_path);
+    assert_eq!(app.last_notice(), Some("Session compacted."));
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("Session compacted."))
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let restored_path = temp.path().join("session-restored.jsonl");
+    let entries = restored_entries("restored-provider", "restored-model");
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.is_busy = true;
+    app.pending_approval = Some(PendingApproval {
+        call: ToolCall {
+            id: "call-1".to_owned(),
+            name: "write_file".to_owned(),
+            args_json: "{}".to_owned(),
+        },
+        spec: ToolSpec {
+            name: "write_file".to_owned(),
+            description: "Write a file".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        preview: None,
+    });
+    app.modal_state = Some(ModalState::KeyboardHelp);
+    app.streaming_reasoning_index = Some(0);
 
     app.handle_worker_message(WorkerMessage::RunFinished {
         result: sigil_kernel::AgentRunResult {
             final_text: "done".to_owned(),
-            tool_calls: 1,
+            tool_calls: 2,
         },
-        entries: restored_entries("deepseek", "deepseek-v4-flash"),
+        entries: entries.clone(),
     })?;
 
     assert!(!app.is_busy);
-    assert_eq!(app.run_phase(), RunPhase::Idle);
-    assert!(!app.has_modal());
     assert!(app.pending_approval.is_none());
+    assert!(app.modal_state.is_none());
+    assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.last_notice(), Some("agent idle"));
+    assert!(app.events.iter().any(|event| {
+        event.label == "run:finish" && event.detail == "tool_calls=2 final_text_bytes=4"
+    }));
+
+    app.handle_worker_message(WorkerMessage::Notice("worker note".to_owned()))?;
+    assert_eq!(app.last_notice(), Some("worker note"));
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "worker note")
+    );
     assert!(
         app.events
             .iter()
-            .any(|event| event.label == "run:finish" && event.detail.contains("tool_calls=1"))
+            .any(|event| event.label == "worker" && event.detail == "worker note")
     );
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path: restored_path.clone(),
+        provider_name: "restored-provider".to_owned(),
+        model_name: "restored-model".to_owned(),
+        entries: entries.clone(),
+    })?;
+    assert_eq!(app.session_log_path, restored_path);
+    assert_eq!(app.provider_name, "restored-provider");
+    assert_eq!(app.model_name, "restored-model");
+    assert_eq!(app.last_notice(), Some("restored from disk"));
+
+    app.is_busy = true;
+    app.modal_state = Some(ModalState::KeyboardHelp);
+    app.handle_worker_message(WorkerMessage::RunFailed(
+        "request failed\n\nCaused by:\n  0: timeout".to_owned(),
+    ))?;
+    assert!(!app.is_busy);
+    assert!(app.modal_state.is_none());
+    assert_eq!(app.run_phase(), RunPhase::Idle);
+    assert_eq!(app.last_notice(), Some("timeout"));
     Ok(())
+}
+
+#[test]
+fn worker_events_cover_completion_continuation_and_duplicate_assistant_messages() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ToolCallArgsDelta {
+        id: "call-1".to_owned(),
+        delta: "{}".to_owned(),
+    })?;
+    assert_eq!(app.run_phase(), RunPhase::Tool("tool".to_owned()));
+
+    app.handle(RunEvent::ToolCallCompleted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    assert_eq!(app.run_phase(), RunPhase::Tool("read_file".to_owned()));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "tool:complete" && event.detail == "read_file call-1")
+    );
+
+    app.handle(RunEvent::Control(ControlEntry::Note {
+        kind: "custom".to_owned(),
+        data: json!({ "value": 1 }),
+    }))?;
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "control" && event.detail.contains("custom"))
+    );
+
+    app.handle(RunEvent::ContinuationState(
+        sigil_kernel::ProviderContinuationState {
+            provider_name: "deepseek".to_owned(),
+            state_kind: "resume".to_owned(),
+            message_id: Some("msg-1".to_owned()),
+            opaque_blob: json!({ "cursor": 1 }),
+        },
+    ))?;
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "continuation" && event.detail == "resume")
+    );
+
+    app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
+        Some("same answer".to_owned()),
+        Vec::new(),
+    )))?;
+    app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
+        Some("same answer".to_owned()),
+        Vec::new(),
+    )))?;
+    app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
+        Some(String::new()),
+        Vec::new(),
+    )))?;
+
+    let matching = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Assistant && entry.text == "same answer")
+        .count();
+    assert_eq!(matching, 1);
+    Ok(())
+}
+
+#[test]
+fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_updates() {
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    assert!(matches!(
+        app.into_worker_command(AppAction::SubmitPrompt("draft".to_owned())),
+        WorkerCommand::SubmitPrompt { prompt, .. } if prompt == "draft"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::ApprovalDecision {
+            call_id: "call-1".to_owned(),
+            approved: true,
+        }),
+        WorkerCommand::ApprovalDecision { call_id, approved }
+            if call_id == "call-1" && approved
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::CancelRun),
+        WorkerCommand::CancelRun
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::CompactNow),
+        WorkerCommand::CompactNow
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::CheckChangedFilesDiagnostics),
+        WorkerCommand::CheckChangedFilesDiagnostics
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::SwitchSession {
+            session_log_path: std::path::PathBuf::from("session.jsonl"),
+        }),
+        WorkerCommand::SwitchSession { session_log_path }
+            if session_log_path == std::path::Path::new("session.jsonl")
+    ));
+    assert!(matches!(
+        AppState::shutdown_command(),
+        WorkerCommand::Shutdown
+    ));
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        app.into_worker_command(AppAction::ConfigSaved {
+            root_config: Box::new(test_config()),
+        })
+    }));
+    assert!(panic.is_err());
 }
 
 #[test]
@@ -304,5 +674,39 @@ fn mcp_activation_status_without_server_name_only_emits_event() -> Result<()> {
             && event.detail.contains("failed")
             && event.detail.contains("bad response")
     }));
+    Ok(())
+}
+
+#[test]
+fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "work".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == "work"
+    ));
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+    assert!(app.has_modal());
+    assert!(app.pending_approval.is_some());
+
+    app.handle_worker_message(WorkerMessage::RunFinished {
+        result: sigil_kernel::AgentRunResult {
+            final_text: "done".to_owned(),
+            tool_calls: 1,
+        },
+        entries: restored_entries("deepseek", "deepseek-v4-flash"),
+    })?;
+
+    assert!(!app.is_busy);
+    assert_eq!(app.run_phase(), RunPhase::Idle);
+    assert!(!app.has_modal());
+    assert!(app.pending_approval.is_none());
+    assert_eq!(app.last_notice(), Some("agent idle"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "run:finish" && event.detail.contains("tool_calls=1"))
+    );
     Ok(())
 }

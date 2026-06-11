@@ -497,3 +497,7 @@ fn approval_diff_line_kind(line: &str) -> ApprovalDiffLineKind {
 fn normalize_approval_diagnostic_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_owned()
 }
+
+#[cfg(test)]
+#[path = "tests/approval_flow_detail_tests.rs"]
+mod tests;
