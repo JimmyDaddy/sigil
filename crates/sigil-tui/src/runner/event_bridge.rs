@@ -23,3 +23,61 @@ impl EventHandler for ChannelEventHandler {
             .map_err(|error| anyhow!("failed to forward run event: {error}"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use sigil_kernel::{EventHandler, RunEvent};
+
+    use super::super::protocol::WorkerMessage;
+    use super::*;
+
+    #[test]
+    fn handle_forwards_event_to_channel() -> Result<()> {
+        let (tx, rx) = mpsc::channel();
+        let mut handler = ChannelEventHandler::new(tx);
+
+        handler.handle(RunEvent::Notice("test notice".to_owned()))?;
+
+        let message = rx.try_recv()?;
+        match message {
+            WorkerMessage::Event(event) => {
+                assert!(matches!(*event, RunEvent::Notice(ref text) if text == "test notice"));
+                Ok(())
+            }
+            _ => panic!("expected Event message"),
+        }
+    }
+
+    #[test]
+    fn handle_returns_error_when_receiver_dropped() {
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let mut handler = ChannelEventHandler::new(tx);
+
+        let result = handler.handle(RunEvent::Notice("lost".to_owned()));
+        let Err(error) = result else {
+            panic!("expected channel forwarding error");
+        };
+        assert!(error.to_string().contains("failed to forward"));
+    }
+
+    #[test]
+    fn clones_share_same_sender() -> Result<()> {
+        let (tx, rx) = mpsc::channel();
+        let handler1 = ChannelEventHandler::new(tx);
+        let mut handler2 = handler1.clone();
+
+        handler2.handle(RunEvent::Notice("from clone".to_owned()))?;
+
+        let message = rx.try_recv()?;
+        match message {
+            WorkerMessage::Event(event) => {
+                assert!(matches!(*event, RunEvent::Notice(ref text) if text == "from clone"));
+                Ok(())
+            }
+            _ => panic!("expected Event message"),
+        }
+    }
+}
