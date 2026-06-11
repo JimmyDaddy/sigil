@@ -12,3 +12,7 @@ impl PaneFocus {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/input_tests.rs"]
+mod tests;

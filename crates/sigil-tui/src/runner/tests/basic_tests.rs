@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use sigil_kernel::{
     Agent, McpServerConfig, McpServerStartup, ProviderChunk, ReasoningEffort, RunEvent,
@@ -9,6 +11,8 @@ use super::{
     super::{McpActivationStatus, WorkerCommand, WorkerMessage},
     common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
 };
+
+use super::super::spawn_agent_worker;
 
 #[test]
 fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
@@ -57,6 +61,67 @@ fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
     ));
 
     worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_worker_reports_provider_configuration_error() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
+    let root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
+
+    let (_command_tx, message_rx) = spawn_agent_worker(
+        root_config,
+        session_log_path,
+        workspace_root,
+        sigil_kernel::InteractionMode::Interactive,
+    )?;
+
+    let message = message_rx.recv_timeout(Duration::from_secs(3))?;
+
+    assert!(matches!(
+        message,
+        WorkerMessage::RunFailed(ref error)
+            if error.contains("missing [providers.deepseek] in sigil.toml")
+    ));
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_worker_reports_required_eager_mcp_startup_error() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
+    let mut root_config = test_root_config(&workspace_root, "deepseek", "deepseek-v4-flash");
+    root_config.providers.insert(
+        "deepseek".to_owned(),
+        serde_json::json!({
+            "api_key": "test-key",
+            "model": "deepseek-v4-flash"
+        }),
+    );
+    root_config.mcp_servers.push(McpServerConfig {
+        name: "required-eager".to_owned(),
+        command: "/definitely/missing/sigil-mcp-server".to_owned(),
+        startup: McpServerStartup::Eager,
+        ..McpServerConfig::default()
+    });
+
+    let (_command_tx, message_rx) = spawn_agent_worker(
+        root_config,
+        session_log_path,
+        workspace_root,
+        sigil_kernel::InteractionMode::Interactive,
+    )?;
+
+    let message = message_rx.recv_timeout(Duration::from_secs(3))?;
+
+    assert!(matches!(
+        message,
+        WorkerMessage::RunFailed(ref error)
+            if error.contains("failed to spawn MCP server required-eager")
+    ));
     Ok(())
 }
 

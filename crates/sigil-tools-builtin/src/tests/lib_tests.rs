@@ -796,3 +796,205 @@ fn builtin_path_and_truncation_helpers_preserve_boundaries() -> Result<()> {
     assert!(std::str::from_utf8(truncated.content.as_bytes()).is_ok());
     Ok(())
 }
+
+#[test]
+fn builtin_argument_helpers_validate_types_and_sizes() {
+    let missing = super::required_string(&json!({}), "path").expect_err("path should be required");
+    assert!(missing.to_string().contains("missing string field path"));
+
+    let wrong_type =
+        super::required_string(&json!({ "path": 7 }), "path").expect_err("path should be string");
+    assert!(wrong_type.to_string().contains("missing string field path"));
+
+    let invalid_limit = super::optional_usize(&json!({ "limit": "many" }), "limit")
+        .expect_err("limit should be numeric");
+    assert!(
+        invalid_limit
+            .to_string()
+            .contains("limit must be a positive integer")
+    );
+    assert_eq!(
+        super::optional_string(&json!({ "path": "src" }), "path"),
+        Some("src")
+    );
+    assert_eq!(
+        super::optional_usize(&json!({ "limit": 3 }), "limit").expect("limit"),
+        Some(3)
+    );
+}
+
+#[tokio::test]
+async fn tool_permission_subjects_validate_required_paths() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    for (tool_name, result) in [
+        (
+            "read_file",
+            ReadFileTool.permission_subjects(&ctx, &json!({})),
+        ),
+        (
+            "write_file",
+            WriteFileTool.permission_subjects(&ctx, &json!({ "content": "hello" })),
+        ),
+        (
+            "edit_file",
+            EditFileTool.permission_subjects(&ctx, &json!({ "old_text": "a", "new_text": "b" })),
+        ),
+        (
+            "delete_file",
+            DeleteFileTool.permission_subjects(&ctx, &json!({})),
+        ),
+    ] {
+        let error = result.expect_err(tool_name);
+        assert!(
+            error.to_string().contains("missing string field path"),
+            "{tool_name} should require a path"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn edit_file_preview_surfaces_missing_and_ambiguous_matches() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("note.txt"), "old one old two")?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    let missing = EditFileTool
+        .preview(
+            ctx.clone(),
+            json!({ "path": "note.txt", "old_text": "absent", "new_text": "new" }),
+        )
+        .await
+        .expect_err("missing old_text should fail preview");
+    assert!(missing.to_string().contains("old_text not found"));
+
+    let ambiguous = EditFileTool
+        .preview(
+            ctx,
+            json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
+        )
+        .await
+        .expect_err("ambiguous old_text should fail preview");
+    assert!(ambiguous.to_string().contains("old_text is ambiguous"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_list_glob_grep_and_bash_surface_input_errors() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    let read_error = ReadFileTool
+        .execute(
+            ctx.clone(),
+            "read".to_owned(),
+            json!({ "path": "missing.txt", "limit": "lots" }),
+        )
+        .await
+        .expect_err("invalid read limit should fail");
+    assert!(
+        read_error
+            .to_string()
+            .contains("limit must be a positive integer")
+    );
+
+    let list_error = ListTool
+        .execute(
+            ctx.clone(),
+            "ls".to_owned(),
+            json!({ "path": "missing-dir" }),
+        )
+        .await
+        .expect_err("missing list path should fail");
+    assert!(!list_error.to_string().is_empty());
+
+    let glob_error = GlobTool
+        .execute(
+            ctx.clone(),
+            "glob".to_owned(),
+            json!({ "pattern": "[", "limit": 5 }),
+        )
+        .await
+        .expect_err("invalid glob should fail");
+    assert!(!glob_error.to_string().is_empty());
+
+    let grep_error = GrepTool
+        .execute(ctx.clone(), "grep".to_owned(), json!({ "pattern": "[" }))
+        .await
+        .expect_err("invalid regex should fail");
+    assert!(!grep_error.to_string().is_empty());
+
+    let bash_error = BashTool
+        .execute(ctx, "bash".to_owned(), json!({}))
+        .await
+        .expect_err("missing command should fail");
+    assert!(
+        bash_error
+            .to_string()
+            .contains("missing string field command")
+    );
+    Ok(())
+}
+
+#[test]
+fn path_and_shell_helpers_cover_workspace_external_and_unknown_cases() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let outside_file = outside.path().join("outside.txt");
+    fs::write(&outside_file, "outside")?;
+
+    let workspace_subject = super::tool_path_subject(workspace.path(), "new/missing.txt")?;
+    assert_eq!(workspace_subject.scope, ToolSubjectScope::Workspace);
+    assert_eq!(workspace_subject.normalized, "new/missing.txt");
+
+    let external_subject =
+        super::tool_path_subject(workspace.path(), outside_file.to_string_lossy().as_ref())?;
+    let expected_external_file = outside_file.canonicalize()?;
+    assert_eq!(external_subject.scope, ToolSubjectScope::External);
+    assert_eq!(
+        external_subject.canonical_path.as_deref(),
+        Some(expected_external_file.as_path())
+    );
+
+    assert_eq!(
+        super::command_permission_subject("  git   status   --short  "),
+        "git status --short"
+    );
+    let long_subject = super::command_permission_subject(&"x ".repeat(100));
+    assert!(long_subject.ends_with("..."));
+    assert!(super::bash_command_is_safe_readonly(
+        "git branch --show-current"
+    ));
+    assert!(!super::bash_command_is_safe_readonly("git branch -D main"));
+    assert!(!super::bash_command_is_safe_readonly("command"));
+    assert!(!super::bash_command_is_safe_readonly(""));
+    Ok(())
+}
+
+#[test]
+fn diff_and_text_limit_helpers_handle_noop_and_head_limits() {
+    let diff = super::render_unified_diff("same\n", "same\n", "current", "proposed");
+    assert_eq!(diff, "No textual changes detected.");
+
+    let limited = super::limit_text_head("one\ntwo\nthree\n", 8, 2);
+    assert!(limited.truncated);
+    assert_eq!(limited.returned_lines, 2);
+    assert!(limited.content.contains("output truncated"));
+
+    let unchanged = super::limit_text_head_tail("short", 128);
+    assert!(!unchanged.truncated);
+    assert_eq!(unchanged.content, "short");
+    assert_eq!(unchanged.omitted_bytes, 0);
+}

@@ -237,7 +237,10 @@ cargo fmt --all --check
 cargo check
 cargo test
 cargo clippy --all-targets -- -D warnings
+./scripts/coverage.sh
 ```
+
+单测覆盖率门禁必须保持 `>= 96%` 行覆盖率。覆盖率统计入口统一使用仓库根目录的 `scripts/coverage.sh`，不要在 CI 或本地文档中另写一套不同参数。
 
 如果只改文档，可以不跑全量 gate，但至少确认：
 

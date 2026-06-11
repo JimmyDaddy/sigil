@@ -1609,3 +1609,216 @@ fn mcp_egress_json_summary_handles_arrays_and_scalars() {
     let scalar = super::summarize_egress_json(&json!(true));
     assert_eq!(scalar["type"], "bool");
 }
+
+#[tokio::test]
+async fn mcp_public_capability_wrappers_handle_empty_server_lists() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let capabilities = ProviderCapabilities {
+        tool_name_max_chars: 32,
+        ..test_provider_capabilities()
+    };
+    let mut registry = ToolRegistry::new();
+
+    super::register_mcp_tools_with_capabilities(&mut registry, &[], &capabilities).await?;
+    super::register_mcp_tools_with_capabilities_and_roots(
+        &mut registry,
+        &[],
+        &capabilities,
+        vec![temp.path().to_path_buf()],
+    )
+    .await?;
+    super::activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
+        &mut registry,
+        &[],
+        &capabilities,
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::empty(),
+    )
+    .await?;
+    super::activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+        &mut registry,
+        &[],
+        &capabilities,
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::empty(),
+        super::unsupported_mcp_elicitation_handler(),
+    )
+    .await?;
+
+    assert!(registry.specs().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn optional_mcp_server_tools_list_failure_is_skipped() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("tools_list_error_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"tools are unavailable"}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "optional-tools".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            required: false,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    assert!(registry.specs().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_tool_without_description_uses_default_description() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("default_description_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"bare","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "bare".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let spec = registry
+        .spec_for("mcp__bare__bare")
+        .expect("bare mcp tool should register");
+    assert_eq!(spec.description, "MCP tool");
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_request_and_response_defaults_are_stable() -> Result<()> {
+    let request = super::mcp_elicitation_request(
+        "server",
+        &json!({
+            "params": {}
+        }),
+    )?;
+    assert_eq!(request.server_name, "server");
+    assert_eq!(request.message, "MCP server requested input");
+    assert_eq!(request.requested_schema["type"], "object");
+
+    let accept_without_content = McpElicitationResponse {
+        action: super::McpElicitationAction::Accept,
+        content: None,
+    }
+    .into_result();
+    assert_eq!(accept_without_content["action"], "accept");
+    assert_eq!(accept_without_content["content"], json!({}));
+
+    assert_eq!(
+        McpElicitationResponse::decline().into_result(),
+        json!({ "action": "decline" })
+    );
+    assert_eq!(
+        McpElicitationResponse::cancel().into_result(),
+        json!({ "action": "cancel" })
+    );
+
+    let error = super::mcp_elicitation_request("server", &json!({}))
+        .expect_err("missing params should be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("MCP elicitation/create missing params object")
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_name_hashing_handles_extremely_short_provider_limits() {
+    assert_eq!(
+        super::fit_provider_name_with_hash("short", "identity", 16),
+        "short"
+    );
+    let fitted = super::fit_provider_name_with_hash("very_long_provider_tool_name", "identity", 6);
+    assert!(fitted.contains("__"));
+    assert!(fitted.len() > 6);
+}

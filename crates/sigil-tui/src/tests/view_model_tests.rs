@@ -449,3 +449,118 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn info_rail_projects_memory_off_and_muted_agent_rows() {
+    let mut config = test_config();
+    config.memory.enabled = false;
+    let app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
+
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(
+        view_model
+            .info_rail
+            .session_lines
+            .iter()
+            .any(|line| line == "memory: off")
+    );
+    assert!(
+        view_model
+            .info_rail
+            .agent_lines
+            .iter()
+            .any(|line| line == "> main: idle in current session")
+    );
+    assert!(
+        view_model
+            .info_rail
+            .agent_lines
+            .iter()
+            .any(|line| line == "~ subagents: not connected yet")
+    );
+}
+
+#[test]
+fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
+    let _ = app.submit_input()?;
+
+    let view_model = UiViewModel::from_app(&app);
+
+    assert_eq!(view_model.footer.phase, RunPhase::Thinking);
+    assert!(view_model.footer.is_busy);
+    assert_eq!(
+        view_model.footer.run_label,
+        "thinking · reasoning with deepseek-v4-flash"
+    );
+    assert_eq!(view_model.footer.hints, "Esc interrupt · Ctrl-T details");
+    assert_eq!(view_model.composer.phase, RunPhase::Thinking);
+    assert_eq!(view_model.composer.reasoning_effort_label, "max");
+    Ok(())
+}
+
+#[test]
+fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    app.is_busy = true;
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-approval".to_owned(),
+            name: "write_file".to_owned(),
+            args_json: r#"{"path":"README.md","content":"hello"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "write_file".to_owned(),
+            description: "Write file".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        preview: None,
+    })?;
+
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(!view_model.footer.is_busy);
+    assert_eq!(
+        view_model.footer.run_label,
+        "approval · waiting for decision on write_file"
+    );
+    assert_eq!(view_model.footer.hints, "Y allow · N deny · V diff");
+    Ok(())
+}
+
+#[test]
+fn live_progress_titles_cover_known_custom_and_phase_labels() {
+    for (detail, expected) in [
+        ("running write_file", "Write"),
+        ("running edit_file", "Edit"),
+        ("running delete_file", "Delete"),
+        ("running grep", "Search"),
+        ("running ls", "Inspect"),
+        ("running custom-tool_name", "Custom Tool Name"),
+        ("running ___", "Tool"),
+    ] {
+        assert_eq!(
+            LiveProgressViewModel::from_parts("tool", detail).title,
+            expected
+        );
+    }
+
+    assert_eq!(
+        LiveProgressViewModel::from_parts("streaming", "writing").title,
+        "Replying"
+    );
+    assert_eq!(
+        LiveProgressViewModel::from_parts("approval", "waiting").title,
+        "Approval"
+    );
+    assert_eq!(
+        LiveProgressViewModel::from_parts("other", "working").title,
+        "Working"
+    );
+}

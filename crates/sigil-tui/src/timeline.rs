@@ -115,3 +115,7 @@ impl ThinkingBlockMode {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/timeline_tests.rs"]
+mod tests;

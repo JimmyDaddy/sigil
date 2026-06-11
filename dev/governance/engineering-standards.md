@@ -82,7 +82,10 @@ cargo fmt --all --check
 cargo check
 cargo test
 cargo clippy --all-targets -- -D warnings
+./scripts/coverage.sh
 ```
+
+覆盖率门禁默认要求 workspace 单测行覆盖率 `>= 96%`，由 `cargo-llvm-cov` 执行；CI 和本地必须使用同一个脚本入口，避免阈值或统计范围漂移。
 
 ### 5.2 何时需要更强验证
 

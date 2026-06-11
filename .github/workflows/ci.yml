@@ -13,6 +13,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_LLVM_COV_VERSION: 0.8.7
+  COVERAGE_MIN_LINES: 96
   RUST_TOOLCHAIN_VERSION: 1.94.1
 
 jobs:
@@ -86,3 +88,28 @@ jobs:
 
       - name: cargo clippy --locked --all-targets -- -D warnings
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          components: llvm-tools-preview
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! cargo llvm-cov --version 2>/dev/null | grep -q "$CARGO_LLVM_COV_VERSION"; then
+            cargo install cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION" --locked
+          fi
+
+      - name: coverage >= 96%
+        run: ./scripts/coverage.sh

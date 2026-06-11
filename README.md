@@ -272,6 +272,15 @@ cargo fmt --all --check
 cargo check
 cargo test
 cargo clippy --all-targets -- -D warnings
+./scripts/coverage.sh
+```
+
+覆盖率门禁使用 `cargo-llvm-cov`，默认要求 workspace 单测行覆盖率 `>= 96%`。
+本地首次运行前需要安装：
+
+```bash
+cargo install cargo-llvm-cov --version 0.8.7 --locked
+rustup component add llvm-tools-preview
 ```
 
 这组质量门也已经固化在 GitHub Actions：

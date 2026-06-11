@@ -66,3 +66,7 @@ impl From<MouseEventKind> for MouseInputKind {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/mouse_tests.rs"]
+mod tests;

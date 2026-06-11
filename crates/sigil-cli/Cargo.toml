@@ -20,5 +20,8 @@ sigil-kernel = { path = "../sigil-kernel" }
 sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
 sigil-runtime = { path = "../sigil-runtime" }
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints]
 workspace = true

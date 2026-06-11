@@ -16,3 +16,29 @@ fn setup_state_masks_api_key() {
     state.api_key = "secret".to_owned();
     assert_eq!(state.masked_api_key(), "********");
 }
+
+#[test]
+fn setup_state_starts_on_trust_field_and_keeps_startup_error() {
+    let state = SetupState::new(
+        PathBuf::from("/tmp/sigil.toml"),
+        Some("failed to load config".to_owned()),
+    );
+
+    assert_eq!(state.config_path, PathBuf::from("/tmp/sigil.toml"));
+    assert_eq!(state.selected_field, SetupField::TrustCurrentFolder);
+    assert_eq!(state.model, "deepseek-v4-flash");
+    assert!(!state.trusted_current_folder);
+    assert_eq!(
+        state.startup_error.as_deref(),
+        Some("failed to load config")
+    );
+}
+
+#[test]
+fn setup_auth_summary_prefers_pending_inline_key() {
+    let mut state = SetupState::new(PathBuf::from("/tmp/sigil.toml"), None);
+
+    state.api_key = "  secret  ".to_owned();
+
+    assert_eq!(state.auth_summary(), "inline api_key pending save");
+}

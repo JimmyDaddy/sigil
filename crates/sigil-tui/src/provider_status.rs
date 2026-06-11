@@ -62,6 +62,10 @@ pub(crate) fn fetch_provider_balance_snapshot(
         .json::<serde_json::Value>()
         .map_err(|error| anyhow!("failed to decode balance payload: {error}"))?;
 
+    parse_balance_snapshot(&payload)
+}
+
+fn parse_balance_snapshot(payload: &serde_json::Value) -> Result<BalanceSnapshot> {
     let available = payload
         .get("is_available")
         .and_then(serde_json::Value::as_bool)
