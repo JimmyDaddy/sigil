@@ -611,7 +611,6 @@ impl CodeIntelligenceService {
                     diagnostics.extend(result.3);
                 }
                 Err(error) => {
-                    let fallback = rust_syntax_diagnostics(&self.inner.workspace_root, &path)?;
                     if let Some(server) = server_for_path(&self.current_servers(), &path) {
                         server_statuses.push(server_status(
                             server.name.clone(),
@@ -622,6 +621,25 @@ impl CodeIntelligenceService {
                             false,
                         ));
                     }
+                    if !is_rust_source_path(&path) {
+                        if diagnostics.is_empty() {
+                            server_name = "code-intel".to_owned();
+                            capability = "diagnostics/unsupported".to_owned();
+                        }
+                        server_statuses.push(server_status(
+                            "code-intel".to_owned(),
+                            Vec::new(),
+                            format!(
+                                "unsupported {}",
+                                workspace_relative_path(&self.inner.workspace_root, &path)
+                            ),
+                            0,
+                            0,
+                            false,
+                        ));
+                        continue;
+                    }
+                    let fallback = rust_syntax_diagnostics(&self.inner.workspace_root, &path)?;
                     let count = fallback.len();
                     server_statuses.push(server_status(
                         "tree-sitter-rust".to_owned(),
@@ -1272,6 +1290,12 @@ fn pull_diagnostics_from_response(value: Value) -> Vec<Value> {
         return items.clone();
     }
     value.as_array().cloned().unwrap_or_default()
+}
+
+fn is_rust_source_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
 }
 
 fn parse_range(value: &Value) -> Option<CodeRange> {

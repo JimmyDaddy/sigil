@@ -573,6 +573,32 @@ async fn diagnostics_falls_back_to_tree_sitter_syntax_errors() {
     );
 }
 
+#[tokio::test]
+async fn diagnostics_skips_unsupported_files_without_rust_fallback() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(temp.path().join("rustfmt.toml"), "edition = \"2024\"\n")
+        .expect("config should write");
+    let service = CodeIntelligenceService::new(temp.path().to_path_buf(), fake_config());
+
+    let result = service
+        .diagnostics(&["rustfmt.toml".to_owned()], Some("error"), 10)
+        .await
+        .expect("unsupported diagnostics should not fail");
+
+    assert!(result.results.is_empty());
+    assert_eq!(result.server, "code-intel");
+    assert_eq!(result.capability, "diagnostics/unsupported");
+    assert!(
+        !result
+            .server_statuses
+            .iter()
+            .any(|status| status.server == "tree-sitter-rust")
+    );
+    assert!(result.server_statuses.iter().any(|status| {
+        status.server == "code-intel" && status.status == "unsupported rustfmt.toml"
+    }));
+}
+
 #[test]
 fn pull_diagnostics_from_response_reads_items_array() {
     let response = serde_json::json!({
