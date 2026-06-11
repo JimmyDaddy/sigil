@@ -233,29 +233,66 @@ fn markdown_plain_text_strips_inline_markup() {
 }
 
 #[test]
-fn markdown_timeline_lines_render_headings_rules_and_quotes() {
-    let lines = render_markdown_timeline_lines(
-        Color::Cyan,
-        Style::default(),
-        "# Title\n---\n> quoted value",
-        MarkdownRenderOptions::timeline(40),
-    );
+fn markdown_options_normalize_small_widths_and_support_plain_empty_code_blocks() {
+    let options = MarkdownRenderOptions::timeline(0);
+    let lines =
+        render_markdown_timeline_lines(Color::Cyan, Style::default(), "```plain\n```", options);
     let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
 
-    assert!(rows.iter().any(|row| row.contains("Title")));
-    assert!(rows.iter().any(|row| row.contains("────────")));
-    assert!(rows.iter().any(|row| row.starts_with("  ▌ quoted value")));
+    assert_eq!(options.max_content_width, 80);
+    assert!(rows.iter().any(|row| row.contains("plain")));
+    assert!(rows.iter().any(|row| row.starts_with("  │ ")));
 }
 
 #[test]
-fn markdown_render_options_normalize_zero_width() {
+fn markdown_horizontal_rules_and_ordered_items_render_distinct_rows() {
     let lines = render_markdown_timeline_lines(
         Color::Cyan,
         Style::default(),
-        "a short paragraph that still needs a sane minimum width",
-        MarkdownRenderOptions::timeline(0),
+        "1. first item\n---",
+        MarkdownRenderOptions::timeline(18),
     );
+    let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
 
-    assert!(!lines.is_empty());
-    assert!(plain_text(&lines).contains("sane minimum width"));
+    assert!(rows.iter().any(|row| row.starts_with("  1. ")));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("────────────────────────────────"))
+    );
+}
+
+#[test]
+fn markdown_heading_underlines_respect_minimum_width_on_narrow_panels() {
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        "## Head",
+        MarkdownRenderOptions::timeline(4),
+    );
+    let underline = line_plain_text(&lines[1]);
+
+    assert_eq!(UnicodeWidthStr::width(underline.as_str()), 8);
+}
+
+#[test]
+fn markdown_can_disable_code_highlighting() {
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        "```rust\nfn main() {}\n```",
+        MarkdownRenderOptions {
+            highlight_code: false,
+            ..MarkdownRenderOptions::timeline(80)
+        },
+    );
+    let fn_span = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref().contains("fn"))
+        .expect("expected code span");
+
+    assert_eq!(
+        fn_span.style,
+        Style::default().fg(ink()).bg(Color::Rgb(28, 33, 41))
+    );
 }

@@ -99,25 +99,56 @@ fn config_step_line_only_highlights_selected_step() {
 }
 
 #[test]
-fn config_header_notice_degrades_to_marker_when_width_is_tiny() {
-    let spans = render_config_header_notice(CONFIG_HEADER_NOTICE, 3);
-    let text = spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
+fn centered_config_area_respects_min_max_and_side_margins() {
+    let narrow = centered_config_area(Rect::new(0, 0, 60, 4));
+    let wide = centered_config_area(Rect::new(0, 0, 220, 4));
 
-    assert_eq!(spans.len(), 1);
-    assert_eq!(text, "hin");
+    assert_eq!(narrow.width, 60);
+    assert_eq!(narrow.x, 0);
+    assert_eq!(wide.width, 152);
+    assert_eq!(wide.x, 34);
 }
 
 #[test]
-fn config_subsection_line_uses_available_separator_width() {
-    let line = render_config_subsection_line("[provider settings]", theme::config_primary(), 28);
-    let text = line_text(&line);
+fn split_config_context_lines_trims_trailing_blanks_before_details() {
+    let (main, context) = split_config_context_lines(vec![
+        "Config".to_owned(),
+        String::new(),
+        String::new(),
+        "[details]".to_owned(),
+        "selected: Model".to_owned(),
+    ]);
 
-    assert!(text.contains(" provider settings "));
-    assert!(text.contains("─"));
-    assert!(text.starts_with("  "));
+    assert_eq!(main, vec!["Config".to_owned()]);
+    assert_eq!(context, vec!["selected: Model".to_owned()]);
+}
+
+#[test]
+fn config_scroll_offset_keeps_focus_visible_with_padding() {
+    assert_eq!(config_scroll_offset(20, 0, &[10]), 0);
+    assert_eq!(config_scroll_offset(5, 8, &[4]), 0);
+    assert_eq!(config_scroll_offset(20, 8, &[5]), 0);
+    assert_eq!(config_scroll_offset(20, 8, &[6]), 4);
+    assert_eq!(config_scroll_offset(20, 8, &[9]), 7);
+    assert_eq!(config_scroll_offset(20, 8, &[]), 0);
+}
+
+#[test]
+fn footer_status_spans_strip_status_prefix_and_handle_tight_widths() {
+    let marker_only = Line::from(footer_status_spans(
+        "status: dirty",
+        3,
+        Style::default().fg(theme::config_warning()),
+    ));
+    let full = Line::from(footer_status_spans(
+        "status: dirty",
+        16,
+        Style::default().fg(theme::config_warning()),
+    ));
+
+    assert_eq!(line_text(&marker_only), "sta");
+    assert_eq!(line_text(&full), "state dirty");
+    assert_eq!(highlighted_width(&full), "state ".chars().count());
 }
 
 fn line_text(line: &Line<'_>) -> String {

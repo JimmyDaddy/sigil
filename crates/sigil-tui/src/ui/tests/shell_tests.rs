@@ -7,6 +7,8 @@ use sigil_kernel::{
     WorkspaceConfig,
 };
 
+use crate::timeline::RunPhase;
+
 use super::super::theme::{
     config_border, config_primary, config_section_bg, config_selected_bg, config_tab_bg,
 };
@@ -572,6 +574,60 @@ fn render_config_readonly_rows_align_value_column() -> anyhow::Result<()> {
         })
         .count();
     assert_eq!(readonly_chip_cells, "read ".chars().count());
+    Ok(())
+}
+
+#[test]
+fn shell_footer_helpers_cover_truncation_and_context_thresholds() {
+    let footer = FooterViewModel {
+        run_label: "Run".to_owned(),
+        hints: "hint".to_owned(),
+        is_busy: false,
+        phase: RunPhase::Idle,
+        context_label: "ctx 42%".to_owned(),
+    };
+
+    assert_eq!(footer_left_line("Run", "", 12), "Run");
+    assert!(footer_left_line("Run", "very long hint", 10).ends_with("..."));
+    assert_eq!(footer_context_width(&footer, 20), 0);
+    assert_eq!(footer_context_width(&footer, 40), 7);
+}
+
+#[test]
+fn shell_path_and_memory_badges_cover_fallback_states() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.memory_enabled = false;
+    assert_eq!(memory_badge(&app), "off");
+
+    app.memory_enabled = true;
+    app.memory_document_count = 3;
+    app.memory_last_status = "ok".to_owned();
+    assert_eq!(memory_badge(&app), "3/ok");
+
+    app.memory_last_status = "failed".to_owned();
+    assert_eq!(memory_badge(&app), "3/err");
+
+    assert_eq!(short_path_label(Path::new("/tmp/demo")), "demo");
+    assert_eq!(short_path_label(Path::new(".")), ".");
+    assert_eq!(short_session_id("1234567890"), "12345678");
+    assert_eq!(short_pane_label(&app), "composer");
+    Ok(())
+}
+
+#[test]
+fn render_status_setup_mode_uses_setup_copy() -> anyhow::Result<()> {
+    let app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+    let backend = TestBackend::new(80, 4);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_status(frame, frame.area(), &app))?;
+    let setup_rendered = rendered_content(&terminal);
+    assert!(setup_rendered.contains("Sigil setup"));
+    assert!(setup_rendered.contains("quick setup"));
     Ok(())
 }
 
