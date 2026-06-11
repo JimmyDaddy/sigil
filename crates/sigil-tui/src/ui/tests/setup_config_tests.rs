@@ -98,6 +98,28 @@ fn config_step_line_only_highlights_selected_step() {
     assert_eq!(inactive_width, 0);
 }
 
+#[test]
+fn config_header_notice_degrades_to_marker_when_width_is_tiny() {
+    let spans = render_config_header_notice(CONFIG_HEADER_NOTICE, 3);
+    let text = spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+
+    assert_eq!(spans.len(), 1);
+    assert_eq!(text, "hin");
+}
+
+#[test]
+fn config_subsection_line_uses_available_separator_width() {
+    let line = render_config_subsection_line("[provider settings]", theme::config_primary(), 28);
+    let text = line_text(&line);
+
+    assert!(text.contains(" provider settings "));
+    assert!(text.contains("─"));
+    assert!(text.starts_with("  "));
+}
+
 fn line_text(line: &Line<'_>) -> String {
     line.spans
         .iter()

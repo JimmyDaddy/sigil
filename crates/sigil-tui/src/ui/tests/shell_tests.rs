@@ -137,6 +137,20 @@ fn render_main_screen_keeps_composer_text_visible() -> anyhow::Result<()> {
 }
 
 #[test]
+fn footer_context_width_uses_half_width_cap_and_hides_small_areas() {
+    let footer = FooterViewModel {
+        phase: crate::timeline::RunPhase::Idle,
+        is_busy: false,
+        run_label: "ready".to_owned(),
+        hints: String::new(),
+        context_label: "ctx 18% · 1200/8000".to_owned(),
+    };
+
+    assert_eq!(footer_context_width(&footer, 20), 0);
+    assert_eq!(footer_context_width(&footer, 60), 19);
+}
+
+#[test]
 fn render_main_screen_shows_esc_interrupt_for_running_turn() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_key_event(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE))?;

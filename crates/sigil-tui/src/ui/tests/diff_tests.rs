@@ -47,3 +47,29 @@ fn diff_line_number_width_uses_current_diff_max_digits() {
     assert_eq!(diff_line_number_text(Some(9), 3), "  9");
     assert_eq!(diff_line_number_text(None, 3), "   ");
 }
+
+#[test]
+fn number_unified_diff_lines_skips_no_newline_marker_counts() {
+    let lines = number_unified_diff_lines([
+        "@@ -4,2 +4,2 @@",
+        "-before",
+        "\\ No newline at end of file",
+        "+after",
+    ]);
+
+    assert_eq!(lines[1].old_line, Some(4));
+    assert_eq!(lines[2].old_line, None);
+    assert_eq!(lines[2].new_line, None);
+    assert_eq!(lines[3].new_line, Some(4));
+}
+
+#[test]
+fn number_unified_diff_lines_drops_numbering_after_invalid_hunk_header() {
+    let lines = number_unified_diff_lines(["@@ invalid @@", " context", "+added"]);
+
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.old_line.is_none() && line.new_line.is_none())
+    );
+}

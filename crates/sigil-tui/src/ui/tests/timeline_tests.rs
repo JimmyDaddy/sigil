@@ -1658,3 +1658,45 @@ fn render_timeline_entry_lines_show_tool_call_context_when_collapsed() {
             .any(|span| span.content.as_ref() == "md")
     );
 }
+
+#[test]
+fn render_timeline_entry_lines_wrap_user_bubbles_on_narrow_widths() {
+    let entry = TimelineEntry {
+        role: TimelineRole::User,
+        text: "this is a longer user prompt that should wrap".to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            max_content_width: 20,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let rows = rendered_plain_lines(&lines);
+
+    assert!(rows.len() > 3);
+    assert!(rows[0].starts_with("▌  "));
+    assert!(rows.iter().any(|row| row.contains("longer")));
+}
+
+#[test]
+fn render_timeline_entry_lines_label_notice_tones() {
+    let ok_notice = TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "saved: config updated".to_owned(),
+    };
+    let error_notice = TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "error: missing token".to_owned(),
+    };
+
+    let ok_plain = rendered_plain_lines(&render_timeline_entry_lines(&ok_notice)).join("\n");
+    let error_plain = rendered_plain_lines(&render_timeline_entry_lines(&error_notice)).join("\n");
+
+    assert!(ok_plain.contains("ok"));
+    assert!(ok_plain.contains("saved: config updated"));
+    assert!(error_plain.contains("error"));
+    assert!(error_plain.contains("missing token"));
+}

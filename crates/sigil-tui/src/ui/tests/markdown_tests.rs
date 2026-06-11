@@ -231,3 +231,31 @@ fn markdown_plain_text_strips_inline_markup() {
         "Phase 3 doc"
     );
 }
+
+#[test]
+fn markdown_timeline_lines_render_headings_rules_and_quotes() {
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        "# Title\n---\n> quoted value",
+        MarkdownRenderOptions::timeline(40),
+    );
+    let rows = lines.iter().map(line_plain_text).collect::<Vec<_>>();
+
+    assert!(rows.iter().any(|row| row.contains("Title")));
+    assert!(rows.iter().any(|row| row.contains("────────")));
+    assert!(rows.iter().any(|row| row.starts_with("  ▌ quoted value")));
+}
+
+#[test]
+fn markdown_render_options_normalize_zero_width() {
+    let lines = render_markdown_timeline_lines(
+        Color::Cyan,
+        Style::default(),
+        "a short paragraph that still needs a sane minimum width",
+        MarkdownRenderOptions::timeline(0),
+    );
+
+    assert!(!lines.is_empty());
+    assert!(plain_text(&lines).contains("sane minimum width"));
+}

@@ -34,3 +34,41 @@ fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
     assert_eq!(content[(3 * width) + 3].symbol(), "/");
     Ok(())
 }
+
+#[test]
+fn composer_cursor_origin_scrolls_with_multiline_input() {
+    let view_model = ComposerViewModel {
+        mode_label: "Build".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        input: "one\ntwo\nthree\nfour".to_owned(),
+        input_rows: 4,
+        cursor_position: (2, 3),
+    };
+
+    assert_eq!(
+        composer_cursor_origin(ratatui::layout::Rect::new(0, 0, 32, 5), &view_model),
+        Some((3, 3))
+    );
+}
+
+#[test]
+fn composer_cursor_origin_returns_none_when_input_area_disappears() {
+    let view_model = ComposerViewModel {
+        mode_label: "Build".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        input: String::new(),
+        input_rows: 1,
+        cursor_position: (0, 0),
+    };
+
+    assert_eq!(
+        composer_cursor_origin(ratatui::layout::Rect::new(0, 0, 4, 2), &view_model),
+        None
+    );
+}

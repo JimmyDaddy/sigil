@@ -2110,3 +2110,7 @@ fn tool_status_style(is_error: bool) -> Style {
             .add_modifier(Modifier::BOLD)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/tool_card_tests.rs"]
+mod tests;
