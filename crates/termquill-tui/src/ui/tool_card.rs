@@ -1280,10 +1280,12 @@ fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
             .metadata
             .exit_code
             .map(|code| format!("exit {code}"))
-    } else if let Some(trust_class) = summary.metadata.mcp_trust_class.as_deref() {
-        Some(format!("trust {trust_class}"))
     } else {
-        None
+        summary
+            .metadata
+            .mcp_trust_class
+            .as_deref()
+            .map(|trust_class| format!("trust {trust_class}"))
     };
     ToolCardDisplayStatus {
         label,
