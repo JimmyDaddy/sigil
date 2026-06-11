@@ -32,12 +32,13 @@ pub use provider::{
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
     CompactionPreview, CompactionRecord, ControlEntry, JsonlSessionStore, Session, SessionLogEntry,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolExecutionEntry,
-    ToolExecutionStatus, ToolSubjectAudit, latest_compaction_record, session_stats_from_entries,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry,
+    ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit, latest_compaction_record,
+    session_stats_from_entries,
 };
 pub use tool::{
-    Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolError,
-    ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewFileSnapshot,
-    ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus,
-    ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit,
+    ToolError, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
 };

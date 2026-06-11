@@ -3,9 +3,10 @@ use std::fs;
 use anyhow::Result;
 
 use crate::{
-    CompactionRecord, MemoryConfig, ProviderContinuationState, ResponseHandle, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
-    UsageStats, provider::ModelMessage,
+    CompactionRecord, MemoryConfig, ProviderContinuationState, ResponseHandle, ToolEgressEntry,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot,
+    ToolResultMeta, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats,
+    provider::ModelMessage,
 };
 
 use super::{
@@ -91,6 +92,39 @@ fn tool_preview_captured_control_entry_roundtrips() -> Result<()> {
         decoded,
         SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(restored))
             if restored == snapshot
+    ));
+    Ok(())
+}
+
+#[test]
+fn tool_egress_control_entry_roundtrips() -> Result<()> {
+    let entry = ToolEgressEntry {
+        call_id: "call-1".to_owned(),
+        tool_name: "mcp__fake__echo".to_owned(),
+        destination: "mcp:fake".to_owned(),
+        operation: "tools/call".to_owned(),
+        subjects: vec![ToolSubjectAudit {
+            kind: ToolSubjectKind::McpTool,
+            original: "mcp__fake__echo".to_owned(),
+            normalized: "mcp__fake__echo".to_owned(),
+            canonical_path: None,
+            scope: ToolSubjectScope::Unknown,
+        }],
+        payload: serde_json::json!({
+            "server": "fake",
+            "arguments": {"type": "object", "top_level_keys": ["value"]}
+        }),
+        redacted: true,
+    };
+    let session_entry = SessionLogEntry::Control(ControlEntry::ToolEgress(Box::new(entry.clone())));
+
+    let json = serde_json::to_string(&session_entry)?;
+    let decoded: SessionLogEntry = serde_json::from_str(&json)?;
+
+    assert!(matches!(
+        decoded,
+        SessionLogEntry::Control(ControlEntry::ToolEgress(restored))
+            if *restored == entry
     ));
     Ok(())
 }

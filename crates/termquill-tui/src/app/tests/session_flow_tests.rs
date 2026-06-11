@@ -502,6 +502,50 @@ fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> 
 }
 
 #[test]
+fn session_audit_view_shows_tool_egress_summary() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path: app.session_log_path.clone(),
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries: vec![
+            SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                provider_name: "deepseek".to_owned(),
+                model_name: "deepseek-v4-flash".to_owned(),
+            }),
+            SessionLogEntry::Control(ControlEntry::ToolEgress(Box::new(ToolEgressEntry {
+                call_id: "call-mcp-1".to_owned(),
+                tool_name: "mcp__fake__echo".to_owned(),
+                destination: "mcp:fake".to_owned(),
+                operation: "tools/call".to_owned(),
+                subjects: vec![ToolSubjectAudit {
+                    kind: ToolSubjectKind::McpTool,
+                    original: "mcp__fake__echo".to_owned(),
+                    normalized: "mcp__fake__echo".to_owned(),
+                    canonical_path: None,
+                    scope: ToolSubjectScope::Unknown,
+                }],
+                payload: json!({
+                    "server": "fake",
+                    "secret_detected": true,
+                    "arguments": {"top_level_keys": ["value"]}
+                }),
+                redacted: true,
+            }))),
+        ],
+    })?;
+
+    app.session_view_mode = super::SessionViewMode::Audit;
+    let audit_lines = app.approval_preview_lines().join("\n");
+
+    assert!(audit_lines.contains(
+        "[ctl] egress call-mcp-1 mcp__fake__echo dest=mcp:fake op=tools/call redacted=true"
+    ));
+    assert!(!audit_lines.contains("secret_detected"));
+    Ok(())
+}
+
+#[test]
 fn sessions_filter_narrows_sidebar_results() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {

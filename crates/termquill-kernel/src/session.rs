@@ -77,6 +77,8 @@ pub enum ControlEntry {
     ToolApproval(ToolApprovalEntry),
     #[serde(alias = "ToolExecution")]
     ToolExecution(Box<ToolExecutionEntry>),
+    #[serde(alias = "ToolEgress")]
+    ToolEgress(Box<ToolEgressEntry>),
     #[serde(alias = "ToolPreviewCaptured")]
     ToolPreviewCaptured(ToolPreviewSnapshot),
     #[serde(alias = "CompactionApplied")]
@@ -135,6 +137,19 @@ pub struct ToolExecutionEntry {
     pub metadata: ToolResultMeta,
     pub error: Option<ToolError>,
     pub model_content_hash: Option<String>,
+}
+
+/// Append-only audit entry for one outbound tool call summary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolEgressEntry {
+    pub call_id: String,
+    pub tool_name: String,
+    pub destination: String,
+    pub operation: String,
+    pub subjects: Vec<ToolSubjectAudit>,
+    pub payload: serde_json::Value,
+    pub redacted: bool,
 }
 
 /// Stable execution status for session audit records.

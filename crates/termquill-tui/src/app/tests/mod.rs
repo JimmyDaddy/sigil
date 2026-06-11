@@ -22,9 +22,10 @@ use termquill_kernel::{
     AgentConfig, ApprovalMode, CompactionConfig, CompactionRecord, ControlEntry, EventHandler,
     JsonlSessionStore, McpServerStartup, McpTrustClass, MemoryConfig, ModelMessage,
     PermissionConfig, ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry,
-    ToolAccess, ToolCall, ToolCategory, ToolError, ToolErrorKind, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewSnapshot, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope, UsageStats, WorkspaceConfig,
+    ToolAccess, ToolCall, ToolCategory, ToolEgressEntry, ToolError, ToolErrorKind,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
+    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectAudit,
+    ToolSubjectKind, ToolSubjectScope, UsageStats, WorkspaceConfig,
 };
 
 use crate::runner::{CompactionTrigger, WorkerCommand, WorkerMessage};

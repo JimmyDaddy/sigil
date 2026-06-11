@@ -134,6 +134,56 @@ while True:
     )?;
     assert_eq!(default_mode, Some(ApprovalMode::Allow));
 
+    let egress = registry
+        .egress_audit(
+            &ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            &termquill_kernel::ToolCall {
+                id: "call-egress".to_owned(),
+                name: "mcp__fake__echo".to_owned(),
+                args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
+            },
+        )?
+        .expect("mcp trust egress logging should produce an audit summary");
+    assert_eq!(egress.destination, "mcp:fake");
+    assert_eq!(egress.operation, "tools/call");
+    assert!(!egress.redacted);
+    let payload = serde_json::to_string(&egress.payload)?;
+    assert!(payload.contains(r#""server":"fake""#));
+    assert!(payload.contains(r#""remote_tool":"echo""#));
+    assert!(payload.contains(r#""top_level_keys":["value"]"#));
+    assert!(!payload.contains("hello from mcp"));
+
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "quiet".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                egress_logging: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+    let quiet_egress = registry.egress_audit(
+        &ToolContext {
+            workspace_root: temp.path().to_path_buf(),
+            timeout_secs: 5,
+        },
+        &termquill_kernel::ToolCall {
+            id: "call-quiet-egress".to_owned(),
+            name: "mcp__quiet__echo".to_owned(),
+            args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
+        },
+    )?;
+    assert!(quiet_egress.is_none());
+
     let result = registry
         .execute(
             termquill_kernel::ToolContext {
@@ -230,6 +280,25 @@ while True:
         )
         .await?;
 
+    let egress = registry
+        .egress_audit(
+            &ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            &termquill_kernel::ToolCall {
+                id: "call-secret-egress".to_owned(),
+                name: "mcp__fake__echo".to_owned(),
+                args_json: r#"{"value":"sk-secret"}"#.to_owned(),
+            },
+        )?
+        .expect("mcp trust egress logging should summarize blocked attempts");
+    assert!(egress.redacted);
+    let payload = serde_json::to_string(&egress.payload)?;
+    assert!(payload.contains(r#""secret_detected":true"#));
+    assert!(payload.contains(r#""top_level_keys":["value"]"#));
+    assert!(!payload.contains("sk-secret"));
+
     match result.status {
         ToolResultStatus::Error(error) => {
             assert_eq!(error.kind, ToolErrorKind::PermissionDenied);
@@ -238,6 +307,21 @@ while True:
     }
     assert!(!result.content.contains("sk-secret"));
     Ok(())
+}
+
+#[test]
+fn mcp_egress_json_summary_does_not_include_values() {
+    let summary = super::summarize_egress_json(&serde_json::json!({
+        "path": "src/main.rs",
+        "api_key": "sk-secret",
+        "count": 3
+    }));
+    let rendered = serde_json::to_string(&summary).expect("summary should serialize");
+
+    assert!(rendered.contains(r#""top_level_keys":["api_key","count","path"]"#));
+    assert!(rendered.contains(r#""api_key":"string""#));
+    assert!(!rendered.contains("sk-secret"));
+    assert!(!rendered.contains("src/main.rs"));
 }
 
 #[tokio::test]

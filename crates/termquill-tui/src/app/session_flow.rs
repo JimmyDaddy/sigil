@@ -8,7 +8,7 @@ use std::{
 
 use termquill_kernel::{
     CompactionPreview, ControlEntry, JsonlSessionStore, ModelMessage, RootConfig, Session,
-    SessionLogEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
+    SessionLogEntry, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
     inspect_memory_documents, latest_compaction_record, session_stats_from_entries,
 };
 use uuid::Uuid;
@@ -692,6 +692,7 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 execution.tool_name,
                 tool_execution_status_label(execution.status)
             ),
+            ControlEntry::ToolEgress(egress) => render_tool_egress_line(egress),
             ControlEntry::ToolPreviewCaptured(snapshot) => format!(
                 "[ctl] preview {} {} files={} +{} -{}",
                 snapshot.call_id,
@@ -707,6 +708,17 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
             ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
         },
     }
+}
+
+fn render_tool_egress_line(egress: &ToolEgressEntry) -> String {
+    format!(
+        "[ctl] egress {} {} dest={} op={} redacted={}",
+        egress.call_id,
+        egress.tool_name,
+        truncate_session_view_text(&egress.destination, 48),
+        truncate_session_view_text(&egress.operation, 32),
+        egress.redacted
+    )
 }
 
 fn restored_tool_execution_index(

@@ -15,11 +15,13 @@ use crate::{
     provider::{ModelMessage, Provider, ProviderChunk, ProviderContinuationState, ToolCall},
     session::{
         ControlEntry, Session, ToolApprovalAuditAction, ToolApprovalEntry,
-        ToolApprovalUserDecision, ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
+        ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+        ToolSubjectAudit,
     },
     tool::{
-        ToolContext, ToolDiffBudget, ToolErrorKind, ToolPreview, ToolPreviewSnapshot, ToolRegistry,
-        ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectScope,
+        ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
+        ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus,
+        ToolSubject, ToolSubjectScope,
     },
 };
 
@@ -536,6 +538,35 @@ where
                                 continue;
                             }
                         }
+                        let egress_audit = match self.tools.egress_audit(&tool_ctx, &call) {
+                            Ok(audit) => audit,
+                            Err(error) => {
+                                let mut result = ToolResult::error(
+                                    call.id.clone(),
+                                    call.name.clone(),
+                                    ToolErrorKind::InvalidInput,
+                                    format!("invalid tool arguments for {}: {error}", call.name),
+                                );
+                                attach_tool_call_context(&mut result, &call, &decision.subjects);
+                                append_tool_execution_audit(
+                                    session,
+                                    &call,
+                                    &decision.subjects,
+                                    ToolExecutionStatus::Failed,
+                                    None,
+                                    Some(&result),
+                                )?;
+                                session.append_tool_message(result.to_model_message())?;
+                                handler.handle(RunEvent::ToolResult(result))?;
+                                continue;
+                            }
+                        };
+                        if let Some(egress_audit) = egress_audit {
+                            let control =
+                                tool_egress_control_entry(&call, &decision.subjects, egress_audit);
+                            session.append_control(control.clone())?;
+                            handler.handle(RunEvent::Control(control))?;
+                        }
                     }
 
                     append_tool_execution_audit(
@@ -820,6 +851,22 @@ fn append_tool_execution_audit(
         error,
         model_content_hash,
     })))
+}
+
+fn tool_egress_control_entry(
+    call: &ToolCall,
+    subjects: &[ToolSubject],
+    audit: ToolEgressAudit,
+) -> ControlEntry {
+    ControlEntry::ToolEgress(Box::new(ToolEgressEntry {
+        call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        destination: audit.destination,
+        operation: audit.operation,
+        subjects: audit_subjects(subjects),
+        payload: audit.payload,
+        redacted: audit.redacted,
+    }))
 }
 
 fn audit_subjects(subjects: &[ToolSubject]) -> Vec<ToolSubjectAudit> {

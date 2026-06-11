@@ -252,6 +252,14 @@ pub trait Tool: Send + Sync {
         Ok(None)
     }
 
+    fn egress_audit(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> anyhow::Result<Option<ToolEgressAudit>> {
+        Ok(None)
+    }
+
     async fn preview(
         &self,
         _ctx: ToolContext,
@@ -278,6 +286,7 @@ pub trait Tool: Send + Sync {
 - `permission_subjects` 是审批与 permission layer 的稳定资源键，文件类工具必须从结构化参数中导出，shell / MCP 等工具可返回多 subject，而不是让 UI 猜字符串
 - `permission_access` 默认使用 `ToolSpec.access`；少数工具可以按本次参数保守调整 access，例如 `bash` 只对简单只读 allowlist 命令降为 `Read`，未知或复杂语法仍为 `Execute`
 - `permission_default_mode` 用于工具域内更具体的默认审批策略，例如 MCP server trust policy；它只改变默认基线，显式 permission tool/rule override 仍然优先
+- `egress_audit` 用于工具域内安全出境审计摘要，返回值会进入 durable control state；实现必须先脱敏并限制大小，不能包含原始 secret、文件内容或大 payload
 - `execute` 必须接收 provider 侧的 `call_id` 并原样写回 `ToolResult.call_id`，保证 tool call / result 配对可恢复
 - 文件类内置工具必须对 workspace root 做 canonicalize，并用路径组件判断 confinement；绝对路径、`..`、目标 symlink 或父目录 symlink 指向 workspace 外时必须生成 `External` subject，再由 `permission.external_directory` gate 决定 deny / ask / allow
 

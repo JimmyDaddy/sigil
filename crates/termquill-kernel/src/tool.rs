@@ -138,6 +138,19 @@ impl ToolSubject {
     }
 }
 
+/// Safe summary of data a tool is about to send outside the local agent boundary.
+///
+/// The payload must be pre-redacted and bounded by the tool implementation; it is persisted
+/// in the control plane for audit and must not contain raw file contents or secrets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolEgressAudit {
+    pub destination: String,
+    pub operation: String,
+    pub payload: Value,
+    pub redacted: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSubjectKind {
@@ -796,6 +809,20 @@ pub trait Tool: Send + Sync {
         Ok(None)
     }
 
+    /// Returns a safe, bounded audit summary for one outbound tool call.
+    ///
+    /// This hook is evaluated after permission approval and before execution. The returned
+    /// payload is written to durable control state, so implementations must not include raw
+    /// secrets, large user content, or unbounded remote payloads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arguments are invalid and no reliable egress summary can be
+    /// derived.
+    fn egress_audit(&self, _ctx: &ToolContext, _args: &Value) -> Result<Option<ToolEgressAudit>> {
+        Ok(None)
+    }
+
     /// Produces an optional approval preview for the given tool call.
     ///
     /// # Errors
@@ -937,6 +964,25 @@ impl ToolRegistry {
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.permission_default_mode(ctx, &args)
+    }
+
+    /// Returns a safe outbound audit summary for a tool call by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is unknown or the JSON arguments are invalid.
+    pub fn egress_audit(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Option<ToolEgressAudit>> {
+        let tool = self
+            .tools
+            .get(&call.name)
+            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        tool.egress_audit(ctx, &args)
     }
 }
 

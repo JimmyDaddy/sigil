@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use termquill_kernel::{
     ApprovalMode, McpServerConfig, McpServerStartup, McpServerTrustPolicy, ProviderCapabilities,
-    SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
+    SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
     ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
 use tokio::{
@@ -435,6 +435,27 @@ impl Tool for McpTool {
         Ok(Some(self.trust.approval_default))
     }
 
+    fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {
+        if !self.trust.egress_logging {
+            return Ok(None);
+        }
+        let secret_detected = self.secret_redactor.value_contains_secret(args);
+        Ok(Some(ToolEgressAudit {
+            destination: format!("mcp:{}", self.tool_name.server_name),
+            operation: "tools/call".to_owned(),
+            payload: json!({
+                "server": self.tool_name.server_name,
+                "trust_class": self.trust.trust_class.as_str(),
+                "provider_tool": self.spec.name,
+                "remote_tool": self.tool_name.original_name,
+                "allow_secrets": self.trust.allow_secrets,
+                "secret_detected": secret_detected,
+                "arguments": summarize_egress_json(args),
+            }),
+            redacted: secret_detected,
+        }))
+    }
+
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         if !self.trust.allow_secrets && self.secret_redactor.value_contains_secret(&args) {
             return Ok(ToolResult::error(
@@ -484,6 +505,52 @@ impl Tool for McpTool {
             ToolResultMeta::default(),
         ))
     }
+}
+
+fn summarize_egress_json(value: &Value) -> Value {
+    let byte_count = serde_json::to_vec(value).map_or(0, |bytes| bytes.len());
+    match value {
+        Value::Object(object) => {
+            let mut keys = object.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            let field_types = keys
+                .iter()
+                .map(|key| {
+                    (
+                        key.clone(),
+                        Value::String(json_type_label(object.get(key).unwrap_or(&Value::Null))),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            json!({
+                "type": "object",
+                "byte_count": byte_count,
+                "top_level_keys": keys,
+                "field_types": field_types,
+            })
+        }
+        Value::Array(items) => json!({
+            "type": "array",
+            "byte_count": byte_count,
+            "item_count": items.len(),
+        }),
+        other => json!({
+            "type": json_type_label(other),
+            "byte_count": byte_count,
+        }),
+    }
+}
+
+fn json_type_label(value: &Value) -> String {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+    .to_owned()
 }
 
 fn sanitize_provider_name_part(value: &str) -> String {

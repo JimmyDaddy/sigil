@@ -19,8 +19,9 @@ use crate::{
     PermissionConfig, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
     ReasoningEffort, ResponseHandle, RunEvent, Session, SessionLogEntry, Tool, ToolAccess,
     ToolApproval, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory,
-    ToolContext, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope,
+    ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject,
+    ToolSubjectScope,
 };
 
 use super::{Agent, AgentRunOptions};
@@ -236,6 +237,21 @@ impl Tool for DefaultAllowWriteTool {
         _args: &serde_json::Value,
     ) -> Result<Option<ApprovalMode>> {
         Ok(Some(ApprovalMode::Allow))
+    }
+
+    fn egress_audit(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Option<ToolEgressAudit>> {
+        Ok(Some(ToolEgressAudit {
+            destination: "test:remote".to_owned(),
+            operation: "write".to_owned(),
+            payload: serde_json::json!({
+                "argument_shape": "path-only"
+            }),
+            redacted: false,
+        }))
     }
 
     async fn execute(
@@ -1182,6 +1198,17 @@ async fn agent_uses_tool_default_permission_mode() -> Result<()> {
                 if approval.call_id == "call-write-1"
                     && approval.action == ToolApprovalAuditAction::PolicyEvaluated
                     && approval.policy_decision == ApprovalMode::Allow
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolEgress(egress))
+                if egress.call_id == "call-write-1"
+                    && egress.tool_name == "write_file"
+                    && egress.destination == "test:remote"
+                    && egress.operation == "write"
+                    && !egress.redacted
         )
     }));
     assert!(!handler.events.iter().any(|event| {
