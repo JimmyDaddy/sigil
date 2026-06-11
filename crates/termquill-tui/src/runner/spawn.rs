@@ -66,6 +66,7 @@ pub fn spawn_agent_worker(
                 runtime,
                 agent,
                 root_config,
+                provider_capabilities,
                 session_log_path,
                 options,
                 command_rx,

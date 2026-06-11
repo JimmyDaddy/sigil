@@ -66,6 +66,16 @@ where
         &self.tools
     }
 
+    /// Returns the provider capability flags for this agent.
+    pub fn provider_capabilities(&self) -> crate::provider::ProviderCapabilities {
+        self.provider.capabilities()
+    }
+
+    /// Returns the mutable registered tool surface used by this agent.
+    pub fn tool_registry_mut(&mut self) -> &mut ToolRegistry {
+        &mut self.tools
+    }
+
     /// Runs the agent with automatic tool approval.
     ///
     /// # Errors

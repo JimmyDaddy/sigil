@@ -515,33 +515,23 @@ fn split_config_context_lines(lines: Vec<String>) -> (Vec<String>, Vec<String>) 
 fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg: Color) {
     let selected = app.config_selected_footer_action_label();
     let compact = area.width < CONFIG_FOOTER_COMPACT_WIDTH;
-    let action_spans = vec![
-        footer_action_span(
-            "save",
-            selected == Some("save"),
-            theme::config_primary(),
+    let action_labels = app.config_footer_action_labels();
+    let mut action_spans = Vec::new();
+    let mut actions_width = 0usize;
+    for (index, label) in action_labels.iter().copied().enumerate() {
+        if index > 0 {
+            action_spans.push(Span::raw(" "));
+            actions_width += 1;
+        }
+        let is_selected = selected == Some(label);
+        action_spans.push(footer_action_span(
+            label,
+            is_selected,
+            footer_action_accent(label),
             compact,
-        ),
-        Span::raw(" "),
-        footer_action_span(
-            "save+close",
-            selected == Some("save+close"),
-            theme::config_warning(),
-            compact,
-        ),
-        Span::raw(" "),
-        footer_action_span(
-            "close",
-            selected == Some("close"),
-            theme::config_danger(),
-            compact,
-        ),
-    ];
-    let actions_width = footer_action_width("save", selected == Some("save"), compact)
-        + 1
-        + footer_action_width("save+close", selected == Some("save+close"), compact)
-        + 1
-        + footer_action_width("close", selected == Some("close"), compact);
+        ));
+        actions_width += footer_action_width(label, is_selected, compact);
+    }
     let gap_width = if compact {
         " | ".chars().count()
     } else {
@@ -582,6 +572,16 @@ fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
         .style(Style::default().bg(panel_bg))
         .wrap(Wrap { trim: false });
     frame.render_widget(footer, area);
+}
+
+fn footer_action_accent(label: &str) -> Color {
+    match label {
+        "save" => theme::config_primary(),
+        "save+close" => theme::config_warning(),
+        "activate" => theme::config_detail(),
+        "close" => theme::config_danger(),
+        _ => theme::config_primary(),
+    }
 }
 
 fn footer_action_span(

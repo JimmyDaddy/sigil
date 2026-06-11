@@ -193,6 +193,9 @@ pub enum AppAction {
     CancelRun,
     CompactNow,
     CheckChangedFilesDiagnostics,
+    ActivateLazyMcp {
+        server_name: Option<String>,
+    },
     SwitchSession {
         session_log_path: PathBuf,
     },

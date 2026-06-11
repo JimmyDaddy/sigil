@@ -13,12 +13,23 @@ fn config_section_flow_wraps() {
 #[test]
 fn config_footer_action_navigation_wraps() {
     assert_eq!(
-        ConfigFooterAction::Save.next(),
+        ConfigFooterAction::Save.next_for_section(ConfigSection::Provider),
         ConfigFooterAction::SaveAndClose
     );
-    assert_eq!(ConfigFooterAction::Close.next(), ConfigFooterAction::Save);
     assert_eq!(
-        ConfigFooterAction::Save.previous(),
+        ConfigFooterAction::Close.next_for_section(ConfigSection::Provider),
+        ConfigFooterAction::Save
+    );
+    assert_eq!(
+        ConfigFooterAction::Save.previous_for_section(ConfigSection::Provider),
+        ConfigFooterAction::Close
+    );
+    assert_eq!(
+        ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Mcp),
+        ConfigFooterAction::ActivateMcp
+    );
+    assert_eq!(
+        ConfigFooterAction::ActivateMcp.next_for_section(ConfigSection::Mcp),
         ConfigFooterAction::Close
     );
 }

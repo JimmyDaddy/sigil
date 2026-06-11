@@ -238,6 +238,9 @@ impl AppState {
             AppAction::CancelRun => WorkerCommand::CancelRun,
             AppAction::CompactNow => WorkerCommand::CompactNow,
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
+            AppAction::ActivateLazyMcp { server_name } => {
+                WorkerCommand::ActivateLazyMcp { server_name }
+            }
             AppAction::SwitchSession { session_log_path } => {
                 WorkerCommand::SwitchSession { session_log_path }
             }

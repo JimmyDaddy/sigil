@@ -58,3 +58,55 @@ fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
     worker.shutdown()?;
     Ok(())
 }
+
+#[test]
+fn activate_lazy_mcp_reports_notice_when_no_lazy_servers_match() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".termquill/sessions/session-worker.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(Vec::new());
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::ActivateLazyMcp {
+        server_name: Some("missing".to_owned()),
+    })?;
+    let notice = worker.recv_until(|message| matches!(message, WorkerMessage::Notice(_)))?;
+
+    assert!(matches!(
+        notice,
+        WorkerMessage::Notice(ref text) if text == "no lazy MCP tools activated for missing"
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn activate_lazy_mcp_is_rejected_while_run_is_active() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".termquill/sessions/session-worker.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "hold".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    worker.send(WorkerCommand::ActivateLazyMcp { server_name: None })?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error)
+            if error == "cannot activate MCP while the agent is running"
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}

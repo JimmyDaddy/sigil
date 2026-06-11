@@ -33,8 +33,9 @@ use crate::slash::SLASH_COMMANDS;
 
 use super::{
     AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary, ApprovalDiffLineKind,
-    ConfigField, ConfigSection, ModalState, ModelPickerRefresh, ModelPickerTarget, PaneFocus,
-    RunPhase, SessionHistoryRow, SessionViewMode, SetupField, TimelineRole,
+    ConfigField, ConfigFooterAction, ConfigSection, ModalState, ModelPickerRefresh,
+    ModelPickerTarget, PaneFocus, RunPhase, SessionHistoryRow, SessionViewMode, SetupField,
+    TimelineRole,
 };
 
 use common::*;

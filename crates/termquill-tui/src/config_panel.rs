@@ -243,16 +243,34 @@ impl ConfigField {
 pub(crate) enum ConfigFooterAction {
     Save,
     SaveAndClose,
+    ActivateMcp,
     Close,
 }
 
 impl ConfigFooterAction {
-    const ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
+    const DEFAULT_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
+    const MCP_ORDER: [Self; 4] = [
+        Self::Save,
+        Self::SaveAndClose,
+        Self::ActivateMcp,
+        Self::Close,
+    ];
+
+    pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
+        match section {
+            ConfigSection::Mcp => &Self::MCP_ORDER,
+            ConfigSection::Provider
+            | ConfigSection::Permissions
+            | ConfigSection::Memory
+            | ConfigSection::Compaction => &Self::DEFAULT_ORDER,
+        }
+    }
 
     pub(crate) fn button_label(self) -> &'static str {
         match self {
             Self::Save => "save",
             Self::SaveAndClose => "save+close",
+            Self::ActivateMcp => "activate",
             Self::Close => "close",
         }
     }
@@ -261,27 +279,30 @@ impl ConfigFooterAction {
         match self {
             Self::Save => "save",
             Self::SaveAndClose => "save_and_close",
+            Self::ActivateMcp => "activate_mcp",
             Self::Close => "close",
         }
     }
 
-    pub(crate) fn next(self) -> Self {
-        let index = Self::ORDER
+    pub(crate) fn next_for_section(self, section: ConfigSection) -> Self {
+        let actions = Self::actions_for_section(section);
+        let index = actions
             .iter()
             .position(|action| *action == self)
-            .expect("footer action must exist in order");
-        Self::ORDER[(index + 1) % Self::ORDER.len()]
+            .unwrap_or(0);
+        actions[(index + 1) % actions.len()]
     }
 
-    pub(crate) fn previous(self) -> Self {
-        let index = Self::ORDER
+    pub(crate) fn previous_for_section(self, section: ConfigSection) -> Self {
+        let actions = Self::actions_for_section(section);
+        let index = actions
             .iter()
             .position(|action| *action == self)
-            .expect("footer action must exist in order");
+            .unwrap_or(0);
         if index == 0 {
-            *Self::ORDER.last().expect("footer actions are non-empty")
+            *actions.last().expect("footer actions are non-empty")
         } else {
-            Self::ORDER[index - 1]
+            actions[index - 1]
         }
     }
 }
@@ -629,9 +650,11 @@ impl ConfigState {
     pub(crate) fn move_footer_action(&mut self, forward: bool) {
         self.footer_selected = true;
         self.selected_footer_action = if forward {
-            self.selected_footer_action.next()
+            self.selected_footer_action
+                .next_for_section(self.selected_section)
         } else {
-            self.selected_footer_action.previous()
+            self.selected_footer_action
+                .previous_for_section(self.selected_section)
         };
     }
 

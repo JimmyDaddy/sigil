@@ -5,7 +5,9 @@ use std::{
     time::Duration,
 };
 
-use termquill_kernel::{Agent, AgentRunOptions, AgentRunResult, RootConfig, Session, ToolApproval};
+use termquill_kernel::{
+    Agent, AgentRunOptions, AgentRunResult, ProviderCapabilities, RootConfig, Session, ToolApproval,
+};
 
 use crate::context_window::effective_compaction_config;
 
@@ -19,8 +21,9 @@ use super::{
 
 pub(super) fn run_worker_loop<P>(
     runtime: tokio::runtime::Runtime,
-    agent: Arc<Agent<P>>,
+    mut agent: Arc<Agent<P>>,
     root_config: RootConfig,
+    provider_capabilities: ProviderCapabilities,
     session_log_path: PathBuf,
     options: AgentRunOptions,
     command_rx: mpsc::Receiver<WorkerCommand>,
@@ -284,6 +287,49 @@ pub(super) fn run_worker_loop<P>(
                     Ok(result) => {
                         let _ = message_tx.send(WorkerMessage::Event(Box::new(
                             diagnostics_tool_event(result),
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    }
+                }
+            }
+            Ok(WorkerCommand::ActivateLazyMcp { server_name }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot activate MCP while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+                let Some(agent) = Arc::get_mut(&mut agent) else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot activate MCP while agent registry is shared".to_owned(),
+                    ));
+                    continue;
+                };
+                match runtime.block_on(termquill_runtime::activate_lazy_mcp_tools(
+                    agent.tool_registry_mut(),
+                    &root_config,
+                    &provider_capabilities,
+                    options.workspace_root.clone(),
+                    server_name.as_deref(),
+                )) {
+                    Ok(0) => {
+                        let detail = server_name
+                            .as_deref()
+                            .map(|name| format!(" for {name}"))
+                            .unwrap_or_default();
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "no lazy MCP tools activated{detail}"
+                        )));
+                    }
+                    Ok(count) => {
+                        let detail = server_name
+                            .as_deref()
+                            .map(|name| format!(" for {name}"))
+                            .unwrap_or_default();
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "activated {count} lazy MCP tools{detail}"
                         )));
                     }
                     Err(error) => {

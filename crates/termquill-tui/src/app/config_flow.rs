@@ -3,7 +3,7 @@ use crate::config_panel::{
     CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
     CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT,
 };
-use termquill_kernel::McpServerConfig;
+use termquill_kernel::{McpServerConfig, McpServerStartup};
 
 impl AppState {
     pub fn config_section_title(&self) -> Option<&'static str> {
@@ -43,6 +43,18 @@ impl AppState {
                 .footer_selected
                 .then_some(state.selected_footer_action.button_label())
         })
+    }
+
+    pub fn config_footer_action_labels(&self) -> Vec<&'static str> {
+        let section = self
+            .config_state
+            .as_ref()
+            .map(|state| state.selected_section)
+            .unwrap_or(ConfigSection::Provider);
+        ConfigFooterAction::actions_for_section(section)
+            .iter()
+            .map(|action| action.button_label())
+            .collect()
     }
 
     pub fn config_footer_hint(&self) -> String {
@@ -109,6 +121,7 @@ impl AppState {
             lines.push("MCP: Ctrl-N add".to_owned());
             lines.push("MCP: Ctrl-D drop".to_owned());
             lines.push("MCP: PgUp/PgDn switch".to_owned());
+            lines.push("MCP: footer activate lazy".to_owned());
         }
         lines
     }
@@ -275,7 +288,7 @@ impl AppState {
                     }
                 }
                 lines.push(String::new());
-                lines.push("Ctrl-N add  Ctrl-D drop  PgUp/PgDn server".to_owned());
+                lines.push("Ctrl-N add  Ctrl-D drop  PgUp/PgDn server  footer activate".to_owned());
                 lines.extend(render_config_selection_details(config_state));
             }
         }
@@ -501,6 +514,7 @@ impl AppState {
                     return match config_state.selected_footer_action {
                         ConfigFooterAction::Save => self.save_config_draft(),
                         ConfigFooterAction::SaveAndClose => self.save_config_draft_and_close(),
+                        ConfigFooterAction::ActivateMcp => self.activate_selected_mcp_server(),
                         ConfigFooterAction::Close => self.attempt_close_config(),
                     };
                 }
@@ -693,6 +707,50 @@ impl AppState {
             self.last_notice = Some("saved config and closed".to_owned());
         }
         Ok(action)
+    }
+
+    fn activate_selected_mcp_server(&mut self) -> Result<Option<AppAction>> {
+        if self.is_busy {
+            self.last_notice = Some("busy; activate MCP later".to_owned());
+            return Ok(None);
+        }
+        let Some(config_state) = self.config_state.as_ref() else {
+            return Ok(None);
+        };
+        if config_state.selected_section != ConfigSection::Mcp {
+            self.last_notice = Some("activate MCP is available in MCP config".to_owned());
+            return Ok(None);
+        }
+        if config_state.dirty {
+            self.last_notice = Some("save config before activating MCP".to_owned());
+            return Ok(None);
+        }
+        let Some(root_config) = self.config_snapshot.as_ref() else {
+            self.last_notice = Some("config is unavailable".to_owned());
+            return Ok(None);
+        };
+        let Some(server) = root_config
+            .mcp_servers
+            .get(config_state.selected_mcp_server_index)
+        else {
+            self.last_notice = Some("no MCP server selected".to_owned());
+            return Ok(None);
+        };
+        if server.startup != McpServerStartup::Lazy {
+            self.last_notice = Some(format!(
+                "MCP server {} is {}",
+                server.name,
+                server.startup.as_str()
+            ));
+            return Ok(None);
+        }
+
+        let server_name = server.name.clone();
+        self.last_notice = Some(format!("activating MCP {server_name}"));
+        self.push_event("mcp", format!("activate {server_name}"));
+        Ok(Some(AppAction::ActivateLazyMcp {
+            server_name: Some(server_name),
+        }))
     }
 
     pub(super) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {

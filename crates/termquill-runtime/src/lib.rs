@@ -3,8 +3,8 @@ use std::{env, path::PathBuf};
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use termquill_kernel::{
-    AgentRunOptions, InteractionMode, Provider, ProviderCapabilities, ReasoningEffort, RootConfig,
-    SecretRedactor, ToolRegistry,
+    AgentRunOptions, InteractionMode, McpServerStartup, Provider, ProviderCapabilities,
+    ReasoningEffort, RootConfig, SecretRedactor, ToolRegistry,
 };
 use termquill_provider_deepseek::{
     DeepSeekProvider, DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV,
@@ -52,6 +52,44 @@ pub async fn build_tool_registry(
     )
     .await?;
     Ok(registry)
+}
+
+/// Activates lazy MCP servers against an existing runtime tool registry.
+///
+/// Returns the number of tools added to the registry. When `server_name` is set, only the
+/// matching lazy server is activated.
+///
+/// # Errors
+///
+/// Returns an error when a required lazy MCP server cannot be started, initialized, or queried.
+pub async fn activate_lazy_mcp_tools(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: Option<&str>,
+) -> Result<usize> {
+    let servers = root_config
+        .mcp_servers
+        .iter()
+        .filter(|server| server.startup == McpServerStartup::Lazy)
+        .filter(|server| server_name.is_none_or(|name| server.name == name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if servers.is_empty() {
+        return Ok(0);
+    }
+
+    let before = registry.specs().len();
+    termquill_mcp::activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
+        registry,
+        &servers,
+        provider_capabilities,
+        vec![canonical_workspace_root(workspace_root)],
+        secret_redactor_for_root_config(root_config),
+    )
+    .await?;
+    Ok(registry.specs().len().saturating_sub(before))
 }
 
 /// Builds shared agent run options for CLI, TUI, and future entrypoints.

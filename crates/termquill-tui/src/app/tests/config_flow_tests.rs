@@ -105,10 +105,87 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save_and_close"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("close"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
     assert_eq!(app.config_selected_field_label(), Some("Model"));
+    Ok(())
+}
+
+#[test]
+fn config_mcp_footer_activate_returns_lazy_activation_action() -> Result<()> {
+    let mut config = test_config();
+    config.mcp_servers.push(termquill_kernel::McpServerConfig {
+        name: "filesystem".to_owned(),
+        command: "mcp-filesystem".to_owned(),
+        required: false,
+        startup: McpServerStartup::Lazy,
+        ..Default::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .selected_field = Some(ConfigField::McpStartupTimeoutSecs);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::ActivateLazyMcp {
+            server_name: Some(ref server_name)
+        }) if server_name == "filesystem"
+    ));
+    assert_eq!(app.last_notice(), Some("activating MCP filesystem"));
+    Ok(())
+}
+
+#[test]
+fn config_mcp_footer_activate_requires_saved_lazy_server() -> Result<()> {
+    let mut config = test_config();
+    config.mcp_servers.push(termquill_kernel::McpServerConfig {
+        name: "eager".to_owned(),
+        command: "mcp-eager".to_owned(),
+        startup: McpServerStartup::Eager,
+        ..Default::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &config);
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.set_section(ConfigSection::Mcp);
+    state.focus_footer(ConfigFooterAction::ActivateMcp);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("MCP server eager is eager"));
+
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.dirty = true;
+    state.focus_footer(ConfigFooterAction::ActivateMcp);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("save config before activating MCP"));
     Ok(())
 }
 

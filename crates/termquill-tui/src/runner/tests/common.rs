@@ -109,6 +109,7 @@ where
         workspace_root,
         termquill_kernel::InteractionMode::Interactive,
     );
+    let provider_capabilities = agent.provider_capabilities();
     let agent = Arc::new(agent);
     let handle = thread::Builder::new()
         .name("termquill-test-agent-worker".to_owned())
@@ -122,6 +123,7 @@ where
                 runtime,
                 agent,
                 root_config,
+                provider_capabilities,
                 session_log_path,
                 options,
                 command_rx,

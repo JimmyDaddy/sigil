@@ -17,6 +17,9 @@ pub enum WorkerCommand {
     CancelRun,
     CompactNow,
     CheckChangedFilesDiagnostics,
+    ActivateLazyMcp {
+        server_name: Option<String>,
+    },
     SwitchSession {
         session_log_path: PathBuf,
     },

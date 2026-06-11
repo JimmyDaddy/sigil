@@ -30,6 +30,22 @@ fn normal_input_creates_user_and_running_state() -> Result<()> {
 }
 
 #[test]
+fn activate_lazy_mcp_action_maps_to_worker_command() {
+    let app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+
+    let command = app.into_worker_command(AppAction::ActivateLazyMcp {
+        server_name: Some("filesystem".to_owned()),
+    });
+
+    assert!(matches!(
+        command,
+        WorkerCommand::ActivateLazyMcp {
+            server_name: Some(ref server_name)
+        } if server_name == "filesystem"
+    ));
+}
+
+#[test]
 fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
 
