@@ -54,6 +54,62 @@ fn compact_now_persists_record_and_restores_session_view() -> Result<()> {
 }
 
 #[test]
+fn compact_now_is_rejected_while_run_is_active() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-compact-busy.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "hold".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+
+    worker.send(WorkerCommand::CompactNow)?;
+    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        error,
+        WorkerMessage::RunFailed(ref text)
+            if text == "cannot compact while the agent is running"
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn compact_now_without_enough_history_reports_error() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-compact-empty.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::CompactNow)?;
+    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        error,
+        WorkerMessage::RunFailed(ref text)
+            if text.contains("session does not have enough history to compact")
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn hard_threshold_run_is_auto_compacted_after_finish() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -154,37 +210,6 @@ fn provider_context_window_prevents_early_auto_compaction() -> Result<()> {
         entry,
         SessionLogEntry::Control(ControlEntry::CompactionApplied(_))
     )));
-
-    worker.shutdown()?;
-    Ok(())
-}
-
-#[test]
-fn compact_now_is_rejected_while_run_is_active() -> Result<()> {
-    let temp = tempdir()?;
-    let workspace_root = temp.path().to_path_buf();
-    let session_log_path = temp
-        .path()
-        .join(".sigil/sessions/session-compact-busy.jsonl");
-    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
-    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
-    let agent = Agent::new(provider, ToolRegistry::new());
-    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
-
-    worker.send(WorkerCommand::SubmitPrompt {
-        prompt: "keep running".to_owned(),
-        reasoning_effort: ReasoningEffort::Max,
-    })?;
-    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
-
-    worker.send(WorkerCommand::CompactNow)?;
-    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
-
-    assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error)
-            if error == "cannot compact while the agent is running"
-    ));
 
     worker.shutdown()?;
     Ok(())

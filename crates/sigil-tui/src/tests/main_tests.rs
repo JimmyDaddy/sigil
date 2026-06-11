@@ -153,6 +153,24 @@ fn stale_pending_seed_restarts_seed_for_current_session() {
 }
 
 #[test]
+fn mismatched_pending_seed_falls_back_to_append_logic() {
+    let state = ScrollbackSyncState {
+        session_id: Some("session-a".to_owned()),
+        revision: 1,
+        line_count: 2,
+        sequence_hash: 42,
+        pending_seed: Some(ScrollbackSeedProgress {
+            session_id: "session-a".to_owned(),
+            next_line_index: 1,
+        }),
+    };
+
+    let plan = plan_scrollback_sync_with_chunk_size(&state, "session-a", 4, 42, 2);
+
+    assert_eq!(plan, ScrollbackSyncPlan::Append { from_index: 2 });
+}
+
+#[test]
 fn growing_history_appends_only_new_lines() {
     let state = ScrollbackSyncState {
         session_id: Some("session-a".to_owned()),
@@ -165,6 +183,29 @@ fn growing_history_appends_only_new_lines() {
     let plan = plan_scrollback_sync(&state, "session-a", 2, 42);
 
     assert_eq!(plan, ScrollbackSyncPlan::Append { from_index: 1 });
+}
+
+#[test]
+fn switching_sessions_without_existing_scrollback_skips_separator() {
+    let state = ScrollbackSyncState {
+        session_id: Some("session-a".to_owned()),
+        revision: 2,
+        line_count: 0,
+        sequence_hash: 0,
+        pending_seed: None,
+    };
+
+    let plan = plan_scrollback_sync_with_chunk_size(&state, "session-b", 3, 0, 2);
+
+    assert_eq!(
+        plan,
+        ScrollbackSyncPlan::Seed {
+            insert_separator: false,
+            from_index: 0,
+            to_index: 2,
+            total_line_count: 3,
+        }
+    );
 }
 
 #[test]
@@ -521,6 +562,13 @@ fn scrollback_plain_and_wrapped_rows_preserve_style_metadata() {
     assert_eq!(wrapped.len(), 2);
     assert_eq!(wrapped[0].0, "Alert");
     assert_eq!(wrapped[0].1.fg, Some(Color::Yellow));
+}
+
+#[test]
+fn blank_scrollback_rows_use_default_style() {
+    let line = Line::from(vec![Span::raw("   ")]);
+
+    assert_eq!(scrollback_row_style(&line), Style::default());
 }
 
 #[test]

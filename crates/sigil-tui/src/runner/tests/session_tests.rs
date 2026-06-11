@@ -1,3 +1,5 @@
+use std::fs;
+
 use anyhow::Result;
 use sigil_kernel::{
     Agent, ControlEntry, JsonlSessionStore, ModelMessage, ReasoningEffort, SessionLogEntry,
@@ -49,6 +51,38 @@ fn switch_session_restores_identity_and_entries() -> Result<()> {
                 && provider_name == "restored-provider"
                 && model_name == "restored-model"
                 && entries.iter().any(|entry| matches!(entry, SessionLogEntry::User(message) if message.content.as_deref() == Some("restored prompt")))
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn invalid_initial_session_log_reports_worker_failure() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-invalid-startup.jsonl");
+    fs::create_dir_all(
+        session_log_path
+            .parent()
+            .expect("session log path should have parent"),
+    )?;
+    fs::write(&session_log_path, "{not-json}\n")?;
+
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    assert!(matches!(
+        error,
+        WorkerMessage::RunFailed(ref text)
+            if text.contains("expected ident")
+                || text.contains("expected value")
+                || text.contains("key must be a string")
     ));
 
     worker.shutdown()?;
@@ -172,6 +206,40 @@ fn switch_session_reports_load_error_for_missing_session_file() -> Result<()> {
         failure,
         WorkerMessage::RunFailed(ref error)
             if error.contains(&invalid_log_path.display().to_string())
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn switch_session_with_invalid_log_reports_error() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
+    let invalid_log_path = temp.path().join(".sigil/sessions/session-invalid.jsonl");
+    fs::create_dir_all(
+        invalid_log_path
+            .parent()
+            .expect("invalid log path should have parent"),
+    )?;
+    fs::write(&invalid_log_path, "{not-json}\n")?;
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SwitchSession {
+        session_log_path: invalid_log_path,
+    })?;
+    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        error,
+        WorkerMessage::RunFailed(ref text)
+            if text.contains("expected ident")
+                || text.contains("expected value")
+                || text.contains("key must be a string")
     ));
 
     worker.shutdown()?;
