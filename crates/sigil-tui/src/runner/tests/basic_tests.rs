@@ -8,12 +8,9 @@ use sigil_kernel::{
 use tempfile::tempdir;
 
 use super::{
-    super::{McpActivationStatus, WorkerCommand, WorkerMessage},
+    super::{McpActivationStatus, WorkerCommand, WorkerMessage, spawn_agent_worker},
     common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
 };
-
-use super::super::spawn_agent_worker;
-
 #[test]
 fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
     let temp = tempdir()?;
@@ -231,5 +228,58 @@ fn activate_lazy_mcp_reports_failed_status_for_required_server_error() -> Result
     ));
 
     worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn check_changed_files_diagnostics_is_rejected_while_run_is_active() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "hold".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    worker.send(WorkerCommand::CheckChangedFilesDiagnostics)?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error)
+            if error == "cannot check changes while the agent is running"
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_worker_reports_provider_build_failure() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-spawn-failure.jsonl");
+    let root_config = test_root_config(&workspace_root, "missing-provider", "planned-model");
+
+    let (_command_tx, message_rx) = spawn_agent_worker(
+        root_config,
+        session_log_path,
+        workspace_root,
+        sigil_kernel::InteractionMode::Interactive,
+    )?;
+    let failure = message_rx.recv_timeout(std::time::Duration::from_secs(3))?;
+
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error)
+            if error.contains("unsupported provider missing-provider")
+    ));
     Ok(())
 }

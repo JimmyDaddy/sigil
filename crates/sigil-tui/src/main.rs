@@ -144,13 +144,7 @@ fn run_app(
             break;
         }
 
-        let poll_interval = if app.is_busy {
-            BUSY_POLL_INTERVAL
-        } else if scrollback.has_pending_seed() && should_sync_terminal_scrollback(app) {
-            SCROLLBACK_SEED_POLL_INTERVAL
-        } else {
-            IDLE_POLL_INTERVAL
-        };
+        let poll_interval = next_poll_interval(app, &scrollback);
         if event::poll(poll_interval)? {
             match event::read()? {
                 CrosstermEvent::Resize(_, _) => {
@@ -327,6 +321,16 @@ fn sync_terminal_scrollback(
 
 fn should_sync_terminal_scrollback(app: &AppState) -> bool {
     !app.is_busy && !app.is_setup_mode() && !app.is_config_mode()
+}
+
+fn next_poll_interval(app: &AppState, scrollback: &ScrollbackSyncState) -> Duration {
+    if app.is_busy {
+        BUSY_POLL_INTERVAL
+    } else if scrollback.has_pending_seed() && should_sync_terminal_scrollback(app) {
+        SCROLLBACK_SEED_POLL_INTERVAL
+    } else {
+        IDLE_POLL_INTERVAL
+    }
 }
 
 fn plan_scrollback_sync(

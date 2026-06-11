@@ -16,7 +16,8 @@ use sigil_tui::{
 };
 
 use super::{
-    ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
+    BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, SCROLLBACK_SEED_POLL_INTERVAL, ScrollbackSeedProgress,
+    ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime, next_poll_interval,
     plan_scrollback_sync, plan_scrollback_sync_with_chunk_size, process_app_action,
     render_scrollback_rows, scrollback_plain_line, scrollback_row_style, scrollback_separator,
     should_sync_terminal_scrollback, wrap_scrollback_text,
@@ -213,6 +214,46 @@ fn busy_run_defers_terminal_scrollback_sync() {
 }
 
 #[test]
+fn setup_mode_defers_terminal_scrollback_sync() {
+    let app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        Some("missing config".to_owned()),
+    );
+
+    assert!(!should_sync_terminal_scrollback(&app));
+}
+
+#[test]
+fn next_poll_interval_prefers_busy_then_seed_then_idle() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let pending_seed = ScrollbackSyncState {
+        pending_seed: Some(ScrollbackSeedProgress {
+            session_id: app.session_id.clone(),
+            next_line_index: 1,
+        }),
+        ..ScrollbackSyncState::default()
+    };
+
+    app.is_busy = true;
+    assert_eq!(
+        next_poll_interval(&app, &ScrollbackSyncState::default()),
+        BUSY_POLL_INTERVAL
+    );
+
+    app.is_busy = false;
+    assert_eq!(
+        next_poll_interval(&app, &pending_seed),
+        SCROLLBACK_SEED_POLL_INTERVAL
+    );
+
+    assert_eq!(
+        next_poll_interval(&app, &ScrollbackSyncState::default()),
+        IDLE_POLL_INTERVAL
+    );
+}
+
+#[test]
 fn wrap_scrollback_text_respects_display_width_for_cjk() {
     assert_eq!(wrap_scrollback_text("你好", 2), vec!["你", "好"]);
     assert_eq!(wrap_scrollback_text("你好ab", 4), vec!["你好", "ab"]);
@@ -254,6 +295,12 @@ fn scrollback_separator_includes_session_provider_and_model() {
     assert!(text.contains("---- session "));
     assert!(text.contains("deepseek"));
     assert!(text.contains("deepseek-v4-flash"));
+}
+
+#[test]
+fn wrap_scrollback_text_preserves_empty_and_zero_width_inputs() {
+    assert_eq!(wrap_scrollback_text("", 10), vec![""]);
+    assert_eq!(wrap_scrollback_text("hello", 0), vec!["hello"]);
 }
 
 #[test]
