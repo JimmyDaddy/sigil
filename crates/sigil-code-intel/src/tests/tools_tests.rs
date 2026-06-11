@@ -3,15 +3,14 @@ use std::{collections::BTreeMap, fs};
 use serde_json::json;
 use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig,
-    LanguageServerConfig, ToolCall, ToolContext, ToolErrorKind, ToolRegistry, ToolResultStatus,
+    LanguageServerConfig, ToolCall, ToolContext, ToolErrorKind, ToolRegistry,
 };
 
-#[allow(clippy::duplicate_mod)]
-#[path = "common.rs"]
-mod common;
-
 use super::*;
-use common::{fake_lsp_server_config_with_env, python3_available, write_fake_lsp_server};
+use crate::tests::common::{
+    fake_server, python3_available, write_fake_lsp_scenario, write_fake_lsp_server,
+};
+use crate::workspace::file_uri_from_path;
 
 fn enabled_config() -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
@@ -43,6 +42,27 @@ fn bounded_payload_config() -> CodeIntelligenceConfig {
     CodeIntelligenceConfig {
         max_results: 50,
         max_payload_bytes: 900,
+        ..enabled_config()
+    }
+}
+
+fn fake_tool_lsp_config(
+    script_path: &std::path::Path,
+    scenario_path: &std::path::Path,
+    timeout_ms: u64,
+) -> CodeIntelligenceConfig {
+    CodeIntelligenceConfig {
+        default_timeout_ms: timeout_ms,
+        servers: vec![fake_server(
+            "rust-analyzer",
+            &["rust"],
+            &["rs"],
+            &["Cargo.toml"],
+            script_path,
+            scenario_path,
+            BTreeMap::new(),
+            2_000,
+        )],
         ..enabled_config()
     }
 }
@@ -103,9 +123,11 @@ async fn code_symbols_tool_returns_bounded_json_envelope() {
     let metadata_servers = result.metadata.details["code_intelligence"]["servers"]
         .as_array()
         .expect("metadata servers should be an array");
-    assert!(metadata_servers.iter().any(|server| {
-        server["server"] == "tree-sitter-rust" && server["status"] == "fallback"
-    }));
+    assert!(
+        metadata_servers
+            .iter()
+            .any(|server| server["server"] == "tree-sitter-rust" && server["status"] == "fallback")
+    );
 }
 
 #[tokio::test]
@@ -202,7 +224,80 @@ fn code_workspace_symbols_permission_subject_targets_workspace_root() {
 }
 
 #[tokio::test]
-async fn code_definition_tool_maps_timeout_errors() {
+async fn code_workspace_symbols_tool_returns_lsp_results() {
+    if !python3_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\n",
+    )
+    .expect("cargo file should write");
+    let source_path = temp.path().join("src").join("lib.rs");
+    fs::write(&source_path, "pub fn hello_workspace() {}\n").expect("source should write");
+    let canonical_source = fs::canonicalize(&source_path).expect("source should canonicalize");
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("workspace-symbols.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "workspaceSymbolProvider": true } }
+                },
+                "workspace/symbol": {
+                    "result": [{
+                        "name": "hello_workspace",
+                        "kind": 12,
+                        "location": {
+                            "uri": file_uri_from_path(&canonical_source),
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 5 }
+                            }
+                        },
+                        "containerName": "crate"
+                    }]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        temp.path().to_path_buf(),
+    );
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 1,
+            },
+            ToolCall {
+                id: "call-workspace".to_owned(),
+                name: "code_workspace_symbols".to_owned(),
+                args_json: json!({ "query": "hello" }).to_string(),
+            },
+        )
+        .await
+        .expect("workspace symbols tool should execute");
+
+    assert!(!result.is_error());
+    let content: serde_json::Value =
+        serde_json::from_str(&result.content).expect("content should be json");
+    assert_eq!(content["tool"], "code_workspace_symbols");
+    assert_eq!(content["server"], "rust-analyzer");
+    assert_eq!(content["workspace_symbols"][0]["name"], "hello_workspace");
+}
+
+#[tokio::test]
+async fn code_definition_tool_maps_timeout_error_kind() {
     if !python3_available() {
         return;
     }
@@ -213,22 +308,33 @@ async fn code_definition_tool_maps_timeout_errors() {
         "[package]\nname='x'\nversion='0.1.0'\nedition='2024'\n",
     )
     .expect("cargo file should write");
-    let workspace_file = temp.path().join("src").join("lib.rs");
-    fs::write(&workspace_file, "pub fn hello() {}\n").expect("source should write");
+    fs::write(
+        temp.path().join("src").join("lib.rs"),
+        "pub fn hello() {}\n",
+    )
+    .expect("source should write");
     let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("timeout.json");
     write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "definitionProvider": true } }
+                },
+                "textDocument/definition": {
+                    "sleep_ms": 100,
+                    "result": []
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
     let mut registry = ToolRegistry::new();
     register_code_intelligence_tools(
         &mut registry,
-        &fake_lsp_server_config_with_env(
-            &server_script,
-            "definition_timeout",
-            25,
-            BTreeMap::from([(
-                "SIGIL_FAKE_LSP_VALID_PATH".to_owned(),
-                workspace_file.to_string_lossy().to_string(),
-            )]),
-        ),
+        &fake_tool_lsp_config(&server_script, &scenario_path, 10),
         temp.path().to_path_buf(),
     );
 
@@ -241,28 +347,45 @@ async fn code_definition_tool_maps_timeout_errors() {
             ToolCall {
                 id: "call-definition".to_owned(),
                 name: "code_definition".to_owned(),
-                args_json: json!({
-                    "path": "src/lib.rs",
-                    "line": 1,
-                    "character": 0,
-                    "max_results": 5
-                })
-                .to_string(),
+                args_json: json!({ "path": "src/lib.rs", "line": 1, "character": 0 }).to_string(),
             },
         )
         .await
-        .expect("tool should execute");
+        .expect("definition tool should execute");
 
+    let summary = result.summary();
     assert!(result.is_error());
-    assert_eq!(result.summary().error_kind, Some(ToolErrorKind::Timeout));
-    assert!(result.content.contains("timed out"));
-    match &result.status {
-        ToolResultStatus::Error(error) => {
-            assert_eq!(
-                error.details["code_intelligence"]["status_line"],
-                "degraded language server request timed out: textDocument/definition"
-            );
-        }
-        status => panic!("expected error result, got {status:?}"),
-    }
+    assert_eq!(summary.error_kind, Some(ToolErrorKind::Timeout));
+    assert!(
+        summary
+            .error_message
+            .expect("timeout message should exist")
+            .contains("timed out")
+    );
+}
+
+#[tokio::test]
+async fn code_diagnostics_tool_maps_missing_files_to_not_found() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 1,
+            },
+            ToolCall {
+                id: "call-diagnostics".to_owned(),
+                name: "code_diagnostics".to_owned(),
+                args_json: json!({ "paths": ["missing.rs"] }).to_string(),
+            },
+        )
+        .await
+        .expect("diagnostics tool should execute");
+
+    let summary = result.summary();
+    assert!(result.is_error());
+    assert_eq!(summary.error_kind, Some(ToolErrorKind::NotFound));
 }

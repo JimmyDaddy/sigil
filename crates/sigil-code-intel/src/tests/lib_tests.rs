@@ -1,3 +1,6 @@
+#[path = "common.rs"]
+pub mod common;
+
 use sigil_kernel::{CodeIntelStartup, CodeIntelligenceConfig};
 
 use super::*;

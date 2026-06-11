@@ -4,14 +4,10 @@ use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig, LanguageServerConfig,
 };
 
-#[allow(clippy::duplicate_mod)]
-#[path = "common.rs"]
-mod common;
-
 use super::*;
-use common::{
+use crate::tests::common::{
     fake_lsp_server_config, fake_lsp_server_config_with_env, python3_available, read_counter,
-    write_fake_lsp_server,
+    write_fake_lsp_scenario, write_fake_lsp_server,
 };
 
 fn missing_server_config() -> CodeIntelligenceConfig {
@@ -127,10 +123,36 @@ async fn document_symbols_uses_configured_lsp_server_when_available() {
     )
     .expect("source should write");
     let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("scenario.json");
     write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "documentSymbolProvider": true } }
+                },
+                "textDocument/documentSymbol": {
+                    "result": [{
+                        "name": "hello",
+                        "kind": 12,
+                        "range": {
+                            "start": { "line": 0, "character": 0 },
+                            "end": { "line": 0, "character": 17 }
+                        },
+                        "selectionRange": {
+                            "start": { "line": 0, "character": 7 },
+                            "end": { "line": 0, "character": 12 }
+                        }
+                    }]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
     let service = CodeIntelligenceService::new(
         temp.path().to_path_buf(),
-        fake_lsp_server_config(&server_script, "document_symbols_success", 5_000),
+        fake_lsp_server_config(&server_script, &scenario_path),
     );
 
     let result = service
@@ -146,6 +168,73 @@ async fn document_symbols_uses_configured_lsp_server_when_available() {
             .any(|status| { status.server == "rust-analyzer" && status.status == "ready" })
     );
     assert!(result.results.iter().any(|symbol| symbol.name == "hello"));
+    service.shutdown().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn document_symbols_returns_cached_result_for_repeat_query() {
+    if !python3_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\n",
+    )
+    .expect("cargo file should write");
+    let source_path = temp.path().join("lib.rs");
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should write");
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("cache-scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "documentSymbolProvider": true } }
+                },
+                "textDocument/documentSymbol": {
+                    "result_sequence": [
+                        [{
+                            "name": "hello",
+                            "kind": 12,
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 5 }
+                            }
+                        }],
+                        [{
+                            "name": "goodbye",
+                            "kind": 12,
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 7 }
+                            }
+                        }]
+                    ]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let service = CodeIntelligenceService::new(
+        temp.path().to_path_buf(),
+        fake_lsp_server_config(&server_script, &scenario_path),
+    );
+
+    let first = service
+        .document_symbols("lib.rs", None, 10)
+        .await
+        .expect("first query should succeed");
+    fs::write(&source_path, "pub fn goodbye() {}\n").expect("updated source should write");
+    let second = service
+        .document_symbols("lib.rs", None, 10)
+        .await
+        .expect("cached query should succeed");
+
+    assert!(first.results.iter().any(|symbol| symbol.name == "hello"));
+    assert_eq!(first.results, second.results);
     service.shutdown().await.expect("shutdown should succeed");
 }
 
@@ -224,6 +313,194 @@ async fn diagnostics_falls_back_to_tree_sitter_syntax_errors() {
             .iter()
             .any(|diagnostic| diagnostic.severity == "error")
     );
+}
+
+#[tokio::test]
+async fn definition_filters_malformed_and_external_locations() {
+    if !python3_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .expect("cargo file should write");
+    let source_path = temp.path().join("src").join("lib.rs");
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should write");
+    let external = tempfile::NamedTempFile::new().expect("external file should build");
+    fs::write(external.path(), "pub fn external() {}\n").expect("external source should write");
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("definition-scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "definitionProvider": true } }
+                },
+                "textDocument/definition": {
+                    "result": [
+                        {
+                            "uri": file_uri_from_path(&source_path),
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 5 }
+                            }
+                        },
+                        {
+                            "uri": file_uri_from_path(&source_path),
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 5 }
+                            }
+                        },
+                        {
+                            "targetUri": file_uri_from_path(external.path()),
+                            "targetSelectionRange": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 8 }
+                            }
+                        },
+                        {
+                            "uri": file_uri_from_path(&source_path),
+                            "range": { "start": { "line": 0 } }
+                        },
+                        {
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 3 }
+                            }
+                        }
+                    ]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let service = CodeIntelligenceService::new(
+        temp.path().to_path_buf(),
+        fake_lsp_server_config(&server_script, &scenario_path),
+    );
+
+    let result = service
+        .definition("src/lib.rs", 1, 0, 10)
+        .await
+        .expect("definition query should succeed");
+
+    assert_eq!(result.server, "rust-analyzer");
+    assert_eq!(result.results.len(), 1);
+    assert_eq!(result.metadata.external_results_filtered, 3);
+    assert_eq!(result.results[0].path, "src/lib.rs");
+    assert_eq!(
+        result.results[0].preview.as_deref(),
+        Some("pub fn hello() {}")
+    );
+    service.shutdown().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn diagnostics_uses_publish_diagnostics_when_pull_is_unavailable() {
+    if !python3_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .expect("cargo file should write");
+    let source_path = temp.path().join("src").join("lib.rs");
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should write");
+    let canonical_source = fs::canonicalize(&source_path).expect("source path should canonicalize");
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("diagnostics-scenario.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": {} }
+                },
+                "shutdown": { "result": null }
+            },
+            "notifications": {
+                "textDocument/didOpen": {
+                    "publish_diagnostics": {
+                        "uri": file_uri_from_path(&canonical_source),
+                        "diagnostics": [
+                            {
+                                "range": {
+                                    "start": { "line": 0, "character": 0 },
+                                    "end": { "line": 0, "character": 2 }
+                                },
+                                "severity": 1,
+                                "message": "first error"
+                            },
+                            {
+                                "range": {
+                                    "start": { "line": 0, "character": 3 },
+                                    "end": { "line": 0, "character": 5 }
+                                },
+                                "severity": 2,
+                                "message": "warning detail"
+                            }
+                        ]
+                    }
+                }
+            }
+        }),
+    );
+    let service = CodeIntelligenceService::new(
+        temp.path().to_path_buf(),
+        fake_lsp_server_config(&server_script, &scenario_path),
+    );
+
+    let result = service
+        .diagnostics(&["src/lib.rs".to_owned()], Some("WARNING"), 10)
+        .await
+        .expect("diagnostics query should succeed");
+
+    assert_eq!(result.server, "rust-analyzer");
+    assert_eq!(result.capability, "textDocument/publishDiagnostics");
+    assert_eq!(result.results.len(), 1);
+    assert_eq!(result.results[0].severity, "warning");
+    assert_eq!(result.results[0].message, "warning detail");
+    service.shutdown().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn workspace_symbols_fall_back_when_lsp_workspace_symbol_is_unavailable() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\n",
+    )
+    .expect("cargo file should write");
+    fs::write(
+        temp.path().join("src").join("lib.rs"),
+        "pub fn hello() {}\n",
+    )
+    .expect("source should write");
+    let service = CodeIntelligenceService::new(temp.path().to_path_buf(), missing_server_config());
+
+    let result = service
+        .workspace_symbols("hello", 10)
+        .await
+        .expect("workspace symbol fallback should succeed");
+
+    assert_eq!(result.server, "tree-sitter-rust");
+    assert_eq!(result.capability, "tree_sitter/workspace_symbols");
+    assert!(result.results.iter().any(|symbol| symbol.name == "hello"));
+    assert!(result.server_statuses.iter().any(|status| {
+        status.server == "missing-rust-analyzer"
+            && status.status == "degraded workspace/symbol unavailable"
+    }));
 }
 
 #[test]
@@ -362,7 +639,12 @@ async fn document_symbols_falls_back_when_lsp_returns_malformed_payload() {
     write_fake_lsp_server(&server_script);
     let service = CodeIntelligenceService::new(
         temp.path().to_path_buf(),
-        fake_lsp_server_config(&server_script, "document_symbols_malformed", 5_000),
+        fake_lsp_server_config_with_env(
+            &server_script,
+            "document_symbols_malformed",
+            5_000,
+            BTreeMap::new(),
+        ),
     );
 
     let result = service
@@ -399,7 +681,12 @@ async fn definition_startup_failure_marks_service_degraded() {
     write_fake_lsp_server(&server_script);
     let service = CodeIntelligenceService::new(
         temp.path().to_path_buf(),
-        fake_lsp_server_config(&server_script, "initialize_malformed", 100),
+        fake_lsp_server_config_with_env(
+            &server_script,
+            "initialize_malformed",
+            100,
+            BTreeMap::new(),
+        ),
     );
 
     let error = service
@@ -483,7 +770,12 @@ async fn diagnostics_wait_for_publish_notifications_when_pull_response_is_empty(
     write_fake_lsp_server(&server_script);
     let service = CodeIntelligenceService::new(
         temp.path().to_path_buf(),
-        fake_lsp_server_config(&server_script, "diagnostics_publish_only", 5_000),
+        fake_lsp_server_config_with_env(
+            &server_script,
+            "diagnostics_publish_only",
+            5_000,
+            BTreeMap::new(),
+        ),
     );
 
     let result = service
