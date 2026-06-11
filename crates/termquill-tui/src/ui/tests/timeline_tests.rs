@@ -899,10 +899,18 @@ fn render_timeline_entry_lines_uses_action_first_tool_headers() {
   "preview_value": {"ok": true},
   "hidden_lines": 0,
   "metadata": {
-    "details": {"call": {"summary": "path=README.md id=call_123"}}
+    "details": {
+      "call": {
+        "summary": "path=README.md id=call_123",
+        "subjects": [
+          "unknown:mcp_tool:mcp__filesystem__stat",
+          "unknown:mcp_trust_class:mcp_trust_class:third_party"
+        ]
+      }
+    }
   }
 }"#,
-            "Called mcp__filesystem__stat path=README.md",
+            "Called stat on filesystem",
         ),
     ];
 
@@ -921,6 +929,12 @@ fn render_timeline_entry_lines_uses_action_first_tool_headers() {
             first_line.contains(expected_title),
             "expected {first_line:?} to contain {expected_title:?}"
         );
+        if expected_title == "Called stat on filesystem" {
+            assert!(
+                first_line.contains("trust third_party"),
+                "MCP tool header should include trust class: {first_line}"
+            );
+        }
         assert!(
             !first_line.contains("path=") || expected_title.contains("Called"),
             "builtin action titles should not expose raw key-value call summaries: {first_line}"

@@ -1201,6 +1201,9 @@ struct ToolCardMetadata {
     changed_files: Vec<String>,
     call_summary: Option<String>,
     action: Option<String>,
+    mcp_server: Option<String>,
+    mcp_tool: Option<String>,
+    mcp_trust_class: Option<String>,
     code_server: Option<String>,
     code_capability: Option<String>,
     returned_entries: Option<u64>,
@@ -1277,6 +1280,8 @@ fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
             .metadata
             .exit_code
             .map(|code| format!("exit {code}"))
+    } else if let Some(trust_class) = summary.metadata.mcp_trust_class.as_deref() {
+        Some(format!("trust {trust_class}"))
     } else {
         None
     };
@@ -1379,6 +1384,9 @@ fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
             primary_path(summary),
             Some("diagnostics".to_owned()),
         );
+    }
+    if let Some(mcp) = mcp_tool_display(summary) {
+        return ToolCardTitle::new("Called", mcp.tool, Some(format!("on {}", mcp.server)));
     }
     match &summary.metadata.call_summary {
         Some(call_summary) => ToolCardTitle::new(
@@ -1660,6 +1668,34 @@ fn call_summary_argument(call_summary: &str, key: &str) -> Option<String> {
     Some(tail[..end].trim().to_owned()).filter(|value| !value.is_empty())
 }
 
+struct McpToolDisplay {
+    server: String,
+    tool: String,
+}
+
+fn mcp_tool_display(summary: &ToolCardRender) -> Option<McpToolDisplay> {
+    let (server_from_name, tool_from_name) = parse_mcp_provider_name(&summary.tool_name)
+        .map(|(server, tool)| (Some(server), Some(tool)))
+        .unwrap_or((None, None));
+    let server = summary.metadata.mcp_server.clone().or(server_from_name)?;
+    let tool = summary
+        .metadata
+        .mcp_tool
+        .clone()
+        .or(tool_from_name)
+        .unwrap_or_else(|| summary.tool_name.clone());
+    Some(McpToolDisplay { server, tool })
+}
+
+fn parse_mcp_provider_name(tool_name: &str) -> Option<(String, String)> {
+    let remainder = tool_name.strip_prefix("mcp__")?;
+    let (server, tool) = remainder.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some((server.to_owned(), tool.to_owned()))
+}
+
 fn sanitize_call_summary(call_summary: &str) -> String {
     truncate_inline_text(
         &call_summary
@@ -1934,6 +1970,10 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
     let Some(object) = value.as_object() else {
         return ToolCardMetadata::default();
     };
+    let details = object.get("details");
+    let call_context = details.and_then(|details| details.get("call"));
+    let (subject_mcp_server, subject_mcp_tool, subject_mcp_trust_class) =
+        parse_mcp_call_subjects(call_context);
     ToolCardMetadata {
         exit_code: object.get("exit_code").and_then(Value::as_i64),
         stdout_bytes: object.get("stdout_bytes").and_then(Value::as_u64),
@@ -1960,6 +2000,27 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(|details| details.get("action"))
             .and_then(Value::as_str)
             .map(str::to_owned),
+        mcp_server: subject_mcp_server.or_else(|| {
+            details
+                .and_then(|details| details.get("mcp"))
+                .and_then(|mcp| mcp.get("server"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
+        mcp_tool: subject_mcp_tool.or_else(|| {
+            details
+                .and_then(|details| details.get("mcp"))
+                .and_then(|mcp| mcp.get("tool"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
+        mcp_trust_class: subject_mcp_trust_class.or_else(|| {
+            details
+                .and_then(|details| details.get("mcp"))
+                .and_then(|mcp| mcp.get("trust_class"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
         code_server: object
             .get("details")
             .and_then(|details| details.get("code_intelligence"))
@@ -1993,6 +2054,45 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
                     .and_then(Value::as_u64)
             }),
     }
+}
+
+fn parse_mcp_call_subjects(
+    call_context: Option<&Value>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let mut mcp_server = None;
+    let mut mcp_tool = None;
+    let mut mcp_trust_class = None;
+    let Some(subjects) = call_context
+        .and_then(|call| call.get("subjects"))
+        .and_then(Value::as_array)
+    else {
+        return (mcp_server, mcp_tool, mcp_trust_class);
+    };
+    for subject in subjects.iter().filter_map(Value::as_str) {
+        let mut parts = subject.splitn(3, ':');
+        let _scope = parts.next();
+        let Some(kind) = parts.next() else {
+            continue;
+        };
+        let Some(target) = parts.next() else {
+            continue;
+        };
+        match kind {
+            "mcp_tool" => {
+                if let Some((server, tool)) = parse_mcp_provider_name(target) {
+                    mcp_server = mcp_server.or(Some(server));
+                    mcp_tool = mcp_tool.or(Some(tool));
+                }
+            }
+            "mcp_trust_class" => {
+                if let Some(trust_class) = target.strip_prefix("mcp_trust_class:") {
+                    mcp_trust_class = mcp_trust_class.or(Some(trust_class.to_owned()));
+                }
+            }
+            _ => {}
+        }
+    }
+    (mcp_server, mcp_tool, mcp_trust_class)
 }
 
 fn tool_status_style(is_error: bool) -> Style {
