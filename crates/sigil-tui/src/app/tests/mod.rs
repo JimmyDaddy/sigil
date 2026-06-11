@@ -2,6 +2,7 @@ mod approval_flow_tests;
 mod command_dispatch_tests;
 mod common;
 mod config_flow_tests;
+mod formatting_tests;
 mod input_flow_tests;
 mod modal_flow_tests;
 mod mouse_flow_tests;

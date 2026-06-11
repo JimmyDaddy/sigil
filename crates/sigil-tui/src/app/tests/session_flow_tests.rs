@@ -44,6 +44,70 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
 }
 
 #[test]
+fn restore_latest_session_returns_false_when_history_is_empty() {
+    let config = test_config();
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert!(!app.restore_latest_session_from_disk(&config));
+}
+
+#[test]
+fn restore_session_path_returns_false_for_invalid_log() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let invalid_path = temp.path().join(".sigil/sessions/bad.jsonl");
+    std::fs::create_dir_all(
+        invalid_path
+            .parent()
+            .expect("session log path should have a parent"),
+    )?;
+    std::fs::write(&invalid_path, "{\"not\":\"a session entry\"}\n")?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert!(!app.restore_session_path_from_disk(
+        invalid_path,
+        "fallback-provider",
+        "fallback-model",
+        "restore failed"
+    ));
+    assert_ne!(app.last_notice(), Some("restore failed"));
+    Ok(())
+}
+
+#[test]
+fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = temp.path().join(".sigil/sessions");
+    std::fs::create_dir_all(&session_dir)?;
+    let alpha = session_dir.join("session-alpha.jsonl");
+    let alpha_copy = session_dir.join("session-alpha-copy.jsonl");
+    let current = session_dir.join("session-current.jsonl");
+    std::fs::write(&alpha, "")?;
+    std::fs::write(&alpha_copy, "")?;
+    std::fs::write(&current, "")?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.session_log_path = current;
+    app.refresh_session_history();
+
+    assert_eq!(app.resolve_resume_target("alpha"), None);
+    assert_eq!(app.resolve_resume_target("latest"), Some(alpha_copy));
+    Ok(())
+}
+
+#[test]
 fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
@@ -751,7 +815,7 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
 }
 
 #[test]
-fn resolve_resume_target_returns_none_for_ambiguous_query() {
+fn resolve_resume_target_returns_none_for_ambiguous_title_query() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.session_log_path = Path::new("session-current.jsonl").to_path_buf();
     app.session_history = vec![

@@ -244,6 +244,48 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
 }
 
 #[test]
+fn manual_compaction_restores_session_view_and_notice() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "compact this".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == "compact this"
+    ));
+    assert!(app.is_busy);
+
+    let session_log_path = app.session_log_path.clone();
+    let entries = restored_entries("compacted-provider", "compacted-model");
+    app.handle_worker_message(WorkerMessage::SessionCompacted {
+        session_log_path: session_log_path.clone(),
+        provider_name: "compacted-provider".to_owned(),
+        model_name: "compacted-model".to_owned(),
+        record: CompactionRecord {
+            summary: "summary".to_owned(),
+            compacted_message_count: 2,
+            retained_tail_message_count: 1,
+        },
+        trigger: CompactionTrigger::Manual,
+        entries: entries.clone(),
+    })?;
+
+    assert!(!app.is_busy);
+    assert_eq!(app.provider_name, "compacted-provider");
+    assert_eq!(app.model_name, "compacted-model");
+    assert_eq!(app.session_log_path, session_log_path);
+    assert_eq!(app.last_notice(), Some("Session compacted."));
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("Session compacted."))
+    );
+    assert!(
+        app.events.iter().any(|event| event.label == "restore"
+            && event.detail == format!("entries={}", entries.len()))
+    );
+    Ok(())
+}
+
+#[test]
 fn mcp_activation_status_without_server_name_only_emits_event() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let before = app.mcp_server_statuses.clone();
@@ -251,13 +293,16 @@ fn mcp_activation_status_without_server_name_only_emits_event() -> Result<()> {
     app.handle_worker_message(WorkerMessage::McpActivationStatus {
         server_name: None,
         status: McpActivationStatus::Failed {
-            error: "filesystem handshake failed".to_owned(),
+            error: "MCP server filesystem tools/list failed: bad response".to_owned(),
         },
     })?;
 
     assert_eq!(app.mcp_server_statuses, before);
+    assert!(app.mcp_server_runtime_status_label("filesystem").is_none());
     assert!(app.events.iter().any(|event| {
-        event.label == "mcp" && event.detail == "failed filesystem handshake failed"
+        event.label == "mcp"
+            && event.detail.contains("failed")
+            && event.detail.contains("bad response")
     }));
     Ok(())
 }

@@ -446,6 +446,37 @@ fn config_mode_closes_on_escape() -> Result<()> {
 }
 
 #[test]
+fn config_mcp_shortcuts_outside_mcp_section_show_guidance() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    assert_eq!(app.config_section_title(), Some("Provider"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.last_notice(), Some("Ctrl-N: MCP only"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.last_notice(), Some("Ctrl-D: MCP only"));
+    Ok(())
+}
+
+#[test]
+fn config_mcp_paging_without_servers_reports_empty_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("no MCP server to select"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("no MCP server to select"));
+    Ok(())
+}
+
+#[test]
 fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");

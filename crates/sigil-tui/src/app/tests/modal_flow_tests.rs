@@ -232,6 +232,7 @@ fn model_picker_remote_refresh_updates_open_modal_options() -> Result<()> {
 fn model_picker_refresh_mismatch_is_ignored() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+    let before = app.modal_lines().join("\n");
 
     let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
         target: ModelPickerTarget::ProviderFim,
@@ -242,9 +243,37 @@ fn model_picker_refresh_mismatch_is_ignored() -> Result<()> {
 
     assert!(!changed);
     assert_eq!(app.last_notice(), Some("using local model list"));
+    assert_eq!(app.modal_lines().join("\n"), before);
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("custom-model"));
     assert!(!lines.contains("remote-model"));
+    Ok(())
+}
+
+#[test]
+fn model_picker_remote_refresh_error_keeps_local_options() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+    let before = app.modal_lines().join("\n");
+
+    let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
+        target: ModelPickerTarget::Provider,
+        current: "custom-model".to_owned(),
+        base_url: "https://example.com".to_owned(),
+        result: Err("network timeout".to_owned()),
+    });
+
+    assert!(changed);
+    assert_eq!(
+        app.last_notice(),
+        Some("using local model list: network timeout")
+    );
+    assert_eq!(app.modal_lines().join("\n"), before);
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "model_list" && event.detail.contains("network timeout"))
+    );
     Ok(())
 }
 
@@ -269,6 +298,129 @@ fn config_numeric_text_modal_rejects_invalid_characters() -> Result<()> {
     assert_eq!(app.last_notice(), Some("value does not accept 'x'"));
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("value: |"));
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_required_field_blocks_submission() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "filesystem".to_owned(),
+            message: "Need target path".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "title": "Path" }
+                },
+                "required": ["path"]
+            }),
+        },
+        response_tx,
+    })?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.has_modal());
+    assert_eq!(app.last_notice(), Some("Path is required"));
+    assert!(response_rx.try_recv().is_err());
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_validates_numeric_fields_before_submit() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "planner".to_owned(),
+            message: "Set retries".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "retries": { "type": "integer", "title": "Retries" }
+                },
+                "required": ["retries"]
+            }),
+        },
+        response_tx,
+    })?;
+
+    for character in "1.5".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.has_modal());
+    assert_eq!(app.last_notice(), Some("Retries must be an integer"));
+    assert!(response_rx.try_recv().is_err());
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_cycles_enum_and_boolean_fields() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "planner".to_owned(),
+            message: "Choose mode".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "title": "Mode",
+                        "enum": ["safe", "fast"]
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "title": "Confirm",
+                        "default": false
+                    }
+                }
+            }),
+        },
+        response_tx,
+    })?;
+
+    if app
+        .modal_input_cursor()
+        .as_ref()
+        .map(|(label, _, _)| label.as_str())
+        != Some("Mode")
+    {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    if app
+        .modal_input_cursor()
+        .as_ref()
+        .map(|(label, _, _)| label.as_str())
+        != Some("Confirm")
+    {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(!app.has_modal());
+    let response = futures::executor::block_on(response_rx)?;
+    assert_eq!(response.action, McpElicitationAction::Accept);
+    assert_eq!(
+        response.content,
+        Some(json!({
+            "mode": "fast",
+            "confirm": true
+        }))
+    );
     Ok(())
 }
 
