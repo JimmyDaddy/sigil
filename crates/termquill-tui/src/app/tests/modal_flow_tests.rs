@@ -90,6 +90,118 @@ fn model_picker_opens_with_local_options_before_remote_refresh() -> Result<()> {
 }
 
 #[test]
+fn mcp_elicitation_modal_accepts_text_input() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "filesystem".to_owned(),
+            message: "Need target path".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "title": "Path",
+                        "description": "Workspace-relative path"
+                    }
+                },
+                "required": ["path"]
+            }),
+        },
+        response_tx,
+    })?;
+
+    assert_eq!(app.modal_title(), Some("MCP Elicitation"));
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("Need target path"));
+    assert!(lines.contains("server: filesystem"));
+    assert!(lines.contains("Path *: |"));
+
+    for character in "src/lib.rs".chars() {
+        let action =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+        assert!(action.is_none());
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(!app.has_modal());
+    assert_eq!(app.last_notice(), Some("submitted MCP input to filesystem"));
+    let response = futures::executor::block_on(response_rx)?;
+    assert_eq!(response.action, McpElicitationAction::Accept);
+    assert_eq!(response.content, Some(json!({ "path": "src/lib.rs" })));
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_modal_declines_with_ctrl_d() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "filesystem".to_owned(),
+            message: "Need target path".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "title": "Path" }
+                }
+            }),
+        },
+        response_tx,
+    })?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert!(!app.has_modal());
+    assert_eq!(
+        app.last_notice(),
+        Some("declined MCP input request from filesystem")
+    );
+    let response = futures::executor::block_on(response_rx)?;
+    assert_eq!(response.action, McpElicitationAction::Decline);
+    assert_eq!(response.content, None);
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_modal_cancels_on_escape() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "filesystem".to_owned(),
+            message: "Need target path".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "title": "Path" }
+                }
+            }),
+        },
+        response_tx,
+    })?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(!app.has_modal());
+    assert_eq!(
+        app.last_notice(),
+        Some("cancelled MCP input request from filesystem")
+    );
+    let response = futures::executor::block_on(response_rx)?;
+    assert_eq!(response.action, McpElicitationAction::Cancel);
+    assert_eq!(response.content, None);
+    Ok(())
+}
+
+#[test]
 fn model_picker_remote_refresh_updates_open_modal_options() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("termquill.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");

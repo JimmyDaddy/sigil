@@ -27,6 +27,7 @@ use termquill_kernel::{
     ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectAudit,
     ToolSubjectKind, ToolSubjectScope, UsageStats, WorkspaceConfig,
 };
+use termquill_runtime::{McpElicitationAction, McpElicitationRequest};
 
 use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 use crate::slash::SLASH_COMMANDS;

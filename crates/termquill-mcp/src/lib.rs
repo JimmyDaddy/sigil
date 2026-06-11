@@ -19,7 +19,7 @@ use tokio::{
 use tracing::warn;
 
 const DEFAULT_PROVIDER_TOOL_NAME_MAX_CHARS: usize = 64;
-const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 pub async fn register_mcp_tools(
     registry: &mut ToolRegistry,
@@ -60,12 +60,32 @@ pub async fn register_mcp_tools_with_capabilities_roots_and_secrets(
     roots: Vec<PathBuf>,
     secret_redactor: SecretRedactor,
 ) -> Result<()> {
+    register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+        registry,
+        servers,
+        capabilities,
+        roots,
+        secret_redactor,
+        unsupported_mcp_elicitation_handler(),
+    )
+    .await
+}
+
+pub async fn register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<PathBuf>,
+    secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+) -> Result<()> {
     register_mcp_tools_with_name_limit_and_roots(
         registry,
         servers,
         capabilities.tool_name_max_chars,
         roots,
         secret_redactor,
+        elicitation_handler,
     )
     .await
 }
@@ -85,12 +105,32 @@ pub async fn activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
     roots: Vec<PathBuf>,
     secret_redactor: SecretRedactor,
 ) -> Result<()> {
+    activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+        registry,
+        servers,
+        capabilities,
+        roots,
+        secret_redactor,
+        unsupported_mcp_elicitation_handler(),
+    )
+    .await
+}
+
+pub async fn activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<PathBuf>,
+    secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+) -> Result<()> {
     activate_lazy_mcp_tools_with_name_limit_and_roots(
         registry,
         servers,
         capabilities.tool_name_max_chars,
         roots,
         secret_redactor,
+        elicitation_handler,
     )
     .await
 }
@@ -106,6 +146,7 @@ async fn register_mcp_tools_with_name_limit(
         provider_tool_name_max_chars,
         default_mcp_roots()?,
         SecretRedactor::empty(),
+        unsupported_mcp_elicitation_handler(),
     )
     .await
 }
@@ -121,6 +162,7 @@ async fn activate_lazy_mcp_tools_with_name_limit(
         provider_tool_name_max_chars,
         default_mcp_roots()?,
         SecretRedactor::empty(),
+        unsupported_mcp_elicitation_handler(),
     )
     .await
 }
@@ -131,6 +173,7 @@ async fn register_mcp_tools_with_name_limit_and_roots(
     provider_tool_name_max_chars: usize,
     roots: Vec<PathBuf>,
     secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
 ) -> Result<()> {
     register_mcp_tools_for_startup(
         registry,
@@ -138,6 +181,7 @@ async fn register_mcp_tools_with_name_limit_and_roots(
         provider_tool_name_max_chars,
         roots,
         secret_redactor,
+        elicitation_handler,
         McpServerStartup::Eager,
     )
     .await
@@ -149,6 +193,7 @@ async fn activate_lazy_mcp_tools_with_name_limit_and_roots(
     provider_tool_name_max_chars: usize,
     roots: Vec<PathBuf>,
     secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
 ) -> Result<()> {
     register_mcp_tools_for_startup(
         registry,
@@ -156,6 +201,7 @@ async fn activate_lazy_mcp_tools_with_name_limit_and_roots(
         provider_tool_name_max_chars,
         roots,
         secret_redactor,
+        elicitation_handler,
         McpServerStartup::Lazy,
     )
     .await
@@ -167,6 +213,7 @@ async fn register_mcp_tools_for_startup(
     provider_tool_name_max_chars: usize,
     roots: Vec<PathBuf>,
     secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
     startup: McpServerStartup,
 ) -> Result<()> {
     let mut used_provider_names = registry
@@ -186,20 +233,26 @@ async fn register_mcp_tools_for_startup(
             continue;
         }
 
-        let client =
-            match McpClient::spawn(server.clone(), roots.clone(), secret_redactor.clone()).await {
-                Ok(client) => Arc::new(client),
-                Err(error) if !server.required => {
-                    warn!(
-                        server = %server.name,
-                        trust_class = server.trust.trust_class.as_str(),
-                        error = %error,
-                        "optional MCP server failed to start and will be skipped"
-                    );
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+        let client = match McpClient::spawn(
+            server.clone(),
+            roots.clone(),
+            secret_redactor.clone(),
+            Arc::clone(&elicitation_handler),
+        )
+        .await
+        {
+            Ok(client) => Arc::new(client),
+            Err(error) if !server.required => {
+                warn!(
+                    server = %server.name,
+                    trust_class = server.trust.trust_class.as_str(),
+                    error = %error,
+                    "optional MCP server failed to start and will be skipped"
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let tools = match client.list_tools().await {
             Ok(tools) => tools,
             Err(error) if !server.required => {
@@ -296,6 +349,92 @@ struct McpToolDescriptor {
     input_schema: Value,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpElicitationRequest {
+    pub server_name: String,
+    pub message: String,
+    pub requested_schema: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpElicitationAction {
+    Accept,
+    Decline,
+    Cancel,
+}
+
+impl McpElicitationAction {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Decline => "decline",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpElicitationResponse {
+    pub action: McpElicitationAction,
+    pub content: Option<Value>,
+}
+
+impl McpElicitationResponse {
+    pub fn accept(content: Value) -> Self {
+        Self {
+            action: McpElicitationAction::Accept,
+            content: Some(content),
+        }
+    }
+
+    pub fn decline() -> Self {
+        Self {
+            action: McpElicitationAction::Decline,
+            content: None,
+        }
+    }
+
+    pub fn cancel() -> Self {
+        Self {
+            action: McpElicitationAction::Cancel,
+            content: None,
+        }
+    }
+
+    fn into_result(self) -> Value {
+        match (self.action, self.content) {
+            (McpElicitationAction::Accept, Some(content)) => {
+                json!({ "action": self.action.as_str(), "content": content })
+            }
+            (McpElicitationAction::Accept, None) => {
+                json!({ "action": self.action.as_str(), "content": {} })
+            }
+            (action, _) => json!({ "action": action.as_str() }),
+        }
+    }
+}
+
+#[async_trait]
+pub trait McpElicitationHandler: Send + Sync {
+    fn supports_elicitation(&self) -> bool {
+        false
+    }
+
+    async fn elicit(&self, _request: McpElicitationRequest) -> Result<McpElicitationResponse> {
+        bail!("MCP elicitation is not supported by termquill yet")
+    }
+}
+
+#[derive(Debug)]
+struct UnsupportedMcpElicitationHandler;
+
+#[async_trait]
+impl McpElicitationHandler for UnsupportedMcpElicitationHandler {}
+
+pub fn unsupported_mcp_elicitation_handler() -> Arc<dyn McpElicitationHandler> {
+    Arc::new(UnsupportedMcpElicitationHandler)
+}
+
 #[derive(Debug, Clone)]
 struct McpServerObservedIdentity {
     command_fingerprint: String,
@@ -344,6 +483,7 @@ struct McpClient {
     server_name: String,
     trust: McpServerTrustPolicy,
     secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
     roots: Vec<PathBuf>,
     identity: McpServerObservedIdentity,
 }
@@ -359,6 +499,7 @@ impl McpClient {
         config: McpServerConfig,
         roots: Vec<PathBuf>,
         secret_redactor: SecretRedactor,
+        elicitation_handler: Arc<dyn McpElicitationHandler>,
     ) -> Result<Self> {
         let mut command = Command::new(&config.command);
         command
@@ -390,6 +531,7 @@ impl McpClient {
             server_name: config.name.clone(),
             trust: config.trust.clone(),
             secret_redactor,
+            elicitation_handler,
             roots,
             identity: McpServerObservedIdentity {
                 command_fingerprint: String::new(),
@@ -410,14 +552,20 @@ impl McpClient {
     }
 
     async fn initialize(&self, config: &McpServerConfig) -> Result<McpServerObservedIdentity> {
+        let mut capabilities = json!({
+            "roots": { "listChanged": true }
+        });
+        if self.elicitation_handler.supports_elicitation()
+            && let Some(object) = capabilities.as_object_mut()
+        {
+            object.insert("elicitation".to_owned(), json!({}));
+        }
         let result = self
             .send_request(
                 "initialize",
                 json!({
                     "protocolVersion": MCP_PROTOCOL_VERSION,
-                    "capabilities": {
-                        "roots": { "listChanged": true }
-                    },
+                    "capabilities": capabilities,
                     "clientInfo": { "name": "termquill", "version": "0.1.0" }
                 }),
             )
@@ -545,13 +693,32 @@ impl McpClient {
                 write_success_response(connection, id, payload).await
             }
             "elicitation/create" => {
-                write_error_response(
-                    connection,
-                    id,
-                    -32601,
-                    "MCP elicitation is not supported by termquill yet",
-                )
-                .await
+                if !self.elicitation_handler.supports_elicitation() {
+                    return write_error_response(
+                        connection,
+                        id,
+                        -32601,
+                        "MCP elicitation is not supported by termquill yet",
+                    )
+                    .await;
+                }
+                let request = mcp_elicitation_request(&self.server_name, message)?;
+                match self.elicitation_handler.elicit(request).await {
+                    Ok(response) => {
+                        let payload = response.into_result();
+                        if !self.trust.allow_secrets
+                            && self.secret_redactor.value_contains_secret(&payload)
+                        {
+                            let message = "MCP elicitation response contains a secret and this server has allow_secrets = false";
+                            write_error_response(connection, id, -32000, message).await?;
+                            bail!("MCP server {} {message}", self.server_name);
+                        }
+                        write_success_response(connection, id, payload).await
+                    }
+                    Err(error) => {
+                        write_error_response(connection, id, -32000, format!("{error:#}")).await
+                    }
+                }
             }
             _ => {
                 write_error_response(
@@ -718,6 +885,27 @@ fn validate_mcp_pin(config: &McpServerConfig, observed: &McpServerObservedIdenti
         );
     }
     Ok(())
+}
+
+fn mcp_elicitation_request(server_name: &str, message: &Value) -> Result<McpElicitationRequest> {
+    let params = message
+        .get("params")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("MCP elicitation/create missing params object"))?;
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("MCP server requested input")
+        .to_owned();
+    let requested_schema = params
+        .get("requestedSchema")
+        .cloned()
+        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+    Ok(McpElicitationRequest {
+        server_name: server_name.to_owned(),
+        message,
+        requested_schema,
+    })
 }
 
 fn mcp_command_fingerprint(command: &str, args: &[String]) -> Result<String> {

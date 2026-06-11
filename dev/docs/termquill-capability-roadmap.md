@@ -37,7 +37,7 @@
 | 优先级 | 能力 | 当前状态 | 推荐目标 |
 | --- | --- | --- | --- |
 | P0 | Code intelligence / LSP | Rust MVP 和多语言自动发现已落地；默认关闭，支持 LSP + Tree-sitter fallback | 扩展 workspace trust UI、code action/rename 审批闭环 |
-| P0 | MCP 完整闭环 | tools 可用；trust enforcement、TUI 手动 lazy activation 与 lifecycle status 已落地；elicitation 未完成 | 支持安全 elicitation 和模型按需 server 激活 |
+| P0 | MCP 完整闭环 | tools 可用；trust enforcement、TUI 手动 lazy activation、lifecycle status 与 elicitation modal 已落地；elicitation audit 未完成 | 支持 elicitation decision audit 和模型按需 server 激活 |
 | P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key | 增加 secret 存储、迁移与 redaction 审计 |
 | P1 | 多 provider | runtime 只支持 `deepseek` | 增加 OpenAI-compatible provider，再扩 Anthropic / Gemini |
 | P1 | 鼠标交互 | 只有滚轮 | 实现区域命中、低风险点击、approval 安全点击 |
@@ -230,19 +230,22 @@ cargo test -p termquill-tui timeline_flow_tests
 
 当前事实：
 
-- `elicitation/create` 当前明确返回 unsupported，避免挂死。
+- TUI runtime 会声明 `elicitation` client capability；server 发 `elicitation/create` 时，TUI modal 会展示 server、请求 message、字段、默认值和 selected field 描述。
+- modal 支持 MCP 规范中的 flat primitive object 输入：string、number、integer、boolean、enum；用户 `Enter` accept、`Ctrl-D` decline、`Esc` cancel。
+- 非 TUI 默认 runtime 仍返回明确 unsupported，避免挂死或伪造输入。
+- `allow_secrets = false` 时，TUI elicitation response 如果包含已解析 secret 或 secret-like 字段会被阻断。
 
 交付物：
 
-1. kernel 增加 provider-neutral 的 user elicitation event 或 tool-side interaction request。
-2. TUI 增加 modal，展示 MCP server、请求字段、默认值、风险提示。
+1. kernel 增加 provider-neutral 的 user elicitation event 或 tool-side interaction request。（本轮先由 MCP handler + TUI worker protocol 承载，kernel durable event 待补）
+2. TUI 增加 modal，展示 MCP server、请求字段、默认值、风险提示。（已落地）
 3. Headless CLI 默认返回明确错误；可选支持 `--elicitation-policy deny|json-file`。
-4. 所有 elicitation 决策写入 append-only control state。
+4. 所有 elicitation 决策写入 append-only control state。（待落地）
 
 验收标准：
 
 - MCP server 请求用户输入时，TUI 不挂起、不伪造输入。
-- 用户拒绝时 server 收到明确 error。
+- 用户拒绝时 server 收到 `decline`，取消时收到 `cancel`。
 - 用户允许时只发送 modal 中确认过的字段。
 
 ### 6.3 Lazy activation

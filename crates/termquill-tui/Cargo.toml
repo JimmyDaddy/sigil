@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
@@ -23,7 +24,6 @@ unicode-width.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 futures.workspace = true
 tempfile.workspace = true
 

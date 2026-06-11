@@ -90,6 +90,7 @@ impl AppState {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
                 self.pending_approval = None;
+                self.modal_state = None;
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
@@ -116,6 +117,7 @@ impl AppState {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
                 self.pending_approval = None;
+                self.modal_state = None;
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
@@ -137,6 +139,7 @@ impl AppState {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
                 self.pending_approval = None;
+                self.modal_state = None;
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
@@ -160,6 +163,7 @@ impl AppState {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
                 self.pending_approval = None;
+                self.modal_state = None;
                 self.last_phase_marker = None;
                 self.streaming_assistant_index = None;
                 self.streaming_reasoning_index = None;
@@ -211,10 +215,17 @@ impl AppState {
             } => {
                 self.apply_mcp_activation_status(server_name, status);
             }
+            WorkerMessage::McpElicitationRequest {
+                request,
+                response_tx,
+            } => {
+                self.open_mcp_elicitation(request, response_tx);
+            }
             WorkerMessage::RunFailed(error) => {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
                 self.pending_approval = None;
+                self.modal_state = None;
                 self.last_phase_marker = None;
                 self.streaming_assistant_index = None;
                 self.streaming_reasoning_index = None;

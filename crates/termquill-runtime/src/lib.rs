@@ -1,10 +1,13 @@
-use std::{env, path::PathBuf};
+use std::{env, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 use termquill_kernel::{
     AgentRunOptions, InteractionMode, McpServerStartup, Provider, ProviderCapabilities,
     ReasoningEffort, RootConfig, SecretRedactor, ToolRegistry,
+};
+pub use termquill_mcp::{
+    McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
 };
 use termquill_provider_deepseek::{
     DeepSeekProvider, DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV,
@@ -36,6 +39,26 @@ pub async fn build_tool_registry(
     provider_capabilities: &ProviderCapabilities,
     workspace_root: PathBuf,
 ) -> Result<ToolRegistry> {
+    build_tool_registry_with_mcp_elicitation(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        termquill_mcp::unsupported_mcp_elicitation_handler(),
+    )
+    .await
+}
+
+/// Builds the runtime tool registry using a caller-provided MCP elicitation handler.
+///
+/// # Errors
+///
+/// Returns an error when one configured MCP server cannot be started or queried.
+pub async fn build_tool_registry_with_mcp_elicitation(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     termquill_tools_builtin::register_builtin_tools(&mut registry);
     termquill_code_intel::register_code_intelligence_tools(
@@ -43,12 +66,13 @@ pub async fn build_tool_registry(
         &root_config.code_intelligence,
         workspace_root.clone(),
     );
-    termquill_mcp::register_mcp_tools_with_capabilities_roots_and_secrets(
+    termquill_mcp::register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
         &mut registry,
         &root_config.mcp_servers,
         provider_capabilities,
         vec![canonical_workspace_root(workspace_root)],
         secret_redactor_for_root_config(root_config),
+        elicitation_handler,
     )
     .await?;
     Ok(registry)
@@ -99,6 +123,30 @@ pub async fn activate_lazy_mcp_tools_detailed(
     workspace_root: PathBuf,
     server_name: Option<&str>,
 ) -> Result<LazyMcpActivationResult> {
+    activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        termquill_mcp::unsupported_mcp_elicitation_handler(),
+    )
+    .await
+}
+
+/// Activates lazy MCP servers using a caller-provided MCP elicitation handler.
+///
+/// # Errors
+///
+/// Returns an error when a required lazy MCP server cannot be started, initialized, or queried.
+pub async fn activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: Option<&str>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+) -> Result<LazyMcpActivationResult> {
     let servers = root_config
         .mcp_servers
         .iter()
@@ -114,12 +162,13 @@ pub async fn activate_lazy_mcp_tools_detailed(
     }
 
     let before = registry.specs().len();
-    termquill_mcp::activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
+    termquill_mcp::activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
         registry,
         &servers,
         provider_capabilities,
         vec![canonical_workspace_root(workspace_root)],
         secret_redactor_for_root_config(root_config),
+        elicitation_handler,
     )
     .await?;
     Ok(LazyMcpActivationResult {

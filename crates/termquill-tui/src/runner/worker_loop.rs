@@ -14,6 +14,7 @@ use crate::context_window::effective_compaction_config;
 use super::{
     approval_bridge::{ApprovalSignal, ChannelApprovalHandler},
     diagnostics::{changed_source_files, check_changed_files_diagnostics, diagnostics_tool_event},
+    elicitation_bridge::ChannelMcpElicitationHandler,
     event_bridge::ChannelEventHandler,
     protocol::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage},
     session_flow::{auto_compact_session, load_session, session_compacted_message},
@@ -311,13 +312,18 @@ pub(super) fn run_worker_loop<P>(
                     server_name: server_name.clone(),
                     status: McpActivationStatus::Activating,
                 });
-                match runtime.block_on(termquill_runtime::activate_lazy_mcp_tools_detailed(
-                    agent.tool_registry_mut(),
-                    &root_config,
-                    &provider_capabilities,
-                    options.workspace_root.clone(),
-                    server_name.as_deref(),
-                )) {
+                let elicitation_handler =
+                    Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
+                match runtime.block_on(
+                    termquill_runtime::activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
+                        agent.tool_registry_mut(),
+                        &root_config,
+                        &provider_capabilities,
+                        options.workspace_root.clone(),
+                        server_name.as_deref(),
+                        elicitation_handler,
+                    ),
+                ) {
                     Ok(result) if result.matched_servers == 0 => {
                         let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                             server_name: server_name.clone(),

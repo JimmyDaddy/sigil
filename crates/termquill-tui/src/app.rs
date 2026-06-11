@@ -30,6 +30,7 @@ use termquill_kernel::{
     SessionLogEntry, SessionStats, ToolPreviewSnapshot, WorkspaceConfig, resolve_workspace_root,
 };
 use termquill_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode, TERMQUILL_API_KEY_ENV};
+use termquill_runtime::{McpElicitationRequest, McpElicitationResponse};
 use uuid::Uuid;
 
 pub(crate) use crate::approval::{

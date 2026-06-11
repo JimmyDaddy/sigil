@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use termquill_kernel::{Agent, InteractionMode, RootConfig};
 
 use super::{
+    elicitation_bridge::ChannelMcpElicitationHandler,
     protocol::{WorkerCommand, WorkerMessage},
     worker_loop::run_worker_loop,
 };
@@ -50,17 +51,21 @@ pub fn spawn_agent_worker(
                 }
             };
             let provider_capabilities = provider.capabilities();
-            let registry = match runtime.block_on(termquill_runtime::build_tool_registry(
-                &root_config,
-                &provider_capabilities,
-                workspace_root.clone(),
-            )) {
-                Ok(registry) => registry,
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                    return;
-                }
-            };
+            let elicitation_handler =
+                Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
+            let registry =
+                match runtime.block_on(termquill_runtime::build_tool_registry_with_mcp_elicitation(
+                    &root_config,
+                    &provider_capabilities,
+                    workspace_root.clone(),
+                    elicitation_handler,
+                )) {
+                    Ok(registry) => registry,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        return;
+                    }
+                };
             let agent = Arc::new(Agent::new(provider, registry));
             run_worker_loop(
                 runtime,

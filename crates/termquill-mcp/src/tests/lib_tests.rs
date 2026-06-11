@@ -8,8 +8,9 @@ use termquill_kernel::{
 };
 
 use super::{
-    activate_lazy_mcp_tools, register_mcp_tools,
-    register_mcp_tools_with_capabilities_roots_and_secrets,
+    McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, activate_lazy_mcp_tools,
+    register_mcp_tools, register_mcp_tools_with_capabilities_roots_and_secrets,
+    register_mcp_tools_with_capabilities_roots_secrets_and_elicitation,
 };
 
 fn write_fake_server_script(path: &std::path::Path, body: &str) -> Result<()> {
@@ -1152,6 +1153,7 @@ while True:
         64,
         vec![workspace_root],
         SecretRedactor::empty(),
+        super::unsupported_mcp_elicitation_handler(),
     )
     .await?;
 
@@ -1224,6 +1226,7 @@ while True:
         64,
         vec![workspace_root],
         SecretRedactor::from_values(["sk-secret"]),
+        super::unsupported_mcp_elicitation_handler(),
     )
     .await
     .expect_err("secret-bearing roots/list should fail registration");
@@ -1293,6 +1296,101 @@ while True:
             startup_timeout_secs: 5,
             ..McpServerConfig::default()
         }],
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__elicitation__echo").is_some());
+    Ok(())
+}
+
+#[derive(Debug)]
+struct AcceptingElicitationHandler;
+
+#[async_trait::async_trait]
+impl McpElicitationHandler for AcceptingElicitationHandler {
+    fn supports_elicitation(&self) -> bool {
+        true
+    }
+
+    async fn elicit(&self, request: McpElicitationRequest) -> Result<McpElicitationResponse> {
+        assert_eq!(request.server_name, "elicitation");
+        assert_eq!(request.message, "Need input");
+        assert!(request.requested_schema.get("properties").is_some());
+        Ok(McpElicitationResponse::accept(serde_json::json!({
+            "value": "accepted from test"
+        })))
+    }
+}
+
+#[tokio::test]
+async fn mcp_client_answers_elicitation_requests_with_handler() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("elicitation_supported_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        params = message.get("params", {})
+        capabilities = params.get("capabilities", {})
+        if params.get("protocolVersion") != "2025-06-18" or "elicitation" not in capabilities:
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"elicitation capability missing"}})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"elicitation","version":"1.0.0"},"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":"server-elicitation-1","method":"elicitation/create","params":{"message":"Need input","requestedSchema":{"type":"object","properties":{"value":{"type":"string","title":"Value"}},"required":["value"]}}})
+        elicitation_response = read_message()
+        result = elicitation_response.get("result", {})
+        content = result.get("content", {})
+        if elicitation_response.get("id") != "server-elicitation-1" or result.get("action") != "accept" or content.get("value") != "accepted from test":
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"invalid elicitation response"}})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+        &mut registry,
+        &[McpServerConfig {
+            name: "elicitation".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::empty(),
+        std::sync::Arc::new(AcceptingElicitationHandler),
     )
     .await?;
 

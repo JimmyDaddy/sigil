@@ -3,6 +3,10 @@ use std::path::PathBuf;
 use termquill_kernel::{
     AgentRunResult, CompactionRecord, ReasoningEffort, RunEvent, SessionLogEntry,
 };
+use termquill_runtime::{McpElicitationRequest, McpElicitationResponse};
+use tokio::sync::oneshot;
+
+pub(crate) type McpElicitationResponseTx = oneshot::Sender<McpElicitationResponse>;
 
 #[derive(Debug)]
 pub enum WorkerCommand {
@@ -60,6 +64,10 @@ pub enum WorkerMessage {
     McpActivationStatus {
         server_name: Option<String>,
         status: McpActivationStatus,
+    },
+    McpElicitationRequest {
+        request: McpElicitationRequest,
+        response_tx: McpElicitationResponseTx,
     },
     RunFailed(String),
 }
