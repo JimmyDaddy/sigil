@@ -1,4 +1,7 @@
-use ratatui::style::{Color, Style};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::Span,
+};
 
 use super::*;
 
@@ -500,4 +503,92 @@ fn markdown_span_renderers_cover_headings_tables_and_code_detection_markers() {
     assert!(line_looks_like_code("[ array"));
     assert!(line_looks_like_code("] array"));
     assert!(!line_looks_like_code("plain text"));
+}
+
+#[test]
+fn markdown_span_helpers_cover_headings_rules_lists_quotes_and_code_fallbacks() {
+    for (level, accent) in [
+        (1, accent_gold()),
+        (2, accent_blue()),
+        (3, accent_lime()),
+        (4, accent_teal()),
+    ] {
+        let heading = render_markdown_spans(
+            &format!("{} title", "#".repeat(level)),
+            Style::default(),
+            &mut MarkdownRenderState::default(),
+            MarkdownRenderOptions::timeline(80),
+        );
+        assert_eq!(heading[0].style.fg, Some(accent));
+        assert!(heading[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    let rule = render_markdown_spans(
+        "---",
+        Style::default(),
+        &mut MarkdownRenderState::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    assert_eq!(rule[0].content.as_ref(), "────────────────────────────────");
+
+    let unchecked = render_markdown_spans(
+        "- [ ] todo",
+        Style::default(),
+        &mut MarkdownRenderState::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    assert_eq!(unchecked[0].content.as_ref(), "[ ] ");
+    assert_eq!(unchecked[0].style.fg, Some(accent_gold()));
+
+    let ordered = render_markdown_spans(
+        "12. next",
+        Style::default(),
+        &mut MarkdownRenderState::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    assert_eq!(ordered[0].content.as_ref(), "12. ");
+    assert_eq!(ordered[0].style.fg, Some(accent_gold()));
+
+    let quote = render_markdown_spans(
+        "> note",
+        Style::default(),
+        &mut MarkdownRenderState::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    assert_eq!(quote[0].content.as_ref(), "│ ");
+    assert_eq!(quote[0].style.fg, Some(accent_teal()));
+    assert_eq!(quote[1].style.fg, Some(muted()));
+
+    let codeish = render_markdown_spans(
+        "{ \"tool\": true }",
+        Style::default(),
+        &mut MarkdownRenderState::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    assert_eq!(codeish[0].content.as_ref(), "│ ");
+}
+
+#[test]
+fn markdown_inline_and_code_helpers_cover_literal_markers_and_empty_rows() {
+    let style = Style::default().fg(Color::White);
+    let mut spans = vec![Span::styled("hello".to_owned(), style)];
+    push_styled_text(&mut spans, "", style);
+    push_styled_text(&mut spans, " world", style);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content.as_ref(), "hello world");
+
+    assert_eq!(next_underscore_marker("foo_bar_baz"), None);
+    assert_eq!(next_underscore_marker("foo _bar"), Some(4));
+    assert_eq!(markdown_plain_text("see [broken"), "see [broken");
+
+    let code = render_code_line_spans_with_bg("", Color::Cyan, Style::default(), Color::Black);
+    assert_eq!(code[1].content.as_ref(), " ");
+
+    let highlighted = render_highlighted_code_line_spans(
+        &[],
+        Color::Cyan,
+        Style::default().fg(Color::White),
+        Color::Black,
+    );
+    assert_eq!(highlighted[1].content.as_ref(), " ");
 }

@@ -1,4 +1,4 @@
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 
 use super::*;
 
@@ -59,4 +59,107 @@ fn refuses_oversized_inputs() {
 
     let too_many_lines = "let x = 1;\n".repeat(10_001);
     assert!(highlight_code_to_spans(&too_many_lines, "rust").is_none());
+}
+
+#[test]
+fn blank_lines_and_cache_hits_cover_internal_paths() {
+    highlight_cache().lock().expect("cache lock").clear();
+
+    let spans = highlight_code_to_spans("\n", "rust").expect("blank rust line should render");
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].len(), 1);
+    assert_eq!(spans[0][0].content.as_ref(), "");
+
+    let cached = cached_highlight("\n", "rust").expect("highlight should be cached");
+    assert_eq!(cached[0][0].content.as_ref(), "");
+}
+
+#[test]
+fn cache_eviction_and_style_conversion_cover_remaining_helpers() {
+    highlight_cache().lock().expect("cache lock").clear();
+
+    for index in 0..=HIGHLIGHT_CACHE_CAPACITY {
+        cache_highlight(
+            &format!("code {index}"),
+            "rust",
+            vec![vec![Span::raw(format!("line {index}"))]],
+        );
+    }
+
+    let cache = highlight_cache().lock().expect("cache lock");
+    assert_eq!(cache.len(), HIGHLIGHT_CACHE_CAPACITY);
+    drop(cache);
+
+    assert!(cached_highlight("code 0", "rust").is_none());
+    assert!(cached_highlight(&format!("code {HIGHLIGHT_CACHE_CAPACITY}"), "rust").is_some());
+
+    assert_eq!(ansi_palette_color(0x07), RatatuiColor::Gray);
+    assert_eq!(ansi_palette_color(0x42), RatatuiColor::Indexed(0x42));
+    assert_eq!(
+        convert_syntect_color(SyntectColor {
+            r: 0x04,
+            g: 0,
+            b: 0,
+            a: ANSI_ALPHA_INDEX,
+        }),
+        Some(RatatuiColor::Blue)
+    );
+    assert_eq!(
+        convert_syntect_color(SyntectColor {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: ANSI_ALPHA_DEFAULT,
+        }),
+        None
+    );
+    assert_eq!(
+        convert_syntect_color(SyntectColor {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: OPAQUE_ALPHA,
+        }),
+        Some(RatatuiColor::Rgb(1, 2, 3))
+    );
+    assert_eq!(
+        convert_syntect_color(SyntectColor {
+            r: 4,
+            g: 5,
+            b: 6,
+            a: 0x7F,
+        }),
+        Some(RatatuiColor::Rgb(4, 5, 6))
+    );
+
+    let style = convert_style(SyntectStyle {
+        foreground: SyntectColor {
+            r: 0x03,
+            g: 0,
+            b: 0,
+            a: ANSI_ALPHA_INDEX,
+        },
+        background: SyntectColor {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: OPAQUE_ALPHA,
+        },
+        font_style: FontStyle::BOLD,
+    });
+    assert_eq!(style.fg, Some(RatatuiColor::Yellow));
+    assert!(style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn syntax_lookup_covers_alias_name_case_and_extension_fallbacks() {
+    assert_eq!(normalized_language_token("csharp"), "c#");
+    assert_eq!(normalized_language_token("golang snippet"), "go");
+    assert_eq!(find_syntax("Rust").expect("exact name").name, "Rust");
+    assert_eq!(
+        find_syntax("RUST").expect("lowercase fallback").name,
+        "Rust"
+    );
+    assert!(syntax_set().find_syntax_by_extension("rs").is_some());
+    assert!(find_syntax("rs").is_some());
 }

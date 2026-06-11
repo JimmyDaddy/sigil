@@ -351,3 +351,7 @@ fn modal_visual(app: &AppState) -> ModalVisual {
         },
     }
 }
+
+#[cfg(test)]
+#[path = "tests/modal_tests.rs"]
+mod tests;

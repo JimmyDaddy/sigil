@@ -1,4 +1,7 @@
-use ratatui::{style::Modifier, text::Line};
+use ratatui::{
+    style::{Modifier, Style},
+    text::Line,
+};
 use serde_json::{Value, json};
 
 use crate::{
@@ -878,5 +881,158 @@ fn tool_card_action_title_helpers_cover_remaining_builtin_and_fallback_paths() {
     assert_eq!(
         sanitize_call_summary("id=123 call_456 path=src/lib.rs mode=fast"),
         "path=src/lib.rs mode=fast"
+    );
+}
+
+#[test]
+fn tool_card_read_file_preview_uses_document_and_file_sections() {
+    let markdown_summary = ToolCardRender {
+        preview_kind: ToolPreviewKind::Markdown,
+        preview_lines: vec!["# Title".to_owned()],
+        ..base_summary("read_file")
+    };
+    let text_summary = ToolCardRender {
+        preview_kind: ToolPreviewKind::Text,
+        preview_lines: vec!["fn main() {}".to_owned()],
+        ..base_summary("read_file")
+    };
+
+    let markdown_text = plain_text(&render_read_file_preview(
+        &markdown_summary,
+        accent_rose(),
+        80,
+    ));
+    let text = plain_text(&render_read_file_preview(&text_summary, accent_rose(), 80));
+
+    assert!(markdown_text.contains("document excerpt"));
+    assert!(text.contains("file excerpt"));
+}
+
+#[test]
+fn tool_card_grep_bash_and_file_change_helpers_cover_remaining_labels() {
+    let grep_summary = ToolCardRender {
+        preview_value: Some(json!([])),
+        ..base_summary("grep")
+    };
+    assert!(render_grep_preview(&grep_summary, accent_rose()).is_none());
+
+    let bash_summary = ToolCardRender {
+        is_error: true,
+        metadata: ToolCardMetadata {
+            exit_code: Some(7),
+            stdout_bytes: Some(4),
+            ..ToolCardMetadata::default()
+        },
+        ..base_summary("bash")
+    };
+    let bash_text = plain_text(&render_bash_preview(&bash_summary, accent_rose()));
+    assert!(bash_text.contains("stdout"));
+    assert!(bash_text.contains("exit 7"));
+
+    let delete_summary = ToolCardRender {
+        metadata: ToolCardMetadata {
+            action: Some("delete".to_owned()),
+            ..ToolCardMetadata::default()
+        },
+        ..base_summary("write_file")
+    };
+    let edit_summary = base_summary("edit_file");
+    let write_summary = base_summary("write_file");
+    let other_summary = base_summary("custom_tool");
+
+    assert_eq!(file_change_count_label(&delete_summary), "deleted");
+    assert_eq!(file_change_result_label(&delete_summary), "delete summary");
+    assert_eq!(file_change_result_label(&edit_summary), "edit summary");
+    assert_eq!(file_change_result_label(&write_summary), "write summary");
+    assert_eq!(file_change_result_label(&other_summary), "file summary");
+}
+
+#[test]
+fn tool_card_code_intelligence_helpers_cover_custom_sources_and_server_rollups() {
+    let single_server = json!({
+        "servers": [{ "server": "rust-analyzer", "status": "ready", "languages": ["rust"] }]
+    });
+    assert!(code_intelligence_servers_line(&single_server).is_none());
+
+    let many_servers = json!({
+        "servers": [
+            { "server": "rust-analyzer", "status": "ready", "languages": ["rust", "toml", "json"] },
+            { "server": "pyright", "status": "fallback" },
+            { "server": "tsserver", "status": "ready", "languages": ["ts", "js"] },
+            { "server": "clangd", "status": "ready", "languages": ["c", "cpp"] }
+        ]
+    });
+    let server_text = code_intelligence_servers_line(&many_servers)
+        .expect("expected summarized server line")
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(server_text.contains("rust-analyzer ready (rust,toml)"));
+    assert!(server_text.contains("pyright fallback"));
+    assert!(server_text.contains("+1 more"));
+
+    let summary = ToolCardRender {
+        tool_name: "code_references".to_owned(),
+        preview_value: Some(json!({
+            "server": "custom-index",
+            "capability": "custom/capability",
+            "metadata": { "returned": 1, "total": 3 },
+            "results": [
+                {
+                    "path": "src/lib.rs",
+                    "preview": "fn demo()",
+                    "container_name": "crate::demo"
+                }
+            ]
+        })),
+        metadata: ToolCardMetadata {
+            returned_entries: Some(1),
+            total_entries: Some(3),
+            ..ToolCardMetadata::default()
+        },
+        ..base_summary("code_references")
+    };
+    let text = plain_text(&render_code_intelligence_preview(
+        &summary,
+        accent_rose(),
+        80,
+    ));
+    assert!(text.contains("custom / capability"));
+    assert!(text.contains("src/lib.rs:1"));
+    assert!(text.contains("fn demo()"));
+    assert!(text.contains("in crate::demo"));
+    assert!(text.contains("2 more lines hidden"));
+}
+
+#[test]
+fn tool_card_diff_and_json_helpers_cover_deleted_lines_and_nested_arrays() {
+    let diff_file = ToolCardDiffFile {
+        path: "old.txt".to_owned(),
+        lines: vec!["-gone".to_owned()],
+        truncated: false,
+        original_line_count: 1,
+        rendered_line_count: 1,
+    };
+    assert_eq!(
+        tool_diff_file_label(&base_summary("edit_file"), &diff_file),
+        "deleted"
+    );
+
+    let numbered = number_unified_diff_lines(["-gone"]);
+    assert_eq!(
+        tool_diff_old_line_number_style(numbered[0]),
+        Style::default().fg(dim())
+    );
+
+    let tree = render_json_tree_preview(&json!([{ "nested": [1, { "leaf": true }] }]));
+    let tree_text = tree.join("\n");
+    assert!(tree_text.contains("[array] 1"));
+    assert!(tree_text.contains("[0] {1 keys}"));
+    assert!(tree_text.contains("nested: [2 items]"));
+    assert!(tree_text.contains("leaf: true"));
+
+    assert_eq!(
+        json_string_list(&json!([1, true])).expect("array should still collect"),
+        Vec::<String>::new()
     );
 }

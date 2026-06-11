@@ -145,3 +145,7 @@ fn render_info_line(value: &str, width: usize) -> Line<'static> {
         Span::styled(clipped, Style::default().fg(ink())),
     ])
 }
+
+#[cfg(test)]
+#[path = "tests/info_rail_tests.rs"]
+mod tests;

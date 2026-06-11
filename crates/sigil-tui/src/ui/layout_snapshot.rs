@@ -342,3 +342,7 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
         && row >= area.y
         && row < area.y.saturating_add(area.height)
 }
+
+#[cfg(test)]
+#[path = "tests/layout_snapshot_tests.rs"]
+mod tests;

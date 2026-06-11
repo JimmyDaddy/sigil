@@ -19,3 +19,10 @@ fn halo_rect_expands_and_clips_to_bounds() {
     let clipped = halo_rect(Rect::new(1, 1, 10, 4), bounds, 4, 2);
     assert_eq!(clipped, Rect::new(0, 0, 15, 7));
 }
+
+#[test]
+fn selector_window_range_centers_selection_when_list_exceeds_viewport() {
+    assert_eq!(selector_window_range(20, 0, 5), (0, 5));
+    assert_eq!(selector_window_range(20, 10, 5), (8, 13));
+    assert_eq!(selector_window_range(20, 19, 5), (15, 20));
+}
