@@ -7,6 +7,10 @@ use sigil_kernel::{
     ProviderCapabilities, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
     ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
+use tokio::{
+    io::BufReader,
+    process::{ChildStdout, Command},
+};
 
 use super::{
     McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, activate_lazy_mcp_tools,
@@ -1953,4 +1957,475 @@ async fn unsupported_elicitation_handler_rejects_requests() {
 fn unsupported_elicitation_handler_reports_capability() {
     let handler = super::unsupported_mcp_elicitation_handler();
     assert!(!handler.supports_elicitation());
+}
+
+#[tokio::test]
+async fn mcp_tool_execute_errors_when_call_result_is_missing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("missing_result_call_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}})
+    elif method == "tools/call":
+        write_message({"jsonrpc":"2.0","id":message["id"]})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "missing-result".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let error = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            sigil_kernel::ToolCall {
+                id: "call-missing-result".to_owned(),
+                name: "mcp__missing_result__echo".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await
+        .expect_err("missing result payload should bubble up");
+    assert!(error.to_string().contains("missing result"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_tool_execute_supports_string_content_results() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("string_content_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}})
+    elif method == "tools/call":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":"plain text"}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "string-content".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            sigil_kernel::ToolCall {
+                id: "call-string-content".to_owned(),
+                name: "mcp__string_content__echo".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+
+    assert_eq!(result.content, "plain text");
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_client_returns_unknown_method_errors_to_server() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("unknown_method_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":"server-unsupported-1","method":"client/ping","params":{}})
+        unsupported_response = read_message()
+        error = unsupported_response.get("error", {})
+        if unsupported_response.get("id") != "server-unsupported-1" or error.get("code") != -32601:
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"invalid unsupported response"}})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "unsupported".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__unsupported__echo").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_client_returns_handler_errors_to_server() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("elicitation_error_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"error","version":"1.0.0"},"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":"server-elicitation-error-1","method":"elicitation/create","params":{"message":"Need input","requestedSchema":{"type":"object"}}})
+        error_response = read_message()
+        error = error_response.get("error", {})
+        if error_response.get("id") != "server-elicitation-error-1" or error.get("code") != -32000 or "handler boom" not in error.get("message", ""):
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"invalid handler error response"}})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+        &mut registry,
+        &[McpServerConfig {
+            name: "error".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::empty(),
+        std::sync::Arc::new(ErroringElicitationHandler),
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__error__echo").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_client_blocks_secret_elicitation_response_when_trust_disallows_secrets() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("elicitation_secret_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"secret","version":"1.0.0"},"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":"server-elicitation-secret-1","method":"elicitation/create","params":{"message":"Need input","requestedSchema":{"type":"object"}}})
+        error_response = read_message()
+        error = error_response.get("error", {})
+        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":error.get("message","missing secret error")}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    let error = register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+        &mut registry,
+        &[McpServerConfig {
+            name: "secret".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                allow_secrets: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::from_values(["sk-secret"]),
+        std::sync::Arc::new(SecretElicitationHandler),
+    )
+    .await
+    .expect_err("secret-bearing elicitation response should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("elicitation response contains a secret")
+    );
+    Ok(())
+}
+
+#[test]
+fn validate_mcp_pin_reports_all_supported_mismatch_fields() {
+    let error = super::validate_mcp_pin(
+        &McpServerConfig {
+            name: "pin".to_owned(),
+            trust: McpServerTrustPolicy {
+                pin_version: true,
+                pinned: Some(sigil_kernel::McpServerPinnedIdentity {
+                    command_fingerprint: "expected-fingerprint".to_owned(),
+                    protocol_version: "expected-protocol".to_owned(),
+                    server_name: "expected-name".to_owned(),
+                    server_version: "expected-version".to_owned(),
+                }),
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        },
+        &super::McpServerObservedIdentity {
+            command_fingerprint: "observed-fingerprint".to_owned(),
+            protocol_version: "observed-protocol".to_owned(),
+            server_name: "expected-name".to_owned(),
+            server_version: "observed-version".to_owned(),
+        },
+    )
+    .expect_err("mismatch should fail pin validation");
+
+    let message = error.to_string();
+    assert!(message.contains(
+        "command_fingerprint expected expected-fingerprint observed observed-fingerprint"
+    ));
+    assert!(
+        message.contains("protocol_version expected expected-protocol observed observed-protocol")
+    );
+    assert!(message.contains("server_version expected expected-version observed observed-version"));
+}
+
+#[tokio::test]
+async fn read_message_reports_stream_close_and_invalid_headers() -> Result<()> {
+    let mut closed = python_stdout_reader("import sys")?;
+    let closed_error = super::read_message(&mut closed)
+        .await
+        .expect_err("closed stdout should fail");
+    assert!(closed_error.to_string().contains("closed stdout"));
+
+    let mut missing_header =
+        python_stdout_reader("import sys; sys.stdout.write('\\r\\n{}'); sys.stdout.flush()")?;
+    let missing_header_error = super::read_message(&mut missing_header)
+        .await
+        .expect_err("missing content length should fail");
+    assert!(
+        missing_header_error
+            .to_string()
+            .contains("missing Content-Length")
+    );
+
+    let mut invalid_header = python_stdout_reader(
+        "import sys; sys.stdout.write('Content-Length: nope\\r\\n\\r\\n{}'); sys.stdout.flush()",
+    )?;
+    let invalid_header_error = super::read_message(&mut invalid_header)
+        .await
+        .expect_err("invalid content length should fail");
+    assert!(invalid_header_error.to_string().contains("invalid digit"));
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ErroringElicitationHandler;
+
+#[async_trait::async_trait]
+impl McpElicitationHandler for ErroringElicitationHandler {
+    fn supports_elicitation(&self) -> bool {
+        true
+    }
+
+    async fn elicit(&self, _request: McpElicitationRequest) -> Result<McpElicitationResponse> {
+        anyhow::bail!("handler boom")
+    }
+}
+
+#[derive(Debug)]
+struct SecretElicitationHandler;
+
+#[async_trait::async_trait]
+impl McpElicitationHandler for SecretElicitationHandler {
+    fn supports_elicitation(&self) -> bool {
+        true
+    }
+
+    async fn elicit(&self, _request: McpElicitationRequest) -> Result<McpElicitationResponse> {
+        Ok(McpElicitationResponse::accept(json!({"value":"sk-secret"})))
+    }
+}
+
+fn python_stdout_reader(script: &str) -> Result<BufReader<ChildStdout>> {
+    let mut child = Command::new("python3")
+        .args(["-c", script])
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .expect("python child stdout should exist");
+    std::mem::forget(child);
+    Ok(BufReader::new(stdout))
 }

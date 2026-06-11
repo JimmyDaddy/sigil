@@ -1,4 +1,10 @@
-use std::pin::Pin;
+use std::{
+    collections::VecDeque,
+    fs,
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Result, anyhow};
 use clap::Parser;
@@ -7,6 +13,10 @@ use sigil_kernel::{
     EventHandler, ModelMessage, ProviderChunk, RunEvent, ToolAccess, ToolCall, ToolCategory,
     ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
     ToolSubject, UsageStats,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
 };
 
 use super::{
@@ -411,4 +421,192 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
     )))?;
 
     Ok(())
+}
+
+#[tokio::test]
+async fn prefix_command_streams_against_configured_provider() -> Result<()> {
+    let requests = Arc::new(Mutex::new(VecDeque::new()));
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"prefixed\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )])));
+    let server = spawn_recording_server(Arc::clone(&requests), Arc::clone(&responses)).await?;
+    let workspace = create_test_workspace("prefix-command");
+    let config_path = workspace.join("sigil.toml");
+    write_test_config(&config_path, &server)?;
+
+    super::prefix_command(
+        &config_path,
+        "write code".to_owned(),
+        "```rust\n".to_owned(),
+        vec!["```".to_owned()],
+        Some("deepseek-v4-flash".to_owned()),
+    )
+    .await?;
+
+    let raw_request = requests
+        .lock()
+        .expect("requests poisoned")
+        .pop_front()
+        .expect("expected recorded prefix request");
+    assert!(raw_request.contains("POST /chat/completions"));
+    assert!(raw_request.contains("\"prefix\":true"));
+    assert!(raw_request.contains("```rust"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fim_command_streams_against_configured_provider() -> Result<()> {
+    let requests = Arc::new(Mutex::new(VecDeque::new()));
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"text\":\"middle\",\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"prompt_cache_hit_tokens\":2,\"prompt_cache_miss_tokens\":5},\"system_fingerprint\":\"fp-fim\"}\n\ndata: [DONE]\n\n",
+    )])));
+    let server = spawn_recording_server(Arc::clone(&requests), Arc::clone(&responses)).await?;
+    let workspace = create_test_workspace("fim-command");
+    let config_path = workspace.join("sigil.toml");
+    write_test_config(&config_path, &server)?;
+
+    super::fim_command(
+        &config_path,
+        "fn main() {\n".to_owned(),
+        "\n}\n".to_owned(),
+        vec!["STOP".to_owned()],
+        Some("deepseek-v4-pro".to_owned()),
+        Some(32),
+    )
+    .await?;
+
+    let raw_request = requests
+        .lock()
+        .expect("requests poisoned")
+        .pop_front()
+        .expect("expected recorded fim request");
+    assert!(raw_request.contains("POST /completions"));
+    assert!(raw_request.contains("\"suffix\":\"\\n}\\n\""));
+    assert!(raw_request.contains("\"max_tokens\":32"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_command_creates_session_log_in_workspace() -> Result<()> {
+    let requests = Arc::new(Mutex::new(VecDeque::new()));
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        200,
+        "text/event-stream",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello from agent\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    )])));
+    let server = spawn_recording_server(Arc::clone(&requests), Arc::clone(&responses)).await?;
+    let workspace = create_test_workspace("run-command");
+    let config_path = workspace.join("sigil.toml");
+    write_test_config(&config_path, &server)?;
+
+    super::run_command(&config_path, &workspace, "Say hi".to_owned()).await?;
+
+    let raw_request = requests
+        .lock()
+        .expect("requests poisoned")
+        .pop_front()
+        .expect("expected recorded run request");
+    assert!(raw_request.contains("POST /chat/completions"));
+    assert!(raw_request.contains("\"Say hi\""));
+
+    let session_dir = workspace.join(".sigil/sessions");
+    let entries = fs::read_dir(&session_dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(
+        entries.len(),
+        1,
+        "run_command should create one session log"
+    );
+    let session_path = entries[0].path();
+    assert_eq!(
+        session_path.extension().and_then(|ext| ext.to_str()),
+        Some("jsonl")
+    );
+    let session_contents = fs::read_to_string(session_path)?;
+    assert!(session_contents.contains("Say hi"));
+    assert!(session_contents.contains("hello from agent"));
+    Ok(())
+}
+
+fn create_test_workspace(name: &str) -> PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("sigil-cli-tests-{name}-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&path).expect("test workspace should create");
+    path
+}
+
+fn write_test_config(path: &std::path::Path, base_url: &str) -> Result<()> {
+    let config = format!(
+        r#"[workspace]
+root = "."
+
+[session]
+log_dir = ".sigil/sessions"
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+tool_timeout_secs = 5
+
+[providers.deepseek]
+base_url = "{base_url}"
+beta_base_url = "{base_url}"
+anthropic_base_url = "{base_url}"
+model = "deepseek-v4-flash"
+fim_model = "deepseek-v4-pro"
+api_key = "test-key"
+strict_tools_mode = "auto"
+request_timeout_secs = 5
+"#
+    );
+    fs::write(path, config)?;
+    Ok(())
+}
+
+async fn spawn_recording_server(
+    requests: Arc<Mutex<VecDeque<String>>>,
+    responses: Arc<Mutex<VecDeque<Vec<u8>>>>,
+) -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let requests = Arc::clone(&requests);
+            let responses = Arc::clone(&responses);
+            tokio::spawn(async move {
+                let mut buffer = vec![0u8; 8192];
+                let bytes = socket.read(&mut buffer).await.unwrap_or(0);
+                requests
+                    .lock()
+                    .expect("requests poisoned")
+                    .push_back(String::from_utf8_lossy(&buffer[..bytes]).to_string());
+                let response = responses
+                    .lock()
+                    .expect("responses poisoned")
+                    .pop_front()
+                    .unwrap_or_else(|| http_response(500, "text/plain", "missing fixture"));
+                let _ = socket.write_all(&response).await;
+            });
+        }
+    });
+    Ok(format!("http://{}", address))
+}
+
+fn http_response(status: u16, content_type: &str, body: &str) -> Vec<u8> {
+    let status_line = match status {
+        200 => "HTTP/1.1 200 OK",
+        _ => "HTTP/1.1 500 Internal Server Error",
+    };
+    format!(
+        "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+    .into_bytes()
 }
