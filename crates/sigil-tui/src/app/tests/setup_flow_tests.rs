@@ -1,0 +1,103 @@
+use super::*;
+
+#[test]
+fn setup_lines_include_startup_error_and_missing_auth_summary() {
+    let app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        Some("config load failed".to_owned()),
+    );
+
+    let lines = app.setup_lines().join("\n");
+
+    assert!(lines.contains("load failed: config load failed"));
+    assert!(lines.contains("auth=missing"));
+    assert_eq!(app.last_notice(), Some("config load failed"));
+}
+
+#[test]
+fn setup_ctrl_s_requires_trust_before_completion() -> Result<()> {
+    let mut app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("trust the current folder before starting sigil")
+    );
+    assert!(app.events.iter().any(|event| {
+        event.label == "setup:error"
+            && event.detail == "trust the current folder before starting sigil"
+    }));
+    Ok(())
+}
+
+#[test]
+fn setup_navigation_and_trust_toggle_update_state() -> Result<()> {
+    let mut app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+
+    assert!(app.is_setup_mode());
+    let state = app
+        .setup_state
+        .as_ref()
+        .expect("setup state should exist in setup mode");
+    assert_eq!(state.selected_field, SetupField::TrustCurrentFolder);
+    assert!(!state.trusted_current_folder);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let state = app
+        .setup_state
+        .as_ref()
+        .expect("setup state should exist after toggling trust");
+    assert!(state.trusted_current_folder);
+    assert_eq!(app.last_notice(), Some("trust current folder on"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("setup field model"));
+    let state = app
+        .setup_state
+        .as_ref()
+        .expect("setup state should exist after moving selection");
+    assert_eq!(state.selected_field, SetupField::Model);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
+    assert_eq!(app.last_notice(), Some("setup field trust_current_folder"));
+    let state = app
+        .setup_state
+        .as_ref()
+        .expect("setup state should exist after reverse navigation");
+    assert_eq!(state.selected_field, SetupField::TrustCurrentFolder);
+    Ok(())
+}
+
+#[test]
+fn typing_in_setup_model_field_opens_text_modal() -> Result<()> {
+    let mut app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist")
+        .selected_field = SetupField::Model;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.has_modal());
+    assert_eq!(app.modal_title(), Some("Model ID"));
+    assert_eq!(app.last_notice(), Some("editing model"));
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("model: g|"));
+    Ok(())
+}

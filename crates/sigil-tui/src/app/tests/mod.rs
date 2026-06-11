@@ -7,6 +7,7 @@ mod modal_flow_tests;
 mod mouse_flow_tests;
 mod performance_tests;
 mod session_flow_tests;
+mod setup_flow_tests;
 mod slash_flow_tests;
 mod timeline_flow_tests;
 mod tool_focus_tests;

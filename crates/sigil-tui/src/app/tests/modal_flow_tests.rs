@@ -229,6 +229,50 @@ fn model_picker_remote_refresh_updates_open_modal_options() -> Result<()> {
 }
 
 #[test]
+fn model_picker_refresh_mismatch_is_ignored() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+
+    let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
+        target: ModelPickerTarget::ProviderFim,
+        current: "custom-model".to_owned(),
+        base_url: "https://example.com".to_owned(),
+        result: Ok(vec!["remote-model".to_owned()]),
+    });
+
+    assert!(!changed);
+    assert_eq!(app.last_notice(), Some("using local model list"));
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("custom-model"));
+    assert!(!lines.contains("remote-model"));
+    Ok(())
+}
+
+#[test]
+fn config_numeric_text_modal_rejects_invalid_characters() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Compaction);
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .selected_field = Some(ConfigField::CompactionContextWindowTokens);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(app.modal_title(), Some("Fallback window"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+
+    assert_eq!(app.last_notice(), Some("value does not accept 'x'"));
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("value: |"));
+    Ok(())
+}
+
+#[test]
 fn config_text_field_uses_modal_and_applies_value() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();

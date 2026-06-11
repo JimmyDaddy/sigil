@@ -220,3 +220,51 @@ fn composer_down_at_bottom_row_navigates_history() -> Result<()> {
     assert_eq!(app.input, "draft123");
     Ok(())
 }
+
+#[test]
+fn busy_submit_keeps_existing_input_and_emits_notice() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.is_busy = true;
+    app.input = "queued".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    assert_eq!(app.input, "queued");
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "busy; submit later")
+    );
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "notice" && event.detail == "submit ignored while busy")
+    );
+    Ok(())
+}
+
+#[test]
+fn input_history_is_capped_at_one_hundred_entries() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    for index in 0..101 {
+        app.input = format!("prompt {index}");
+        assert!(matches!(
+            app.submit_input()?,
+            Some(AppAction::SubmitPrompt(prompt)) if prompt == format!("prompt {index}")
+        ));
+        app.is_busy = false;
+    }
+
+    assert_eq!(app.input_history.len(), 100);
+    assert_eq!(
+        app.input_history.first().map(String::as_str),
+        Some("prompt 1")
+    );
+    assert_eq!(
+        app.input_history.last().map(String::as_str),
+        Some("prompt 100")
+    );
+    Ok(())
+}

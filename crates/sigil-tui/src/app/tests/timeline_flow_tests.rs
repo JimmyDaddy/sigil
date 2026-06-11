@@ -925,3 +925,23 @@ fn live_activity_summary_tracks_busy_phase() {
     assert_eq!(summary.label, "tool");
     assert_eq!(summary.detail, "running read_file");
 }
+
+#[test]
+fn duplicate_phase_markers_do_not_append_duplicate_events() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.push_phase_marker("thinking|deepseek-v4-flash");
+    app.push_phase_marker("thinking|deepseek-v4-flash");
+    app.push_phase_marker("tool|bash");
+
+    let phase_events = app
+        .events
+        .iter()
+        .filter(|event| event.label == "phase")
+        .map(|event| event.detail.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        phase_events,
+        vec!["thinking|deepseek-v4-flash", "tool|bash"]
+    );
+}

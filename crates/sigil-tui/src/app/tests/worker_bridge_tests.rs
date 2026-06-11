@@ -208,3 +208,56 @@ fn esc_interrupts_active_run() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "work".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == "work"
+    ));
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE))?;
+    assert!(app.has_modal());
+    assert!(app.pending_approval.is_some());
+
+    app.handle_worker_message(WorkerMessage::RunFinished {
+        result: sigil_kernel::AgentRunResult {
+            final_text: "done".to_owned(),
+            tool_calls: 1,
+        },
+        entries: restored_entries("deepseek", "deepseek-v4-flash"),
+    })?;
+
+    assert!(!app.is_busy);
+    assert_eq!(app.run_phase(), RunPhase::Idle);
+    assert!(!app.has_modal());
+    assert!(app.pending_approval.is_none());
+    assert_eq!(app.last_notice(), Some("agent idle"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "run:finish" && event.detail.contains("tool_calls=1"))
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_activation_status_without_server_name_only_emits_event() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let before = app.mcp_server_statuses.clone();
+
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: None,
+        status: McpActivationStatus::Failed {
+            error: "filesystem handshake failed".to_owned(),
+        },
+    })?;
+
+    assert_eq!(app.mcp_server_statuses, before);
+    assert!(app.events.iter().any(|event| {
+        event.label == "mcp" && event.detail == "failed filesystem handshake failed"
+    }));
+    Ok(())
+}

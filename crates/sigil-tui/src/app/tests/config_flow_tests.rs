@@ -996,3 +996,23 @@ fn setup_save_requires_credentials() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn config_command_is_unavailable_in_setup_mode() -> Result<()> {
+    let mut app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+
+    app.input = "/config".to_owned();
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    assert!(!app.is_config_mode());
+    assert_eq!(
+        app.last_notice(),
+        Some("config is unavailable in setup mode")
+    );
+    Ok(())
+}

@@ -749,3 +749,26 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn resolve_resume_target_returns_none_for_ambiguous_query() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_log_path = Path::new("session-current.jsonl").to_path_buf();
+    app.session_history = vec![
+        crate::sessions::SessionHistoryEntry {
+            path: Path::new("session-alpha.jsonl").to_path_buf(),
+            label: "session-alpha.jsonl".to_owned(),
+            title: Some("restored alpha prompt".to_owned()),
+            modified_epoch_secs: 2,
+            bytes: 10,
+        },
+        crate::sessions::SessionHistoryEntry {
+            path: Path::new("session-beta.jsonl").to_path_buf(),
+            label: "session-beta.jsonl".to_owned(),
+            title: Some("restored beta prompt".to_owned()),
+            modified_epoch_secs: 1,
+            bytes: 10,
+        },
+    ];
+    assert_eq!(app.resolve_resume_target("prompt"), None);
+}
