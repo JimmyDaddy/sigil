@@ -307,6 +307,10 @@ pub struct McpToolName {
     pub original_name: String,
 }
 
+pub fn mcp_provider_tool_name_prefix(server_name: &str) -> String {
+    format!("mcp__{}__", sanitize_provider_name_part(server_name))
+}
+
 impl McpToolName {
     fn new(
         server_name: &str,

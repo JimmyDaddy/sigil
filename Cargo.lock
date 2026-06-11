@@ -2213,6 +2213,7 @@ name = "sigil-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "serde_json",
  "sha2",
  "sigil-code-intel",
@@ -2220,6 +2221,7 @@ dependencies = [
  "sigil-mcp",
  "sigil-provider-deepseek",
  "sigil-tools-builtin",
+ "tempfile",
  "tokio",
 ]
 

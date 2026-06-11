@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -843,9 +847,17 @@ pub trait Tool: Send + Sync {
 }
 
 /// Runtime registry for built-in and remote tools.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: BTreeMap<String, Arc<dyn Tool>>,
+    tools: Arc<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self {
+            tools: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -856,17 +868,30 @@ impl ToolRegistry {
 
     /// Registers one tool by its stable spec name, replacing any prior entry with the same name.
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.spec().name.clone(), tool);
+        let name = tool.spec().name.clone();
+        let mut tools = match self.tools.write() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tools.insert(name, tool);
     }
 
     /// Returns the full list of registered tool specifications.
     pub fn specs(&self) -> Vec<ToolSpec> {
-        self.tools.values().map(|tool| tool.spec()).collect()
+        let tools = match self.tools.read() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tools.values().map(|tool| tool.spec()).collect()
     }
 
     /// Returns one registered spec by name.
     pub fn spec_for(&self, name: &str) -> Option<ToolSpec> {
-        self.tools.get(name).map(|tool| tool.spec())
+        let tools = match self.tools.read() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        tools.get(name).map(|tool| tool.spec())
     }
 
     /// Executes a tool call by name.
@@ -879,10 +904,16 @@ impl ToolRegistry {
         ctx: ToolContext,
         call: crate::provider::ToolCall,
     ) -> Result<ToolResult> {
-        let tool = self
-            .tools
-            .get(&call.name)
-            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            tools
+                .get(&call.name)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+        };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.execute(ctx, call.id, args).await
@@ -899,10 +930,16 @@ impl ToolRegistry {
         ctx: ToolContext,
         call: crate::provider::ToolCall,
     ) -> Result<Option<ToolPreview>> {
-        let tool = self
-            .tools
-            .get(&call.name)
-            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            tools
+                .get(&call.name)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+        };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.preview(ctx, args).await
@@ -918,10 +955,16 @@ impl ToolRegistry {
         ctx: &ToolContext,
         call: &crate::provider::ToolCall,
     ) -> Result<Vec<ToolSubject>> {
-        let tool = self
-            .tools
-            .get(&call.name)
-            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            tools
+                .get(&call.name)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+        };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.permission_subjects(ctx, &args)
@@ -938,10 +981,16 @@ impl ToolRegistry {
         ctx: &ToolContext,
         call: &crate::provider::ToolCall,
     ) -> Result<ToolAccess> {
-        let tool = self
-            .tools
-            .get(&call.name)
-            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            tools
+                .get(&call.name)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+        };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.permission_access(ctx, &args)
@@ -957,10 +1006,16 @@ impl ToolRegistry {
         ctx: &ToolContext,
         call: &crate::provider::ToolCall,
     ) -> Result<Option<ApprovalMode>> {
-        let tool = self
-            .tools
-            .get(&call.name)
-            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            tools
+                .get(&call.name)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+        };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.permission_default_mode(ctx, &args)
@@ -976,10 +1031,16 @@ impl ToolRegistry {
         ctx: &ToolContext,
         call: &crate::provider::ToolCall,
     ) -> Result<Option<ToolEgressAudit>> {
-        let tool = self
-            .tools
-            .get(&call.name)
-            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            tools
+                .get(&call.name)
+                .cloned()
+                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+        };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.egress_audit(ctx, &args)

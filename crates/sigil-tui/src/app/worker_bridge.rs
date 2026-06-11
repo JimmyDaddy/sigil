@@ -343,6 +343,37 @@ impl AppState {
         }
         self.push_event("code_intelligence", self.code_intelligence_status.clone());
     }
+
+    fn apply_mcp_activation_tool_status(&mut self, result: &ToolResult) {
+        if result.tool_name != "mcp_activate_server" || result.is_error() {
+            return;
+        }
+        let Ok(content) = serde_json::from_str::<serde_json::Value>(&result.content) else {
+            return;
+        };
+        let Some(server_name) = content
+            .get("server_name")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let status = content
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ready");
+        if status != "ready" && status != "already_ready" {
+            return;
+        }
+        let added_tools = content
+            .get("added_tools")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
+        self.apply_mcp_activation_status(
+            Some(server_name.to_owned()),
+            McpActivationStatus::Ready { added_tools },
+        );
+    }
 }
 
 fn mcp_activation_event_detail(server_name: Option<&str>, status: &McpActivationStatus) -> String {
@@ -604,6 +635,7 @@ impl EventHandler for AppState {
                 self.push_phase_marker(format!("tool|{}", result.tool_name));
                 let status = if result.is_error() { "error" } else { "ok" };
                 self.apply_code_intelligence_tool_status(&result);
+                self.apply_mcp_activation_tool_status(&result);
                 let preview = self.tool_preview_snapshots.get(&result.call_id);
                 self.push_timeline(
                     TimelineRole::Tool,

@@ -678,6 +678,39 @@ fn mcp_activation_status_without_server_name_only_emits_event() -> Result<()> {
 }
 
 #[test]
+fn mcp_activate_server_tool_result_marks_lazy_server_ready() -> Result<()> {
+    let mut config = test_config();
+    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        name: "filesystem".to_owned(),
+        startup: sigil_kernel::McpServerStartup::Lazy,
+        ..sigil_kernel::McpServerConfig::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "activate-filesystem",
+        "mcp_activate_server",
+        serde_json::json!({
+            "server_name": "filesystem",
+            "status": "ready",
+            "matched_servers": 1,
+            "added_tools": 2
+        })
+        .to_string(),
+        Default::default(),
+    )))?;
+
+    assert_eq!(
+        app.mcp_server_runtime_status_label("filesystem").as_deref(),
+        Some("ready 2 tools")
+    );
+    assert!(app.events.iter().any(|event| {
+        event.label == "mcp" && event.detail == "server=filesystem ready tools=2"
+    }));
+    Ok(())
+}
+
+#[test]
 fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "work".to_owned();

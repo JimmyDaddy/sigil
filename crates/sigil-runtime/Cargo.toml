@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
@@ -15,6 +16,7 @@ sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
 sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio.workspace = true
 
 [lints]

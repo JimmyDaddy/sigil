@@ -3,6 +3,7 @@ use std::{
     env,
     ffi::OsString,
     path::Path,
+    process::Command,
     sync::{Mutex, OnceLock},
 };
 
@@ -11,7 +12,7 @@ use serde_json::json;
 use sigil_kernel::{
     AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, InteractionMode, LanguageServerConfig,
     McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig,
-    SessionConfig, ToolRegistry, WorkspaceConfig,
+    SessionConfig, ToolCall, ToolContext, ToolRegistry, WorkspaceConfig,
 };
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
 
@@ -248,6 +249,87 @@ async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() ->
 
     assert!(registry.spec_for("code_symbols").is_some());
     assert!(registry.spec_for("code_diagnostics").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_activate_server_tool_registers_lazy_tools_for_model_turns() -> Result<()> {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("lazy_mcp_server.py");
+    std::fs::write(
+        &script,
+        r#"
+import json
+import sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    body = sys.stdin.buffer.read(int(headers["content-length"]))
+    return json.loads(body)
+
+def write_message(message):
+    data = json.dumps(message).encode()
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"lazy","version":"1.0.0"},"capabilities":{}}})
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]}})
+    elif method == "tools/call":
+        value = message.get("params", {}).get("arguments", {}).get("value", "")
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":"lazy:" + value}]}})
+    elif "id" in message:
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{}})
+"#,
+    )?;
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        name: "lazy".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.display().to_string()],
+        startup: McpServerStartup::Lazy,
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    });
+
+    let registry =
+        build_tool_registry(&config, &provider.capabilities(), temp.path().to_path_buf()).await?;
+
+    assert!(registry.spec_for("mcp_activate_server").is_some());
+    assert!(registry.spec_for("mcp__lazy__echo").is_none());
+
+    let activation = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            ToolCall {
+                id: "activate-lazy".to_owned(),
+                name: "mcp_activate_server".to_owned(),
+                args_json: json!({ "server_name": "lazy" }).to_string(),
+            },
+        )
+        .await?;
+
+    assert!(!activation.is_error());
+    assert!(registry.spec_for("mcp__lazy__echo").is_some());
     Ok(())
 }
 
