@@ -844,6 +844,14 @@ pub struct McpServerTrustPolicy {
     pub egress_logging: bool,
     pub allow_secrets: bool,
     pub pin_version: bool,
+    pub pinned: Option<McpServerPinnedIdentity>,
+}
+
+pub struct McpServerPinnedIdentity {
+    pub command_fingerprint: String,
+    pub protocol_version: String,
+    pub server_name: String,
+    pub server_version: String,
 }
 ```
 
@@ -853,7 +861,7 @@ pub struct McpServerTrustPolicy {
 - `SelfHosted`：默认 `approval_default = Ask`、`egress_logging = true`、`allow_secrets = false`
 - `ThirdParty`：建议逐次审批、记录出境数据、默认不透传高敏凭据
 
-当前 `trust` 字段已经可解析和序列化，用于保留 server 边界和后续 enforcement；除默认 MCP 工具 `Network` access 外，尚未把 `approval_default / egress_logging / allow_secrets / pin_version` 接入逐调用策略。
+当前 `approval_default` 已参与逐调用 permission decision；`egress_logging` 已写入安全出境摘要；`allow_secrets = false` 已阻断 MCP tool args 中的已解析 secret。`pin_version = true` 会校验 `trust.pinned` 中的 command fingerprint、protocol version、server name 和 server version；缺少 pinned identity 时会明确失败并输出 observed pin 供用户写入配置。
 
 ### 11.5 协议版本与能力协商
 

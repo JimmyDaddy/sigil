@@ -470,6 +470,8 @@ pub struct McpServerTrustPolicy {
     pub allow_secrets: bool,
     #[serde(default)]
     pub pin_version: bool,
+    #[serde(default)]
+    pub pinned: Option<McpServerPinnedIdentity>,
 }
 
 impl Default for McpServerTrustPolicy {
@@ -480,8 +482,19 @@ impl Default for McpServerTrustPolicy {
             egress_logging: default_mcp_egress_logging(),
             allow_secrets: false,
             pin_version: false,
+            pinned: None,
         }
     }
+}
+
+/// Expected MCP server identity used when `pin_version = true`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct McpServerPinnedIdentity {
+    pub command_fingerprint: String,
+    pub protocol_version: String,
+    pub server_name: String,
+    pub server_version: String,
 }
 
 fn default_workspace_root() -> String {

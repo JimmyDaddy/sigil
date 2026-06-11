@@ -117,6 +117,12 @@ approval_default = "ask"
 egress_logging = true
 allow_secrets = false
 pin_version = true
+
+[mcp_servers.trust.pinned]
+command_fingerprint = "sha256:abc"
+protocol_version = "2024-11-05"
+server_name = "third-party"
+server_version = "1.2.3"
 "#;
 
     let config: RootConfig = toml::from_str(raw).expect("mcp config should parse");
@@ -140,6 +146,15 @@ pin_version = true
     assert!(optional.trust.egress_logging);
     assert!(!optional.trust.allow_secrets);
     assert!(optional.trust.pin_version);
+    let pinned = optional
+        .trust
+        .pinned
+        .as_ref()
+        .expect("pinned identity should parse");
+    assert_eq!(pinned.command_fingerprint, "sha256:abc");
+    assert_eq!(pinned.protocol_version, "2024-11-05");
+    assert_eq!(pinned.server_name, "third-party");
+    assert_eq!(pinned.server_version, "1.2.3");
 }
 
 #[test]

@@ -4,10 +4,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use termquill_kernel::{
-    ApprovalMode, McpServerConfig, McpServerStartup, McpServerTrustPolicy, ProviderCapabilities,
-    SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ApprovalMode, McpServerConfig, McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy,
+    ProviderCapabilities, SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -17,6 +19,7 @@ use tokio::{
 use tracing::warn;
 
 const DEFAULT_PROVIDER_TOOL_NAME_MAX_CHARS: usize = 64;
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 pub async fn register_mcp_tools(
     registry: &mut ToolRegistry,
@@ -215,10 +218,53 @@ struct McpToolDescriptor {
     input_schema: Value,
 }
 
+#[derive(Debug, Clone)]
+struct McpServerObservedIdentity {
+    command_fingerprint: String,
+    protocol_version: String,
+    server_name: String,
+    server_version: String,
+}
+
+impl McpServerObservedIdentity {
+    fn as_pinned_identity(&self) -> McpServerPinnedIdentity {
+        McpServerPinnedIdentity {
+            command_fingerprint: self.command_fingerprint.clone(),
+            protocol_version: self.protocol_version.clone(),
+            server_name: self.server_name.clone(),
+            server_version: self.server_version.clone(),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "command_fingerprint": self.command_fingerprint,
+            "protocol_version": self.protocol_version,
+            "server_name": self.server_name,
+            "server_version": self.server_version,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct McpInitializeResult {
+    #[serde(default, rename = "protocolVersion")]
+    protocol_version: Option<String>,
+    #[serde(default, rename = "serverInfo")]
+    server_info: Option<McpServerInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct McpServerInfo {
+    name: String,
+    version: String,
+}
+
 struct McpClient {
     _child: Mutex<Child>,
     connection: Mutex<Connection>,
     roots: Vec<PathBuf>,
+    identity: McpServerObservedIdentity,
 }
 
 struct Connection {
@@ -249,7 +295,7 @@ impl McpClient {
             .take()
             .ok_or_else(|| anyhow!("missing stdout for MCP server {}", config.name))?;
 
-        let client = Self {
+        let mut client = Self {
             _child: Mutex::new(child),
             connection: Mutex::new(Connection {
                 stdin,
@@ -257,22 +303,30 @@ impl McpClient {
                 next_id: 0,
             }),
             roots,
+            identity: McpServerObservedIdentity {
+                command_fingerprint: String::new(),
+                protocol_version: String::new(),
+                server_name: String::new(),
+                server_version: String::new(),
+            },
         };
-        tokio::time::timeout(
+        let identity = tokio::time::timeout(
             std::time::Duration::from_secs(config.startup_timeout_secs),
-            client.initialize(),
+            client.initialize(&config),
         )
         .await
         .with_context(|| format!("MCP server {} initialize timed out", config.name))??;
+        validate_mcp_pin(&config, &identity)?;
+        client.identity = identity;
         Ok(client)
     }
 
-    async fn initialize(&self) -> Result<()> {
-        let _ = self
+    async fn initialize(&self, config: &McpServerConfig) -> Result<McpServerObservedIdentity> {
+        let result = self
             .send_request(
                 "initialize",
                 json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
                     "capabilities": {
                         "roots": { "listChanged": true }
                     },
@@ -280,8 +334,22 @@ impl McpClient {
                 }),
             )
             .await?;
+        let initialize = serde_json::from_value::<McpInitializeResult>(result)
+            .context("failed to decode MCP initialize result")?;
         self.send_notification("notifications/initialized", json!({}))
-            .await
+            .await?;
+        let server_info = initialize.server_info.unwrap_or(McpServerInfo {
+            name: String::new(),
+            version: String::new(),
+        });
+        Ok(McpServerObservedIdentity {
+            command_fingerprint: mcp_command_fingerprint(&config.command, &config.args)?,
+            protocol_version: initialize
+                .protocol_version
+                .unwrap_or_else(|| MCP_PROTOCOL_VERSION.to_owned()),
+            server_name: server_info.name,
+            server_version: server_info.version,
+        })
     }
 
     async fn list_tools(&self) -> Result<Vec<McpToolDescriptor>> {
@@ -450,6 +518,7 @@ impl Tool for McpTool {
                 "remote_tool": self.tool_name.original_name,
                 "allow_secrets": self.trust.allow_secrets,
                 "secret_detected": secret_detected,
+                "server_identity": self.client.identity.to_json(),
                 "arguments": summarize_egress_json(args),
             }),
             redacted: secret_detected,
@@ -505,6 +574,64 @@ impl Tool for McpTool {
             ToolResultMeta::default(),
         ))
     }
+}
+
+fn validate_mcp_pin(config: &McpServerConfig, observed: &McpServerObservedIdentity) -> Result<()> {
+    if !config.trust.pin_version {
+        return Ok(());
+    }
+    let observed_pin = observed.as_pinned_identity();
+    let Some(expected) = config.trust.pinned.as_ref() else {
+        bail!(
+            "MCP server {} has pin_version = true but no pinned identity; observed pin: {}",
+            config.name,
+            serde_json::to_string(&observed_pin)?
+        );
+    };
+
+    let mut mismatches = Vec::new();
+    if expected.command_fingerprint != observed_pin.command_fingerprint {
+        mismatches.push(format!(
+            "command_fingerprint expected {} observed {}",
+            expected.command_fingerprint, observed_pin.command_fingerprint
+        ));
+    }
+    if expected.protocol_version != observed_pin.protocol_version {
+        mismatches.push(format!(
+            "protocol_version expected {} observed {}",
+            expected.protocol_version, observed_pin.protocol_version
+        ));
+    }
+    if expected.server_name != observed_pin.server_name {
+        mismatches.push(format!(
+            "server_name expected {} observed {}",
+            expected.server_name, observed_pin.server_name
+        ));
+    }
+    if expected.server_version != observed_pin.server_version {
+        mismatches.push(format!(
+            "server_version expected {} observed {}",
+            expected.server_version, observed_pin.server_version
+        ));
+    }
+
+    if !mismatches.is_empty() {
+        bail!(
+            "MCP server {} pinned identity mismatch: {}",
+            config.name,
+            mismatches.join("; ")
+        );
+    }
+    Ok(())
+}
+
+fn mcp_command_fingerprint(command: &str, args: &[String]) -> Result<String> {
+    let encoded = serde_json::to_vec(&json!({
+        "command": command,
+        "args": args,
+    }))
+    .context("failed to serialize MCP command fingerprint material")?;
+    Ok(format!("sha256:{:x}", Sha256::digest(&encoded)))
 }
 
 fn summarize_egress_json(value: &Value) -> Value {

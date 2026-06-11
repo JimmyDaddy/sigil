@@ -14,6 +14,57 @@ fn write_fake_server_script(path: &std::path::Path, body: &str) -> Result<()> {
     Ok(())
 }
 
+fn write_identity_server_script(
+    path: &std::path::Path,
+    server_name: &str,
+    server_version: &str,
+) -> Result<()> {
+    let body = format!(
+        r#"#!/usr/bin/env python3
+import json, sys
+
+SERVER_NAME = {server_name:?}
+SERVER_VERSION = {server_version:?}
+
+def read_message():
+    headers = {{}}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {{len(body)}}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({{"jsonrpc":"2.0","id":message["id"],"result":{{"protocolVersion":"2024-11-05","serverInfo":{{"name":SERVER_NAME,"version":SERVER_VERSION}},"capabilities":{{}}}}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({{"jsonrpc":"2.0","id":message["id"],"result":{{"tools":[{{"name":"echo","description":"Echo","inputSchema":{{"type":"object","properties":{{"value":{{"type":"string"}}}},"required":["value"]}}}}]}}}})
+    elif method == "tools/call":
+        value = message["params"]["arguments"]["value"]
+        write_message({{"jsonrpc":"2.0","id":message["id"],"result":{{"content":[{{"type":"text","text":value}}]}}}})
+"#
+    );
+    write_fake_server_script(path, &body)
+}
+
 fn test_provider_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         exact_prefix_cache: false,
@@ -198,6 +249,128 @@ while True:
         )
         .await?;
     assert_eq!(result.content, "hello from mcp");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_mcp_server_registers_when_identity_matches() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("pinned_mcp_server.py");
+    write_identity_server_script(&script, "termquill-test-server", "1.2.3")?;
+    let args = vec![script.to_string_lossy().to_string()];
+    let command_fingerprint = super::mcp_command_fingerprint("python3", &args)?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "pinned".to_owned(),
+            command: "python3".to_owned(),
+            args,
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                pin_version: true,
+                pinned: Some(termquill_kernel::McpServerPinnedIdentity {
+                    command_fingerprint,
+                    protocol_version: "2024-11-05".to_owned(),
+                    server_name: "termquill-test-server".to_owned(),
+                    server_version: "1.2.3".to_owned(),
+                }),
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__pinned__echo").is_some());
+    let egress = registry
+        .egress_audit(
+            &ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            &termquill_kernel::ToolCall {
+                id: "call-pin-egress".to_owned(),
+                name: "mcp__pinned__echo".to_owned(),
+                args_json: r#"{"value":"hello"}"#.to_owned(),
+            },
+        )?
+        .expect("egress audit should include pinned server identity");
+    assert_eq!(
+        egress.payload["server_identity"]["server_name"],
+        "termquill-test-server"
+    );
+    assert_eq!(egress.payload["server_identity"]["server_version"], "1.2.3");
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_mcp_server_errors_when_pin_is_missing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("unpinned_mcp_server.py");
+    write_identity_server_script(&script, "termquill-test-server", "1.2.3")?;
+
+    let mut registry = ToolRegistry::new();
+    let error = register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "unpinned".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                pin_version: true,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+    )
+    .await
+    .expect_err("pin_version without pinned identity should fail");
+
+    let message = error.to_string();
+    assert!(message.contains("pin_version = true but no pinned identity"));
+    assert!(message.contains("command_fingerprint"));
+    assert!(message.contains("termquill-test-server"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn pinned_mcp_server_errors_when_identity_mismatches() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("mismatched_mcp_server.py");
+    write_identity_server_script(&script, "termquill-test-server", "1.2.3")?;
+    let args = vec![script.to_string_lossy().to_string()];
+    let command_fingerprint = super::mcp_command_fingerprint("python3", &args)?;
+
+    let mut registry = ToolRegistry::new();
+    let error = register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "mismatched".to_owned(),
+            command: "python3".to_owned(),
+            args,
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                pin_version: true,
+                pinned: Some(termquill_kernel::McpServerPinnedIdentity {
+                    command_fingerprint,
+                    protocol_version: "2024-11-05".to_owned(),
+                    server_name: "other-server".to_owned(),
+                    server_version: "1.2.3".to_owned(),
+                }),
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+    )
+    .await
+    .expect_err("mismatched pinned identity should fail");
+
+    let message = error.to_string();
+    assert!(message.contains("pinned identity mismatch"));
+    assert!(message.contains("server_name expected other-server observed termquill-test-server"));
     Ok(())
 }
 

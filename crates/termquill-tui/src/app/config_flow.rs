@@ -3,6 +3,7 @@ use crate::config_panel::{
     CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
     CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT,
 };
+use termquill_kernel::McpServerConfig;
 
 impl AppState {
     pub fn config_section_title(&self) -> Option<&'static str> {
@@ -834,6 +835,7 @@ fn render_mcp_lifecycle_summary(config_state: &ConfigState) -> Vec<String> {
         render_config_readonly_row("Startup", config.startup.as_str()),
         render_config_readonly_row("Trust", config.trust.trust_class.as_str()),
         render_config_readonly_row("Approval", config.trust.approval_default.as_str()),
+        render_config_readonly_row("Pin", mcp_pin_summary(&config)),
         render_config_readonly_row(
             "Secrets",
             if config.trust.allow_secrets {
@@ -843,6 +845,16 @@ fn render_mcp_lifecycle_summary(config_state: &ConfigState) -> Vec<String> {
             },
         ),
     ]
+}
+
+fn mcp_pin_summary(config: &McpServerConfig) -> &'static str {
+    if !config.trust.pin_version {
+        "off"
+    } else if config.trust.pinned.is_some() {
+        "pinned"
+    } else {
+        "missing"
+    }
 }
 
 fn bool_summary(value: bool) -> &'static str {

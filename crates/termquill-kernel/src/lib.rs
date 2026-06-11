@@ -14,9 +14,9 @@ pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
 pub use config::{
     AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig,
     CompactionConfig, CompactionThresholdStatus, LanguageServerConfig, McpServerConfig,
-    McpServerStartup, McpServerTrustPolicy, McpTrustClass, MemoryConfig, RootConfig, SessionConfig,
-    WorkspaceConfig, default_user_config_dir, default_user_config_path, preferred_config_path,
-    resolve_workspace_root,
+    McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy, McpTrustClass, MemoryConfig,
+    RootConfig, SessionConfig, WorkspaceConfig, default_user_config_dir, default_user_config_path,
+    preferred_config_path, resolve_workspace_root,
 };
 pub use event::{EventHandler, NoopEventHandler, RunEvent};
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
