@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use super::{
     CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, McpServerStartup, McpTrustClass,
-    RootConfig, preferred_config_path, resolve_workspace_root,
+    RootConfig, default_user_config_path, preferred_config_path, resolve_workspace_root,
 };
 use crate::{AgentConfig, ApprovalMode, WorkspaceConfig};
 
@@ -270,6 +270,37 @@ fn compaction_threshold_status_handles_disabled_and_missing_window() {
 }
 
 #[test]
+fn root_config_defaults_code_intelligence_and_memory() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )
+    .expect("minimal config should parse");
+
+    assert!(config.memory.enabled);
+    assert!(!config.code_intelligence.enabled);
+    assert_eq!(config.code_intelligence.startup, CodeIntelStartup::Lazy);
+    assert_eq!(config.code_intelligence.default_timeout_ms, 5_000);
+    assert_eq!(config.code_intelligence.max_results, 100);
+    assert_eq!(config.code_intelligence.max_payload_bytes, 64 * 1024);
+    assert!(config.code_intelligence.discovery.enabled);
+    assert!(config.code_intelligence.discovery.report_missing);
+}
+
+#[test]
+fn preferred_config_path_falls_back_to_user_config_path() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+
+    assert_eq!(
+        preferred_config_path(None, temp.path()).expect("user config path should resolve"),
+        default_user_config_path().expect("default user config path should resolve")
+    );
+}
+
+#[test]
 fn resolve_workspace_root_handles_blank_and_absolute_paths() {
     let config_path = Path::new("/Users/example/.config/sigil/sigil.toml");
     let cwd = Path::new("/Users/example/work/project");
@@ -278,5 +309,9 @@ fn resolve_workspace_root_handles_blank_and_absolute_paths() {
     assert_eq!(
         resolve_workspace_root(config_path, cwd, "/tmp/absolute-workspace"),
         Path::new("/tmp/absolute-workspace")
+    );
+    assert_eq!(
+        resolve_workspace_root(config_path, cwd, "/tmp/explicit"),
+        Path::new("/tmp/explicit")
     );
 }

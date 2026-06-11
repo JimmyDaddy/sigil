@@ -477,6 +477,9 @@ struct PreviewFailingWriteTool {
 
 struct ExecuteFailingTool;
 struct InvalidEgressTool;
+struct PermissionAccessFailingWriteTool;
+struct EgressAuditFailingWriteTool;
+struct ExecuteFailingWriteTool;
 
 #[async_trait]
 impl Tool for PreviewFailingWriteTool {
@@ -518,6 +521,145 @@ impl Tool for PreviewFailingWriteTool {
             "wrote file",
             ToolResultMeta::default(),
         ))
+    }
+}
+
+#[async_trait]
+impl Tool for PermissionAccessFailingWriteTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "write_file".to_owned(),
+            description: "write".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+        Ok(vec![ToolSubject::path(path, path)])
+    }
+
+    fn permission_access(
+        &self,
+        _ctx: &crate::ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<ToolAccess> {
+        anyhow::bail!("access exploded");
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        _call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        unreachable!("tool should not execute when permission_access fails")
+    }
+}
+
+#[async_trait]
+impl Tool for EgressAuditFailingWriteTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "write_file".to_owned(),
+            description: "write".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+        Ok(vec![ToolSubject::path(path, path)])
+    }
+
+    fn egress_audit(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Option<ToolEgressAudit>> {
+        anyhow::bail!("egress exploded");
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        _call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        unreachable!("tool should not execute when egress audit fails")
+    }
+}
+
+#[async_trait]
+impl Tool for ExecuteFailingWriteTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "write_file".to_owned(),
+            description: "write".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+        Ok(vec![ToolSubject::path(path, path)])
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        _call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        anyhow::bail!("tool blew up");
     }
 }
 
@@ -1237,7 +1379,13 @@ async fn agent_stops_after_max_turns_without_failing_the_run() -> Result<()> {
                 reasoning_effort: Some(ReasoningEffort::Medium),
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
-                permission_config: PermissionConfig::default(),
+                permission_config: PermissionConfig {
+                    access: crate::PermissionAccessConfig {
+                        write: Some(ApprovalMode::Allow),
+                        ..crate::PermissionAccessConfig::default()
+                    },
+                    ..PermissionConfig::default()
+                },
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -1852,6 +2000,42 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
     Ok(())
 }
 
+struct StreamErrorProvider;
+
+#[async_trait]
+impl Provider for StreamErrorProvider {
+    fn name(&self) -> &str {
+        "mock-stream-error"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            supports_reasoning_stream: true,
+            supports_tool_stream: false,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        Ok(Box::pin(stream::iter(vec![Err(anyhow::anyhow!(
+            "socket closed"
+        ))])))
+    }
+}
+
 #[tokio::test]
 async fn agent_returns_internal_tool_result_for_unknown_registered_name() -> Result<()> {
     let agent = Agent::new(UnknownToolProvider, ToolRegistry::new());
@@ -1943,7 +2127,7 @@ async fn agent_records_failed_execution_when_tool_returns_error() -> Result<()> 
 }
 
 #[tokio::test]
-async fn agent_returns_invalid_input_when_egress_audit_fails() -> Result<()> {
+async fn agent_returns_invalid_input_when_egress_payload_audit_fails() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(InvalidEgressTool));
     let agent = Agent::new(WriteMockProvider, registry);
@@ -1986,4 +2170,186 @@ async fn agent_returns_invalid_input_when_egress_audit_fails() -> Result<()> {
         )
     }));
     Ok(())
+}
+
+#[tokio::test]
+async fn agent_returns_invalid_input_when_permission_access_fails() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(PermissionAccessFailingWriteTool));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = PanicApprovalHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write something",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolResult(result)
+            if result.is_error()
+                && result.content.contains("invalid tool arguments for write_file: access exploded"))
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-write-1"
+                    && execution.status == ToolExecutionStatus::Failed
+                    && execution.error.as_ref().is_some_and(|error| error.kind == ToolErrorKind::InvalidInput)
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_returns_invalid_input_when_egress_audit_fails() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EgressAuditFailingWriteTool));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = PanicApprovalHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write something",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig {
+                    access: crate::PermissionAccessConfig {
+                        write: Some(ApprovalMode::Allow),
+                        ..crate::PermissionAccessConfig::default()
+                    },
+                    ..PermissionConfig::default()
+                },
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolResult(result)
+            if result.is_error()
+                && result.content.contains("invalid tool arguments for write_file: egress exploded"))
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(entry, SessionLogEntry::Control(ControlEntry::ToolEgress(egress))
+            if egress.call_id == "call-write-1")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_records_internal_error_when_tool_execution_fails() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExecuteFailingWriteTool));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = PanicApprovalHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write something",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig {
+                    access: crate::PermissionAccessConfig {
+                        write: Some(ApprovalMode::Allow),
+                        ..crate::PermissionAccessConfig::default()
+                    },
+                    ..PermissionConfig::default()
+                },
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolResult(result)
+            if matches!(&result.status, crate::ToolResultStatus::Error(error) if error.kind == ToolErrorKind::Internal)
+                && result.content.contains("tool blew up"))
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-write-1"
+                    && execution.status == ToolExecutionStatus::Failed
+                    && execution.error.as_ref().is_some_and(|error| error.kind == ToolErrorKind::Internal)
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_wraps_provider_stream_errors_with_context() {
+    let agent = Agent::new(StreamErrorProvider, ToolRegistry::new());
+    let mut session = Session::new("mock-stream-error", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    let error = agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await
+        .expect_err("stream error should fail the run");
+
+    assert!(error.to_string().contains("provider stream failed"));
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.to_string().contains("socket closed"))
+    );
 }

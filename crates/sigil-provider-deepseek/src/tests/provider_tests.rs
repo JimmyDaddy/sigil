@@ -389,6 +389,297 @@ async fn fim_completion_yields_first_delta_before_stream_finishes() -> Result<()
     Ok(())
 }
 
+#[tokio::test]
+async fn provider_retries_rate_limited_status_once() -> Result<()> {
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![
+        http_response(
+            429,
+            "application/json",
+            r#"{"error":{"message":"slow down"}}"#,
+        ),
+        http_response(
+            200,
+            "text/event-stream",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"after-retry\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ),
+    ])));
+    let server = spawn_mock_server(Arc::clone(&responses)).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server.clone(),
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+
+    let chunks = provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!(
+        chunks
+            .iter()
+            .any(|chunk| matches!(chunk, ProviderChunk::TextDelta(text) if text == "after-retry"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_returns_invalid_request_after_reasoning_retry_is_exhausted() -> Result<()> {
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![
+        http_response(
+            400,
+            "application/json",
+            r#"{"error":{"message":"missing reasoning_content"}}"#,
+        ),
+        http_response(
+            400,
+            "application/json",
+            r#"{"error":{"message":"missing reasoning_content again"}}"#,
+        ),
+    ])));
+    let server = spawn_mock_server(Arc::clone(&responses)).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server.clone(),
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+
+    let error = match provider
+        .stream(chat_request_with_reasoning_state("deepseek-v4-flash"))
+        .await
+    {
+        Ok(_) => panic!("second 400 should surface"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("deepseek invalid request"));
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.to_string().contains("reasoning_content again"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_emits_done_when_chat_stream_ends_without_done_frame() -> Result<()> {
+    let server = spawn_chat_stream_without_done_server().await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+
+    let chunks = provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!(matches!(
+        chunks.as_slice(),
+        [ProviderChunk::TextDelta(text), ProviderChunk::Done] if text == "tail"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_surfaces_invalid_utf8_chat_chunks() -> Result<()> {
+    let server = spawn_invalid_utf8_streaming_server().await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let mut stream = provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await?;
+
+    let error = stream
+        .next()
+        .await
+        .expect("stream should yield one error")
+        .expect_err("invalid utf-8 should fail");
+
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.to_string().to_lowercase().contains("utf-8"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_surfaces_invalid_chat_event_payloads() -> Result<()> {
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        200,
+        "text/event-stream",
+        "data: {not-json}\n\n",
+    )])));
+    let server = spawn_mock_server(Arc::clone(&responses)).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let mut stream = provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await?;
+
+    let error = stream
+        .next()
+        .await
+        .expect("stream should yield one error")
+        .expect_err("invalid JSON should fail");
+
+    assert!(error.to_string().contains("invalid DeepSeek event"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fim_completion_emits_done_when_stream_ends_without_done_frame() -> Result<()> {
+    let server = spawn_completion_stream_without_done_server().await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+
+    let chunks = provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {\n".to_owned(),
+            suffix: "\n}\n".to_owned(),
+            max_tokens: Some(32),
+            stop: Vec::new(),
+        })
+        .await?
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert!(matches!(
+        chunks.as_slice(),
+        [ProviderChunk::TextDelta(text), ProviderChunk::Done] if text == "tail-middle"
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn fim_completion_surfaces_non_success_status() -> Result<()> {
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
+        500,
+        "application/json",
+        r#"{"error":{"message":"server broke"}}"#,
+    )])));
+    let server = spawn_mock_server(Arc::clone(&responses)).await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: server.clone(),
+        beta_base_url: server.clone(),
+        anthropic_base_url: server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+
+    let error = match provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {\n".to_owned(),
+            suffix: "\n}\n".to_owned(),
+            max_tokens: Some(32),
+            stop: Vec::new(),
+        })
+        .await
+    {
+        Ok(_) => panic!("non-success completion response should fail"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("deepseek retryable server error 500")
+    );
+    Ok(())
+}
+
+fn simple_chat_request(model_name: &str) -> sigil_kernel::CompletionRequest {
+    sigil_kernel::CompletionRequest {
+        provider_name: "deepseek".to_owned(),
+        model_name: model_name.to_owned(),
+        messages: vec![sigil_kernel::ModelMessage::user("hi")],
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: None,
+        previous_response_handle: None,
+        continuation_states: Vec::new(),
+        traffic_partition_key: None,
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+    }
+}
+
+fn chat_request_with_reasoning_state(model_name: &str) -> sigil_kernel::CompletionRequest {
+    let mut request = simple_chat_request(model_name);
+    request
+        .continuation_states
+        .push(sigil_kernel::ProviderContinuationState {
+            provider_name: "deepseek".to_owned(),
+            state_kind: "deepseek.reasoning_replay".to_owned(),
+            message_id: None,
+            opaque_blob: serde_json::json!({"reasoning_content":"think"}),
+        });
+    request
+}
+
 async fn spawn_mock_server(responses: Arc<Mutex<VecDeque<Vec<u8>>>>) -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -506,6 +797,53 @@ async fn spawn_slow_completion_streaming_server() -> Result<String> {
         sleep(Duration::from_secs(1)).await;
         let done = "data: [DONE]\n\n";
         let _ = socket.write_all(done.as_bytes()).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_chat_stream_without_done_server() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":null}]}\n\n";
+        let _ = socket.write_all(response.as_bytes()).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_completion_stream_without_done_server() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"choices\":[{\"text\":\"tail-middle\",\"finish_reason\":null}]}\n\n";
+        let _ = socket.write_all(response.as_bytes()).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_invalid_utf8_streaming_server() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let header =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        let _ = socket.write_all(header.as_bytes()).await;
+        let _ = socket.write_all(&[0xff, 0xfe, 0xfd]).await;
     });
     Ok(format!("http://{}", address))
 }

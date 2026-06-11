@@ -577,6 +577,45 @@ fn continuation_states_keep_latest_state_per_key_and_provider() -> Result<()> {
 }
 
 #[test]
+fn build_request_only_includes_matching_provider_continuation_states() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("hello"))?;
+    session.append_control(ControlEntry::ContinuationStateSaved(
+        ProviderContinuationState {
+            provider_name: "deepseek".to_owned(),
+            state_kind: "reasoning".to_owned(),
+            message_id: Some("message-1".to_owned()),
+            opaque_blob: serde_json::json!({"cursor":"keep"}),
+        },
+    ))?;
+    session.append_control(ControlEntry::ContinuationStateSaved(
+        ProviderContinuationState {
+            provider_name: "other-provider".to_owned(),
+            state_kind: "reasoning".to_owned(),
+            message_id: Some("message-2".to_owned()),
+            opaque_blob: serde_json::json!({"cursor":"drop"}),
+        },
+    ))?;
+
+    let request = session.build_request(
+        std::env::temp_dir().as_path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+
+    assert_eq!(request.continuation_states.len(), 1);
+    assert_eq!(request.continuation_states[0].provider_name, "deepseek");
+    assert_eq!(
+        request.continuation_states[0].opaque_blob,
+        serde_json::json!({"cursor":"keep"})
+    );
+    Ok(())
+}
+
+#[test]
 fn ensure_identity_entry_is_idempotent() -> Result<()> {
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
 
@@ -594,5 +633,89 @@ fn ensure_identity_entry_is_idempotent() -> Result<()> {
         })
         .count();
     assert_eq!(identity_entries, 1);
+    Ok(())
+}
+
+#[test]
+fn compaction_preview_returns_none_for_insufficient_history() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("only one"))?;
+
+    let preview = session.compaction_preview(&CompactionConfig {
+        enabled: true,
+        soft_threshold_ratio: 0.5,
+        hard_threshold_ratio: 0.8,
+        context_window_tokens: Some(1000),
+        tail_messages: 2,
+    })?;
+
+    assert!(preview.is_none());
+    Ok(())
+}
+
+#[test]
+fn compact_now_rejects_disabled_config() {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+
+    let error = session
+        .compact_now(&CompactionConfig {
+            enabled: false,
+            soft_threshold_ratio: 0.5,
+            hard_threshold_ratio: 0.8,
+            context_window_tokens: Some(1000),
+            tail_messages: 2,
+        })
+        .expect_err("disabled compaction should fail");
+
+    assert!(error.to_string().contains("compaction is disabled"));
+}
+
+#[test]
+fn load_from_store_does_not_duplicate_closed_tool_execution() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+        Box::new(ToolExecutionEntry {
+            call_id: "call-1".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        }),
+    )))?;
+    store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+        Box::new(ToolExecutionEntry {
+            call_id: "call-1".to_owned(),
+            tool_name: "write_file".to_owned(),
+            status: ToolExecutionStatus::Completed,
+            duration_ms: Some(12),
+            subjects: Vec::new(),
+            changed_files: vec!["file.txt".to_owned()],
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: Some("hash".to_owned()),
+        }),
+    )))?;
+
+    let session = Session::load_from_store("deepseek", "deepseek-v4-flash", store)?;
+    let interrupted_count = session
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                    if execution.call_id == "call-1"
+                        && execution.status == ToolExecutionStatus::Interrupted
+            )
+        })
+        .count();
+
+    assert_eq!(interrupted_count, 0);
     Ok(())
 }
