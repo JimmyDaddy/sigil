@@ -54,3 +54,23 @@ fn alt_d_does_not_request_diagnostics_while_busy() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn alt_d_does_not_request_diagnostics_with_pending_approval() -> Result<()> {
+    let temp = tempdir()?;
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+    config.code_intelligence.enabled = true;
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    let action = app.request_changed_files_diagnostics();
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice.as_deref(),
+        Some("finish the pending approval before checking changes")
+    );
+    assert!(!app.events.iter().any(|event| event.label == "code:check"));
+    Ok(())
+}

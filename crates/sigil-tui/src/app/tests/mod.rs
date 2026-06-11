@@ -1,3 +1,4 @@
+mod app_tests;
 mod approval_flow_tests;
 mod command_dispatch_tests;
 pub(crate) mod common;

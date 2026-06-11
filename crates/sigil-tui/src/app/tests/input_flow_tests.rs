@@ -268,3 +268,89 @@ fn input_history_is_capped_at_one_hundred_entries() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn input_helpers_edit_and_navigate_multiline_text() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    app.set_input_and_cursor("ab\ncd".to_owned());
+
+    assert_eq!(app.input_char_len(), 5);
+    assert_eq!(app.composer_input_rows(), 2);
+    assert_eq!(app.composer_height(), 6);
+    assert_eq!(app.visual_position_for_cursor(5, 4), (1, 2));
+    assert_eq!(app.cursor_for_visual_position(1, 1, 4), 4);
+
+    app.input_cursor = usize::MAX;
+    app.clamp_input_cursor();
+    assert_eq!(app.input_cursor, 5);
+
+    app.move_input_cursor_home();
+    assert_eq!(app.input_cursor, 0);
+    assert!(!app.move_input_cursor_vertical(true));
+
+    app.remove_input_character_before_cursor();
+    assert_eq!(app.input, "ab\ncd");
+
+    app.move_input_cursor_right();
+    app.insert_input_character('X');
+    assert_eq!(app.input, "aXb\ncd");
+    assert_eq!(app.input_cursor, 2);
+
+    app.remove_input_character_before_cursor();
+    assert_eq!(app.input, "ab\ncd");
+
+    app.move_input_cursor_end();
+    assert_eq!(app.input_cursor_visual_row(), 1);
+    assert!(app.move_input_cursor_vertical(true));
+    assert_eq!(app.input_cursor, 2);
+    assert!(app.move_input_cursor_vertical(false));
+    assert_eq!(app.input_cursor, 5);
+    assert!(!app.move_input_cursor_vertical(false));
+
+    app.move_input_cursor_left();
+    app.move_input_cursor_left();
+    assert_eq!(app.input_cursor, 3);
+    app.move_input_cursor_home();
+    app.move_input_cursor_left();
+    assert_eq!(app.input_cursor, 0);
+    app.move_input_cursor_end();
+    app.move_input_cursor_right();
+    assert_eq!(app.input_cursor, app.input_char_len());
+}
+
+#[test]
+fn input_history_recording_deduplicates_caps_and_restores_draft() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    for index in 0..=100 {
+        app.record_input_history(format!("prompt-{index}"));
+    }
+    assert_eq!(app.input_history.len(), 100);
+    assert_eq!(
+        app.input_history.first().map(String::as_str),
+        Some("prompt-1")
+    );
+
+    app.record_input_history("prompt-100".to_owned());
+    assert_eq!(app.input_history.len(), 100);
+
+    app.input = "draft".to_owned();
+    app.navigate_input_history(true);
+    assert_eq!(app.input, "prompt-100");
+
+    for _ in 0..200 {
+        app.navigate_input_history(true);
+    }
+    assert_eq!(app.input, "prompt-1");
+    assert_eq!(app.input_history_index, Some(0));
+
+    app.navigate_input_history(true);
+    assert_eq!(app.input, "prompt-1");
+
+    for _ in 0..200 {
+        app.navigate_input_history(false);
+    }
+    assert_eq!(app.input, "draft");
+    assert_eq!(app.input_history_index, None);
+    assert_eq!(app.input_history_draft, None);
+}

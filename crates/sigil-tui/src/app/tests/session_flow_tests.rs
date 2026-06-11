@@ -807,6 +807,7 @@ fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<
             .any(|entry| entry.path == beta_path && entry.title.as_deref() == Some("beta plan"))
     );
 
+    assert_eq!(app.resolve_resume_target(""), Some(beta_path.clone()));
     assert_eq!(app.resolve_resume_target("latest"), Some(beta_path.clone()));
     assert_eq!(app.resolve_resume_target("1"), Some(beta_path.clone()));
     assert_eq!(

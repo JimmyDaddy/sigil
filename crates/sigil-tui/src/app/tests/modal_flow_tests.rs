@@ -279,6 +279,85 @@ fn model_picker_remote_refresh_error_keeps_local_options() -> Result<()> {
 }
 
 #[test]
+fn model_picker_empty_refresh_keeps_local_options() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+    let before = app.modal_lines().join("\n");
+
+    let changed = app.apply_model_picker_refresh(ModelPickerRefresh {
+        target: ModelPickerTarget::Provider,
+        current: "custom-model".to_owned(),
+        base_url: "https://empty.example".to_owned(),
+        result: Ok(Vec::new()),
+    });
+
+    assert!(changed);
+    assert_eq!(app.last_notice(), Some("using local model list"));
+    assert_eq!(app.modal_lines().join("\n"), before);
+    Ok(())
+}
+
+#[test]
+fn model_picker_submit_updates_setup_and_fim_targets() -> Result<()> {
+    let temp = tempdir()?;
+    let mut setup_app = AppState::from_setup(
+        temp.path().join("sigil.toml"),
+        temp.path().join("workspace"),
+        None,
+    );
+    setup_app.open_model_picker(ModelPickerTarget::Setup, "deepseek-v4-flash");
+
+    assert!(matches!(
+        setup_app.handle_modal_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
+    assert_eq!(setup_app.last_notice(), Some("model deepseek-v4-pro"));
+
+    let outcome = setup_app.submit_modal();
+    setup_app.apply_modal_outcome(outcome);
+
+    assert_eq!(
+        setup_app
+            .setup_state
+            .as_ref()
+            .map(|state| state.model.as_str()),
+        Some("deepseek-v4-pro")
+    );
+    assert_eq!(
+        setup_app.last_notice(),
+        Some("selected model deepseek-v4-pro")
+    );
+
+    let mut config_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    config_app.open_config_panel();
+    config_app.open_model_picker(ModelPickerTarget::ProviderFim, "deepseek-v4-pro");
+
+    assert!(matches!(
+        config_app.handle_modal_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
+    assert_eq!(
+        config_app.last_notice(),
+        Some("fim model deepseek-v4-flash")
+    );
+
+    let outcome = config_app.submit_modal();
+    config_app.apply_modal_outcome(outcome);
+
+    let state = config_app
+        .config_state
+        .as_ref()
+        .expect("config state should remain open");
+    assert_eq!(state.draft.provider_fim_model, "deepseek-v4-flash");
+    assert!(state.dirty);
+    assert_eq!(
+        config_app.last_notice(),
+        Some("selected fim model deepseek-v4-flash")
+    );
+    Ok(())
+}
+
+#[test]
 fn config_numeric_text_modal_rejects_invalid_characters() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
@@ -420,6 +499,172 @@ fn mcp_elicitation_cycles_enum_and_boolean_fields() -> Result<()> {
         Some(json!({
             "mode": "fast",
             "confirm": true
+        }))
+    );
+    Ok(())
+}
+
+#[test]
+fn config_tail_messages_text_modal_updates_value_after_validation() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist after opening /config");
+    state.set_section(ConfigSection::Compaction);
+    state.selected_field = Some(ConfigField::CompactionTailMessages);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(app.modal_title(), Some("Tail messages"));
+    assert_eq!(app.modal_input_cursor(), Some(("value".to_owned(), 1, 4)));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("value does not accept 'x'"));
+    assert!(app.modal_lines().join("\n").contains("value: 6|"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should remain open");
+    assert!(!app.has_modal());
+    assert_eq!(state.draft.compaction_tail_messages, "9");
+    assert!(state.dirty);
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_modal_validates_multiple_field_kinds_and_accepts_response() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "planner".to_owned(),
+            message: "Need execution parameters".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "type": "string",
+                        "title": "Mode",
+                        "description": "Execution mode",
+                        "enum": ["read", "write"],
+                        "default": "read"
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "title": "Force",
+                        "description": "Force overwrite",
+                        "default": false
+                    },
+                    "count": {
+                        "type": "integer",
+                        "title": "Count",
+                        "description": "Number of items"
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "title": "Threshold",
+                        "description": "Retry threshold"
+                    }
+                },
+                "required": ["count"]
+            }),
+        },
+        response_tx,
+    })?;
+
+    let lines = app.modal_lines().join("\n");
+    assert!(lines.contains("Need execution parameters"));
+    assert!(lines.contains("server: planner"));
+    assert!(lines.contains("fields: 4"));
+
+    while app
+        .modal_input_cursor()
+        .as_ref()
+        .map(|(label, _, _)| label.as_str())
+        != Some("Mode")
+    {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    assert!(app.modal_lines().join("\n").contains("Mode: read|"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("editing Mode"));
+    assert!(app.modal_lines().join("\n").contains("Mode: write|"));
+
+    while app
+        .modal_input_cursor()
+        .as_ref()
+        .map(|(label, _, _)| label.as_str())
+        != Some("Force")
+    {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    assert!(app.modal_lines().join("\n").contains("Force: true|"));
+
+    while app
+        .modal_input_cursor()
+        .as_ref()
+        .map(|(label, _, _)| label.as_str())
+        != Some("Count")
+    {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.has_modal());
+    assert_eq!(app.last_notice(), Some("Count is required"));
+
+    for character in "12".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    while app
+        .modal_input_cursor()
+        .as_ref()
+        .map(|(label, _, _)| label.as_str())
+        != Some("Threshold")
+    {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    for character in "1e309".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    assert!(app.modal_lines().join("\n").contains("Threshold: 1e309|"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(app.has_modal());
+    assert_eq!(app.last_notice(), Some("Threshold must be a finite number"));
+
+    for _ in 0..5 {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+    }
+    for character in "2.5".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(!app.has_modal());
+    assert_eq!(app.last_notice(), Some("submitted MCP input to planner"));
+
+    let response = futures::executor::block_on(response_rx)?;
+    assert_eq!(response.action, McpElicitationAction::Accept);
+    assert_eq!(
+        response.content,
+        Some(json!({
+            "mode": "write",
+            "force": true,
+            "count": 12,
+            "threshold": 2.5
         }))
     );
     Ok(())

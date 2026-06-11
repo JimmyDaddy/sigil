@@ -1,4 +1,5 @@
 use super::*;
+use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
 
 #[test]
 fn setup_lines_include_startup_error_and_missing_auth_summary() {
@@ -99,5 +100,53 @@ fn typing_in_setup_model_field_opens_text_modal() -> Result<()> {
     assert_eq!(app.last_notice(), Some("editing model"));
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("model: g|"));
+    Ok(())
+}
+
+#[test]
+fn setup_screen_toggles_trust_and_opens_inline_field_modals() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("config").join("sigil.toml");
+    let workspace_root = temp.path().join("workspace");
+    let mut app = AppState::from_setup(
+        config_path,
+        workspace_root,
+        Some("invalid existing config".to_owned()),
+    );
+
+    let setup_lines = app.setup_lines().join("\n");
+    assert!(setup_lines.contains("Quick setup"));
+    assert!(setup_lines.contains("auth=missing"));
+    assert!(setup_lines.contains("load failed: invalid existing config"));
+    assert!(setup_lines.contains(&format!("env={SIGIL_API_KEY_ENV}")));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("trust current folder on"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("setup field model"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))?;
+    assert_eq!(app.modal_title(), Some("Model ID"));
+    assert_eq!(app.modal_input_cursor(), Some(("model".to_owned(), 1, 3)));
+    assert!(app.modal_lines().join("\n").contains("model: p|"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("closed text input"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("setup field api_key"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    assert_eq!(app.modal_title(), Some("API Key"));
+    assert_eq!(app.modal_input_cursor(), Some(("api_key".to_owned(), 1, 4)));
+    assert!(app.modal_lines().join("\n").contains("api_key: *|"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("updated api key"));
+    assert_eq!(
+        app.setup_state.as_ref().map(|state| state.api_key.as_str()),
+        Some("s")
+    );
     Ok(())
 }
