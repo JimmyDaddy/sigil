@@ -423,3 +423,50 @@ fn permission_external_directory_rule_rejects_parent_components() -> Result<()> 
     assert!(error.to_string().contains("must not contain .."));
     Ok(())
 }
+
+#[test]
+fn permission_rule_without_subject_glob_applies_when_call_has_no_subjects() -> Result<()> {
+    let config = PermissionConfig {
+        rules: vec![PermissionRule {
+            tool_name: Some("bash".to_owned()),
+            subject_glob: None,
+            mode: ApprovalMode::Deny,
+        }],
+        ..PermissionConfig::default()
+    };
+
+    let decision =
+        PermissionPolicy::new(&config).decide(&spec(ToolAccess::Execute), "bash", vec![])?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    assert!(decision.subjects.is_empty());
+    Ok(())
+}
+
+#[test]
+fn permission_external_directory_rule_requires_absolute_or_home_anchored_glob() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_path = temp.path().canonicalize()?.join("note.txt");
+    let config = PermissionConfig {
+        external_directory: ExternalDirectoryConfig {
+            enabled: true,
+            rules: vec![ExternalDirectoryRule {
+                path_glob: "relative/path/**".to_owned(),
+                mode: ApprovalMode::Allow,
+            }],
+            ..ExternalDirectoryConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+
+    let error = PermissionPolicy::new(&config)
+        .decide(
+            &spec(ToolAccess::Read),
+            "read_file",
+            vec![external_path_subject(external_path)],
+        )
+        .expect_err("relative external glob should fail");
+
+    assert!(error.to_string().contains("must be absolute"));
+    Ok(())
+}

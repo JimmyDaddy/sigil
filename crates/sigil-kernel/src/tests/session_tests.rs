@@ -529,3 +529,70 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
     assert_eq!(session.stats().last_prompt_tokens, 0);
     Ok(())
 }
+
+#[test]
+fn continuation_states_keep_latest_state_per_key_and_provider() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_control(ControlEntry::ContinuationStateSaved(
+        ProviderContinuationState {
+            provider_name: "deepseek".to_owned(),
+            state_kind: "cursor".to_owned(),
+            message_id: Some("message-1".to_owned()),
+            opaque_blob: serde_json::json!({"cursor":"old"}),
+        },
+    ))?;
+    session.append_control(ControlEntry::ContinuationStateSaved(
+        ProviderContinuationState {
+            provider_name: "deepseek".to_owned(),
+            state_kind: "cursor".to_owned(),
+            message_id: Some("message-1".to_owned()),
+            opaque_blob: serde_json::json!({"cursor":"new"}),
+        },
+    ))?;
+    session.append_control(ControlEntry::ContinuationStateSaved(
+        ProviderContinuationState {
+            provider_name: "other".to_owned(),
+            state_kind: "cursor".to_owned(),
+            message_id: Some("message-1".to_owned()),
+            opaque_blob: serde_json::json!({"cursor":"other"}),
+        },
+    ))?;
+    session.append_control(ControlEntry::ContinuationStateSaved(
+        ProviderContinuationState {
+            provider_name: "deepseek".to_owned(),
+            state_kind: "reasoning".to_owned(),
+            message_id: None,
+            opaque_blob: serde_json::json!({"trace":"kept"}),
+        },
+    ))?;
+
+    let mut states = session.continuation_states("deepseek");
+    states.sort_by(|left, right| left.state_kind.cmp(&right.state_kind));
+
+    assert_eq!(states.len(), 2);
+    assert_eq!(states[0].state_kind, "cursor");
+    assert_eq!(states[0].opaque_blob["cursor"], "new");
+    assert_eq!(states[1].state_kind, "reasoning");
+    Ok(())
+}
+
+#[test]
+fn ensure_identity_entry_is_idempotent() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+
+    session.ensure_identity_entry()?;
+    session.ensure_identity_entry()?;
+
+    let identity_entries = session
+        .entries()
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+            )
+        })
+        .count();
+    assert_eq!(identity_entries, 1);
+    Ok(())
+}

@@ -237,3 +237,46 @@ fn resolve_workspace_root_uses_launch_cwd_for_default_dot() {
         Path::new("/Users/example/.config/sigil/nested/workspace")
     );
 }
+
+#[test]
+fn compaction_threshold_status_handles_disabled_and_missing_window() {
+    let disabled = CompactionConfig {
+        enabled: false,
+        ..CompactionConfig::default()
+    };
+    let missing_window = CompactionConfig {
+        enabled: true,
+        context_window_tokens: None,
+        ..CompactionConfig::default()
+    };
+    let zero_window = CompactionConfig {
+        enabled: true,
+        context_window_tokens: Some(0),
+        ..CompactionConfig::default()
+    };
+
+    assert_eq!(
+        disabled.threshold_status(100),
+        CompactionThresholdStatus::Off
+    );
+    assert_eq!(
+        missing_window.threshold_status(100),
+        CompactionThresholdStatus::NotAvailable
+    );
+    assert_eq!(
+        zero_window.threshold_status(100),
+        CompactionThresholdStatus::NotAvailable
+    );
+}
+
+#[test]
+fn resolve_workspace_root_handles_blank_and_absolute_paths() {
+    let config_path = Path::new("/Users/example/.config/sigil/sigil.toml");
+    let cwd = Path::new("/Users/example/work/project");
+
+    assert_eq!(resolve_workspace_root(config_path, cwd, "   "), cwd);
+    assert_eq!(
+        resolve_workspace_root(config_path, cwd, "/tmp/absolute-workspace"),
+        Path::new("/tmp/absolute-workspace")
+    );
+}

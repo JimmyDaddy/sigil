@@ -475,6 +475,9 @@ struct PreviewFailingWriteTool {
     executed: Arc<AtomicBool>,
 }
 
+struct ExecuteFailingTool;
+struct InvalidEgressTool;
+
 #[async_trait]
 impl Tool for PreviewFailingWriteTool {
     fn spec(&self) -> crate::ToolSpec {
@@ -519,6 +522,8 @@ impl Tool for PreviewFailingWriteTool {
 }
 
 struct PreviewFallbackProvider;
+struct UnknownToolProvider;
+struct ExecuteFailingProvider;
 
 #[async_trait]
 impl Provider for PreviewFallbackProvider {
@@ -585,6 +590,191 @@ impl Provider for PreviewFallbackProvider {
                 Ok(ProviderChunk::Done),
             ])))
         }
+    }
+}
+
+#[async_trait]
+impl Provider for UnknownToolProvider {
+    fn name(&self) -> &str {
+        "mock-unknown-tool"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            supports_reasoning_stream: true,
+            supports_tool_stream: true,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        if tool_used {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])))
+        } else {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-missing-1".to_owned(),
+                    name: "missing_tool".to_owned(),
+                    args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])))
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for ExecuteFailingProvider {
+    fn name(&self) -> &str {
+        "mock-execute-failing"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            supports_reasoning_stream: true,
+            supports_tool_stream: true,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        if tool_used {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])))
+        } else {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-execute-1".to_owned(),
+                    name: "explode".to_owned(),
+                    args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])))
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ExecuteFailingTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "explode".to_owned(),
+            description: "explode".to_owned(),
+            input_schema: serde_json::json!({"type":"object"}),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        _call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        anyhow::bail!("tool exploded");
+    }
+}
+
+#[async_trait]
+impl Tool for InvalidEgressTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "write_file".to_owned(),
+            description: "write".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+        Ok(vec![ToolSubject::path(path, path)])
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(Some(ApprovalMode::Allow))
+    }
+
+    fn egress_audit(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Option<ToolEgressAudit>> {
+        Err(anyhow::anyhow!("egress payload invalid"))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "write_file",
+            "should not execute",
+            ToolResultMeta::default(),
+        ))
     }
 }
 
@@ -1659,5 +1849,141 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
         saved_state.and_then(|state| state.message_id.clone()),
         assistant_tool_message_id
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_returns_internal_tool_result_for_unknown_registered_name() -> Result<()> {
+    let agent = Agent::new(UnknownToolProvider, ToolRegistry::new());
+    let mut session = Session::new("mock-unknown-tool", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let result = agent
+        .run(
+            &mut session,
+            "trigger unknown tool",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(session.messages().iter().any(|message| {
+        matches!(message.role, MessageRole::Tool)
+            && message.tool_call_id.as_deref() == Some("call-missing-1")
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("unknown tool missing_tool"))
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-missing-1"
+                    && execution.status == ToolExecutionStatus::Failed
+                    && execution.error.as_ref().is_some_and(|error| error.kind == ToolErrorKind::Internal)
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_records_failed_execution_when_tool_returns_error() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExecuteFailingTool));
+    let agent = Agent::new(ExecuteFailingProvider, registry);
+    let mut session = Session::new("mock-execute-failing", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let result = agent
+        .run(
+            &mut session,
+            "fail execution",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolResult(result)
+            if result.is_error() && result.content.contains("tool exploded"))
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-execute-1"
+                    && execution.status == ToolExecutionStatus::Failed
+                    && execution.error.as_ref().is_some_and(|error| error.kind == ToolErrorKind::Internal)
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_returns_invalid_input_when_egress_audit_fails() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(InvalidEgressTool));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = PanicApprovalHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write something",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Headless,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolResult(result)
+            if result.is_error() && result.content.contains("egress payload invalid"))
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-write-1"
+                    && execution.status == ToolExecutionStatus::Failed
+                    && execution.error.as_ref().is_some_and(|error| error.kind == ToolErrorKind::InvalidInput)
+        )
+    }));
     Ok(())
 }
