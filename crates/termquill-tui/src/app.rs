@@ -78,6 +78,28 @@ fn code_intelligence_config_status(config: &CodeIntelligenceConfig) -> String {
     }
 }
 
+fn diagnostic_summary_label(summary: ApprovalDiagnosticSummary) -> String {
+    if summary.is_clean() {
+        return "clean".to_owned();
+    }
+    let mut parts = Vec::new();
+    if summary.errors > 0 {
+        parts.push(count_label(summary.errors, "error", "errors"));
+    }
+    if summary.warnings > 0 {
+        parts.push(count_label(summary.warnings, "warning", "warnings"));
+    }
+    parts.join(" ")
+}
+
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {plural}")
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub config_path: PathBuf,
@@ -403,6 +425,7 @@ impl AppState {
     pub(crate) fn code_intelligence_sidebar_lines(&self) -> Vec<String> {
         if self.code_intelligence_server_lines.is_empty()
             && self.code_intelligence_diagnostics_line.is_none()
+            && self.code_intelligence_diagnostics_by_path.is_empty()
         {
             return vec![format!("status: {}", self.code_intelligence_status)];
         }
@@ -413,6 +436,39 @@ impl AppState {
             .collect::<Vec<_>>();
         if let Some(line) = &self.code_intelligence_diagnostics_line {
             lines.push(line.clone());
+        }
+        lines.extend(self.code_intelligence_diagnostic_file_lines());
+        lines
+    }
+
+    fn code_intelligence_diagnostic_file_lines(&self) -> Vec<String> {
+        if self.code_intelligence_diagnostics_by_path.is_empty() {
+            return Vec::new();
+        }
+        const MAX_DIAGNOSTIC_FILES: usize = 4;
+        let mut summaries = self
+            .code_intelligence_diagnostics_by_path
+            .iter()
+            .map(|(path, summary)| (path.as_str(), *summary))
+            .collect::<Vec<_>>();
+        summaries.sort_by(|(left_path, left), (right_path, right)| {
+            right
+                .errors
+                .cmp(&left.errors)
+                .then_with(|| right.warnings.cmp(&left.warnings))
+                .then_with(|| left_path.cmp(right_path))
+        });
+
+        let mut lines = vec![format!("latest diagnostics: {} files", summaries.len())];
+        lines.extend(
+            summaries
+                .iter()
+                .take(MAX_DIAGNOSTIC_FILES)
+                .map(|(path, summary)| format!("{path}: {}", diagnostic_summary_label(*summary))),
+        );
+        let hidden = summaries.len().saturating_sub(MAX_DIAGNOSTIC_FILES);
+        if hidden > 0 {
+            lines.push(format!("+{hidden} more files"));
         }
         lines
     }

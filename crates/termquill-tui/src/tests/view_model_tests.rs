@@ -240,6 +240,80 @@ fn code_diagnostics_tool_result_projects_diagnostic_counts() -> anyhow::Result<(
 }
 
 #[test]
+fn code_diagnostics_tool_result_projects_latest_file_summaries() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-code",
+        "code_diagnostics",
+        json!({
+            "query": {
+                "paths": [
+                    "src/clean.rs",
+                    "src/error.rs",
+                    "src/warn.rs",
+                    "src/both.rs",
+                    "src/extra.rs"
+                ]
+            },
+            "diagnostics": [
+                { "path": "src/error.rs", "severity": "error" },
+                { "path": "src/both.rs", "severity": "error" },
+                { "path": "src/both.rs", "severity": "warning" },
+                { "path": "src/warn.rs", "severity": "warning" }
+            ]
+        })
+        .to_string(),
+        ToolResultMeta {
+            details: json!({
+                "code_intelligence": {
+                    "status_line": "ready rust-analyzer",
+                    "servers": [{
+                        "server": "rust-analyzer",
+                        "languages": ["rust"],
+                        "status": "ready"
+                    }]
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    )))?;
+
+    let view_model = UiViewModel::from_app(&app);
+    let code_lines = view_model.info_rail.code_lines;
+
+    assert!(
+        code_lines
+            .iter()
+            .any(|line| line == "latest diagnostics: 5 files")
+    );
+    assert!(
+        code_lines
+            .iter()
+            .any(|line| line == "src/both.rs: 1 error 1 warning")
+    );
+    assert!(
+        code_lines
+            .iter()
+            .any(|line| line == "src/error.rs: 1 error")
+    );
+    assert!(
+        code_lines
+            .iter()
+            .any(|line| line == "src/warn.rs: 1 warning")
+    );
+    assert!(code_lines.iter().any(|line| line == "+1 more files"));
+    assert!(
+        code_lines
+            .iter()
+            .position(|line| line == "src/both.rs: 1 error 1 warning")
+            < code_lines
+                .iter()
+                .position(|line| line == "src/warn.rs: 1 warning")
+    );
+    Ok(())
+}
+
+#[test]
 fn composer_view_model_tracks_input_cursor() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/termquill.toml"), &test_config());
     app.handle_key_event(KeyEvent::new(KeyCode::Char('你'), KeyModifiers::NONE))?;

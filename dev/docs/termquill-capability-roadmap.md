@@ -109,7 +109,7 @@ cargo clippy --all-targets -- -D warnings
 - 已支持 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具；`code_workspace_symbols` 会对已配置或自动发现的 language server 做 fan-out 并合并结果。
 - `code_intelligence.discovery.enabled = true` 时会按 workspace marker / 文件扩展名自动发现 Rust、TypeScript/JavaScript、Python、Go，并只把 PATH 上可用的内置 allowlist server 纳入启动计划；手写 `code_intelligence.servers` 作为高级覆盖或补充。
 - Rust 项目优先走 `rust-analyzer`；LSP 不可用时，符号与语法诊断回退到 Tree-sitter Rust。
-- TUI info rail 的 `LSP` 区按 language/server 显示最近状态，包括 installed、missing、ready、degraded、fallback，并在 `code_diagnostics` 后投影错误/警告摘要；code tool result 使用专门 renderer。
+- TUI info rail 的 `LSP` 区按 language/server 显示最近状态，包括 installed、missing、ready、degraded、fallback，并在 `code_diagnostics` 后投影错误/警告摘要和最近文件级 diagnostics 列表；code tool result 使用专门 renderer。
 - 默认配置仍为关闭，不影响普通 chat、内置工具和 MCP。
 
 ### 5.1 最小 code intelligence 服务
