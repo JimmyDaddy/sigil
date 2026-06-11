@@ -102,7 +102,7 @@
 - `notifications/progress` 在没有产品化 timeline 映射前只能安全忽略，不能刷爆事件流
 - `elicitation/create` 在 TUI 交互闭环落地前必须明确返回 unsupported，不要静默挂起或伪造用户输入
 - MCP server 配置必须保留 lifecycle/trust 边界：默认 `required = true`、`startup = "eager"`；`required = false` 且 `startup = "lazy"` 当前只能跳过启动和注册，不要伪造 lazy 工具；required lazy 在 lazy activation 落地前必须明确报错；`required = false` 的 eager server 失败时可以降级为 warning 并跳过
-- MCP trust policy 必须可配置、可序列化，至少表达 `trust_class / approval_default / egress_logging / allow_secrets / pin_version`；在没有更细粒度 enforcement 前，不要把这些字段写成已经生效的安全保证
+- MCP trust policy 必须可配置、可序列化，至少表达 `trust_class / approval_default / egress_logging / allow_secrets / pin_version`；已接入运行时的字段必须有测试覆盖，尚未接入更细粒度 enforcement 的字段不要写成已经生效的安全保证
 
 ### 3.5 `termquill-tui`
 

@@ -2,9 +2,9 @@ use std::fs;
 
 use anyhow::Result;
 use termquill_kernel::{
-    McpServerConfig, McpServerStartup, McpServerTrustPolicy, ProviderCapabilities, SecretRedactor,
-    ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolRegistry, ToolResultStatus,
-    ToolSubjectKind, ToolSubjectScope,
+    ApprovalMode, McpServerConfig, McpServerStartup, McpServerTrustPolicy, McpTrustClass,
+    ProviderCapabilities, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
+    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 
 use super::{register_mcp_tools, register_mcp_tools_with_capabilities_roots_and_secrets};
@@ -85,6 +85,11 @@ while True:
             command: "python3".to_owned(),
             args: vec![script.to_string_lossy().to_string()],
             startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                trust_class: McpTrustClass::ThirdParty,
+                approval_default: ApprovalMode::Allow,
+                ..McpServerTrustPolicy::default()
+            },
             ..McpServerConfig::default()
         }],
     )
@@ -107,10 +112,27 @@ while True:
             args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
         },
     )?;
-    assert_eq!(subjects.len(), 1);
+    assert_eq!(subjects.len(), 2);
     assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
     assert_eq!(subjects[0].normalized, "mcp__fake__echo");
     assert_eq!(subjects[0].scope, ToolSubjectScope::Unknown);
+    assert_eq!(subjects[1].kind, ToolSubjectKind::McpTrustClass);
+    assert_eq!(subjects[1].original, "fake:third_party");
+    assert_eq!(subjects[1].normalized, "mcp_trust_class:third_party");
+    assert_eq!(subjects[1].scope, ToolSubjectScope::Unknown);
+
+    let default_mode = registry.permission_default_mode(
+        &ToolContext {
+            workspace_root: temp.path().to_path_buf(),
+            timeout_secs: 5,
+        },
+        &termquill_kernel::ToolCall {
+            id: "call-default".to_owned(),
+            name: "mcp__fake__echo".to_owned(),
+            args_json: r#"{"value":"hello from mcp"}"#.to_owned(),
+        },
+    )?;
+    assert_eq!(default_mode, Some(ApprovalMode::Allow));
 
     let result = registry
         .execute(

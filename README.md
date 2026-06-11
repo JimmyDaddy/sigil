@@ -236,7 +236,7 @@ allow_secrets = false
 pin_version = false
 ```
 
-当前 MCP 支持 stdio、`initialize`、`tools/list`、`tools/call`、provider-visible 名称清洗/截断/hash 去重，以及 `roots/list` 响应。client 只把已解析的 workspace root 暴露为 root；`notifications/progress` 会被安全忽略，不刷 timeline；`elicitation/create` 在完整 TUI 交互落地前会返回不支持错误。`allow_secrets = false` 时，MCP tool 参数中一旦包含已解析 secret 或 secret-like 字段会被阻断；允许发送 secret 的 MCP 结果仍会在回到本地 tool result 前脱敏。MCP server 默认是 required + eager；`required = false` 的 eager server 启动或 `tools/list` 失败时会跳过并记录 warning，`required = false` 且 `startup = "lazy"` 的 server 当前不会启动或注册工具；required lazy 会明确报错，避免关键 server 被静默跳过。
+当前 MCP 支持 stdio、`initialize`、`tools/list`、`tools/call`、provider-visible 名称清洗/截断/hash 去重，以及 `roots/list` 响应。client 只把已解析的 workspace root 暴露为 root；`notifications/progress` 会被安全忽略，不刷 timeline；`elicitation/create` 在完整 TUI 交互落地前会返回不支持错误。MCP tool 的 permission subjects 会包含 `mcp_trust_class:<class>`，可被 permission rule 匹配；`approval_default` 会作为该 server 工具的默认审批模式参与逐调用决策，并且仍会被显式 tool/rule override 覆盖。`allow_secrets = false` 时，MCP tool 参数中一旦包含已解析 secret 或 secret-like 字段会被阻断；允许发送 secret 的 MCP 结果仍会在回到本地 tool result 前脱敏。MCP server 默认是 required + eager；`required = false` 的 eager server 启动或 `tools/list` 失败时会跳过并记录 warning，`required = false` 且 `startup = "lazy"` 的 server 当前不会启动或注册工具；required lazy 会明确报错，避免关键 server 被静默跳过。
 
 ### Provider 环境变量 override
 

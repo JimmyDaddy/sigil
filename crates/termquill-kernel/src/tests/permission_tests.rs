@@ -83,6 +83,67 @@ fn permission_dynamic_access_can_downgrade_execute_to_read() -> Result<()> {
 }
 
 #[test]
+fn permission_tool_default_mode_is_between_access_default_and_tool_rules() -> Result<()> {
+    let subjects = vec![
+        ToolSubject::mcp_tool("mcp__fake__echo"),
+        ToolSubject::mcp_trust_class("fake", "third_party"),
+    ];
+    let access_deny = PermissionConfig {
+        access: PermissionAccessConfig {
+            network: Some(ApprovalMode::Deny),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let server_default = PermissionPolicy::new(&access_deny).decide_with_access_and_default(
+        &spec(ToolAccess::Network),
+        "mcp__fake__echo",
+        ToolAccess::Network,
+        subjects.clone(),
+        Some(ApprovalMode::Allow),
+    )?;
+
+    assert_eq!(server_default.mode, ApprovalMode::Allow);
+
+    let tool_override = PermissionConfig {
+        access: PermissionAccessConfig {
+            network: Some(ApprovalMode::Deny),
+            ..PermissionAccessConfig::default()
+        },
+        tools: BTreeMap::from([("mcp__fake__echo".to_owned(), ApprovalMode::Ask)]),
+        ..PermissionConfig::default()
+    };
+    let explicit_tool = PermissionPolicy::new(&tool_override).decide_with_access_and_default(
+        &spec(ToolAccess::Network),
+        "mcp__fake__echo",
+        ToolAccess::Network,
+        subjects.clone(),
+        Some(ApprovalMode::Allow),
+    )?;
+
+    assert_eq!(explicit_tool.mode, ApprovalMode::Ask);
+
+    let trust_rule = PermissionConfig {
+        rules: vec![PermissionRule {
+            tool_name: None,
+            subject_glob: Some("mcp_trust_class:third_party".to_owned()),
+            mode: ApprovalMode::Deny,
+        }],
+        ..PermissionConfig::default()
+    };
+    let explicit_rule = PermissionPolicy::new(&trust_rule).decide_with_access_and_default(
+        &spec(ToolAccess::Network),
+        "mcp__fake__echo",
+        ToolAccess::Network,
+        subjects,
+        Some(ApprovalMode::Allow),
+    )?;
+
+    assert_eq!(explicit_rule.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
 fn permission_tool_override_is_more_specific_than_access_default() -> Result<()> {
     let config = PermissionConfig {
         tools: BTreeMap::from([("read_file".to_owned(), ApprovalMode::Ask)]),

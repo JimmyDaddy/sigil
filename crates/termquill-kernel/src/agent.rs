@@ -279,11 +279,38 @@ where
                                 continue;
                             }
                         };
-                        let decision = permission_policy.decide_with_access(
+                        let tool_default_mode = match self
+                            .tools
+                            .permission_default_mode(&tool_ctx, &call)
+                        {
+                            Ok(mode) => mode,
+                            Err(error) => {
+                                let mut result = ToolResult::error(
+                                    call.id.clone(),
+                                    call.name.clone(),
+                                    ToolErrorKind::InvalidInput,
+                                    format!("invalid tool arguments for {}: {error}", call.name),
+                                );
+                                attach_tool_call_context(&mut result, &call, &subjects);
+                                append_tool_execution_audit(
+                                    session,
+                                    &call,
+                                    &subjects,
+                                    ToolExecutionStatus::Failed,
+                                    None,
+                                    Some(&result),
+                                )?;
+                                session.append_tool_message(result.to_model_message())?;
+                                handler.handle(RunEvent::ToolResult(result))?;
+                                continue;
+                            }
+                        };
+                        let decision = permission_policy.decide_with_access_and_default(
                             &spec,
                             &call.name,
                             access,
                             subjects.clone(),
+                            tool_default_mode,
                         )?;
                         let subject_label = if decision.subjects.is_empty() {
                             "-".to_owned()

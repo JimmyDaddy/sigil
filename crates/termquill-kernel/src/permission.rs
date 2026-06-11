@@ -200,21 +200,39 @@ impl<'a> PermissionPolicy<'a> {
     /// Returns an error when one configured subject glob is invalid.
     pub fn decide_with_access(
         &self,
+        spec: &ToolSpec,
+        tool_name: &str,
+        access: ToolAccess,
+        subjects: Vec<ToolSubject>,
+    ) -> Result<PermissionDecision> {
+        self.decide_with_access_and_default(spec, tool_name, access, subjects, None)
+    }
+
+    /// Resolves one tool call decision with a tool-provided default approval mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when one configured subject glob is invalid.
+    pub fn decide_with_access_and_default(
+        &self,
         _spec: &ToolSpec,
         tool_name: &str,
         access: ToolAccess,
         subjects: Vec<ToolSubject>,
+        tool_default_mode: Option<ApprovalMode>,
     ) -> Result<PermissionDecision> {
         let external_directory_required = subjects
             .iter()
             .any(|subject| subject.scope == ToolSubjectScope::External)
             && !self.config.external_directory.enabled;
         let subject_modes = if subjects.is_empty() {
-            vec![self.decide_one_subject(tool_name, access, None)?]
+            vec![self.decide_one_subject(tool_name, access, tool_default_mode, None)?]
         } else {
             subjects
                 .iter()
-                .map(|subject| self.decide_one_subject(tool_name, access, Some(subject)))
+                .map(|subject| {
+                    self.decide_one_subject(tool_name, access, tool_default_mode, Some(subject))
+                })
                 .collect::<Result<Vec<_>>>()?
         };
 
@@ -230,6 +248,7 @@ impl<'a> PermissionPolicy<'a> {
         &self,
         tool_name: &str,
         access: ToolAccess,
+        tool_default_mode: Option<ApprovalMode>,
         subject: Option<&ToolSubject>,
     ) -> Result<ApprovalMode> {
         let mut mode = self
@@ -237,6 +256,9 @@ impl<'a> PermissionPolicy<'a> {
             .access
             .mode_for(access)
             .unwrap_or(self.config.default_mode);
+        if let Some(tool_default_mode) = tool_default_mode {
+            mode = tool_default_mode;
+        }
         if let Some(tool_mode) = self.config.tools.get(tool_name).copied() {
             mode = tool_mode;
         }

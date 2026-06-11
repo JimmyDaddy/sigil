@@ -5,9 +5,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use termquill_kernel::{
-    McpServerConfig, McpServerStartup, McpServerTrustPolicy, ProviderCapabilities, SecretRedactor,
-    Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ApprovalMode, McpServerConfig, McpServerStartup, McpServerTrustPolicy, ProviderCapabilities,
+    SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -418,7 +418,21 @@ impl Tool for McpTool {
     }
 
     fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
-        Ok(vec![ToolSubject::mcp_tool(self.spec.name.clone())])
+        Ok(vec![
+            ToolSubject::mcp_tool(self.spec.name.clone()),
+            ToolSubject::mcp_trust_class(
+                self.tool_name.server_name.clone(),
+                self.trust.trust_class.as_str(),
+            ),
+        ])
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(Some(self.trust.approval_default))
     }
 
     async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {

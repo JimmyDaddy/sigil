@@ -89,6 +89,9 @@ struct EchoTool;
 struct WriteTool {
     executed: Arc<AtomicBool>,
 }
+struct DefaultAllowWriteTool {
+    executed: Arc<AtomicBool>,
+}
 struct ExternalWriteTool {
     executed: Arc<AtomicBool>,
     external_path: std::path::PathBuf,
@@ -178,6 +181,61 @@ impl Tool for WriteTool {
                 diff: format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+hello"),
             }],
         }))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        self.executed.store(true, Ordering::SeqCst);
+        Ok(ToolResult::ok(
+            call_id,
+            "write_file",
+            "wrote file",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for DefaultAllowWriteTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "write_file".to_owned(),
+            description: "write".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(
+        &self,
+        _ctx: &crate::ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<Vec<ToolSubject>> {
+        let path = args
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("missing string field path"))?;
+        Ok(vec![ToolSubject::path(path, path)])
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(Some(ApprovalMode::Allow))
     }
 
     async fn execute(
@@ -1080,6 +1138,55 @@ async fn agent_returns_approval_required_in_headless_ask_mode() -> Result<()> {
                 .content
                 .as_deref()
                 .is_some_and(|content| content.contains(r#""kind":"approval_required""#))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_uses_tool_default_permission_mode() -> Result<()> {
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(DefaultAllowWriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = PanicApprovalHandler;
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "write something",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Headless,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(executed.load(Ordering::SeqCst));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
+                    && approval.policy_decision == ApprovalMode::Allow
+        )
+    }));
+    assert!(!handler.events.iter().any(|event| {
+        matches!(event, RunEvent::ToolResult(result)
+            if result.is_error() && result.content.contains("requires approval in headless mode"))
     }));
     Ok(())
 }

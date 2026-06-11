@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::permission::ApprovalMode;
+
 /// JSON-schema-backed tool contract exposed to model providers and UI approvals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,6 +124,18 @@ impl ToolSubject {
             scope: ToolSubjectScope::Unknown,
         }
     }
+
+    pub fn mcp_trust_class(server_name: impl Into<String>, trust_class: impl Into<String>) -> Self {
+        let server_name = server_name.into();
+        let trust_class = trust_class.into();
+        Self {
+            kind: ToolSubjectKind::McpTrustClass,
+            original: format!("{server_name}:{trust_class}"),
+            normalized: format!("mcp_trust_class:{trust_class}"),
+            canonical_path: None,
+            scope: ToolSubjectScope::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,6 +145,7 @@ pub enum ToolSubjectKind {
     Command,
     NetworkEndpoint,
     McpTool,
+    McpTrustClass,
     Other,
 }
 
@@ -141,6 +156,7 @@ impl ToolSubjectKind {
             Self::Command => "command",
             Self::NetworkEndpoint => "network_endpoint",
             Self::McpTool => "mcp_tool",
+            Self::McpTrustClass => "mcp_trust_class",
             Self::Other => "other",
         }
     }
@@ -763,6 +779,23 @@ pub trait Tool: Send + Sync {
         Ok(self.spec().access)
     }
 
+    /// Returns an optional tool-provided default approval mode for this concrete call.
+    ///
+    /// This is used for configuration domains that are more specific than the global
+    /// access default, such as one MCP server's trust policy, while still allowing
+    /// explicit permission tool and subject rules to override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arguments are invalid and no reliable default can be derived.
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(None)
+    }
+
     /// Produces an optional approval preview for the given tool call.
     ///
     /// # Errors
@@ -885,6 +918,25 @@ impl ToolRegistry {
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.permission_access(ctx, &args)
+    }
+
+    /// Returns an optional tool-provided default approval mode for a tool call by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is unknown or the JSON arguments are invalid.
+    pub fn permission_default_mode(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Option<ApprovalMode>> {
+        let tool = self
+            .tools
+            .get(&call.name)
+            .ok_or_else(|| anyhow!("unknown tool {}", call.name))?;
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        tool.permission_default_mode(ctx, &args)
     }
 }
 
