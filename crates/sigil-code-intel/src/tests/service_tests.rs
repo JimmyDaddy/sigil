@@ -1027,20 +1027,80 @@ async fn service_helper_functions_cover_defaults_and_truncation() {
         2
     );
     assert!(parse_range(&json!({ "start": {} })).is_none());
-    assert_eq!(lsp_symbol_kind(Some(1)), "file");
-    assert_eq!(lsp_symbol_kind(Some(24)), "event");
-    assert_eq!(lsp_symbol_kind(Some(25)), "operator");
-    assert_eq!(lsp_symbol_kind(Some(26)), "type_parameter");
-    assert_eq!(lsp_symbol_kind(Some(23)), "struct");
+    let symbol_kinds = [
+        (1, "file"),
+        (2, "module"),
+        (3, "namespace"),
+        (4, "package"),
+        (5, "class"),
+        (6, "method"),
+        (7, "property"),
+        (8, "field"),
+        (9, "constructor"),
+        (10, "enum"),
+        (11, "interface"),
+        (12, "function"),
+        (13, "variable"),
+        (14, "constant"),
+        (15, "string"),
+        (16, "number"),
+        (17, "boolean"),
+        (18, "array"),
+        (19, "object"),
+        (20, "key"),
+        (21, "null"),
+        (22, "enum_member"),
+        (23, "struct"),
+        (24, "event"),
+        (25, "operator"),
+        (26, "type_parameter"),
+    ];
+    for (kind, label) in symbol_kinds {
+        assert_eq!(lsp_symbol_kind(Some(kind)), label);
+    }
     assert_eq!(lsp_symbol_kind(None), "symbol");
     assert_eq!(lsp_diagnostic_severity(Some(1)), "error");
+    assert_eq!(lsp_diagnostic_severity(Some(2)), "warning");
     assert_eq!(lsp_diagnostic_severity(Some(3)), "information");
+    assert_eq!(lsp_diagnostic_severity(Some(4)), "hint");
     assert_eq!(lsp_diagnostic_severity(None), "unknown");
     assert_eq!(preview_line(&file, 2).await.as_deref(), Some("second line"));
     assert!(preview_line(&file, 99).await.is_none());
     assert_eq!(service.limit(0), service.inner.config.max_results);
     assert_eq!(service.limit(1), 1);
     assert_eq!(service.request_timeout(), Duration::from_millis(50));
+}
+
+#[tokio::test]
+async fn service_basic_accessors_status_and_shutdown_cover_idle_paths() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let source = temp.path().join("src.rs");
+    fs::write(&source, "pub fn hello() {}\n").expect("source should write");
+    let service = CodeIntelligenceService::new(temp.path().to_path_buf(), fake_config());
+
+    assert!(service.enabled());
+    assert_eq!(service.config().servers.len(), 1);
+    assert_eq!(service.workspace_root(), temp.path());
+    assert_eq!(
+        service
+            .resolve_file("src.rs")
+            .expect("file should resolve")
+            .canonicalize()
+            .expect("resolved source should canonicalize"),
+        source
+            .canonicalize()
+            .expect("expected source should canonicalize")
+    );
+    assert!(service.resolve_file("../outside.rs").is_err());
+    assert_eq!(
+        CodeIntelligenceService::configured_status_line(service.config()),
+        "lazy"
+    );
+
+    service
+        .shutdown()
+        .await
+        .expect("idle shutdown should succeed");
 }
 
 #[tokio::test]

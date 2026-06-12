@@ -120,7 +120,7 @@ fn parse_balance_snapshot(payload: &serde_json::Value) -> Result<BalanceSnapshot
                 .and_then(|value| value.parse::<f64>().ok())?;
             Some((currency, total))
         })
-        .max_by(|left, right| left.1.total_cmp(&right.1));
+        .next();
 
     let Some((currency, total)) = primary else {
         bail!("provider returned no parseable balances");

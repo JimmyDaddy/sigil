@@ -4,21 +4,24 @@ use std::{
     ffi::OsString,
     path::Path,
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, InteractionMode, LanguageServerConfig,
     McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ReasoningEffort, RootConfig,
-    SessionConfig, ToolCall, ToolContext, ToolRegistry, WorkspaceConfig,
+    SessionConfig, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
 
 use super::{
     SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
-    build_run_options, build_tool_registry, load_deepseek_config, resolve_deepseek_api_key,
+    build_run_options, build_tool_registry, load_deepseek_config,
+    register_lazy_mcp_activation_tool, resolve_deepseek_api_key,
     resolve_deepseek_api_key_with_session, secret_redactor_for_root_config,
 };
 
@@ -56,6 +59,36 @@ fn test_root_config(provider: &str) -> RootConfig {
             }),
         )]),
         mcp_servers: Vec::new(),
+    }
+}
+
+struct ExistingMcpTool;
+
+#[async_trait]
+impl Tool for ExistingMcpTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "mcp__lazy__echo".to_owned(),
+            description: "already registered MCP tool".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Mcp,
+            access: ToolAccess::Network,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "mcp__lazy__echo",
+            "ok",
+            ToolResultMeta::default(),
+        ))
     }
 }
 
@@ -410,6 +443,93 @@ async fn activate_lazy_mcp_tools_detailed_reports_matched_servers() -> Result<()
 
     assert_eq!(result.matched_servers, 1);
     assert_eq!(result.added_tools, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        name: "lazy".to_owned(),
+        command: "/definitely/missing/sigil-mcp-server".to_owned(),
+        startup: McpServerStartup::Lazy,
+        ..McpServerConfig::default()
+    });
+    let mut registry = ToolRegistry::new();
+    register_lazy_mcp_activation_tool(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        std::env::current_dir()?,
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+    );
+
+    let unknown = registry
+        .execute(
+            ToolContext {
+                workspace_root: std::env::current_dir()?,
+                timeout_secs: 5,
+            },
+            ToolCall {
+                id: "activate-unknown".to_owned(),
+                name: "mcp_activate_server".to_owned(),
+                args_json: json!({"server_name": "other"}).to_string(),
+            },
+        )
+        .await?;
+    assert!(unknown.is_error());
+    assert!(unknown.content.contains("unknown lazy MCP server other"));
+
+    registry.register(Arc::new(ExistingMcpTool));
+    let subjects = registry.permission_subjects(
+        &ToolContext {
+            workspace_root: std::env::current_dir()?,
+            timeout_secs: 5,
+        },
+        &ToolCall {
+            id: "activate-lazy-subjects".to_owned(),
+            name: "mcp_activate_server".to_owned(),
+            args_json: json!({"server_name": "lazy"}).to_string(),
+        },
+    )?;
+    assert!(
+        subjects
+            .iter()
+            .any(|subject| subject.normalized == "mcp_server:lazy")
+    );
+
+    let audit = registry.egress_audit(
+        &ToolContext {
+            workspace_root: std::env::current_dir()?,
+            timeout_secs: 5,
+        },
+        &ToolCall {
+            id: "activate-lazy-audit".to_owned(),
+            name: "mcp_activate_server".to_owned(),
+            args_json: json!({"server_name": "lazy"}).to_string(),
+        },
+    )?;
+    assert!(audit.is_some());
+
+    let ready = registry
+        .execute(
+            ToolContext {
+                workspace_root: std::env::current_dir()?,
+                timeout_secs: 5,
+            },
+            ToolCall {
+                id: "activate-lazy".to_owned(),
+                name: "mcp_activate_server".to_owned(),
+                args_json: json!({"server_name": "lazy"}).to_string(),
+            },
+        )
+        .await?;
+    assert!(!ready.is_error());
+    let payload: serde_json::Value = serde_json::from_str(&ready.content)?;
+    assert_eq!(payload["status"], "already_ready");
+    assert_eq!(payload["matched_servers"], 1);
+    assert_eq!(payload["added_tools"], 0);
     Ok(())
 }
 

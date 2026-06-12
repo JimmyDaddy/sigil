@@ -469,6 +469,7 @@ pub enum ControlEntry {
     ResponseHandleTracked(ResponseHandle),
     BackgroundTaskTracked(BackgroundTaskHandle),
     PrefixSnapshotCaptured(PrefixSnapshot),
+    MemorySnapshotCaptured(MemorySnapshot),
     UsageSnapshot(UsageStats),
     ToolApproval(ToolApprovalEntry),
     ToolExecution(ToolExecutionEntry),
@@ -483,7 +484,8 @@ pub enum ControlEntry {
 - `ResponseHandleTracked`：记录可续跑句柄
 - `BackgroundTaskTracked`：记录后台任务句柄
 - `PrefixSnapshotCaptured`：记录当前稳定前缀的快照
-- `UsageSnapshot`：记录 usage 与 cache token 统计，供 resume 后恢复 session stats
+- `MemorySnapshotCaptured`：记录 request 使用的 memory/system 消息；后续 request 在 fingerprint 未变时复用该快照，fingerprint 变化时追加新快照，避免静默忽略 `AGENTS.md` 等文件更新
+- `UsageSnapshot`：记录 usage、cost 与 cache token 统计，供 resume 后恢复 session 生命周期累计 stats
 - `ToolApproval`：记录权限策略评估、审批请求、审批结果和 preview 失败，包含 call id、tool name、access、subjects、policy/user decision、reason 与 preview hash
 - `ToolExecution`：记录工具执行 started/completed/failed/interrupted，包含 duration、subjects、changed files、metadata、structured error 与 provider-visible result hash
 - `CompactionApplied`：记录稳定 compaction summary 与 tail 计数，供后续 request 做 provider-visible projection
@@ -573,7 +575,14 @@ pub struct SessionStats {
 }
 ```
 
-建议这个结构既支持“本轮增量”，也支持“整会话累计”。
+当前实现中，`UsageSnapshot` 是持久化事实源，`SessionStats` 可以从 append-only control log 重建整会话累计 usage。TUI 额外维护一个非持久化的 `session_delta_stats`，表示本次打开、恢复或切换到当前 session 后新增的 usage/cost；它在新 session 或 session switch 时清零，在每个 `RunEvent::Usage` 到达时与整会话 `stats` 同步累加。
+
+用户侧费用展示必须区分两个口径，UI label 使用自然短语而不是内部字段名：
+
+- `total spent`：从 session 创建至当前的生命周期累计扣费，resume 后由 `UsageSnapshot` 重建
+- `spent since opening`：本次 TUI 打开或恢复该 session 后新增的扣费，不写入 session log
+
+cost 字段当前仍以 provider 计价逻辑输出的 USD 金额作为内部源。TUI 展示时根据 provider balance 的 currency 选择显示货币；DeepSeek balance 返回 `CNY` 时，`total spent`、`spent since opening` 与 `cache save` 统一显示为 `CNY`，避免余额与扣费单位混用。
 
 ### 6.7 确定性序列化规范
 
@@ -744,8 +753,9 @@ Memory 必须遵循 cache-first 思路。
 
 在 session 运行中：
 
-- 除非发生 compaction，否则不改写这段 prefix
-- 中途新增的 memory 变化应通过 transient tail queue 注入，而不是直接篡改 prefix
+- 已加载的 memory/system 消息通过 `MemorySnapshotCaptured` 进入 append-only control log；后续 request 与 resume 在 fingerprint 未变时复用最新快照
+- 当 `AGENTS.md`、`SIGIL.md` 或导入的 memory 文档变化导致 fingerprint 改变时，下一轮 request 会追加新的 `MemorySnapshotCaptured` 并使用新内容；这会形成受控 cache reset 点，但不会让 AI 继续执行旧指令
+- 单轮用户临时要求应作为普通 user message 进入 tail history，不应改写已持久化的旧 memory snapshot
 
 ### 10.3 Cache-Safe Compaction
 

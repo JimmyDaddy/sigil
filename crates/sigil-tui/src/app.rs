@@ -70,6 +70,30 @@ use self::modal_flow::{
 use self::session_flow::{current_focus_label, short_session_token};
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
+// Usage costs are currently stored as USD; CNY display mirrors the provider wallet currency.
+const USD_TO_CNY: f64 = 7.2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsageCostCurrency {
+    Usd,
+    Cny,
+}
+
+impl UsageCostCurrency {
+    fn from_code(code: Option<&str>) -> Self {
+        match code {
+            Some(code) if code.eq_ignore_ascii_case("CNY") => Self::Cny,
+            _ => Self::Usd,
+        }
+    }
+
+    fn format_cost(self, usd_value: f64) -> String {
+        match self {
+            Self::Usd => format!("USD {usd_value:.4}"),
+            Self::Cny => format!("CNY {:.4}", usd_value * USD_TO_CNY),
+        }
+    }
+}
 
 fn code_intelligence_config_status(config: &CodeIntelligenceConfig) -> String {
     if !config.enabled || config.startup == CodeIntelStartup::Off {
@@ -164,6 +188,7 @@ pub struct AppState {
     pub timeline: Vec<TimelineEntry>,
     pub events: Vec<EventEntry>,
     pub stats: SessionStats,
+    pub session_delta_stats: SessionStats,
     pub should_quit: bool,
     pub is_busy: bool,
     pub pending_approval: Option<PendingApproval>,
@@ -294,6 +319,7 @@ impl AppState {
             timeline: Vec::new(),
             events: Vec::new(),
             stats: SessionStats::default(),
+            session_delta_stats: SessionStats::default(),
             should_quit: false,
             is_busy: false,
             pending_approval: None,
@@ -398,6 +424,7 @@ impl AppState {
             timeline: Vec::new(),
             events: Vec::new(),
             stats: SessionStats::default(),
+            session_delta_stats: SessionStats::default(),
             should_quit: false,
             is_busy: false,
             pending_approval: None,
@@ -575,6 +602,7 @@ impl AppState {
             .session_log_dir
             .join(format!("session-{}.jsonl", self.session_id));
         self.stats = SessionStats::default();
+        self.session_delta_stats = SessionStats::default();
         self.is_busy = false;
         self.pending_approval = None;
         self.active_pane = PaneFocus::Composer;
@@ -1131,8 +1159,14 @@ impl AppState {
     }
 
     fn refresh_usage_sidebar_cache(&mut self) {
-        let spent = self.stats.input_cost + self.stats.output_cost;
+        let currency = self.usage_cost_currency();
+        let session_spent = self.stats.input_cost + self.stats.output_cost;
+        let delta_spent =
+            self.session_delta_stats.input_cost + self.session_delta_stats.output_cost;
         let saved = self.stats.cache_savings;
+        let session_spent = currency.format_cost(session_spent);
+        let delta_spent = currency.format_cost(delta_spent);
+        let saved = currency.format_cost(saved);
         let balance_line = self.balance_sidebar_line();
         let mut lines = vec![
             self.context_usage_line(),
@@ -1140,10 +1174,11 @@ impl AppState {
             self.compaction_policy_line(),
             self.tool_card_status_line(),
             format!(
-                "cache: {:.0}% · save ${saved:.4}",
+                "cache: {:.0}% · save {saved}",
                 self.cache_hit_ratio() * 100.0
             ),
-            format!("spent: ${spent:.4}"),
+            format!("total spent: {session_spent}"),
+            format!("spent since opening: {delta_spent}"),
             balance_line,
         ];
         if !self.is_busy && !self.current_session_entries.is_empty() {
@@ -1186,9 +1221,18 @@ impl AppState {
         }
     }
 
+    fn usage_cost_currency(&self) -> UsageCostCurrency {
+        UsageCostCurrency::from_code(self.balance_snapshot.currency.as_deref())
+    }
+
     #[cfg(test)]
     pub(crate) fn footer_status_line(&self) -> String {
-        let spent = self.stats.input_cost + self.stats.output_cost;
+        let currency = self.usage_cost_currency();
+        let session_spent = self.stats.input_cost + self.stats.output_cost;
+        let delta_spent =
+            self.session_delta_stats.input_cost + self.session_delta_stats.output_cost;
+        let session_spent = currency.format_cost(session_spent);
+        let delta_spent = currency.format_cost(delta_spent);
         let token_line = format!(
             "tok {}",
             format_token_compact(self.stats.last_prompt_tokens)
@@ -1198,7 +1242,7 @@ impl AppState {
             _ => "ctx n/a".to_owned(),
         };
         format!(
-            "{}  ·  {}  ·  cache {:.0}%  ·  spent ${spent:.4}  ·  write {}  ·  Ctrl-C {}",
+            "{}  ·  {}  ·  cache {:.0}%  ·  spent {delta_spent} since opening / {session_spent} total  ·  write {}  ·  Ctrl-C {}",
             token_line,
             context,
             self.cache_hit_ratio() * 100.0,

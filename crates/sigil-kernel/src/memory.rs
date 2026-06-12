@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{MemoryConfig, ModelMessage, PrefixSnapshot};
@@ -13,7 +14,7 @@ const ROOT_MEMORY_FILENAMES: &[&str] = &["SIGIL.md", "AGENTS.md", "CLAUDE.md", "
 const BASE_SYSTEM_PROMPT: &str = "You are Sigil, a TUI-first Rust coding agent working inside the user's workspace. Prefer inspecting the workspace before edits, keep changes auditable, and follow loaded workspace instructions.";
 
 /// Loaded workspace memory summary for UI and request materialization.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryLoadReport {
     pub enabled: bool,
     pub document_count: usize,

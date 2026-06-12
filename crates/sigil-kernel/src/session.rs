@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CompactionConfig, MemoryConfig,
+    CompactionConfig, MemoryConfig, MemoryLoadReport,
     memory::{apply_memory_report, materialize_memory},
     permission::ApprovalMode,
     provider::{
@@ -54,6 +54,14 @@ pub struct CompactionPreview {
     pub projected_messages: Vec<ModelMessage>,
 }
 
+/// Stable memory payload captured for a specific memory fingerprint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MemorySnapshot {
+    pub messages: Vec<ModelMessage>,
+    pub report: MemoryLoadReport,
+}
+
 /// Control-plane state that must survive resume and remain outside model-facing chat history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +79,8 @@ pub enum ControlEntry {
     BackgroundTaskTracked(crate::provider::BackgroundTaskHandle),
     #[serde(alias = "PrefixSnapshotCaptured")]
     PrefixSnapshotCaptured(PrefixSnapshot),
+    #[serde(alias = "MemorySnapshotCaptured")]
+    MemorySnapshotCaptured(MemorySnapshot),
     #[serde(alias = "UsageSnapshot")]
     UsageSnapshot(UsageStats),
     #[serde(alias = "ToolApproval")]
@@ -439,6 +449,15 @@ impl Session {
         })
     }
 
+    pub fn latest_memory_snapshot(&self) -> Option<MemorySnapshot> {
+        self.entries.iter().rev().find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::MemorySnapshotCaptured(snapshot)) => {
+                Some(snapshot.clone())
+            }
+            _ => None,
+        })
+    }
+
     pub fn latest_compaction_record(&self) -> Option<CompactionRecord> {
         latest_compaction_record(&self.entries)
     }
@@ -457,7 +476,7 @@ impl Session {
         previous_response_handle: Option<crate::provider::ResponseHandle>,
         traffic_partition_key: Option<String>,
     ) -> Result<CompletionRequest> {
-        let memory = materialize_memory(workspace_root, memory_config)?;
+        let memory = self.memory_snapshot_for_request(workspace_root, memory_config)?;
         let projected_messages = self.projected_messages();
         let mut request_messages = memory.messages.clone();
         request_messages.extend(projected_messages);
@@ -494,6 +513,26 @@ impl Session {
             store: false,
             deterministic_materialization: true,
         })
+    }
+
+    fn memory_snapshot_for_request(
+        &mut self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+    ) -> Result<MemorySnapshot> {
+        let memory = materialize_memory(workspace_root, memory_config)?;
+        if let Some(snapshot) = self.latest_memory_snapshot()
+            && snapshot.report.fingerprint == memory.report.fingerprint
+        {
+            return Ok(snapshot);
+        }
+
+        let snapshot = MemorySnapshot {
+            messages: memory.messages,
+            report: memory.report,
+        };
+        self.append_control(ControlEntry::MemorySnapshotCaptured(snapshot.clone()))?;
+        Ok(snapshot)
     }
 
     /// Applies one stable compaction record and persists it in the append-only control log.

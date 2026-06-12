@@ -241,6 +241,40 @@ fn model_command_is_noop_when_selected_model_is_already_active() -> Result<()> {
 }
 
 #[test]
+fn slash_model_and_effort_invalid_or_busy_paths_show_usage_without_state_change() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let original_model = app.model_name.clone();
+    let original_session_id = app.session_id.clone();
+
+    app.input = "/effort impossible".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.reasoning_effort.as_str(), "max");
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /effort <low|medium|high|max>")
+    );
+
+    app.input = "/model".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.model_name, original_model);
+    assert_eq!(app.session_id, original_session_id);
+
+    app.is_busy = true;
+    app.input = "/model pro".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.model_name, original_model);
+    assert_eq!(app.session_id, original_session_id);
+    assert_eq!(app.last_notice(), Some("busy; model locked"));
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice
+                && entry.text == "busy; switch model after the run")
+    );
+    Ok(())
+}
+
+#[test]
 fn slash_selector_orders_effort_candidates_by_current_value() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.reasoning_effort = ReasoningEffort::High;

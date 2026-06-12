@@ -148,7 +148,7 @@ cargo run -p sigil-tui -- --config /absolute/path/to/sigil.toml
 - 文件变更工具的历史结果卡片会随 session restore 恢复；恢复后仍可回看 `write_file` / `edit_file` / `delete_file` 当时捕获的 bounded diff，下一轮模型上下文只保留工具结果摘要
 - `/config` 保存后的默认 provider/model 不会静默改写当前 session identity；当前会话仍以 durable log 中的身份为准，新默认值会用于后续新 session 或空白 session
 - 运行中取消后，TUI 会从 durable JSONL log 重建会话视图，避免把临时内存态当成恢复真相
-- 每轮 usage 会追加持久化 control 记录，session resume 后可恢复 cache hit、累计 usage 和最近一次 prompt pressure
+- 每轮 usage 会追加持久化 control 记录，session resume 后可恢复 cache hit、累计 usage、最近一次 prompt pressure 和 session 生命周期累计扣费；TUI 同时展示本次打开当前 session 后新增的 delta 扣费，费用单位跟随 provider balance currency
 - compaction 只追加 `CompactionApplied` control 记录，不改写旧历史；后续请求使用稳定 summary + tail 投影
 - hard threshold 自动 compaction 只在 run 回到 idle 后触发，不会抢占当前流式执行
 

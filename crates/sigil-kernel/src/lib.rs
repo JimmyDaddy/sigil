@@ -32,9 +32,9 @@ pub use provider::{
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
     CompactionPreview, CompactionRecord, ControlEntry, JsonlSessionStore, McpElicitationDecision,
-    McpElicitationEntry, Session, SessionLogEntry, ToolApprovalAuditAction, ToolApprovalEntry,
-    ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolSubjectAudit, latest_compaction_record, session_stats_from_entries,
+    McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolSubjectAudit, latest_compaction_record, session_stats_from_entries,
 };
 pub use tool::{
     Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit,

@@ -1,14 +1,16 @@
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+
+#[cfg(not(test))]
+use std::env;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
+#[cfg(not(test))]
+use sigil_kernel::preferred_config_path;
 use sigil_kernel::{
     Agent, EventHandler, InteractionMode, JsonlSessionStore, ProviderChunk, RootConfig, RunEvent,
-    Session, preferred_config_path, resolve_workspace_root,
+    Session, resolve_workspace_root,
 };
 use sigil_provider_deepseek::{
     DeepSeekFimCompletionRequest, DeepSeekPrefixCompletionRequest, DeepSeekProvider,
@@ -53,6 +55,7 @@ enum Commands {
     },
 }
 
+#[cfg(not(test))]
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();

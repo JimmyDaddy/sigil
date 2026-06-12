@@ -876,6 +876,16 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
                 skill_index_fingerprint: "skill-fingerprint".to_owned(),
             },
         )),
+        SessionLogEntry::Control(ControlEntry::MemorySnapshotCaptured(
+            sigil_kernel::MemorySnapshot {
+                messages: Vec::new(),
+                report: sigil_kernel::MemoryLoadReport {
+                    enabled: true,
+                    document_count: 2,
+                    fingerprint: "memory-fingerprint".to_owned(),
+                },
+            },
+        )),
         SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
             prompt_tokens: 10,
             completion_tokens: 5,
@@ -939,6 +949,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
     assert!(rendered.contains("[ctl] response response-1234567890"));
     assert!(rendered.contains("[ctl] task task-1"));
     assert!(rendered.contains("[ctl] prefix sha=abcdef1234567890"));
+    assert!(rendered.contains("[ctl] memory docs=2 fp=memory-fingerpri"));
     assert!(rendered.contains("[ctl] usage p=10 c=5 hit=3 miss=7"));
     assert!(rendered.contains("[ctl] approval call-write-1 write_file action=requested"));
     assert!(rendered.contains("[ctl] execution call-write-1 write_file status=completed"));

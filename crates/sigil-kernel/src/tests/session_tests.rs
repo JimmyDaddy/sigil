@@ -14,6 +14,33 @@ use super::{
     session_stats_from_entries,
 };
 
+fn request_memory_text(request: &crate::CompletionRequest) -> String {
+    request
+        .messages
+        .iter()
+        .filter_map(|message| {
+            message
+                .id
+                .starts_with("memory:")
+                .then_some(message.content.as_deref())
+                .flatten()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn memory_snapshot_count(entries: &[SessionLogEntry]) -> usize {
+    entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::MemorySnapshotCaptured(_))
+            )
+        })
+        .count()
+}
+
 #[test]
 fn load_from_store_recovers_identity_from_prefix_snapshot() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -198,6 +225,12 @@ fn build_request_persists_prefix_snapshot_in_memory_and_store() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(_))
         )
     }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::MemorySnapshotCaptured(_))
+        )
+    }));
 
     let reloaded = JsonlSessionStore::read_entries(store.path())?;
     assert!(reloaded.iter().any(|entry| {
@@ -206,6 +239,65 @@ fn build_request_persists_prefix_snapshot_in_memory_and_store() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(_))
         )
     }));
+    assert!(reloaded.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::MemorySnapshotCaptured(_))
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn build_request_refreshes_session_memory_snapshot_after_disk_memory_changes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    fs::write(temp.path().join("AGENTS.md"), "repo rules v1\n")?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let memory_config = MemoryConfig { enabled: true };
+
+    session.append_user_message(ModelMessage::user("first"))?;
+    let first = session.build_request(temp.path(), &memory_config, Vec::new(), None, None, None)?;
+    assert!(request_memory_text(&first).contains("repo rules v1"));
+
+    fs::write(temp.path().join("AGENTS.md"), "repo rules v2\n")?;
+    session.append_user_message(ModelMessage::user("second"))?;
+    let second =
+        session.build_request(temp.path(), &memory_config, Vec::new(), None, None, None)?;
+    let second_memory = request_memory_text(&second);
+    assert!(second_memory.contains("repo rules v2"));
+    assert!(!second_memory.contains("repo rules v1"));
+
+    let fingerprints = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::PrefixSnapshotCaptured(snapshot)) => {
+                Some(snapshot.memory_fingerprint.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fingerprints.len(), 2);
+    assert_ne!(fingerprints[0], fingerprints[1]);
+    assert_eq!(memory_snapshot_count(session.entries()), 2);
+
+    session.append_user_message(ModelMessage::user("third"))?;
+    let third = session.build_request(temp.path(), &memory_config, Vec::new(), None, None, None)?;
+    assert!(request_memory_text(&third).contains("repo rules v2"));
+    assert_eq!(memory_snapshot_count(session.entries()), 2);
+
+    let mut restored = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
+    restored.append_user_message(ModelMessage::user("after restore"))?;
+    let restored_request =
+        restored.build_request(temp.path(), &memory_config, Vec::new(), None, None, None)?;
+    let restored_memory = request_memory_text(&restored_request);
+    assert!(restored_memory.contains("repo rules v2"));
+    assert!(!restored_memory.contains("repo rules v1"));
+
+    let reloaded = JsonlSessionStore::read_entries(store.path())?;
+    assert_eq!(memory_snapshot_count(&reloaded), 2);
     Ok(())
 }
 

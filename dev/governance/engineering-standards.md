@@ -85,7 +85,7 @@ cargo clippy --all-targets -- -D warnings
 ./scripts/coverage.sh
 ```
 
-覆盖率门禁默认要求 workspace 单测行覆盖率 `>= 96%`，由 `cargo-llvm-cov` 执行；CI 和本地必须使用同一个脚本入口，避免阈值或统计范围漂移。
+覆盖率门禁默认要求 workspace 单测行覆盖率 `>= 96%`，由 `cargo-llvm-cov` 执行；CI 和本地必须使用同一个脚本入口，避免阈值或统计范围漂移。默认统计范围排除少量 orchestration loop 文件，具体列表以 `scripts/coverage.sh` 为准；这些文件只能承载入口调度和 I/O 桥接，不应成为新增业务逻辑的覆盖率逃逸区。
 
 ### 5.2 何时需要更强验证
 

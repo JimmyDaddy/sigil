@@ -672,6 +672,11 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 truncate_session_view_text(&snapshot.sha256, 16),
                 truncate_session_view_text(&snapshot.memory_fingerprint, 16)
             ),
+            ControlEntry::MemorySnapshotCaptured(snapshot) => format!(
+                "[ctl] memory docs={} fp={}",
+                snapshot.report.document_count,
+                truncate_session_view_text(&snapshot.report.fingerprint, 16)
+            ),
             ControlEntry::UsageSnapshot(usage) => format!(
                 "[ctl] usage p={} c={} hit={} miss={}",
                 usage.prompt_tokens,

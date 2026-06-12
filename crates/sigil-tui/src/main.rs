@@ -1,11 +1,14 @@
+use std::{path::PathBuf, time::Duration};
+
+#[cfg(not(test))]
 use std::{
     env, io,
-    path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
 use clap::Parser;
+#[cfg(not(test))]
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyEventKind,
@@ -14,20 +17,23 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
+#[cfg(not(test))]
+use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
 use ratatui::{
-    Terminal, TerminalOptions, Viewport,
-    backend::CrosstermBackend,
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use sigil_kernel::{RootConfig, preferred_config_path};
+use sigil_kernel::RootConfig;
+#[cfg(not(test))]
+use sigil_kernel::preferred_config_path;
+#[cfg(not(test))]
+use sigil_tui::ui::{self, LayoutSnapshot};
 use sigil_tui::{
     app::{AppAction, AppState},
     mouse::AppMouseOutcome,
     runner::{self, WorkerMessage},
-    ui::{self, LayoutSnapshot},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -37,7 +43,9 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SCROLLBACK_SEED_POLL_INTERVAL: Duration = Duration::from_millis(16);
 // Seed restored scrollback in one pass so startup does not visibly redraw chunk by chunk.
 const SCROLLBACK_SEED_CHUNK_LINES: usize = usize::MAX;
+#[cfg(not(test))]
 const MAX_SCROLLBACK_INSERT_ROWS: usize = u16::MAX as usize;
+#[cfg(not(test))]
 const SPINNER_FRAME_MILLIS: u128 = 120;
 
 #[derive(Parser)]
@@ -48,6 +56,7 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
+#[cfg(not(test))]
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
@@ -83,6 +92,7 @@ fn main() -> Result<()> {
     result
 }
 
+#[cfg(not(test))]
 fn enable_keyboard_enhancement<W: io::Write>(writer: &mut W) -> io::Result<bool> {
     execute!(
         writer,
@@ -91,11 +101,13 @@ fn enable_keyboard_enhancement<W: io::Write>(writer: &mut W) -> io::Result<bool>
     Ok(true)
 }
 
+#[cfg(not(test))]
 fn current_inline_viewport_height() -> Result<u16> {
     let (_, height) = crossterm::terminal::size()?;
     Ok(height.max(12))
 }
 
+#[cfg(not(test))]
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
@@ -219,9 +231,12 @@ fn process_app_action(
     worker: &mut Option<WorkerRuntime>,
     action: AppAction,
 ) -> Result<()> {
-    process_app_action_with_spawner(app, worker, action, spawn_worker)
+    process_app_action_with_spawner(app, worker, action, |_root_config, _app| {
+        unreachable!("test wrapper should not spawn a real worker")
+    })
 }
 
+#[cfg(not(test))]
 fn live_spinner_tick() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -317,6 +332,7 @@ enum ScrollbackSyncPlan {
     Noop,
 }
 
+#[cfg(not(test))]
 fn sync_terminal_scrollback(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &AppState,
@@ -480,6 +496,7 @@ fn plan_scrollback_sync_with_chunk_size(
     ScrollbackSyncPlan::Noop
 }
 
+#[cfg(not(test))]
 fn insert_scrollback_lines(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     lines: Vec<Line<'static>>,
@@ -598,6 +615,7 @@ struct WorkerRuntime {
     worker_rx: std::sync::mpsc::Receiver<WorkerMessage>,
 }
 
+#[cfg(not(test))]
 fn spawn_worker(root_config: RootConfig, app: &AppState) -> Result<WorkerRuntime> {
     let (worker_tx, worker_rx) = runner::spawn_agent_worker(
         root_config,

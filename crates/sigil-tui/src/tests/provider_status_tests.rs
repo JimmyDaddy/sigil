@@ -98,7 +98,7 @@ fn balance_snapshot_default_is_not_available() {
 }
 
 #[test]
-fn parse_balance_snapshot_uses_largest_parseable_balance() {
+fn parse_balance_snapshot_uses_first_parseable_balance_without_cross_currency_comparison() {
     let payload = json!({
         "is_available": true,
         "balance_infos": [
@@ -110,10 +110,10 @@ fn parse_balance_snapshot_uses_largest_parseable_balance() {
 
     let snapshot = parse_balance_snapshot(&payload).expect("valid balance should parse");
 
-    assert_eq!(snapshot.total, Some(99.50));
-    assert_eq!(snapshot.currency.as_deref(), Some("USD"));
+    assert_eq!(snapshot.total, Some(12.34));
+    assert_eq!(snapshot.currency.as_deref(), Some("CNY"));
     assert!(snapshot.available);
-    assert_eq!(snapshot.status, "USD 99.50");
+    assert_eq!(snapshot.status, "CNY 12.34");
 }
 
 #[test]

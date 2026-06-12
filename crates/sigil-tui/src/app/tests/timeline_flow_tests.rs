@@ -914,6 +914,246 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
 }
 
 #[test]
+fn usage_display_shows_session_and_delta_costs() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 100,
+        completion_tokens: 40,
+        cache_hit_tokens: 75,
+        cache_miss_tokens: 25,
+        input_cost: 0.12,
+        output_cost: 0.03,
+        cache_savings: 0.45,
+        system_fingerprint: None,
+    }))?;
+
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "cache: 75% · save USD 0.4500")
+    );
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "total spent: USD 0.1500")
+    );
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "spent since opening: USD 0.1500")
+    );
+    assert!(
+        app.footer_status_line()
+            .contains("spent USD 0.1500 since opening / USD 0.1500 total")
+    );
+    assert!(
+        !app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line.contains('$'))
+    );
+    Ok(())
+}
+
+#[test]
+fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.balance_snapshot = crate::provider_status::BalanceSnapshot {
+        total: Some(12.34),
+        currency: Some("CNY".to_owned()),
+        available: true,
+        status: "CNY 12.34".to_owned(),
+    };
+    let restored_path = app
+        .workspace_root
+        .join(".sigil/sessions/session-restored.jsonl");
+
+    app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 100,
+        completion_tokens: 10,
+        cache_hit_tokens: 50,
+        cache_miss_tokens: 50,
+        input_cost: 0.20,
+        output_cost: 0.05,
+        cache_savings: 0.10,
+        system_fingerprint: None,
+    }))?;
+    assert_eq!(app.session_delta_stats.input_cost, 0.20);
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path: restored_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries: vec![SessionLogEntry::Control(ControlEntry::UsageSnapshot(
+            UsageStats {
+                prompt_tokens: 200,
+                completion_tokens: 20,
+                cache_hit_tokens: 120,
+                cache_miss_tokens: 80,
+                input_cost: 1.00,
+                output_cost: 0.50,
+                cache_savings: 2.00,
+                system_fingerprint: None,
+            },
+        ))],
+    })?;
+
+    assert_eq!(app.stats.input_cost + app.stats.output_cost, 1.50);
+    assert_eq!(
+        app.session_delta_stats.input_cost + app.session_delta_stats.output_cost,
+        0.0
+    );
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "total spent: CNY 10.8000")
+    );
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "spent since opening: CNY 0.0000")
+    );
+
+    app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 100,
+        completion_tokens: 40,
+        cache_hit_tokens: 75,
+        cache_miss_tokens: 25,
+        input_cost: 0.12,
+        output_cost: 0.03,
+        cache_savings: 0.45,
+        system_fingerprint: None,
+    }))?;
+
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "total spent: CNY 11.8800")
+    );
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "spent since opening: CNY 1.0800")
+    );
+    assert!(
+        app.footer_status_line()
+            .contains("spent CNY 1.0800 since opening / CNY 11.8800 total")
+    );
+    Ok(())
+}
+
+#[test]
+fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.active_pane = PaneFocus::Activity;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let rows = app.agent_sidebar_rows();
+    assert!(rows.iter().any(|row| row.label == "main" && row.selected));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let rows = app.agent_sidebar_rows();
+    assert!(
+        rows.iter()
+            .any(|row| row.label == "subagents" && row.selected)
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("not connected yet"));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert_eq!(app.input, "/");
+
+    app.active_pane = PaneFocus::Activity;
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    Ok(())
+}
+
+#[test]
+fn busy_escape_requests_cancel_without_discarding_composer_text() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.is_busy = true;
+    app.input = "keep draft".to_owned();
+    app.input_cursor = app.input.chars().count();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+    assert!(matches!(action, Some(AppAction::CancelRun)));
+    assert_eq!(app.input, "keep draft");
+    assert_eq!(app.last_notice(), Some("cancellation requested"));
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "cancel requested")
+    );
+    Ok(())
+}
+
+#[test]
+fn slash_command_busy_and_unknown_paths_leave_tui_responsive() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.input = "/unknown".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.last_notice(), Some("unknown slash command"));
+
+    app.is_busy = true;
+    app.input = "/compact".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "busy; compact later")
+    );
+
+    app.input = "/resume missing".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "busy; resume later")
+    );
+    Ok(())
+}
+
+#[test]
+fn app_status_helpers_cover_empty_balance_context_and_session_title() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.balance_snapshot.available = true;
+    app.balance_snapshot.total = None;
+    app.balance_snapshot.currency = None;
+    app.balance_snapshot.status = "checking".to_owned();
+    app.stats.last_prompt_tokens = 1234;
+
+    assert_eq!(app.balance_sidebar_line(), "balance: checking");
+    assert_eq!(app.context_usage_line(), "ctx: 0% · 1.2K / 1.0M tok");
+    let policy = app.compaction_policy_line();
+    assert!(policy.starts_with("policy: "));
+    assert!(policy.contains("provider"));
+    assert!(policy.contains("soft"));
+    assert!(policy.contains("hard"));
+    assert_eq!(app.permission_card_lines()[2], "scope: saved default");
+    assert!(app.session_display_title().contains("deepseek-v4-flash"));
+
+    app.push_timeline(TimelineRole::User, "\n\nfirst line\nsecond line");
+    assert_eq!(
+        app.latest_user_prompt_preview(),
+        Some("first line  +1 more".to_owned())
+    );
+    assert_eq!(app.session_display_title(), "first line");
+
+    app.is_busy = true;
+    assert_eq!(app.permission_card_lines()[2], "busy: locked during run");
+    assert!(app.footer_status_line().contains("Ctrl-C cancel"));
+}
+
+#[test]
 fn live_activity_summary_tracks_busy_phase() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     assert!(app.live_activity_summary().is_none());

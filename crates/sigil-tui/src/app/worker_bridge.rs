@@ -55,10 +55,8 @@ impl AppState {
             return;
         };
         if resolve_provider_api_key(&provider_config).is_none() {
-            self.balance_snapshot = BalanceSnapshot {
-                status: "missing auth".to_owned(),
-                ..BalanceSnapshot::default()
-            };
+            self.balance_snapshot.available = false;
+            self.balance_snapshot.status = "missing auth".to_owned();
             self.refresh_usage_sidebar_cache();
             return;
         }
@@ -143,6 +141,7 @@ impl AppState {
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
+                self.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
                     session_log_path,
                     provider_name,
@@ -645,6 +644,7 @@ impl EventHandler for AppState {
             }
             RunEvent::Usage(usage) => {
                 self.stats.apply_usage(&usage);
+                self.session_delta_stats.apply_usage(&usage);
                 self.recompute_compaction_status(true);
                 self.refresh_usage_sidebar_cache();
                 self.push_event(
