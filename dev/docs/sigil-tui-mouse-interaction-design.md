@@ -796,7 +796,7 @@ cargo check -p sigil-tui
 
 1. composer 光标定位
 2. tool card affordance click
-3. terminal capability / config switch
+3. terminal capability / config switch（已落地：`[terminal].mouse_capture` / `osc52_clipboard`）
 4. hover visual state
 
 此阶段必须重新评估状态模型是否仍适合只用 `PaneFocus::Composer` / `PaneFocus::Activity`。
@@ -813,7 +813,7 @@ cargo check -p sigil-tui
 4. info rail 的 permission card 是否允许点击切换写权限？
    - 建议第一版不支持，后续若做必须有明确按钮与确认语义
 5. 是否需要配置开关禁用 mouse capture？
-   - 第一版可以不做；如果用户反馈 terminal 兼容问题，再补配置
+   - 已补 `[terminal].mouse_capture`；不支持 OSC52 的终端可关闭 `[terminal].osc52_clipboard`
 
 ## 16. 推荐结论
 

@@ -103,8 +103,8 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     assert_eq!(state.selected_field, None);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Code Intel"));
-    assert_eq!(app.config_selected_field_label(), Some("Code intelligence"));
+    assert_eq!(app.config_section_title(), Some("Terminal"));
+    assert_eq!(app.config_selected_field_label(), Some("Mouse capture"));
 
     app.config_state
         .as_mut()
@@ -113,8 +113,8 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Code Intel"));
-    assert_eq!(app.config_selected_field_label(), Some("Code intelligence"));
+    assert_eq!(app.config_section_title(), Some("Terminal"));
+    assert_eq!(app.config_selected_field_label(), Some("Mouse capture"));
 
     app.config_state
         .as_mut()
@@ -329,10 +329,10 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/6 · provider settings");
+    assert_eq!(lines[0], "Provider 1/7 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] permissions memory compaction code intel mcp"
+        "[provider] permissions memory compaction code intel terminal mcp"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -490,7 +490,7 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Code Intel 5/6 · LSP readiness"));
+    assert!(detail.contains("Code Intel 5/7 · LSP readiness"));
     assert!(detail.contains("[controls]"));
     assert!(detail.contains("Code intelligence: yes"));
     assert!(detail.contains("Startup: lazy"));
@@ -508,6 +508,27 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
     assert!(detail.contains("command=missing"));
     assert!(detail.contains("i install or configure the missing-lsp language server"));
     assert!(detail.contains("selected: Code intelligence"));
+}
+
+#[test]
+fn config_terminal_step_shows_controls_and_compatibility() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Terminal);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Terminal 6/7 · terminal integration"));
+    assert!(detail.contains("[interaction]"));
+    assert!(detail.contains("Mouse capture: yes"));
+    assert!(detail.contains("OSC52 clipboard: yes"));
+    assert!(detail.contains("[compatibility]"));
+    assert!(detail.contains("Turn mouse_capture off"));
+    assert!(detail.contains("Turn osc52_clipboard off"));
+    assert!(detail.contains("Requests terminal mouse events"));
 }
 
 #[test]
@@ -550,6 +571,8 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.code_intelligence_startup = sigil_kernel::CodeIntelStartup::Eager;
     state.draft.code_intelligence_discovery_enabled = false;
     state.draft.code_intelligence_discovery_report_missing = true;
+    state.draft.terminal_mouse_capture = false;
+    state.draft.terminal_osc52_clipboard = false;
     state.dirty = true;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
@@ -570,6 +593,8 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     );
     assert!(!root_config.code_intelligence.discovery.enabled);
     assert!(root_config.code_intelligence.discovery.report_missing);
+    assert!(!root_config.terminal.mouse_capture);
+    assert!(!root_config.terminal.osc52_clipboard);
     assert!(!app.config_is_dirty());
     assert_eq!(app.permission_default_mode, "allow");
     assert!(!app.memory_enabled);
@@ -1428,6 +1453,36 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .expect("config state should exist")
             .draft
             .code_intelligence_discovery_report_missing
+    );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Terminal);
+        state.selected_field = Some(ConfigField::TerminalMouseCapture);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .terminal_mouse_capture
+    );
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::TerminalOsc52Clipboard);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .terminal_osc52_clipboard
     );
 
     {

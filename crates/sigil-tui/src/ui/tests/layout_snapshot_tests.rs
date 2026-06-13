@@ -14,6 +14,7 @@ use crate::{
         ApprovalAction, ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
         PendingApproval,
     },
+    config_panel::ConfigSection,
     mouse::HitTarget,
     runner::WorkerMessage,
 };
@@ -38,6 +39,7 @@ fn test_config() -> RootConfig {
         memory: MemoryConfig { enabled: true },
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     }
@@ -93,7 +95,7 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
         .config_hit_areas
         .as_ref()
         .expect("config hit areas should render");
-    assert_eq!(config_hits.sections.len(), 6);
+    assert_eq!(config_hits.sections.len(), ConfigSection::FLOW.len());
     assert!(!config_hits.fields.is_empty());
     assert_eq!(config_hits.footer_actions.len(), 3);
     let provider_section = config_hits
@@ -380,7 +382,7 @@ fn setup_and_config_hit_areas_cover_empty_and_wide_layouts() -> anyhow::Result<(
     let hits = wide
         .config_hit_areas
         .expect("wide config layout should expose hit areas");
-    assert_eq!(hits.sections.len(), 6);
+    assert_eq!(hits.sections.len(), ConfigSection::FLOW.len());
     assert!(!hits.fields.is_empty());
     assert_eq!(hits.footer_actions.len(), 3);
     Ok(())

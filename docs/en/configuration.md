@@ -71,6 +71,10 @@ provider = "deepseek"
 model = "deepseek-v4-flash"
 tool_timeout_secs = 30
 
+[terminal]
+mouse_capture = true
+osc52_clipboard = true
+
 [providers.deepseek]
 model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
@@ -235,6 +239,20 @@ file_extensions = ["rs"]
 startup_timeout_ms = 5000
 trust_required = true
 ```
+
+## Terminal
+
+```toml
+[terminal]
+mouse_capture = true
+osc52_clipboard = true
+```
+
+`mouse_capture` lets the TUI request terminal mouse events for clicks, scrolling, approval controls, setup/config/session selection, and transcript drag selection. Turn it off if your terminal or multiplexer mishandles mouse mode; keyboard controls remain available.
+
+`osc52_clipboard` lets `Ctrl-C` copy selected transcript text by writing an OSC52 clipboard sequence. Turn it off if your terminal blocks OSC52 or shows the sequence as text. When disabled, Sigil reports `clipboard unavailable` instead of writing to the terminal.
+
+The TUI `/config` panel includes a `Terminal` section for both switches. `mouse_capture` is applied on the next launch; `osc52_clipboard` is checked for each copy action.
 
 ## Provider Environment Overrides
 

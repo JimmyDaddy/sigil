@@ -1,3 +1,4 @@
+use super::super::timeline_flow::{selected_timeline_line_columns, text_by_display_columns};
 use super::*;
 use crate::{
     mouse::{AppMouseOutcome, MouseInput, MouseInputKind},
@@ -6,8 +7,32 @@ use crate::{
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
 };
+
+#[test]
+fn column_selection_helpers_cover_empty_and_zero_width_edges() {
+    let unchanged = selected_timeline_line_columns(Line::from(Span::raw("abc")), 2..2);
+    assert_eq!(unchanged.spans.len(), 1);
+    assert_eq!(unchanged.spans[0].content.as_ref(), "abc");
+
+    let selected = selected_timeline_line_columns(Line::from(Span::raw("\u{0301}a")), 0..1);
+    let selected_text = selected
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(selected_text, "\u{0301}a");
+    assert!(
+        selected
+            .spans
+            .iter()
+            .any(|span| span.style.bg == Some(Color::Rgb(242, 171, 122)))
+    );
+
+    assert_eq!(text_by_display_columns("abc", 2, 2), "");
+    assert_eq!(text_by_display_columns("\u{0301}a", 0, 1), "\u{0301}a");
+}
 
 #[test]
 fn short_transcript_stays_in_live_panel_instead_of_terminal_scrollback() {

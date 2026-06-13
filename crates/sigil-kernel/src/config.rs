@@ -28,6 +28,8 @@ pub struct RootConfig {
     #[serde(default)]
     pub code_intelligence: CodeIntelligenceConfig,
     #[serde(default)]
+    pub terminal: TerminalConfig,
+    #[serde(default)]
     pub providers: BTreeMap<String, Value>,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
@@ -85,6 +87,25 @@ impl Default for CodeIntelligenceDiscoveryConfig {
         Self {
             enabled: default_code_intel_discovery_enabled(),
             report_missing: default_code_intel_discovery_report_missing(),
+        }
+    }
+}
+
+/// Terminal integration controls for interactive entrypoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TerminalConfig {
+    #[serde(default = "default_terminal_mouse_capture")]
+    pub mouse_capture: bool,
+    #[serde(default = "default_terminal_osc52_clipboard")]
+    pub osc52_clipboard: bool,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            mouse_capture: default_terminal_mouse_capture(),
+            osc52_clipboard: default_terminal_osc52_clipboard(),
         }
     }
 }
@@ -543,6 +564,14 @@ fn default_code_intel_discovery_enabled() -> bool {
 }
 
 fn default_code_intel_discovery_report_missing() -> bool {
+    true
+}
+
+fn default_terminal_mouse_capture() -> bool {
+    true
+}
+
+fn default_terminal_osc52_clipboard() -> bool {
     true
 }
 

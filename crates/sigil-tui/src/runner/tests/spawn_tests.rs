@@ -30,6 +30,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
         memory: MemoryConfig { enabled: false },
         compaction: Default::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: BTreeMap::from([(
             "deepseek".to_owned(),
             json!({

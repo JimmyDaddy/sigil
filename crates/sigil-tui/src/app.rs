@@ -976,6 +976,18 @@ impl AppState {
         self.last_notice.as_deref()
     }
 
+    pub fn terminal_mouse_capture_enabled(&self) -> bool {
+        self.config_snapshot
+            .as_ref()
+            .is_none_or(|config| config.terminal.mouse_capture)
+    }
+
+    pub fn terminal_osc52_clipboard_enabled(&self) -> bool {
+        self.config_snapshot
+            .as_ref()
+            .is_none_or(|config| config.terminal.osc52_clipboard)
+    }
+
     pub fn set_terminal_size(&mut self, width: u16, height: u16) -> bool {
         let next_width = width.max(3);
         let next_height = height.max(8);

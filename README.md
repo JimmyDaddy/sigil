@@ -42,6 +42,7 @@ The CLI is not the primary product surface. It is intentionally kept as an autom
 - Use `/doctor` to diagnose config, authentication, MCP, LSP, and terminal readiness with suggested fixes.
 - Use `/model` and `/effort` to adjust the next model run.
 - Use `/compact` to compact long-session context.
+- Use mouse clicks, scrolling, and transcript drag selection when your terminal supports mouse mode.
 - Optionally enable code intelligence for symbols, definitions, references, diagnostics, code actions, rename previews, and `/config` readiness checks.
 - Optionally connect stdio MCP servers under explicit trust and approval policies.
 
@@ -76,7 +77,7 @@ Common per-user config paths:
 - Linux: `$XDG_CONFIG_HOME/sigil/sigil.toml` or `~/.config/sigil/sigil.toml`
 - Windows: `%APPDATA%\sigil\sigil.toml`
 
-For examples covering authentication, provider settings, permissions, memory, compaction, code intelligence, and environment variable overrides, see [docs/en/configuration.md](docs/en/configuration.md).
+For examples covering authentication, provider settings, permissions, memory, compaction, code intelligence, terminal compatibility, and environment variable overrides, see [docs/en/configuration.md](docs/en/configuration.md).
 
 ## Providers
 

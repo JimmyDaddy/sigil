@@ -47,6 +47,7 @@ fn test_config() -> RootConfig {
         memory: MemoryConfig { enabled: true },
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     }
@@ -453,6 +454,34 @@ fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
 
     assert!(command_rx.recv_timeout(Duration::from_millis(10)).is_err());
     assert_eq!(app.last_notice(), Some("copied 1 line(s), 8 char(s)"));
+    Ok(())
+}
+
+#[test]
+fn process_app_action_reports_disabled_osc52_clipboard() -> anyhow::Result<()> {
+    let mut root_config = test_config();
+    root_config.terminal.osc52_clipboard = false;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &root_config);
+    let (worker_tx, command_rx) = mpsc::channel();
+    let (_message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+    });
+
+    process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::CopyToClipboard {
+            text: "selected".to_owned(),
+        },
+    )?;
+
+    assert!(command_rx.recv_timeout(Duration::from_millis(10)).is_err());
+    assert_eq!(
+        app.last_notice(),
+        Some("clipboard unavailable: OSC52 disabled")
+    );
     Ok(())
 }
 

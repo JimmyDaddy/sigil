@@ -42,6 +42,7 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         memory: MemoryConfig { enabled: false },
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::<McpServerConfig>::new(),
     }

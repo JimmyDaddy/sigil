@@ -72,7 +72,10 @@ fn main() -> Result<()> {
     let inline_viewport_height = current_inline_viewport_height()?;
     let mut stdout = io::stdout();
     let keyboard_enhancement_enabled = enable_keyboard_enhancement(&mut stdout)?;
-    execute!(stdout, EnableMouseCapture)?;
+    let mouse_capture_enabled = app.terminal_mouse_capture_enabled();
+    if mouse_capture_enabled {
+        execute!(stdout, EnableMouseCapture)?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::with_options(
         backend,
@@ -85,7 +88,9 @@ fn main() -> Result<()> {
     if keyboard_enhancement_enabled {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
-    execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    if mouse_capture_enabled {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
     disable_raw_mode()?;
     terminal.show_cursor()?;
 
@@ -219,8 +224,12 @@ where
             *worker = Some(spawn_worker_fn(*root_config, app)?);
         }
         AppAction::CopyToClipboard { text } => {
-            copy_text_to_terminal_clipboard(&text)?;
-            app.record_clipboard_copy_success(&text);
+            if app.terminal_osc52_clipboard_enabled() {
+                copy_text_to_terminal_clipboard(&text)?;
+                app.record_clipboard_copy_success(&text);
+            } else {
+                app.record_clipboard_copy_unavailable("OSC52 disabled");
+            }
         }
         action => {
             if let Some(runtime) = worker.as_ref() {

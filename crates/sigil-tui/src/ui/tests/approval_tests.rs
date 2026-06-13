@@ -615,6 +615,7 @@ fn test_config() -> RootConfig {
         memory: MemoryConfig { enabled: true },
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     }

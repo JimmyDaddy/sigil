@@ -619,6 +619,11 @@ impl AppState {
         self.push_event("selection:copy", clipboard_copy_status(text));
     }
 
+    pub fn record_clipboard_copy_unavailable(&mut self, reason: &str) {
+        self.last_notice = Some(format!("clipboard unavailable: {reason}"));
+        self.push_event("selection:copy", format!("unavailable {reason}"));
+    }
+
     pub fn timeline_revision(&self) -> u64 {
         self.timeline_revision
     }
@@ -678,7 +683,10 @@ fn selected_timeline_line(line: Line<'static>) -> Line<'static> {
     line.patch_style(timeline_selection_style())
 }
 
-fn selected_timeline_line_columns(line: Line<'static>, columns: Range<usize>) -> Line<'static> {
+pub(super) fn selected_timeline_line_columns(
+    line: Line<'static>,
+    columns: Range<usize>,
+) -> Line<'static> {
     if columns.start >= columns.end {
         return line;
     }
@@ -745,7 +753,7 @@ fn timeline_selection_style() -> Style {
         .bg(Color::Rgb(242, 171, 122))
 }
 
-fn text_by_display_columns(text: &str, start: usize, end: usize) -> String {
+pub(super) fn text_by_display_columns(text: &str, start: usize, end: usize) -> String {
     if start >= end {
         return String::new();
     }
@@ -771,33 +779,4 @@ pub(super) fn clipboard_copy_status(text: &str) -> String {
     let lines = text.lines().count().max(1);
     let chars = text.chars().count();
     format!("{lines} line(s), {chars} char(s)")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn column_selection_helpers_cover_empty_and_zero_width_edges() {
-        let unchanged = selected_timeline_line_columns(Line::from(Span::raw("abc")), 2..2);
-        assert_eq!(unchanged.spans.len(), 1);
-        assert_eq!(unchanged.spans[0].content.as_ref(), "abc");
-
-        let selected = selected_timeline_line_columns(Line::from(Span::raw("\u{0301}a")), 0..1);
-        let selected_text = selected
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>();
-        assert_eq!(selected_text, "\u{0301}a");
-        assert!(
-            selected
-                .spans
-                .iter()
-                .any(|span| span.style.bg == Some(Color::Rgb(242, 171, 122)))
-        );
-
-        assert_eq!(text_by_display_columns("abc", 2, 2), "");
-        assert_eq!(text_by_display_columns("\u{0301}a", 0, 1), "\u{0301}a");
-    }
 }

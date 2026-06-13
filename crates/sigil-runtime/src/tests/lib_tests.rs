@@ -48,6 +48,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         memory: MemoryConfig { enabled: true },
         compaction: sigil_kernel::CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
+        terminal: Default::default(),
         providers: BTreeMap::from([
             (
                 "deepseek".to_owned(),

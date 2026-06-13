@@ -44,6 +44,8 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 
 When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input.
 
+Mouse mode supports transcript scrolling, approval controls, slash candidates, setup/config rows, session selection, and activity selection when your terminal supports mouse capture. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
+
 ## Slash Commands
 
 | Command | Purpose |
@@ -130,6 +132,10 @@ No usable config was found, or the config failed to load. Complete Quick Setup t
 ### Should I write the API key into the config file?
 
 For temporary use or CI, prefer an environment variable such as `SIGIL_API_KEY`. If you save the key through Quick Setup or `/config`, it is stored as plaintext in the local config file. `doctor` reports that state as a warning with a remediation hint. Do not commit a real `sigil.toml`.
+
+### What if my terminal has broken mouse or clipboard support?
+
+Use the `Terminal` section in `/config`, or set `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` in `sigil.toml`. Mouse capture changes apply on the next launch; OSC52 clipboard changes apply to the next copy action.
 
 ### Why is the CLI small?
 

@@ -81,6 +81,7 @@ fn root_config_save_roundtrips() {
         memory: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     };
@@ -109,6 +110,7 @@ fn root_config_save_handles_paths_without_parent() {
         memory: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     };
@@ -137,6 +139,26 @@ model = "deepseek-v4-flash"
     assert_eq!(config.agent.tool_timeout_secs, 30);
     assert_eq!(config.memory, Default::default());
     assert_eq!(config.compaction.tail_messages, 6);
+    assert_eq!(config.terminal, Default::default());
+}
+
+#[test]
+fn root_config_loads_terminal_config() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[terminal]
+mouse_capture = false
+osc52_clipboard = false
+"#,
+    )
+    .expect("terminal config should parse");
+
+    assert!(!config.terminal.mouse_capture);
+    assert!(!config.terminal.osc52_clipboard);
 }
 
 #[test]
@@ -499,6 +521,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         memory: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     };

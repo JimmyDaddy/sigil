@@ -300,6 +300,26 @@ impl AppState {
                 lines.extend(self.render_code_intelligence_readiness_summary(config_state));
                 lines.extend(render_config_selection_details(config_state));
             }
+            ConfigSection::Terminal => {
+                lines.push("[interaction]".to_owned());
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::TerminalMouseCapture,
+                ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::TerminalOsc52Clipboard,
+                ));
+                lines.push(String::new());
+                lines.push("[compatibility]".to_owned());
+                lines.push(render_config_hint_row(
+                    "Turn mouse_capture off when your terminal or multiplexer mishandles mouse mode",
+                ));
+                lines.push(render_config_hint_row(
+                    "Turn osc52_clipboard off when clipboard writes are blocked or noisy",
+                ));
+                lines.extend(render_config_selection_details(config_state));
+            }
             ConfigSection::Mcp => {
                 lines.push("[servers]".to_owned());
                 lines.push(render_config_readonly_row(
@@ -656,6 +676,20 @@ impl AppState {
                                 .draft
                                 .code_intelligence_discovery_report_missing;
                             *report_missing = !*report_missing;
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::TerminalMouseCapture => {
+                            config_state.draft.terminal_mouse_capture =
+                                !config_state.draft.terminal_mouse_capture;
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::TerminalOsc52Clipboard => {
+                            config_state.draft.terminal_osc52_clipboard =
+                                !config_state.draft.terminal_osc52_clipboard;
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);

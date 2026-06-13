@@ -34,6 +34,25 @@ fn from_root_config_initializes_mcp_statuses_from_startup_mode() {
 }
 
 #[test]
+fn terminal_capability_helpers_default_on_and_follow_config() {
+    let setup_app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+    assert!(setup_app.terminal_mouse_capture_enabled());
+    assert!(setup_app.terminal_osc52_clipboard_enabled());
+
+    let mut config = test_config();
+    config.terminal.mouse_capture = false;
+    config.terminal.osc52_clipboard = false;
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert!(!app.terminal_mouse_capture_enabled());
+    assert!(!app.terminal_osc52_clipboard_enabled());
+}
+
+#[test]
 fn mcp_sidebar_lines_are_empty_before_runtime_config_loads() -> Result<()> {
     let temp = tempdir()?;
     let app = AppState::from_setup(

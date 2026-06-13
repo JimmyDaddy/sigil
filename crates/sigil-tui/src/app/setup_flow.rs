@@ -314,6 +314,7 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
             tail_messages: 6,
         },
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: std::collections::BTreeMap::from([("deepseek".to_owned(), provider_value)]),
         mcp_servers: Vec::new(),
     })

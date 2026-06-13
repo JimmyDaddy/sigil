@@ -14,6 +14,7 @@ fn test_root_config() -> RootConfig {
         memory: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -31,8 +32,9 @@ fn config_section_flow_wraps() {
     );
     assert_eq!(
         ConfigSection::CodeIntelligence.next_flow(),
-        ConfigSection::Mcp
+        ConfigSection::Terminal
     );
+    assert_eq!(ConfigSection::Terminal.next_flow(), ConfigSection::Mcp);
     assert_eq!(ConfigSection::Mcp.next_flow(), ConfigSection::Provider);
     assert_eq!(ConfigSection::Provider.previous_flow(), ConfigSection::Mcp);
 }
@@ -85,6 +87,7 @@ fn compaction_context_field_uses_short_fallback_label() {
         memory: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
     });
@@ -110,6 +113,7 @@ fn config_rows_do_not_pre_pad_labels() {
         memory: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
     });
@@ -139,6 +143,7 @@ fn api_key_display_uses_status_without_secret_length() {
         memory: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
+        terminal: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
     };
@@ -179,7 +184,8 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Permissions.summary(), "approval rules");
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));
     assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(4));
-    assert_eq!(ConfigSection::Mcp.flow_index(), Some(5));
+    assert_eq!(ConfigSection::Terminal.flow_index(), Some(5));
+    assert_eq!(ConfigSection::Mcp.flow_index(), Some(6));
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
         &[
@@ -187,6 +193,13 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             ConfigField::CodeIntelStartup,
             ConfigField::CodeIntelDiscoveryEnabled,
             ConfigField::CodeIntelDiscoveryReportMissing,
+        ]
+    );
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Terminal),
+        &[
+            ConfigField::TerminalMouseCapture,
+            ConfigField::TerminalOsc52Clipboard,
         ]
     );
     assert_eq!(
@@ -205,6 +218,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::ProviderApiKey.action_label(), "Enter input");
     assert_eq!(ConfigField::CodeIntelStartup.action_label(), "Enter cycle");
     assert_eq!(ConfigField::CodeIntelEnabled.action_label(), "Enter toggle");
+    assert_eq!(
+        ConfigField::TerminalMouseCapture.action_label(),
+        "Enter toggle"
+    );
     assert_eq!(ConfigField::McpCommand.action_label(), "Enter input");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
     assert_eq!(
@@ -240,6 +257,11 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::CodeIntelDiscoveryReportMissing
             .help_text()
             .contains("readiness warnings")
+    );
+    assert!(
+        ConfigField::TerminalOsc52Clipboard
+            .help_text()
+            .contains("OSC52")
     );
 }
 
@@ -649,6 +671,22 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
         state.display_value(ConfigField::CompactionContextWindowTokens),
         "64000 tokens"
     );
+    assert_eq!(
+        state.display_value(ConfigField::TerminalMouseCapture),
+        "yes"
+    );
+    assert_eq!(
+        state.display_value(ConfigField::TerminalOsc52Clipboard),
+        "yes"
+    );
+
+    let mut draft = state.draft.clone();
+    draft.terminal_mouse_capture = false;
+    draft.terminal_osc52_clipboard = false;
+    let root_config = draft.to_root_config()?;
+    assert!(!root_config.terminal.mouse_capture);
+    assert!(!root_config.terminal.osc52_clipboard);
+
     assert_eq!(display_ratio("not-a-number"), "not-a-number");
     Ok(())
 }

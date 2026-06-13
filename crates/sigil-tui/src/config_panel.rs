@@ -24,16 +24,18 @@ pub(crate) enum ConfigSection {
     Memory,
     Compaction,
     CodeIntelligence,
+    Terminal,
     Mcp,
 }
 
 impl ConfigSection {
-    pub(crate) const FLOW: [Self; 6] = [
+    pub(crate) const FLOW: [Self; 7] = [
         Self::Provider,
         Self::Permissions,
         Self::Memory,
         Self::Compaction,
         Self::CodeIntelligence,
+        Self::Terminal,
         Self::Mcp,
     ];
 
@@ -44,6 +46,7 @@ impl ConfigSection {
             Self::Memory => "Memory",
             Self::Compaction => "Compaction",
             Self::CodeIntelligence => "Code Intel",
+            Self::Terminal => "Terminal",
             Self::Mcp => "MCP",
         }
     }
@@ -55,6 +58,7 @@ impl ConfigSection {
             Self::Memory => "memory status",
             Self::Compaction => "context and thresholds",
             Self::CodeIntelligence => "LSP readiness",
+            Self::Terminal => "terminal integration",
             Self::Mcp => "MCP servers",
         }
     }
@@ -108,6 +112,8 @@ pub(crate) enum ConfigField {
     CodeIntelStartup,
     CodeIntelDiscoveryEnabled,
     CodeIntelDiscoveryReportMissing,
+    TerminalMouseCapture,
+    TerminalOsc52Clipboard,
     McpName,
     McpCommand,
     McpArgsCsv,
@@ -137,6 +143,7 @@ impl ConfigField {
         Self::CodeIntelDiscoveryEnabled,
         Self::CodeIntelDiscoveryReportMissing,
     ];
+    const TERMINAL_FIELDS: [Self; 2] = [Self::TerminalMouseCapture, Self::TerminalOsc52Clipboard];
     const MCP_FIELDS: [Self; 4] = [
         Self::McpName,
         Self::McpCommand,
@@ -151,6 +158,7 @@ impl ConfigField {
             ConfigSection::Memory => &Self::MEMORY_FIELDS,
             ConfigSection::Compaction => &Self::COMPACTION_FIELDS,
             ConfigSection::CodeIntelligence => &Self::CODE_INTELLIGENCE_FIELDS,
+            ConfigSection::Terminal => &Self::TERMINAL_FIELDS,
             ConfigSection::Mcp => &Self::MCP_FIELDS,
         }
     }
@@ -177,6 +185,8 @@ impl ConfigField {
             Self::CodeIntelStartup => "startup",
             Self::CodeIntelDiscoveryEnabled => "discovery",
             Self::CodeIntelDiscoveryReportMissing => "report_missing",
+            Self::TerminalMouseCapture => "mouse_capture",
+            Self::TerminalOsc52Clipboard => "osc52_clipboard",
             Self::McpName => "name",
             Self::McpCommand => "command",
             Self::McpArgsCsv => "args_csv",
@@ -202,6 +212,8 @@ impl ConfigField {
             Self::CodeIntelStartup => "Startup",
             Self::CodeIntelDiscoveryEnabled => "Discovery",
             Self::CodeIntelDiscoveryReportMissing => "Missing reports",
+            Self::TerminalMouseCapture => "Mouse capture",
+            Self::TerminalOsc52Clipboard => "OSC52 clipboard",
             Self::McpName => "Name",
             Self::McpCommand => "Command",
             Self::McpArgsCsv => "Arguments",
@@ -259,6 +271,12 @@ impl ConfigField {
             Self::CodeIntelDiscoveryReportMissing => {
                 "Shows missing discovered language servers as readiness warnings."
             }
+            Self::TerminalMouseCapture => {
+                "Requests terminal mouse events for clicks, scrolling, and drag selection."
+            }
+            Self::TerminalOsc52Clipboard => {
+                "Copies selected transcript text through OSC52. Turn off when the terminal blocks clipboard writes."
+            }
             Self::McpName => "Stable local name for this MCP server.",
             Self::McpCommand => "Executable used to start the MCP server process.",
             Self::McpArgsCsv => "Comma-separated startup arguments for the MCP server.",
@@ -293,7 +311,9 @@ impl ConfigField {
             | Self::CompactionEnabled
             | Self::CodeIntelEnabled
             | Self::CodeIntelDiscoveryEnabled
-            | Self::CodeIntelDiscoveryReportMissing => "Enter toggle",
+            | Self::CodeIntelDiscoveryReportMissing
+            | Self::TerminalMouseCapture
+            | Self::TerminalOsc52Clipboard => "Enter toggle",
             _ if self.accepts_text_input() => "Enter input",
             _ => "",
         }
@@ -324,7 +344,8 @@ impl ConfigFooterAction {
             | ConfigSection::Permissions
             | ConfigSection::Memory
             | ConfigSection::Compaction
-            | ConfigSection::CodeIntelligence => &Self::DEFAULT_ORDER,
+            | ConfigSection::CodeIntelligence
+            | ConfigSection::Terminal => &Self::DEFAULT_ORDER,
         }
     }
 
@@ -464,6 +485,8 @@ pub(crate) struct ConfigDraft {
     pub(crate) code_intelligence_startup: CodeIntelStartup,
     pub(crate) code_intelligence_discovery_enabled: bool,
     pub(crate) code_intelligence_discovery_report_missing: bool,
+    pub(crate) terminal_mouse_capture: bool,
+    pub(crate) terminal_osc52_clipboard: bool,
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
 
@@ -526,6 +549,8 @@ impl ConfigDraft {
                 .code_intelligence
                 .discovery
                 .report_missing,
+            terminal_mouse_capture: root_config.terminal.mouse_capture,
+            terminal_osc52_clipboard: root_config.terminal.osc52_clipboard,
             mcp_servers: root_config
                 .mcp_servers
                 .iter()
@@ -625,6 +650,8 @@ impl ConfigDraft {
         root_config.compaction.context_window_tokens = context_window_tokens;
         root_config.compaction.tail_messages = tail_messages;
         root_config.code_intelligence = self.code_intelligence_config();
+        root_config.terminal.mouse_capture = self.terminal_mouse_capture;
+        root_config.terminal.osc52_clipboard = self.terminal_osc52_clipboard;
         root_config.mcp_servers = self
             .mcp_servers
             .iter()
@@ -912,7 +939,9 @@ impl ConfigState {
             | ConfigField::CodeIntelEnabled
             | ConfigField::CodeIntelStartup
             | ConfigField::CodeIntelDiscoveryEnabled
-            | ConfigField::CodeIntelDiscoveryReportMissing => None,
+            | ConfigField::CodeIntelDiscoveryReportMissing
+            | ConfigField::TerminalMouseCapture
+            | ConfigField::TerminalOsc52Clipboard => None,
         }
     }
 
@@ -951,7 +980,9 @@ impl ConfigState {
             | ConfigField::CodeIntelEnabled
             | ConfigField::CodeIntelStartup
             | ConfigField::CodeIntelDiscoveryEnabled
-            | ConfigField::CodeIntelDiscoveryReportMissing => None,
+            | ConfigField::CodeIntelDiscoveryReportMissing
+            | ConfigField::TerminalMouseCapture
+            | ConfigField::TerminalOsc52Clipboard => None,
         }
     }
 
@@ -984,6 +1015,12 @@ impl ConfigState {
             ConfigField::CodeIntelDiscoveryReportMissing => {
                 return bool_label(self.draft.code_intelligence_discovery_report_missing)
                     .to_owned();
+            }
+            ConfigField::TerminalMouseCapture => {
+                return bool_label(self.draft.terminal_mouse_capture).to_owned();
+            }
+            ConfigField::TerminalOsc52Clipboard => {
+                return bool_label(self.draft.terminal_osc52_clipboard).to_owned();
             }
             _ => self.field_text_value(field).unwrap_or_default(),
         };
@@ -1118,7 +1155,9 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::CodeIntelEnabled
         | ConfigField::CodeIntelStartup
         | ConfigField::CodeIntelDiscoveryEnabled
-        | ConfigField::CodeIntelDiscoveryReportMissing => false,
+        | ConfigField::CodeIntelDiscoveryReportMissing
+        | ConfigField::TerminalMouseCapture
+        | ConfigField::TerminalOsc52Clipboard => false,
     }
 }
 
