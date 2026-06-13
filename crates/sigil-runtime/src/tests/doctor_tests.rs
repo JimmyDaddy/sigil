@@ -706,7 +706,7 @@ fn doctor_terminal_check_reports_dumb_and_missing_term() {
     {
         let _env_scope = EnvScope::set_many(&[("TERM", "dumb")]);
         let mut report = DoctorReport::default();
-        check_terminal(&mut report);
+        check_terminal(&mut report, None);
         assert_eq!(report.overall_status(), DoctorStatus::Warn);
         assert!(report.checks.iter().any(|check| check.name == "terminal"
             && check.status == DoctorStatus::Warn
@@ -716,12 +716,177 @@ fn doctor_terminal_check_reports_dumb_and_missing_term() {
     {
         let _env_scope = EnvScope::remove_many(&["TERM"]);
         let mut report = DoctorReport::default();
-        check_terminal(&mut report);
+        check_terminal(&mut report, None);
         assert_eq!(report.overall_status(), DoctorStatus::Warn);
         assert!(report.checks.iter().any(|check| check.name == "terminal"
             && check.status == DoctorStatus::Warn
             && check.message == "TERM is not set"));
     }
+}
+
+#[test]
+fn terminal_checks_report_disabled_config_and_smoke_checklist() {
+    let mut report = DoctorReport::default();
+    let config = TerminalConfig {
+        mouse_capture: false,
+        osc52_clipboard: false,
+    };
+    let environment = TerminalEnvironment {
+        term: Some("xterm-256color".to_owned()),
+        term_program: Some("Apple_Terminal".to_owned()),
+        ..TerminalEnvironment::default()
+    };
+
+    check_terminal_with_env(&mut report, Some(&config), &environment);
+
+    assert_eq!(report.overall_status(), DoctorStatus::Ok);
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:config"
+            && check.message == "mouse_capture=false osc52_clipboard=false"
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:mouse"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("disabled by config")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:clipboard"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("disabled by config")
+    }));
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "terminal:smoke"
+                && check.message.contains("terminal-compatibility.md"))
+    );
+}
+
+#[test]
+fn terminal_checks_warn_for_multiplexer_and_remote_clipboard_bridges() {
+    let mut report = DoctorReport::default();
+    let config = TerminalConfig::default();
+    let environment = TerminalEnvironment {
+        term: Some("screen-256color".to_owned()),
+        tmux: true,
+        ssh: true,
+        ..TerminalEnvironment::default()
+    };
+
+    check_terminal_with_env(&mut report, Some(&config), &environment);
+
+    assert_eq!(report.overall_status(), DoctorStatus::Warn);
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "terminal:profile"
+                && check.message.contains("layer=tmux")
+                && check.message.contains("layer=ssh"))
+    );
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:mouse"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("tmux")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("mouse_capture"))
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:clipboard"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("tmux+ssh")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("osc52_clipboard"))
+    }));
+}
+
+#[test]
+fn terminal_checks_warn_when_term_is_unusable_with_enabled_config() {
+    let mut report = DoctorReport::default();
+    let config = TerminalConfig::default();
+    let environment = TerminalEnvironment {
+        term: Some("dumb".to_owned()),
+        ..TerminalEnvironment::default()
+    };
+
+    check_terminal_with_env(&mut report, Some(&config), &environment);
+
+    assert_eq!(report.overall_status(), DoctorStatus::Warn);
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:mouse"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("TERM is missing or dumb")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("mouse_capture"))
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:clipboard"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("TERM is missing or dumb")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("osc52_clipboard"))
+    }));
+}
+
+#[test]
+fn terminal_environment_summary_covers_known_profiles_and_layers() {
+    let environment = TerminalEnvironment {
+        term: Some("xterm-kitty".to_owned()),
+        term_program: Some("WezTerm".to_owned()),
+        term_program_version: Some("20260201".to_owned()),
+        kitty: true,
+        wezterm: true,
+        windows_terminal: true,
+        screen: true,
+        wsl: true,
+        ..TerminalEnvironment::default()
+    };
+
+    let summary = environment.profile_summary();
+
+    assert!(summary.contains("TERM_PROGRAM=WezTerm"));
+    assert!(summary.contains("TERM_PROGRAM_VERSION=20260201"));
+    assert!(summary.contains("profile=wezterm"));
+    assert!(summary.contains("profile=kitty"));
+    assert!(summary.contains("profile=windows_terminal"));
+    assert!(summary.contains("layer=screen"));
+    assert!(summary.contains("layer=wsl"));
+    assert!(!environment.term_is_missing_or_dumb());
+    assert!(TerminalEnvironment::default().term_is_missing_or_dumb());
+    assert_eq!(
+        TerminalEnvironment::default().profile_summary(),
+        "profile=unknown"
+    );
+    assert_eq!(
+        TerminalEnvironment::default().clipboard_bridge_label(),
+        "terminal bridge"
+    );
+    assert_eq!(
+        TerminalEnvironment {
+            screen: true,
+            ..TerminalEnvironment::default()
+        }
+        .multiplexer_label(),
+        "screen"
+    );
+    assert_eq!(
+        TerminalEnvironment {
+            screen: true,
+            wsl: true,
+            ..TerminalEnvironment::default()
+        }
+        .clipboard_bridge_label(),
+        "screen+wsl"
+    );
 }
 
 #[test]

@@ -137,7 +137,7 @@ DeepSeek provider 配置位于 `[providers.deepseek]`。OpenAI-compatible provid
 
 TUI `/config` 只暴露 provider 高频项、permissions、memory、compaction、code intelligence 控制项、terminal mouse/OSC52 兼容性开关和 MCP server 常用字段。它可以在 `deepseek` 与 `openai_compat` 间切换；DeepSeek FIM 显示为 provider 专项高级项，OpenAI-compatible 下标记为不支持。低频 provider 专项字段继续保留给配置文件和环境变量。
 
-`sigil doctor` 与 TUI `/doctor` 复用 runtime 诊断逻辑，检查配置加载、workspace、session log、provider/auth 来源、MCP command/trust、code intelligence LSP plan 和 terminal `TERM`。诊断只展示 secret 来源，不输出 secret 值。
+`sigil doctor` 与 TUI `/doctor` 复用 runtime 诊断逻辑，检查配置加载、workspace、session log、provider/auth 来源、MCP command/trust、code intelligence LSP plan、terminal `TERM`、终端 profile/layers，以及 mouse/OSC52 兼容性开关。诊断只展示 secret 来源，不输出 secret 值。
 
 ## MCP 当前实现
 

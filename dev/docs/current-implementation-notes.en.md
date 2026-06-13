@@ -137,7 +137,7 @@ DeepSeek provider configuration lives under `[providers.deepseek]`. OpenAI-compa
 
 TUI `/config` exposes only high-frequency provider fields, permissions, memory, compaction, code intelligence controls, terminal mouse/OSC52 compatibility switches, and common MCP server fields. It can switch between `deepseek` and `openai_compat`; DeepSeek FIM is shown as a provider-specific advanced field, while OpenAI-compatible marks it unsupported. Lower-frequency provider-specific fields remain available through config files and environment variables.
 
-`sigil doctor` and TUI `/doctor` reuse runtime diagnostics to check config loading, workspace resolution, session log location, provider/auth source, MCP command/trust state, code intelligence LSP plan, and terminal `TERM`. Diagnostics report only the secret source, not secret values.
+`sigil doctor` and TUI `/doctor` reuse runtime diagnostics to check config loading, workspace resolution, session log location, provider/auth source, MCP command/trust state, code intelligence LSP plan, terminal `TERM`, terminal profile/layers, and mouse/OSC52 compatibility switches. Diagnostics report only the secret source, not secret values.
 
 ## Current MCP Implementation
 

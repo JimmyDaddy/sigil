@@ -3,7 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sigil_kernel::{McpServerConfig, McpServerStartup, RootConfig, resolve_workspace_root};
+use sigil_kernel::{
+    McpServerConfig, McpServerStartup, RootConfig, config::TerminalConfig, resolve_workspace_root,
+};
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 
@@ -106,7 +108,7 @@ pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
             format!("missing config at {}", config_path.display()),
             Some("start `sigil-tui` to complete Quick Setup, or create sigil.toml at this path"),
         );
-        check_terminal(&mut report);
+        check_terminal(&mut report, None);
         return report;
     }
 
@@ -122,7 +124,7 @@ pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
                 error.to_string(),
                 Some("fix sigil.toml syntax, or rerun Quick Setup to regenerate the config"),
             );
-            check_terminal(&mut report);
+            check_terminal(&mut report, None);
             return report;
         }
     };
@@ -138,7 +140,7 @@ pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
         &root_config,
         canonical_workspace.as_deref().unwrap_or(&workspace_root),
     );
-    check_terminal(&mut report);
+    check_terminal(&mut report, Some(&root_config.terminal));
     report
 }
 
@@ -450,12 +452,22 @@ fn check_code_intelligence(
     }
 }
 
-fn check_terminal(report: &mut DoctorReport) {
-    match env::var("TERM")
-        .ok()
+fn check_terminal(report: &mut DoctorReport, config: Option<&TerminalConfig>) {
+    let environment = TerminalEnvironment::from_env();
+    check_terminal_with_env(report, config, &environment);
+}
+
+fn check_terminal_with_env(
+    report: &mut DoctorReport,
+    config: Option<&TerminalConfig>,
+    environment: &TerminalEnvironment,
+) {
+    match environment
+        .term
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        Some(term) if term == "dumb" => report.push_with_remediation(
+        Some("dumb") => report.push_with_remediation(
             DoctorStatus::Warn,
             "terminal",
             "TERM=dumb; TUI rendering may be limited",
@@ -469,6 +481,250 @@ fn check_terminal(report: &mut DoctorReport) {
             Some("set TERM in the shell before launching the TUI"),
         ),
     }
+
+    report.push(
+        DoctorStatus::Ok,
+        "terminal:profile",
+        environment.profile_summary(),
+    );
+
+    if let Some(config) = config {
+        report.push(
+            DoctorStatus::Ok,
+            "terminal:config",
+            format!(
+                "mouse_capture={} osc52_clipboard={}",
+                config.mouse_capture, config.osc52_clipboard
+            ),
+        );
+        check_terminal_mouse(report, config, environment);
+        check_terminal_clipboard(report, config, environment);
+        report.push(
+            DoctorStatus::Ok,
+            "terminal:smoke",
+            "run checklist: click, scroll, drag transcript, Ctrl-C copy; see docs/en/terminal-compatibility.md",
+        );
+    }
+}
+
+fn check_terminal_mouse(
+    report: &mut DoctorReport,
+    config: &TerminalConfig,
+    environment: &TerminalEnvironment,
+) {
+    if !config.mouse_capture {
+        report.push(
+            DoctorStatus::Ok,
+            "terminal:mouse",
+            "mouse capture disabled by config; keyboard controls remain available",
+        );
+        return;
+    }
+
+    if environment.term_is_missing_or_dumb() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "terminal:mouse",
+            "mouse capture enabled but TERM is missing or dumb",
+            Some("fix TERM, or set [terminal].mouse_capture = false if this terminal cannot pass mouse events"),
+        );
+        return;
+    }
+
+    if environment.has_multiplexer() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "terminal:mouse",
+            format!(
+                "mouse capture enabled through {}; verify multiplexer mouse pass-through",
+                environment.multiplexer_label()
+            ),
+            Some(
+                "enable mouse support in the multiplexer, or set [terminal].mouse_capture = false",
+            ),
+        );
+        return;
+    }
+
+    report.push(
+        DoctorStatus::Ok,
+        "terminal:mouse",
+        "mouse capture enabled; smoke: click controls, scroll transcript, drag-select text",
+    );
+}
+
+fn check_terminal_clipboard(
+    report: &mut DoctorReport,
+    config: &TerminalConfig,
+    environment: &TerminalEnvironment,
+) {
+    if !config.osc52_clipboard {
+        report.push(
+            DoctorStatus::Ok,
+            "terminal:clipboard",
+            "OSC52 clipboard disabled by config",
+        );
+        return;
+    }
+
+    if environment.term_is_missing_or_dumb() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "terminal:clipboard",
+            "OSC52 clipboard enabled but TERM is missing or dumb",
+            Some(
+                "fix TERM, or set [terminal].osc52_clipboard = false if copy sequences are blocked",
+            ),
+        );
+        return;
+    }
+
+    if environment.has_clipboard_bridge_risk() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "terminal:clipboard",
+            format!(
+                "OSC52 clipboard enabled through {}; verify clipboard pass-through",
+                environment.clipboard_bridge_label()
+            ),
+            Some("smoke test Ctrl-C copy and paste; if blocked, set [terminal].osc52_clipboard = false"),
+        );
+        return;
+    }
+
+    report.push(
+        DoctorStatus::Ok,
+        "terminal:clipboard",
+        "OSC52 clipboard enabled; smoke: drag-select transcript, press Ctrl-C, paste elsewhere",
+    );
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TerminalEnvironment {
+    term: Option<String>,
+    term_program: Option<String>,
+    term_program_version: Option<String>,
+    tmux: bool,
+    screen: bool,
+    ssh: bool,
+    wsl: bool,
+    wezterm: bool,
+    kitty: bool,
+    windows_terminal: bool,
+}
+
+impl TerminalEnvironment {
+    fn from_env() -> Self {
+        let term = non_empty_env("TERM");
+        let term_program = non_empty_env("TERM_PROGRAM");
+        let term_program_version = non_empty_env("TERM_PROGRAM_VERSION");
+        Self {
+            wezterm: non_empty_env("WEZTERM_EXECUTABLE").is_some()
+                || term_program.as_deref() == Some("WezTerm"),
+            kitty: non_empty_env("KITTY_WINDOW_ID").is_some()
+                || term.as_deref().is_some_and(|term| term.contains("kitty")),
+            windows_terminal: non_empty_env("WT_SESSION").is_some(),
+            tmux: non_empty_env("TMUX").is_some(),
+            screen: non_empty_env("STY").is_some()
+                || term
+                    .as_deref()
+                    .is_some_and(|term| term.starts_with("screen")),
+            ssh: non_empty_env("SSH_TTY").is_some() || non_empty_env("SSH_CONNECTION").is_some(),
+            wsl: non_empty_env("WSL_DISTRO_NAME").is_some()
+                || non_empty_env("WSL_INTEROP").is_some(),
+            term,
+            term_program,
+            term_program_version,
+        }
+    }
+
+    fn term_is_missing_or_dumb(&self) -> bool {
+        self.term
+            .as_deref()
+            .is_none_or(|term| term.trim().is_empty() || term == "dumb")
+    }
+
+    fn has_multiplexer(&self) -> bool {
+        self.tmux || self.screen
+    }
+
+    fn has_clipboard_bridge_risk(&self) -> bool {
+        self.has_multiplexer() || self.ssh || self.wsl
+    }
+
+    fn multiplexer_label(&self) -> &'static str {
+        if self.tmux {
+            "tmux"
+        } else if self.screen {
+            "screen"
+        } else {
+            "multiplexer"
+        }
+    }
+
+    fn clipboard_bridge_label(&self) -> String {
+        let mut layers = Vec::new();
+        if self.tmux {
+            layers.push("tmux");
+        }
+        if self.screen {
+            layers.push("screen");
+        }
+        if self.ssh {
+            layers.push("ssh");
+        }
+        if self.wsl {
+            layers.push("wsl");
+        }
+        if layers.is_empty() {
+            "terminal bridge".to_owned()
+        } else {
+            layers.join("+")
+        }
+    }
+
+    fn profile_summary(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(term_program) = self.term_program.as_deref() {
+            parts.push(format!("TERM_PROGRAM={term_program}"));
+        }
+        if let Some(version) = self.term_program_version.as_deref() {
+            parts.push(format!("TERM_PROGRAM_VERSION={version}"));
+        }
+        if self.wezterm {
+            parts.push("profile=wezterm".to_owned());
+        }
+        if self.kitty {
+            parts.push("profile=kitty".to_owned());
+        }
+        if self.windows_terminal {
+            parts.push("profile=windows_terminal".to_owned());
+        }
+        if self.tmux {
+            parts.push("layer=tmux".to_owned());
+        }
+        if self.screen {
+            parts.push("layer=screen".to_owned());
+        }
+        if self.ssh {
+            parts.push("layer=ssh".to_owned());
+        }
+        if self.wsl {
+            parts.push("layer=wsl".to_owned());
+        }
+        if parts.is_empty() {
+            "profile=unknown".to_owned()
+        } else {
+            parts.join(" ")
+        }
+    }
+}
+
+fn non_empty_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn mcp_remediation(

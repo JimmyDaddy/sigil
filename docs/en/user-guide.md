@@ -46,6 +46,8 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 
 Mouse mode supports transcript scrolling, approval controls, slash candidates, setup/config rows, session selection, and activity selection when your terminal supports mouse capture. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
 
+For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatibility.md](terminal-compatibility.md).
+
 ## Slash Commands
 
 | Command | Purpose |
@@ -136,6 +138,8 @@ For temporary use or CI, prefer an environment variable such as `SIGIL_API_KEY`.
 ### What if my terminal has broken mouse or clipboard support?
 
 Use the `Terminal` section in `/config`, or set `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` in `sigil.toml`. Mouse capture changes apply on the next launch; OSC52 clipboard changes apply to the next copy action.
+
+Run `/doctor` to see the detected terminal profile, multiplexer or remote layers, and clipboard bridge warnings.
 
 ### Why is the CLI small?
 

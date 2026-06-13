@@ -254,6 +254,8 @@ osc52_clipboard = true
 
 The TUI `/config` panel includes a `Terminal` section for both switches. `mouse_capture` is applied on the next launch; `osc52_clipboard` is checked for each copy action.
 
+`doctor` reports the configured switches, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk. For a repeatable manual checklist across iTerm2, Terminal.app, WezTerm, kitty, tmux, and SSH, see [terminal-compatibility.md](terminal-compatibility.md).
+
 ## Provider Environment Overrides
 
 Supported variables:

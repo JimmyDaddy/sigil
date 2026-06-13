@@ -254,6 +254,8 @@ osc52_clipboard = true
 
 TUI `/config` 面板有 `Terminal` 区块可以调整这两个开关。`mouse_capture` 下一次启动生效；`osc52_clipboard` 每次复制时都会读取当前配置。
 
+`doctor` 会报告配置开关、`TERM`、常见终端 profile 变量、tmux/screen、SSH、WSL 和剪贴板桥接风险。跨 iTerm2、Terminal.app、WezTerm、kitty、tmux 和 SSH 的可重复人工 checklist 见 [terminal-compatibility.md](terminal-compatibility.md)。
+
 ## Provider 环境变量 Override
 
 当前支持：

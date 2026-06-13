@@ -42,7 +42,7 @@ CLI 不是主要产品表面，默认只承担自动化和调试入口。
 - 用 `/doctor` 诊断配置、认证、MCP、LSP 和 terminal 就绪状态，并查看修复建议
 - 用 `/model` 和 `/effort` 调整下一轮模型与 reasoning effort
 - 用 `/compact` 压缩长会话上下文
-- 在支持 mouse mode 的终端里使用鼠标点击、滚动和 transcript 拖选
+- 在支持 mouse mode / OSC52 的终端里使用鼠标点击、滚动、transcript 拖选和复制
 - 可选开启 code intelligence，让 agent 使用符号、定义、引用、诊断、code action 和 rename preview，并在 `/config` 查看就绪状态
 - 可选接入 stdio MCP server，按信任策略暴露外部工具
 
@@ -77,7 +77,7 @@ Sigil 会按顺序查找配置：
 - Linux：`$XDG_CONFIG_HOME/sigil/sigil.toml` 或 `~/.config/sigil/sigil.toml`
 - Windows：`%APPDATA%\sigil\sigil.toml`
 
-认证、provider、permission、memory、compaction、code intelligence、terminal 兼容性和环境变量 override 的完整配置示例见 [docs/zh-CN/configuration.md](docs/zh-CN/configuration.md)。
+认证、provider、permission、memory、compaction、code intelligence、terminal 兼容性和环境变量 override 的完整配置示例见 [docs/zh-CN/configuration.md](docs/zh-CN/configuration.md)。真实终端里的鼠标和剪贴板 smoke checklist 见 [docs/zh-CN/terminal-compatibility.md](docs/zh-CN/terminal-compatibility.md)。
 
 ## Provider
 
