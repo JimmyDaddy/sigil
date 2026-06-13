@@ -55,7 +55,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | Command | Purpose |
 | --- | --- |
 | `/config` | Open the TUI config panel |
-| `/doctor` | Run local setup diagnostics |
+| `/doctor` | Run local setup diagnostics with a summary and remediation list |
 | `/resume` | Select and restore a previous session |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
 | `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |

@@ -28,7 +28,7 @@ cargo run -p sigil-cli -- run "总结一下当前仓库"
 cargo run -p sigil-cli -- doctor
 ```
 
-在 TUI 内也可以用 `/doctor`，它会把同一份本地诊断报告渲染到 transcript。Doctor 会附带可执行的 `fix:` 建议；如果 API key 只明文保存在配置里，也会给出安全提示。
+在 TUI 内也可以用 `/doctor`，它会把同一份本地诊断报告渲染到 transcript。TUI 报告会先显示状态汇总和 `needs attention` 修复清单，再保留完整 check 列表；如果 API key 只明文保存在配置里，也会给出安全提示。
 
 CLI 不是主要产品表面，默认只承担自动化和调试入口。
 

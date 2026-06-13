@@ -28,7 +28,7 @@ Use `doctor` when setup or local tooling looks wrong:
 cargo run -p sigil-cli -- doctor
 ```
 
-Inside the TUI, use `/doctor` to render the same local diagnostics report in the transcript. Doctor includes actionable `fix:` lines and warns when the API key is only stored as plaintext in config.
+Inside the TUI, use `/doctor` to render the same local diagnostics report in the transcript. The TUI report starts with a status summary and a `needs attention` remediation list, then keeps the full check list. Doctor warns when the API key is only stored as plaintext in config.
 
 The CLI is not the primary product surface. It is intentionally kept as an automation and debugging entrypoint.
 

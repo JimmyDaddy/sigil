@@ -45,7 +45,7 @@ cargo run -p sigil-tui
 cargo run -p sigil-cli -- doctor
 ```
 
-在 TUI 内可以用 `/doctor`，它会把同一份报告渲染到 transcript。
+在 TUI 内可以用 `/doctor`，它会把同一份报告渲染到 transcript。TUI 版本会先显示状态汇总和 `needs attention` 修复清单，再展示完整 check 列表。
 
 如果启动 Sigil 时使用了非默认配置，也传入同一个配置路径：
 

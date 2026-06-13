@@ -39,6 +39,8 @@ fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Resul
         .text
         .clone();
     assert!(rendered.contains("[ok] config:load - config parsed"));
+    assert!(rendered.contains("summary:"));
+    assert!(rendered.contains("needs attention:"));
     assert!(rendered.contains("provider:auth"));
     assert!(rendered.contains("fix: prefer SIGIL_API_KEY"));
     assert!(!rendered.contains("super-secret-test-key"));
@@ -48,18 +50,46 @@ fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Resul
 #[test]
 fn render_doctor_report_includes_summary_and_check_lines() {
     let report = DoctorReport {
+        checks: vec![
+            DoctorCheck {
+                status: DoctorStatus::Ok,
+                name: "config:load".to_owned(),
+                message: "config parsed".to_owned(),
+                remediation: None,
+            },
+            DoctorCheck {
+                status: DoctorStatus::Warn,
+                name: "terminal".to_owned(),
+                message: "TERM is not set".to_owned(),
+                remediation: Some("set TERM in the shell before launching the TUI".to_owned()),
+            },
+        ],
+    };
+
+    let rendered = render_doctor_report(&report);
+
+    assert!(rendered.starts_with("doctor: warn\nsummary: 0 error · 1 warn · 1 ok"));
+    assert!(rendered.contains("needs attention:\n- [warn] terminal - TERM is not set"));
+    assert!(rendered.contains("  fix: set TERM in the shell before launching the TUI"));
+    assert!(rendered.contains("checks:\n[ok] config:load - config parsed"));
+    assert!(rendered.contains("[warn] terminal - TERM is not set"));
+    assert!(rendered.contains("    fix: set TERM in the shell before launching the TUI"));
+}
+
+#[test]
+fn render_doctor_report_marks_all_ok_reports_ready() {
+    let report = DoctorReport {
         checks: vec![DoctorCheck {
-            status: DoctorStatus::Warn,
+            status: DoctorStatus::Ok,
             name: "terminal".to_owned(),
-            message: "TERM is not set".to_owned(),
-            remediation: Some("set TERM in the shell before launching the TUI".to_owned()),
+            message: "TERM=xterm-256color".to_owned(),
+            remediation: None,
         }],
     };
 
     let rendered = render_doctor_report(&report);
 
-    assert_eq!(
-        rendered,
-        "doctor: warn\n[warn] terminal - TERM is not set\n    fix: set TERM in the shell before launching the TUI"
-    );
+    assert!(rendered.starts_with("doctor: ok\nsummary: 0 error · 0 warn · 1 ok"));
+    assert!(rendered.contains("ready: all checks passed"));
+    assert!(!rendered.contains("needs attention:"));
 }

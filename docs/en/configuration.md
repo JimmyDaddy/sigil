@@ -45,7 +45,7 @@ Run `doctor` when setup, authentication, MCP, or local LSP tooling looks wrong:
 cargo run -p sigil-cli -- doctor
 ```
 
-Inside the TUI, use `/doctor` to render the same report in the transcript.
+Inside the TUI, use `/doctor` to render the same report in the transcript. The TUI version starts with a status summary and a `needs attention` remediation list before the full check list.
 
 Use the same config override if you launch Sigil with a non-default config:
 
