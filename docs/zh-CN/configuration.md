@@ -37,6 +37,24 @@ cargo run -p sigil-tui
 
 如果没有配置文件，TUI 会进入 Quick Setup，并在保存后生成可用配置。后续可以用 `/config` 调整常用项。
 
+## 用 Doctor 排障
+
+当配置、认证、MCP 或本地 LSP 工具链看起来不对时，先运行 `doctor`：
+
+```bash
+cargo run -p sigil-cli -- doctor
+```
+
+在 TUI 内可以用 `/doctor`，它会把同一份报告渲染到 transcript。
+
+如果启动 Sigil 时使用了非默认配置，也传入同一个配置路径：
+
+```bash
+cargo run -p sigil-cli -- --config ./sigil.toml doctor
+```
+
+报告会检查配置加载、workspace 解析、session log 位置、DeepSeek provider 设置、API key 来源、MCP command 与 trust 设置、code intelligence language server 可用性，以及当前 `TERM`。它只展示 API key 的来源，不会打印密钥值。
+
 ## 最小配置示例
 
 如果需要手写配置，可以从这个结构开始：

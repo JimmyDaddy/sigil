@@ -15,6 +15,7 @@ use sigil_kernel::{
 use sigil_provider_deepseek::{
     DeepSeekFimCompletionRequest, DeepSeekPrefixCompletionRequest, DeepSeekProvider,
 };
+use sigil_runtime::doctor::{DoctorReport, build_doctor_report};
 
 #[derive(Parser)]
 #[command(name = "sigil")]
@@ -31,6 +32,7 @@ enum Commands {
     Run {
         prompt: String,
     },
+    Doctor,
     #[command(hide = true)]
     Prefix {
         prompt: String,
@@ -64,6 +66,7 @@ async fn main() -> Result<()> {
     let config_path = preferred_config_path(cli.config.as_deref(), &cwd)?;
     match cli.command {
         Commands::Run { prompt } => run_command(&config_path, &cwd, prompt).await,
+        Commands::Doctor => doctor_command(&config_path, &cwd),
         Commands::Prefix {
             prompt,
             assistant_prefix,
@@ -78,6 +81,26 @@ async fn main() -> Result<()> {
             max_tokens,
         } => fim_command(&config_path, prompt, suffix, stop, model, max_tokens).await,
     }
+}
+
+fn doctor_command(config_path: &Path, launch_cwd: &Path) -> Result<()> {
+    let report = build_doctor_report(config_path, launch_cwd);
+    print!("{}", render_doctor_report(&report));
+    Ok(())
+}
+
+fn render_doctor_report(report: &DoctorReport) -> String {
+    let mut output = String::from("Sigil doctor\n");
+    for check in &report.checks {
+        output.push_str(&format!(
+            "[{}] {} - {}\n",
+            check.status.as_str(),
+            check.name,
+            check.message
+        ));
+    }
+    output.push_str(&format!("summary: {}\n", report.overall_status().as_str()));
+    output
 }
 
 async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> Result<()> {

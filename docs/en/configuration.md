@@ -37,6 +37,24 @@ cargo run -p sigil-tui
 
 Quick Setup creates a usable config when no config file exists. Later, use `/config` for common settings.
 
+## Troubleshooting With Doctor
+
+Run `doctor` when setup, authentication, MCP, or local LSP tooling looks wrong:
+
+```bash
+cargo run -p sigil-cli -- doctor
+```
+
+Inside the TUI, use `/doctor` to render the same report in the transcript.
+
+Use the same config override if you launch Sigil with a non-default config:
+
+```bash
+cargo run -p sigil-cli -- --config ./sigil.toml doctor
+```
+
+The report checks config loading, workspace resolution, session log location, DeepSeek provider settings, API key source, configured MCP commands and trust settings, code intelligence language-server availability, and the current `TERM`. It reports where the API key was resolved from, but never prints the secret value.
+
 ## Minimal Config Example
 
 If you want to write config manually, start here:

@@ -84,4 +84,5 @@ fn command_metadata_generates_help_and_control_hints() {
     let slash = metadata_slash_help_lines();
     assert!(slash.iter().any(|line| line.starts_with("/config:")));
     assert!(metadata_slash_commands().any(|command| command == "/compact"));
+    assert!(metadata_slash_commands().any(|command| command == "/doctor"));
 }

@@ -14,6 +14,7 @@ use sigil_kernel::{
     ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
     ToolSubject, UsageStats,
 };
+use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -21,7 +22,7 @@ use tokio::{
 
 use super::{
     Cli, Commands, StdoutEventHandler, default_session_path, drain_provider_stream,
-    render_provider_chunk, render_run_event, resolve_workspace_root,
+    render_doctor_report, render_provider_chunk, render_run_event, resolve_workspace_root,
 };
 
 fn boxed_chunk_stream(
@@ -314,6 +315,50 @@ fn cli_parses_run_command_with_explicit_config() -> Result<()> {
         Commands::Run { ref prompt } if prompt == "hello"
     ));
     Ok(())
+}
+
+#[test]
+fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "--config", "custom.toml", "doctor"])?;
+
+    assert_eq!(
+        cli.config.as_deref(),
+        Some(std::path::Path::new("custom.toml"))
+    );
+    assert!(matches!(cli.command, Commands::Doctor));
+    Ok(())
+}
+
+#[test]
+fn render_doctor_report_formats_checks_and_summary() {
+    let report = DoctorReport {
+        checks: vec![
+            DoctorCheck {
+                status: DoctorStatus::Ok,
+                name: "config:load".to_owned(),
+                message: "config parsed".to_owned(),
+            },
+            DoctorCheck {
+                status: DoctorStatus::Warn,
+                name: "terminal".to_owned(),
+                message: "TERM is not set".to_owned(),
+            },
+        ],
+    };
+
+    let rendered = render_doctor_report(&report);
+
+    assert!(rendered.contains("Sigil doctor"));
+    assert!(rendered.contains("[ok] config:load - config parsed"));
+    assert!(rendered.contains("[warn] terminal - TERM is not set"));
+    assert!(rendered.contains("summary: warn"));
+}
+
+#[test]
+fn doctor_command_renders_report_for_missing_config() -> Result<()> {
+    let workspace = create_test_workspace("doctor-command");
+
+    super::doctor_command(&workspace.join("missing.toml"), &workspace)
 }
 
 #[tokio::test]

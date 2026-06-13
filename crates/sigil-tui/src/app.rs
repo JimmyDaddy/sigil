@@ -7,6 +7,7 @@ use std::{
 mod approval_flow;
 mod command_dispatch;
 mod config_flow;
+mod diagnostics_flow;
 mod formatting;
 mod input_flow;
 mod modal_flow;
@@ -976,6 +977,10 @@ impl AppState {
             }
             "/config" => {
                 self.open_config_panel();
+                Ok(None)
+            }
+            "/doctor" => {
+                self.show_doctor_report();
                 Ok(None)
             }
             "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),

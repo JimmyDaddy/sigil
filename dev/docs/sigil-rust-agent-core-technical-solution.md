@@ -163,8 +163,8 @@ sigil/
 - `sigil-code-intel`：隔离 LSP client 生命周期、Rust Tree-sitter fallback、符号/诊断缓存和只读 code intelligence tools。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态代码智能结果只通过 bounded tool result 进入 provider-visible history，不注入 system prompt。
 - `sigil-mcp`：隔离 stdio MCP client 与工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
 - `sigil-runtime`：收口跨入口共享的 provider factory、tool registry 和 run options，避免 TUI / CLI 各自硬编码装配链。它不是新的领域层，kernel 仍然不知道 runtime 存在。
-- `sigil-cli`：薄启动器、调试入口和自动化入口，不承担最终产品心智。
-- `sigil-tui`：第一用户入口。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
+- `sigil-cli`：薄启动器、调试入口、自动化入口和本地 doctor 诊断入口，不承担最终产品心智；诊断事实由 `sigil-runtime` 提供，避免 CLI 与 TUI 后续各写一套判断。
+- `sigil-tui`：第一用户入口。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
 
 这个拆分仍然比“教科书式 Clean Architecture”更少：crate 边界只承载产品级职责，crate 内模块才承载局部复杂度。memory、permission、config、session 继续留在 `sigil-kernel` 内，因为它们共同定义通用执行语义；TUI 的输入、modal、session、approval、timeline、worker bridge 等状态流则留在 `sigil-tui` 内，因为它们属于第一用户表面的交互模型。
 

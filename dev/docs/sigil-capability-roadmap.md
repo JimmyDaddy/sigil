@@ -2,7 +2,7 @@
 
 状态：规划草案
 
-更新日期：2026-06-10
+更新日期：2026-06-13
 
 本文基于当前仓库实现、`README.md`、`dev/governance/*` 和
 [`sigil-rust-agent-core-technical-solution.md`](sigil-rust-agent-core-technical-solution.md)
@@ -39,6 +39,7 @@
 | P0 | Code intelligence / LSP | Rust MVP 和多语言自动发现已落地；默认关闭，支持 LSP + Tree-sitter fallback | 扩展 workspace trust UI、code action/rename 审批闭环 |
 | P0 | MCP 完整闭环 | tools 可用；trust enforcement、TUI 手动 lazy activation、模型按需 activation、lifecycle status、elicitation modal 与 elicitation decision audit 已落地 | 补 prompt/resource surface 与更细粒度 progress 展示 |
 | P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key | 增加 secret 存储、迁移与 redaction 审计 |
+| P0 | Diagnostics / doctor | CLI `doctor` 与 TUI `/doctor` 已复用同一份 `DoctorReport` 检查 config、workspace、provider/auth、MCP、LSP 和 terminal 基线 | 增加可执行 remediation 文案与更丰富 diagnostics panel |
 | P1 | 多 provider | runtime 只支持 `deepseek` | 增加 OpenAI-compatible provider，再扩 Anthropic / Gemini |
 | P1 | 鼠标交互 | 只有滚轮 | 实现区域命中、低风险点击、approval 安全点击 |
 | P1 | Planner / executor / subagent | 单 agent loop | 分 session 双模型协作与任务型 subagent |
@@ -98,6 +99,28 @@ cargo clippy --all-targets -- -D warnings
 
 - 后续工作能按 task 执行，不需要重新解释能力边界。
 - README 和 architecture snapshot 不宣传尚未完成的能力。
+
+### 4.3 Diagnostics / Doctor
+
+当前事实：
+
+- `sigil doctor` 已作为 CLI 本地诊断入口落地。
+- TUI `/doctor` 会把同一份 `DoctorReport` 渲染到 transcript。
+- 诊断逻辑位于 `sigil-runtime::doctor`，CLI 和 TUI 只负责渲染。
+- 当前检查覆盖 config path/load、workspace root、session log dir、DeepSeek provider/auth 来源、MCP command/trust、code intelligence LSP plan 和 terminal `TERM`。
+- 诊断只报告 secret 来源，不打印 secret 值。
+
+后续交付物：
+
+1. 为每类 warning/error 增加可执行 remediation 文案。
+2. 后续如需要更强交互，再把 `/doctor` report 扩展成 dedicated diagnostics panel。
+3. 如后续出现 release binary，把 `doctor` 作为安装后第一排障命令写入 release 文档。
+
+验收标准：
+
+- CLI 与 TUI 使用同一份诊断事实，不各写一套判断。
+- secret 来源可以定位，但 secret 值不会进入 stdout、stderr、timeline 或 session log。
+- 缺配置、缺 API key、缺 MCP command、缺 LSP server 都能给出明确定位。
 
 ## 5. Phase 1：Code Intelligence / LSP
 
@@ -555,16 +578,17 @@ cargo test -p sigil-tui approval timeline
 
 推荐按下面顺序推进，而不是按实现趣味挑选：
 
-1. **Secret 与安全产品化**：先消除明文配置和 MCP secret egress 的安全债。
-2. **Code intelligence foundation**：建立 `sigil-code-intel`，先让 Rust 项目诊断和符号可用。
-3. **MCP trust enforcement + elicitation**：把插件系统从可用推进到可信。
-4. **OpenAI-compatible provider**：验证 provider-neutral runtime 边界。
-5. **鼠标交互 Phase 1/2**：改善 TUI 手感，但不碰高风险审批点击。
-6. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
-7. **PTY / background tasks**：解决长命令和交互式命令。
-8. **Editing Tools 2.0**：提高多文件变更可靠性。
-9. **CLI JSON / HTTP adapter**：扩展自动化表面。
-10. **Packaging / Memory 2.0**：产品化和长期智能。
+1. **Secret 与安全产品化后半段**：在已完成 secret resolution / redaction / MCP egress enforcement 基础上，评估 session-only 或可选安全存储。
+2. **Diagnostics remediation 文案**：为 `doctor` 的 warning/error 增加明确下一步，避免用户只看到状态。
+3. **Code intelligence trust UI**：在已有 LSP 工具和状态展示基础上补 workspace trust / remediation。
+4. **MCP prompt/resource surface**：在 tool/roots/elicitation 已治理的基础上扩展 protocol surface。
+5. **OpenAI-compatible provider**：验证 provider-neutral runtime 边界。
+6. **鼠标交互 Phase 1/2**：改善 TUI 手感，但不碰高风险审批点击。
+7. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
+8. **PTY / background tasks**：解决长命令和交互式命令。
+9. **Editing Tools 2.0**：提高多文件变更可靠性。
+10. **CLI JSON / HTTP adapter**：扩展自动化表面。
+11. **Packaging / Memory 2.0**：产品化和长期智能。
 
 ## 16. 每阶段通用完成定义
 

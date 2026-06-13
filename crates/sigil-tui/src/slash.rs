@@ -42,6 +42,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         completes_with_space: false,
     },
     SlashCommandSpec {
+        canonical: "/doctor",
+        aliases: &[],
+        description: "run local diagnostics",
+        completes_with_space: false,
+    },
+    SlashCommandSpec {
         canonical: "/effort",
         aliases: &["/e"],
         description: "set effort <low|medium|high|max>",

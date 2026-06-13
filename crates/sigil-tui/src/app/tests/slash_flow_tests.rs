@@ -140,6 +140,7 @@ fn slash_selector_shows_all_commands_for_root_slash() {
     let rows = app.slash_selector_rows();
 
     assert_eq!(rows.len(), super::SLASH_COMMANDS.len());
+    assert!(rows.iter().any(|(label, _)| label == "/doctor"));
     assert_eq!(app.slash_selector_selected_index(), Some(0));
 }
 

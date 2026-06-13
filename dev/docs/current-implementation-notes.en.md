@@ -31,8 +31,8 @@ sigil/
 - `sigil-tools-builtin` provides file read/write/edit/delete, search, directory listing, and shell execution.
 - `sigil-code-intel` provides optional LSP / Tree-sitter code intelligence, including read-only symbol, definition, reference, and diagnostic tools.
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, `roots/list`, elicitation handling, lazy activation, and trust enforcement.
-- `sigil-cli` currently exposes the public `run` automation entrypoint; `prefix` and `fim` remain debugging or provider-specific entrypoints rather than normal user concepts.
-- `sigil-tui` is the primary user entrypoint. It owns chat/composer, slash selector, Quick Setup, `/config`, `/resume`, approval modal, tool activity, diff preview, session recovery, context compaction, markdown code block highlighting, and code intelligence status display.
+- `sigil-cli` currently exposes the public `run` automation entrypoint and the `doctor` local diagnostics entrypoint; `prefix` and `fim` remain debugging or provider-specific entrypoints rather than normal user concepts.
+- `sigil-tui` is the primary user entrypoint. It owns chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/resume`, approval modal, tool activity, diff preview, session recovery, context compaction, markdown code block highlighting, and code intelligence status display.
 
 ## TUI Module Boundaries
 
@@ -133,6 +133,8 @@ Root config is parsed by `sigil-kernel`:
 DeepSeek provider configuration lives under `[providers.deepseek]`. Runtime environment overrides are resolved in the provider config layer, with `SIGIL_API_KEY` taking highest priority and `DEEPSEEK_API_KEY` retained as a fallback source.
 
 TUI `/config` exposes only high-frequency provider fields, permissions, memory, compaction, and common MCP server fields. Lower-frequency provider-specific fields remain available through config files and environment variables.
+
+`sigil doctor` and TUI `/doctor` reuse runtime diagnostics to check config loading, workspace resolution, session log location, provider/auth source, MCP command/trust state, code intelligence LSP plan, and terminal `TERM`. Diagnostics report only the secret source, not secret values.
 
 ## Current MCP Implementation
 

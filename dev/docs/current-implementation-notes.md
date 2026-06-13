@@ -31,8 +31,8 @@ sigil/
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、搜索、目录枚举和 shell 执行。
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用和诊断只读工具。
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、`roots/list`、elicitation handler、lazy activation 和 trust enforcement。
-- `sigil-cli` 当前公开 `run` 自动化入口；`prefix` / `fim` 保留为调试或 provider 专项入口，不作为普通用户主心智。
-- `sigil-tui` 是第一用户入口，承载 chat/composer、slash selector、Quick Setup、`/config`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
+- `sigil-cli` 当前公开 `run` 自动化入口和 `doctor` 本地诊断入口；`prefix` / `fim` 保留为调试或 provider 专项入口，不作为普通用户主心智。
+- `sigil-tui` 是第一用户入口，承载 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
 
 ## TUI 模块边界
 
@@ -133,6 +133,8 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 DeepSeek provider 配置位于 `[providers.deepseek]`。运行时环境变量 override 在 provider config 层解析，其中 `SIGIL_API_KEY` 优先级最高，`DEEPSEEK_API_KEY` 作为备用来源保留。
 
 TUI `/config` 只暴露 provider 高频项、permissions、memory、compaction 和 MCP server 常用字段。低频 provider 专项字段继续保留给配置文件和环境变量。
+
+`sigil doctor` 与 TUI `/doctor` 复用 runtime 诊断逻辑，检查配置加载、workspace、session log、provider/auth 来源、MCP command/trust、code intelligence LSP plan 和 terminal `TERM`。诊断只展示 secret 来源，不输出 secret 值。
 
 ## MCP 当前实现
 

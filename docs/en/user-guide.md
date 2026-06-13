@@ -49,6 +49,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | Command | Purpose |
 | --- | --- |
 | `/config` | Open the TUI config panel |
+| `/doctor` | Run local setup diagnostics |
 | `/resume` | Select and restore a previous session |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
 | `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |

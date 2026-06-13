@@ -49,6 +49,7 @@ impl AppState {
             | UiCommand::ToggleThinking
             | UiCommand::OpenKeyboardHelp
             | UiCommand::OpenConfig
+            | UiCommand::OpenDoctor
             | UiCommand::CompactNow
             | UiCommand::CheckChangedFilesDiagnostics => false,
         }

@@ -17,6 +17,8 @@ use sigil_provider_deepseek::{
     DeepSeekProvider, DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV,
 };
 
+pub mod doctor;
+
 /// Builds the configured model provider for runtime entrypoints.
 ///
 /// # Errors

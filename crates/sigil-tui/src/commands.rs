@@ -8,6 +8,7 @@ pub(crate) enum UiCommand {
     ToggleThinking,
     OpenKeyboardHelp,
     OpenConfig,
+    OpenDoctor,
     CompactNow,
     CheckChangedFilesDiagnostics,
     FocusLatestToolCard,
@@ -94,6 +95,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: Some("/compact"),
         label: "Compact",
         help: "Request context compaction when idle.",
+        surface: CommandSurface::Slash,
+    },
+    UiCommandSpec {
+        command: UiCommand::OpenDoctor,
+        keys: &[],
+        slash: Some("/doctor"),
+        label: "Doctor",
+        help: "Run local setup diagnostics.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {

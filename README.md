@@ -22,6 +22,14 @@ Use the CLI for automation or scripts:
 cargo run -p sigil-cli -- run "summarize this repository"
 ```
 
+Use `doctor` when setup or local tooling looks wrong:
+
+```bash
+cargo run -p sigil-cli -- doctor
+```
+
+Inside the TUI, use `/doctor` to render the same local diagnostics report in the transcript.
+
 The CLI is not the primary product surface. It is intentionally kept as an automation and debugging entrypoint.
 
 ## What It Does
@@ -31,6 +39,7 @@ The CLI is not the primary product surface. It is intentionally kept as an autom
 - Inspect tool activities, command output, file changes, and diagnostics after a run.
 - Restore the latest session after restarting the TUI.
 - Use `/config` for common settings and `/resume` for session selection.
+- Use `/doctor` to diagnose config, authentication, MCP, LSP, and terminal readiness.
 - Use `/model` and `/effort` to adjust the next model run.
 - Use `/compact` to compact long-session context.
 - Optionally enable code intelligence for symbols, definitions, references, and diagnostics.
