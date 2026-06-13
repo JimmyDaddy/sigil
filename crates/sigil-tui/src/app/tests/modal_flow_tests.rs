@@ -358,6 +358,44 @@ fn model_picker_submit_updates_setup_and_fim_targets() -> Result<()> {
 }
 
 #[test]
+fn model_picker_key_edges_cover_up_decrement_and_empty_selection() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+
+    assert!(matches!(
+        app.handle_modal_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
+    assert_eq!(app.last_notice(), Some("model deepseek-v4-pro"));
+    assert!(matches!(
+        app.handle_modal_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        ModalOutcome::None
+    ));
+    assert_eq!(app.last_notice(), Some("model deepseek-v4-flash"));
+
+    if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_mut() {
+        state.options.clear();
+        state.selected = 0;
+    }
+    assert!(matches!(
+        app.handle_modal_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ModalOutcome::Dismissed(message) if message == "closed picker"
+    ));
+    assert!(!app.has_modal());
+
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    if let Some(ModalState::ModelPicker(state)) = app.modal_state.as_mut() {
+        state.options.clear();
+        state.selected = 0;
+    }
+    assert!(matches!(
+        app.submit_modal(),
+        ModalOutcome::Dismissed(message) if message == "closed picker"
+    ));
+    assert!(!app.has_modal());
+}
+
+#[test]
 fn config_numeric_text_modal_rejects_invalid_characters() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
@@ -1108,6 +1146,108 @@ fn mcp_elicitation_cycles_boolean_and_enum_fields() -> Result<()> {
         Some(json!({
             "confirm": true,
             "mode": "safe"
+        }))
+    );
+    Ok(())
+}
+
+#[test]
+fn mcp_elicitation_key_edges_cover_boolean_enum_number_and_string_input() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    app.handle_worker_message(WorkerMessage::McpElicitationRequest {
+        request: McpElicitationRequest {
+            server_name: "planner".to_owned(),
+            message: "Fill fields".to_owned(),
+            requested_schema: json!({
+                "type": "object",
+                "properties": {
+                    "confirm": { "type": "boolean", "title": "Confirm", "default": false },
+                    "mode": { "enum": ["safe", "fast"], "title": "Mode", "default": "safe" },
+                    "count": { "type": "integer", "title": "Count" },
+                    "note": { "type": "string", "title": "Note" }
+                }
+            }),
+        },
+        response_tx,
+    })?;
+
+    assert_eq!(app.modal_input_cursor(), Some(("Confirm".to_owned(), 5, 5)));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE))?;
+    assert!(app.modal_lines().join("\n").contains("Confirm: true|"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))?;
+    assert!(app.modal_lines().join("\n").contains("Confirm: false|"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert!(app.modal_lines().join("\n").contains("Confirm: true|"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE))?;
+    assert!(app.modal_lines().join("\n").contains("Confirm: false|"));
+
+    for _ in 0..4 {
+        if app
+            .modal_input_cursor()
+            .as_ref()
+            .map(|(label, _, _)| label.as_str())
+            == Some("Mode")
+        {
+            break;
+        }
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    assert_eq!(
+        app.modal_input_cursor()
+            .as_ref()
+            .map(|(label, _, _)| label.as_str()),
+        Some("Mode")
+    );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    assert!(app.modal_lines().join("\n").contains("Mode: fast|"));
+
+    for _ in 0..4 {
+        if app
+            .modal_input_cursor()
+            .as_ref()
+            .map(|(label, _, _)| label.as_str())
+            == Some("Count")
+        {
+            break;
+        }
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    for character in "+12".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))?;
+    assert!(app.modal_lines().join("\n").contains("Count: +12|"));
+
+    for _ in 0..4 {
+        if app
+            .modal_input_cursor()
+            .as_ref()
+            .map(|(label, _, _)| label.as_str())
+            == Some("Note")
+        {
+            break;
+        }
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    }
+    for character in "memo".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let response = futures::executor::block_on(response_rx)?;
+
+    assert_eq!(response.action, McpElicitationAction::Accept);
+    assert_eq!(
+        response.content,
+        Some(json!({
+            "confirm": false,
+            "mode": "fast",
+            "count": 12,
+            "note": "memo"
         }))
     );
     Ok(())

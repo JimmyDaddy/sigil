@@ -2,6 +2,11 @@ use serde_json::json;
 use sigil_provider_deepseek::{
     DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV, StrictToolsMode,
 };
+use std::{
+    io::{Read, Write},
+    net::TcpListener,
+    thread,
+};
 
 use super::{
     BalanceSnapshot, build_provider_status_client, fetch_provider_balance_snapshot,
@@ -9,6 +14,49 @@ use super::{
     provider_request_timeout_secs, provider_status_request_parts, provider_status_url,
     require_provider_auth, resolve_provider_api_key,
 };
+
+fn spawn_mock_http_server(
+    response_status: u16,
+    response_body: String,
+) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("mock server should bind");
+    let addr = listener
+        .local_addr()
+        .expect("mock server should expose address");
+    let reason = if response_status == 200 {
+        "OK"
+    } else {
+        "Internal Server Error"
+    };
+
+    let handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1];
+            while request.len() < 8192 {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        request.push(buffer[0]);
+                        if request.ends_with(b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            let response = format!(
+                "HTTP/1.1 {response_status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+    });
+
+    (format!("http://{addr}"), handle)
+}
 
 fn provider_config(api_key: Option<&str>) -> DeepSeekProviderConfig {
     DeepSeekProviderConfig {
@@ -142,11 +190,42 @@ fn parse_balance_snapshot_rejects_missing_or_unparseable_infos() {
         "provider returned no balance infos"
     );
     assert_eq!(
+        parse_balance_snapshot(&json!({"balance_infos": []}))
+            .expect_err("empty array should fail")
+            .to_string(),
+        "provider returned no parseable balances"
+    );
+    assert_eq!(
         parse_balance_snapshot(&json!({"balance_infos": [{"currency": "CNY"}]}))
             .expect_err("unparseable balances should fail")
             .to_string(),
         "provider returned no parseable balances"
     );
+}
+
+#[test]
+fn parse_balance_snapshot_rejects_non_array_balance_infos() {
+    let error =
+        parse_balance_snapshot(&json!({"balance_infos": 42})).expect_err("object should fail");
+
+    assert_eq!(error.to_string(), "provider returned no balance infos");
+}
+
+#[test]
+fn parse_balance_snapshot_skips_invalid_entries_until_first_valid() {
+    let snapshot = parse_balance_snapshot(&json!({
+        "is_available": true,
+        "balance_infos": [
+            {"currency": "USD", "total_balance": "bad"},
+            {"currency": "CNY", "total_balance": "88.12"},
+            {"currency": 123, "total_balance": "77.77"}
+        ]
+    }))
+    .expect("valid balance should parse after skipped entries");
+
+    assert_eq!(snapshot.total, Some(88.12));
+    assert_eq!(snapshot.currency.as_deref(), Some("CNY"));
+    assert_eq!(snapshot.status, "CNY 88.12");
 }
 
 fn test_provider_config(timeout_secs: u64) -> DeepSeekProviderConfig {
@@ -257,6 +336,125 @@ fn parse_balance_snapshot_rejects_unparseable_items() {
             .to_string()
             .contains("provider returned no parseable balances")
     );
+}
+
+#[test]
+fn fetch_remote_model_ids_reports_http_errors() {
+    let (base_url, server) = spawn_mock_http_server(500, r#"{ \"error\": \"down\" }"#.to_owned());
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let error = fetch_remote_model_ids(&config).expect_err("server error should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to fetch provider models")
+    );
+
+    let _ = server.join();
+}
+
+#[test]
+fn fetch_remote_model_ids_reports_decode_errors() {
+    let (base_url, server) = spawn_mock_http_server(200, "not-json".to_owned());
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let error = fetch_remote_model_ids(&config).expect_err("invalid json should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to decode provider models")
+    );
+
+    let _ = server.join();
+}
+
+#[test]
+fn fetch_remote_model_ids_returns_remote_ids_from_http_payload() {
+    let (base_url, server) = spawn_mock_http_server(
+        200,
+        json!({
+            "data": [
+                {"id": "deepseek-v4-flash"},
+                {"id": "deepseek-v4-pro"},
+                {"id": "deepseek-v4-flash"}
+            ]
+        })
+        .to_string(),
+    );
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let models = fetch_remote_model_ids(&config).expect("valid remote model list should parse");
+
+    assert_eq!(models, vec!["deepseek-v4-flash", "deepseek-v4-pro"]);
+    let _ = server.join();
+}
+
+#[test]
+fn fetch_remote_model_ids_rejects_empty_remote_model_list() {
+    let (base_url, server) = spawn_mock_http_server(200, json!({"data": []}).to_string());
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let error = fetch_remote_model_ids(&config).expect_err("empty model list should fail");
+
+    assert_eq!(error.to_string(), "provider returned no model ids");
+    let _ = server.join();
+}
+
+#[test]
+fn fetch_provider_balance_snapshot_reports_http_errors() {
+    let (base_url, server) = spawn_mock_http_server(503, r#"{ \"error\": \"down\" }"#.to_owned());
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let error = fetch_provider_balance_snapshot(&config).expect_err("server error should fail");
+    assert!(error.to_string().contains("failed to fetch balance"));
+
+    let _ = server.join();
+}
+
+#[test]
+fn fetch_provider_balance_snapshot_reports_decode_errors() {
+    let (base_url, server) = spawn_mock_http_server(200, "not-json".to_owned());
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let error = fetch_provider_balance_snapshot(&config).expect_err("invalid json should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("failed to decode balance payload")
+    );
+
+    let _ = server.join();
+}
+
+#[test]
+fn fetch_provider_balance_snapshot_returns_http_balance_payload() {
+    let (base_url, server) = spawn_mock_http_server(
+        200,
+        json!({
+            "is_available": true,
+            "balance_infos": [
+                {"currency": "CNY", "total_balance": "18.50"}
+            ]
+        })
+        .to_string(),
+    );
+    let mut config = provider_config(Some("test-key"));
+    config.base_url = base_url;
+
+    let snapshot =
+        fetch_provider_balance_snapshot(&config).expect("valid remote balance should parse");
+
+    assert_eq!(snapshot.total, Some(18.50));
+    assert_eq!(snapshot.currency.as_deref(), Some("CNY"));
+    assert!(snapshot.available);
+    assert_eq!(snapshot.status, "CNY 18.50");
+    let _ = server.join();
 }
 
 #[test]

@@ -251,3 +251,65 @@ fn tool_activity_metadata_is_cached_after_append() {
     );
     assert!(app.tool_card_status_line().contains("open"));
 }
+
+#[test]
+fn tool_focus_commands_are_noop_without_tool_cards() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    assert_eq!(app.tool_card_status_line(), "activities: none");
+    assert_eq!(app.selected_tool_activity_key, None);
+
+    assert!(!app.has_tool_cards());
+    assert!(app.tool_activity_entry_indices().is_empty());
+    assert!(!app.select_tool_activity_entry(0));
+    assert!(!app.focus_latest_tool_card());
+    assert_eq!(app.last_notice(), Some("no activities yet"));
+    assert!(!app.select_adjacent_tool_card(true));
+    assert_eq!(app.last_notice(), Some("no activities yet"));
+    assert!(!app.toggle_selected_tool_card());
+    assert_eq!(app.last_notice(), Some("no activities yet"));
+
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT))?
+            .is_none()
+    );
+    assert!(
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT))?
+            .is_none()
+    );
+    assert_eq!(app.selected_tool_activity_key, None);
+    Ok(())
+}
+
+#[test]
+fn tool_focus_private_helpers_cover_stale_selection_and_reveal_guards() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let entries = vec![(2, "first".to_owned()), (5, "second".to_owned())];
+
+    app.selected_tool_activity_key = Some("missing".to_owned());
+    assert_eq!(
+        app.ensure_selected_tool_entry(&entries),
+        (5, "second".to_owned())
+    );
+    assert_eq!(app.selected_tool_activity_key.as_deref(), Some("second"));
+
+    app.selected_tool_activity_key = Some("first".to_owned());
+    assert_eq!(
+        app.next_tool_entry(&entries, false),
+        (5, "second".to_owned())
+    );
+    assert_eq!(
+        app.next_tool_entry(&entries, true),
+        (5, "second".to_owned())
+    );
+
+    app.timeline_render_ranges.clear();
+    app.reveal_timeline_entry(99);
+    assert_eq!(app.timeline_scroll_back, 0);
+
+    app.rerender_tool_selection_change(Some(0), 0);
+    assert!(!app.timeline_render_cache.is_empty());
+}

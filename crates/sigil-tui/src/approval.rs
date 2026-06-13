@@ -104,3 +104,7 @@ impl ApprovalDiffMode {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/approval_tests.rs"]
+mod tests;

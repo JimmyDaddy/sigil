@@ -697,6 +697,7 @@ async fn grep_skips_non_utf8_files_without_panicking() -> Result<()> {
     assert!(!result.is_error());
     assert!(result.content.contains("valid.txt"));
     assert!(!result.content.contains("binary.bin"));
+    assert_eq!(result.metadata.details["binary_files_skipped"], 1);
     Ok(())
 }
 
@@ -1166,7 +1167,17 @@ fn bash_and_shell_helper_functions_cover_parser_edges() -> Result<()> {
         ]
     );
     assert_eq!(super::redirection_target("1>out.txt"), Some("out.txt"));
+    assert_eq!(super::redirection_target("&>>all.log"), Some("all.log"));
+    assert_eq!(super::redirection_target("2>>err.log"), Some("err.log"));
+    assert_eq!(super::redirection_target("<"), None);
+    assert_eq!(
+        super::redirection_target("2>stderr.log"),
+        Some("stderr.log")
+    );
+    assert!(super::is_redirection_operator("<<"));
     assert!(!super::is_path_argument("git", "--help"));
+    assert!(!super::is_path_argument("cat", "https://example.com/file"));
+    assert!(!super::is_path_argument("cat", "-n"));
     assert!(super::is_path_argument("cat", "Cargo.toml"));
     assert!(!super::is_path_argument("echo", "Cargo.toml"));
     assert_eq!(
@@ -1219,6 +1230,9 @@ fn bash_and_shell_helper_functions_cover_parser_edges() -> Result<()> {
             .iter()
             .any(|subject| subject.normalized == "nested/out.txt")
     );
+
+    let no_target_subjects = super::bash_path_subjects(workspace.path(), "cat < && cd - && ls")?;
+    assert!(no_target_subjects.is_empty());
     Ok(())
 }
 
@@ -1248,11 +1262,29 @@ fn bash_path_subjects_and_tokenizer_cover_segmented_and_quoted_edges() -> Result
             "Cargo.toml",
         ]
     );
+    let compact_tokens =
+        super::tokenize_shell_subject_words(r#"echo hi&&cat 'src/lib.rs'||pwd;ls"#);
+    assert_eq!(
+        compact_tokens,
+        vec![
+            "echo",
+            "hi",
+            "&&",
+            "cat",
+            "src/lib.rs",
+            "||",
+            "pwd",
+            ";",
+            "ls",
+        ]
+    );
 
-    let subjects =
-        super::bash_path_subjects(workspace.path(), "cd src && cat lib.rs || ls ../Cargo.toml")?;
+    let subjects = super::bash_path_subjects(
+        workspace.path(),
+        "cd src && cat lib.rs || ls ../Cargo.toml; cat <lib.rs &>../combined.log",
+    )?;
 
-    assert_eq!(subjects.len(), 3);
+    assert_eq!(subjects.len(), 5);
     assert_eq!(
         subjects[0].canonical_path.as_deref(),
         Some(workspace_root.join("src").as_path())
@@ -1266,6 +1298,11 @@ fn bash_path_subjects_and_tokenizer_cover_segmented_and_quoted_edges() -> Result
         subjects
             .iter()
             .any(|subject| subject.normalized == "Cargo.toml")
+    );
+    assert!(
+        subjects
+            .iter()
+            .any(|subject| subject.normalized == "combined.log")
     );
     Ok(())
 }

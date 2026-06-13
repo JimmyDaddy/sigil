@@ -83,6 +83,32 @@ fn effective_server_plan_reports_degraded_status_when_discovery_fails() {
 }
 
 #[test]
+fn effective_server_plan_uses_successful_discovery_results() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\n",
+    )
+    .expect("cargo file should write");
+    let config = CodeIntelligenceConfig {
+        enabled: true,
+        discovery: CodeIntelligenceDiscoveryConfig {
+            enabled: true,
+            report_missing: true,
+        },
+        ..CodeIntelligenceConfig::default()
+    };
+
+    let plan = effective_server_plan(&config, temp.path());
+
+    assert!(
+        plan.statuses
+            .iter()
+            .any(|status| status.server == "rust-analyzer")
+    );
+}
+
+#[test]
 fn configured_servers_override_discovered_profile_by_name() {
     let configured = LanguageServerConfig {
         command: "custom-ts-lsp".to_owned(),
@@ -234,6 +260,18 @@ fn config_enabled_respects_enabled_and_startup_flags() {
 }
 
 #[test]
+fn fallback_rust_analyzer_server_matches_default_rust_shape() {
+    let server = fallback_rust_analyzer_server();
+
+    assert_eq!(server.name, "rust-analyzer");
+    assert_eq!(server.languages, vec!["rust"]);
+    assert_eq!(server.command, "rust-analyzer");
+    assert!(server.root_markers.contains(&"Cargo.toml".to_owned()));
+    assert!(server.file_extensions.contains(&"rs".to_owned()));
+    assert!(server.trust_required);
+}
+
+#[test]
 fn canonical_workspace_root_errors_for_missing_directory() {
     let missing = std::env::temp_dir().join("sigil-code-intel-no-root");
     let error = canonical_workspace_root(&missing).expect_err("missing workspace root should fail");
@@ -255,6 +293,16 @@ fn resolve_workspace_file_rejects_empty_and_missing_paths() {
     let missing =
         resolve_workspace_file(temp.path(), "missing.rs").expect_err("missing file should fail");
     assert!(missing.to_string().contains("missing.rs"));
+}
+
+#[test]
+fn resolve_workspace_file_maps_non_not_found_io_errors() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+
+    let error = resolve_workspace_file(temp.path(), "bad\0path.rs")
+        .expect_err("invalid path bytes should surface as io error");
+
+    assert!(error.to_string().contains("bad"));
 }
 
 #[test]

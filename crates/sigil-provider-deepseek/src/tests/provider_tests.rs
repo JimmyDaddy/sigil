@@ -248,6 +248,37 @@ fn provider_trait_methods_and_frame_helpers_cover_remaining_branches() -> Result
         "deepseek-v4-flash",
     )?);
     assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
+
+    let mut decoder = crate::stream::DeepSeekSseDecoder::default();
+    let mut mapper = crate::mapper::StreamMapper::new("deepseek-v4-flash");
+    let mut pending = VecDeque::new();
+    decoder.push("data: [DONE]")?;
+    assert!(super::enqueue_finished_chat_frames(
+        &mut decoder,
+        &mut mapper,
+        &mut pending,
+    )?);
+    assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
+
+    let mut decoder = crate::stream::DeepSeekSseDecoder::default();
+    let mut pending = VecDeque::new();
+    assert!(super::enqueue_completion_frames(
+        &mut decoder,
+        &mut pending,
+        "data: [DONE]\n\ndata: {not-json}\n\n",
+        "deepseek-v4-flash",
+    )?);
+    assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
+
+    let mut decoder = crate::stream::DeepSeekSseDecoder::default();
+    let mut pending = VecDeque::new();
+    decoder.push("data: [DONE]")?;
+    assert!(super::enqueue_finished_completion_frames(
+        &mut decoder,
+        &mut pending,
+        "deepseek-v4-flash",
+    )?);
+    assert!(matches!(pending.pop_front(), Some(ProviderChunk::Done)));
     Ok(())
 }
 
@@ -961,6 +992,122 @@ async fn fim_completion_emits_done_when_stream_ends_without_done_frame() -> Resu
 }
 
 #[tokio::test]
+async fn provider_surfaces_chat_and_completion_body_read_errors() -> Result<()> {
+    let chat_server = spawn_malformed_chunked_streaming_server().await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: chat_server.clone(),
+        beta_base_url: chat_server.clone(),
+        anthropic_base_url: chat_server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let mut stream = provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await?;
+    let error = stream
+        .next()
+        .await
+        .expect("chat stream should yield one error")
+        .expect_err("malformed chunked body should fail");
+    assert!(
+        error
+            .chain()
+            .any(|cause| cause.to_string().contains("failed to read response chunk"))
+    );
+
+    let completion_server = spawn_malformed_chunked_streaming_server().await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: completion_server.clone(),
+        beta_base_url: completion_server.clone(),
+        anthropic_base_url: completion_server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let mut stream = provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {\n".to_owned(),
+            suffix: "\n}\n".to_owned(),
+            max_tokens: Some(32),
+            stop: Vec::new(),
+        })
+        .await?;
+    let error = stream
+        .next()
+        .await
+        .expect("completion stream should yield one error")
+        .expect_err("malformed chunked body should fail");
+    assert!(error.chain().any(|cause| {
+        cause
+            .to_string()
+            .contains("failed to read completion chunk")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_surfaces_errors_from_unterminated_sse_frames() -> Result<()> {
+    let chat_server = spawn_unterminated_sse_streaming_server("not-a-data-frame").await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: chat_server.clone(),
+        beta_base_url: chat_server.clone(),
+        anthropic_base_url: chat_server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let mut stream = provider
+        .stream(simple_chat_request("deepseek-v4-flash"))
+        .await?;
+    let error = stream
+        .next()
+        .await
+        .expect("chat stream should yield one error")
+        .expect_err("invalid unterminated chat frame should fail");
+    assert!(error.to_string().contains("invalid SSE chunk"));
+
+    let completion_server = spawn_unterminated_sse_streaming_server("not-a-data-frame").await?;
+    let provider = deepseek_provider(crate::DeepSeekProviderConfig {
+        base_url: completion_server.clone(),
+        beta_base_url: completion_server.clone(),
+        anthropic_base_url: completion_server,
+        model: "deepseek-v4-flash".to_owned(),
+        fim_model: "deepseek-v4-pro".to_owned(),
+        api_key: Some("test".to_owned()),
+        user_id_strategy: None,
+        strict_tools_mode: crate::StrictToolsMode::Auto,
+        request_timeout_secs: 10,
+    })?;
+    let mut stream = provider
+        .stream_fim_completion(DeepSeekFimCompletionRequest {
+            model: None,
+            prompt: "fn main() {\n".to_owned(),
+            suffix: "\n}\n".to_owned(),
+            max_tokens: Some(32),
+            stop: Vec::new(),
+        })
+        .await?;
+    let error = stream
+        .next()
+        .await
+        .expect("completion stream should yield one error")
+        .expect_err("invalid unterminated completion frame should fail");
+    assert!(error.to_string().contains("invalid SSE chunk"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn fim_completion_surfaces_non_success_status() -> Result<()> {
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
         500,
@@ -1214,6 +1361,40 @@ async fn spawn_invalid_utf8_completion_streaming_server() -> Result<String> {
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
         let _ = socket.write_all(header.as_bytes()).await;
         let _ = socket.write_all(&[0xff, 0xfe, 0xfd]).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_malformed_chunked_streaming_server() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nZ\r\nbroken\r\n";
+        let _ = socket.write_all(response.as_bytes()).await;
+    });
+    Ok(format!("http://{}", address))
+}
+
+async fn spawn_unterminated_sse_streaming_server(body: &'static str) -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0u8; 8192];
+        let _ = socket.read(&mut buffer).await;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
     });
     Ok(format!("http://{}", address))
 }

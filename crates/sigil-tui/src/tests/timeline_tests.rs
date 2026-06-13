@@ -57,6 +57,21 @@ fn timeline_data_structures_preserve_projection_fields() {
 }
 
 #[test]
+fn sidebar_card_navigation_covers_all_variants() {
+    assert_eq!(SidebarCard::Permission.label(), "permission");
+    assert_eq!(SidebarCard::Agents.label(), "agents");
+    assert_eq!(SidebarCard::Usage.label(), "usage");
+
+    assert_eq!(SidebarCard::Permission.next(), SidebarCard::Agents);
+    assert_eq!(SidebarCard::Agents.next(), SidebarCard::Usage);
+    assert_eq!(SidebarCard::Usage.next(), SidebarCard::Permission);
+
+    assert_eq!(SidebarCard::Permission.previous(), SidebarCard::Usage);
+    assert_eq!(SidebarCard::Agents.previous(), SidebarCard::Permission);
+    assert_eq!(SidebarCard::Usage.previous(), SidebarCard::Agents);
+}
+
+#[test]
 fn session_history_rows_capture_selector_states() {
     let header = SessionHistoryRow::SessionHeader {
         filter: "abc".to_owned(),

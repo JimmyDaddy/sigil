@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     mouse::{AppMouseOutcome, HitTarget, MouseInput, MouseInputKind},
-    ui::LayoutSnapshot,
+    ui::{LayoutMode, LayoutSnapshot},
 };
 use ratatui::layout::Rect;
 
@@ -237,6 +237,82 @@ fn mouse_click_quit_shows_confirmation_in_slash_row() -> Result<()> {
 }
 
 #[test]
+fn mouse_click_slash_candidate_is_noop_when_approval_is_pending() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.active_pane = PaneFocus::Activity;
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.input = "/".to_owned();
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = slash_candidate_point_by_label(&app, &layout, "/config");
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert_eq!(app.input, "/");
+    Ok(())
+}
+
+#[test]
+fn mouse_click_tool_card_is_noop_when_approval_is_pending() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    let previous_selected_tool_activity_key = app.selected_tool_activity_key.clone();
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = tool_card_point(&layout, first_entry_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    assert_eq!(
+        app.selected_tool_activity_key,
+        previous_selected_tool_activity_key
+    );
+    Ok(())
+}
+
+#[test]
+fn mouse_click_composer_is_noop_when_approval_is_pending() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.active_pane = PaneFocus::Activity;
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = point_in(layout.composer);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_background_path_is_noop_without_state_change() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 10);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 10), &app);
+    let background = (layout.screen.width - 1, layout.screen.height - 1);
+
+    let outcome = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, background.0, background.1),
+        &layout,
+    )?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    assert_eq!(
+        layout.hit_target(background.0, background.1),
+        HitTarget::Background
+    );
+    Ok(())
+}
+
+#[test]
 fn keyboard_enter_dangerous_slash_command_needs_no_mouse_confirmation() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/compact".to_owned();
@@ -331,5 +407,136 @@ fn mouse_scroll_behind_approval_modal_is_noop() -> Result<()> {
     assert!(matches!(outcome, AppMouseOutcome::Noop));
     assert_eq!(app.approval_scroll_back, 0);
     assert_eq!(app.timeline_scroll_back, 0);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_infotrack_focuses_activity() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.active_pane = PaneFocus::Composer;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = point_in(layout.info_rail);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_unknown_tool_card_is_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let mut layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    layout.tool_cards[0].entry_index = 99;
+    let (column, row) = point_in(layout.tool_cards[0].area);
+    let previous_selected = app.selected_tool_activity_key.clone();
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    assert_eq!(app.selected_tool_activity_key, previous_selected);
+    Ok(())
+}
+
+#[test]
+fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 20);
+    let layout = LayoutSnapshot {
+        screen: Rect::new(0, 0, 80, 20),
+        mode: LayoutMode::Main,
+        live_panel: Rect::new(0, 0, 80, 12),
+        composer: Rect::new(0, 12, 80, 4),
+        footer: Rect::new(0, 16, 80, 4),
+        info_rail: Rect::new(60, 0, 20, 12),
+        tool_cards: Vec::new(),
+        slash_overlay: None,
+        approval_modal: Some(Rect::new(10, 2, 20, 6)),
+    };
+    let (column, row) = point_in(layout.approval_modal.expect("expected approval area"));
+
+    let outcome =
+        app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    Ok(())
+}
+
+#[test]
+fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 20);
+    let layout = LayoutSnapshot {
+        screen: Rect::new(0, 0, 80, 20),
+        mode: LayoutMode::Main,
+        live_panel: Rect::new(0, 0, 80, 12),
+        composer: Rect::new(0, 12, 80, 4),
+        footer: Rect::new(0, 16, 80, 4),
+        info_rail: Rect::new(60, 0, 20, 12),
+        tool_cards: Vec::new(),
+        slash_overlay: None,
+        approval_modal: None,
+    };
+    let (column, row) = point_in(layout.composer);
+
+    let outcome =
+        app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    Ok(())
+}
+
+#[test]
+fn mouse_drag_is_noop_by_default() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.set_terminal_size(120, 20);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = point_in(layout.composer);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::Drag, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    Ok(())
+}
+
+#[test]
+fn mouse_scroll_tool_card_scrolls_timeline() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 12);
+    for index in 0..8 {
+        app.push_timeline(TimelineRole::Assistant, format!("message {index}"));
+    }
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 12), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_point(&layout, first_entry_index);
+    let before = app.timeline_scroll_back;
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::ScrollUp, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert!(app.timeline_scroll_back > before);
+    Ok(())
+}
+
+#[test]
+fn mouse_scroll_approval_with_pending_approval_scrolls_upward() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.approval_scroll_back = 5;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let approval = layout.approval_modal.expect("expected approval area");
+    let (column, row) = point_in(approval);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::ScrollUp, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(app.approval_scroll_back, 2);
     Ok(())
 }

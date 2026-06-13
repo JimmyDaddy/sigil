@@ -151,7 +151,10 @@ impl AppState {
             })
     }
 
-    fn ensure_selected_tool_entry(&mut self, entries: &[(usize, String)]) -> (usize, String) {
+    pub(super) fn ensure_selected_tool_entry(
+        &mut self,
+        entries: &[(usize, String)],
+    ) -> (usize, String) {
         if let Some(selected_key) = self.selected_tool_activity_key.as_deref()
             && let Some((index, key)) = entries.iter().find(|(_, key)| key == selected_key)
         {
@@ -165,7 +168,11 @@ impl AppState {
         latest
     }
 
-    fn next_tool_entry(&mut self, entries: &[(usize, String)], forward: bool) -> (usize, String) {
+    pub(super) fn next_tool_entry(
+        &mut self,
+        entries: &[(usize, String)],
+        forward: bool,
+    ) -> (usize, String) {
         let (_, current_key) = self.ensure_selected_tool_entry(entries);
         let position = entries
             .iter()
@@ -188,7 +195,7 @@ impl AppState {
             .find_map(|(index, key)| (key == selected_key).then_some(*index))
     }
 
-    fn rerender_tool_selection_change(
+    pub(super) fn rerender_tool_selection_change(
         &mut self,
         previous_index: Option<usize>,
         selected_index: usize,
@@ -203,7 +210,7 @@ impl AppState {
         self.rerender_timeline_entry(selected_index);
     }
 
-    fn reveal_timeline_entry(&mut self, entry_index: usize) {
+    pub(super) fn reveal_timeline_entry(&mut self, entry_index: usize) {
         let Some(range) = self.timeline_render_ranges.get(entry_index) else {
             return;
         };

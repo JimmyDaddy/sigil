@@ -81,6 +81,22 @@ fn slash_command_hints_handles_leading_space() {
 }
 
 #[test]
+fn slash_command_entries_preserve_typed_argument_during_completion() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/c now".to_owned();
+
+    let rows = app.slash_selector_rows();
+
+    assert!(rows.iter().any(|(label, _)| label == "/compact"));
+    assert_eq!(
+        app.selected_slash_entry()
+            .expect("slash entry should resolve")
+            .fill,
+        "/compact now"
+    );
+}
+
+#[test]
 fn slash_command_input_starts_in_activity_mode() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.active_pane = PaneFocus::Activity;
@@ -162,6 +178,33 @@ fn slash_selector_navigation_and_tab_completion_work() -> Result<()> {
 }
 
 #[test]
+fn slash_selector_empty_navigation_and_visibility_edges_are_noops() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "plain prompt".to_owned();
+    assert_eq!(app.slash_selector_visible_rows(), 0);
+    assert_eq!(app.slash_selector_empty_message(), None);
+
+    app.input = "/unknown".to_owned();
+    assert!(app.slash_selector_rows().is_empty());
+    app.move_slash_selector(true);
+    assert_eq!(app.slash_selector_selected_index(), None);
+    assert!(app.handle_mouse_slash_candidate(0)?.is_none());
+    app.accept_slash_selector();
+    assert_eq!(app.input, "/unknown");
+    assert_eq!(app.slash_command_hints(), vec!["no slash match".to_owned()]);
+
+    app.input = "/".to_owned();
+    let row_count = app.slash_selector_rows().len();
+    assert!(row_count > 2);
+    assert_eq!(app.slash_selector_empty_message(), None);
+    app.move_slash_selector(false);
+    assert_eq!(app.slash_selector_selected_index(), Some(row_count - 1));
+    app.move_slash_selector(false);
+    assert_eq!(app.slash_selector_selected_index(), Some(row_count - 2));
+    Ok(())
+}
+
+#[test]
 fn slash_selector_offers_model_candidates_and_completes_argument() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/model p".to_owned();
@@ -172,6 +215,40 @@ fn slash_selector_offers_model_candidates_and_completes_argument() -> Result<()>
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert_eq!(app.input, "/model deepseek-v4-pro");
+    Ok(())
+}
+
+#[test]
+fn slash_selector_includes_custom_current_model_when_query_matches() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.model_name = "custom-current-model".to_owned();
+    app.input = "/model custom".to_owned();
+
+    let rows = app.slash_selector_rows();
+
+    assert_eq!(rows.first().map(|row| row.0.as_str()), Some("current"));
+    assert!(
+        rows.first()
+            .map(|row| row.1.contains("custom-current-model"))
+            .unwrap_or(false)
+    );
+}
+
+#[test]
+fn mouse_selecting_slash_command_with_argument_selector_completes_entry() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/".to_owned();
+    let model_index = app
+        .slash_selector_rows()
+        .iter()
+        .position(|(label, _)| label == "/model")
+        .expect("model command should be present");
+
+    let action = app.handle_mouse_slash_candidate(model_index)?;
+
+    assert!(action.is_none());
+    assert_eq!(app.input, "/model ");
+    assert_eq!(app.last_notice(), Some("slash completed to /model"));
     Ok(())
 }
 
@@ -306,6 +383,29 @@ fn slash_selector_preserves_custom_model_ids() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert_eq!(app.input, "/model ds-custom");
     Ok(())
+}
+
+#[test]
+fn resume_selector_empty_message_distinguishes_no_match_from_no_sessions() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_history = vec![crate::sessions::SessionHistoryEntry {
+        path: Path::new(".sigil/sessions/alpha.jsonl").to_path_buf(),
+        label: "alpha".to_owned(),
+        title: Some("Alpha task".to_owned()),
+        modified_epoch_secs: 1,
+        bytes: 128,
+    }];
+    app.input = "/resume zzz".to_owned();
+
+    assert!(app.slash_selector_rows().is_empty());
+    assert_eq!(
+        app.slash_selector_empty_message(),
+        Some("no matching session")
+    );
+    assert_eq!(
+        app.slash_command_hints(),
+        vec!["no matching session".to_owned()]
+    );
 }
 
 #[test]

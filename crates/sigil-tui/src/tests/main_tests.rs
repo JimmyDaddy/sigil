@@ -21,9 +21,10 @@ use super::{
     ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
     apply_key_action, apply_mouse_outcome, build_initial_app, drain_worker_messages,
     next_poll_interval, plan_scrollback_sync, plan_scrollback_sync_with_chunk_size, poll_interval,
-    prepare_scrollback_sync, process_app_action, process_app_action_with_spawner,
-    render_scrollback_rows, scrollback_plain_line, scrollback_row_style, scrollback_separator,
-    scrollback_wrapped_rows, should_sync_terminal_scrollback, wrap_scrollback_text,
+    prepare_scrollback_sync, prepare_scrollback_sync_with_chunk_size, process_app_action,
+    process_app_action_with_spawner, render_scrollback_rows, scrollback_plain_line,
+    scrollback_row_style, scrollback_separator, scrollback_wrapped_rows,
+    should_sync_terminal_scrollback, wrap_scrollback_text,
 };
 
 fn test_config() -> RootConfig {
@@ -558,6 +559,66 @@ fn prepare_scrollback_sync_reseeds_and_appends_expected_batches() {
 }
 
 #[test]
+fn prepare_scrollback_sync_tracks_pending_seed_for_chunked_initial_seed() {
+    let app = app_with_scrollback();
+    assert!(app.scrollback_line_count() > 1);
+
+    let prepared =
+        prepare_scrollback_sync_with_chunk_size(&app, &ScrollbackSyncState::default(), 1)
+            .expect("expected chunked seed");
+
+    assert_eq!(prepared.next_state.line_count, 1);
+    assert_eq!(
+        prepared.next_state.pending_seed,
+        Some(ScrollbackSeedProgress {
+            session_id: app.session_id.clone(),
+            next_line_index: 1,
+        })
+    );
+    assert_eq!(prepared.line_batches.len(), 1);
+}
+
+#[test]
+fn prepare_scrollback_sync_appends_non_empty_batches_from_shared_prefix() {
+    let app = app_with_scrollback();
+
+    let prepared = prepare_scrollback_sync(
+        &app,
+        &ScrollbackSyncState {
+            session_id: Some(app.session_id.clone()),
+            revision: app.timeline_revision().saturating_sub(1),
+            line_count: 0,
+            sequence_hash: app.scrollback_prefix_hash(0),
+            pending_seed: None,
+        },
+    )
+    .expect("expected append plan");
+
+    assert!(!prepared.line_batches.is_empty());
+    assert_eq!(prepared.next_state.line_count, app.scrollback_line_count());
+}
+
+#[test]
+fn prepare_scrollback_sync_can_return_noop_plan_when_prefix_changed() {
+    let app = app_with_scrollback();
+
+    let prepared = prepare_scrollback_sync(
+        &app,
+        &ScrollbackSyncState {
+            session_id: Some(app.session_id.clone()),
+            revision: app.timeline_revision().saturating_sub(1),
+            line_count: 1,
+            sequence_hash: u64::MAX,
+            pending_seed: None,
+        },
+    )
+    .expect("expected noop preparation");
+
+    assert!(prepared.line_batches.is_empty());
+    assert!(prepared.next_state.pending_seed.is_none());
+}
+
+#[test]
 fn scrollback_plain_and_wrapped_rows_preserve_style_metadata() {
     let line = Line::from(vec![
         Span::styled(
@@ -651,6 +712,46 @@ fn process_app_action_restarts_worker_for_config_save() -> Result<()> {
 }
 
 #[test]
+fn process_app_action_restarts_worker_for_runtime_config_update() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (old_runtime, old_commands) = fake_worker_runtime();
+    let mut worker = Some(old_runtime);
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::RuntimeConfigUpdated {
+            root_config: Box::new(test_config()),
+        },
+        |_root_config, _app| Ok(fake_worker_runtime().0),
+    )?;
+
+    assert!(matches!(
+        old_commands.recv()?,
+        sigil_tui::runner::WorkerCommand::Shutdown
+    ));
+    assert!(worker.is_some());
+    Ok(())
+}
+
+#[test]
+fn process_app_action_test_wrapper_reports_spawn_attempts_as_errors() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut worker = None;
+
+    let error = process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::ConfigSaved {
+            root_config: Box::new(test_config()),
+        },
+    )
+    .expect_err("test wrapper should reject spawn actions");
+
+    assert!(error.to_string().contains("test wrapper should not spawn"));
+}
+
+#[test]
 fn process_app_action_forwards_runtime_commands_to_worker() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let (runtime, commands) = fake_worker_runtime();
@@ -711,6 +812,15 @@ fn drain_worker_messages_marks_dirty_when_messages_arrive() -> Result<()> {
     })?;
 
     assert!(drain_worker_messages(&mut app, &mut worker)?);
+    Ok(())
+}
+
+#[test]
+fn drain_worker_messages_returns_clean_without_runtime() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut worker = None;
+
+    assert!(!drain_worker_messages(&mut app, &mut worker)?);
     Ok(())
 }
 

@@ -24,7 +24,7 @@ fn error_and_envelope_helpers_cover_bounds() {
     let oversized = "中".repeat(70_000);
     let (owned, truncated) = bounded_tool_display_content(&oversized);
     assert!(truncated);
-    assert!(owned.ends_with(']'));
+    assert!(owned.as_ref().ends_with("]"));
     assert_eq!(previous_char_boundary("a中b", 2), 1);
 }
 
@@ -89,12 +89,12 @@ fn preview_helpers_cover_json_markdown_and_limits() {
 
     let (json_kind, json_source) = tool_preview_source("ls", "ignored", Some(&json_value));
     assert_eq!(json_kind, "json");
-    assert!(json_source.contains("\"items\""));
+    assert!(json_source.as_str().contains("\"items\""));
 
     let (markdown_kind, markdown_source) =
         tool_preview_source("read_file", "# Title\n\n- item", None);
     assert_eq!(markdown_kind, "markdown");
-    assert!(markdown_source.contains("# Title"));
+    assert!(markdown_source.as_str().contains("# Title"));
 
     let compacted = compact_preview_value(
         &json!({
@@ -109,7 +109,7 @@ fn preview_helpers_cover_json_markdown_and_limits() {
     assert!(
         compacted["text"]
             .as_str()
-            .is_some_and(|text| text.ends_with("..."))
+            .is_some_and(|text: &str| text.ends_with("..."))
     );
 
     let lines = (0..20)

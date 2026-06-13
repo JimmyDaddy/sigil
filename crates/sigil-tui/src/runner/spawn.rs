@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use sigil_kernel::{Agent, InteractionMode, RootConfig};
+use tokio::runtime::Runtime;
 
 use super::{
     elicitation_bridge::ChannelMcpElicitationHandler,
@@ -28,16 +29,9 @@ pub fn spawn_agent_worker(
     thread::Builder::new()
         .name("sigil-agent-worker".to_owned())
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                    return;
-                }
+            let Some(runtime) = report_runtime_build_result(build_worker_runtime(), &message_tx)
+            else {
+                return;
             };
 
             let provider = match sigil_runtime::build_provider(&root_config) {
@@ -79,4 +73,24 @@ pub fn spawn_agent_worker(
         .context("failed to spawn sigil agent worker")?;
 
     Ok((command_tx, message_rx))
+}
+
+fn build_worker_runtime() -> Result<Runtime, std::io::Error> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+}
+
+pub(super) fn report_runtime_build_result(
+    result: Result<Runtime, std::io::Error>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+) -> Option<Runtime> {
+    match result {
+        Ok(runtime) => Some(runtime),
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+            None
+        }
+    }
 }

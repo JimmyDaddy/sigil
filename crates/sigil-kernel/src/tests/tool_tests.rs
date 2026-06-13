@@ -268,6 +268,23 @@ fn tool_result_summary_and_model_content_include_structured_error_details() {
     assert_eq!(summary.error_message.as_deref(), Some("protocol mismatch"));
 }
 
+#[test]
+fn tool_result_model_content_omits_empty_false_metadata_values() {
+    let result = ToolResult::ok(
+        "call-1",
+        "fixture",
+        "ok",
+        ToolResultMeta {
+            details: json!(false),
+            ..ToolResultMeta::default()
+        },
+    );
+
+    let content = result.to_model_content();
+
+    assert!(!content.contains("meta"));
+}
+
 struct DefaultHookTool;
 
 #[async_trait]
@@ -511,5 +528,99 @@ async fn tool_registry_surfaces_errors_and_default_trait_hooks() -> Result<()> {
 
     let policy = ApprovalMode::Ask;
     assert_eq!(policy.as_str(), "ask");
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_registry_surfaces_unknown_and_invalid_args_for_all_public_hooks() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(std::sync::Arc::new(DefaultHookTool));
+    let ctx = ToolContext {
+        workspace_root: std::env::temp_dir(),
+        timeout_secs: 5,
+    };
+    let valid = crate::ToolCall {
+        id: "call-1".to_owned(),
+        name: "default_hooks".to_owned(),
+        args_json: "{}".to_owned(),
+    };
+    let invalid = crate::ToolCall {
+        args_json: "{".to_owned(),
+        ..valid.clone()
+    };
+    let unknown = crate::ToolCall {
+        name: "missing".to_owned(),
+        ..valid.clone()
+    };
+
+    for error in [
+        registry
+            .execute(ctx.clone(), invalid.clone())
+            .await
+            .expect_err("invalid args should fail execute"),
+        registry
+            .preview(ctx.clone(), invalid.clone())
+            .await
+            .expect_err("invalid args should fail preview"),
+    ] {
+        assert!(
+            error
+                .to_string()
+                .contains("invalid tool args for default_hooks")
+        );
+    }
+
+    for error in [
+        registry
+            .permission_subjects(&ctx, &invalid)
+            .expect_err("invalid args should fail permission subjects"),
+        registry
+            .permission_access(&ctx, &invalid)
+            .expect_err("invalid args should fail permission access"),
+        registry
+            .permission_default_mode(&ctx, &invalid)
+            .expect_err("invalid args should fail permission default mode"),
+        registry
+            .egress_audit(&ctx, &invalid)
+            .expect_err("invalid args should fail egress audit"),
+    ] {
+        assert!(
+            error
+                .to_string()
+                .contains("invalid tool args for default_hooks")
+        );
+    }
+
+    assert!(registry.spec_for("missing").is_none());
+    for error in [
+        registry
+            .preview(ctx.clone(), unknown.clone())
+            .await
+            .expect_err("unknown tool should fail preview"),
+        registry
+            .execute(ctx.clone(), unknown.clone())
+            .await
+            .expect_err("unknown tool should fail execute"),
+    ] {
+        assert!(error.to_string().contains("unknown tool missing"));
+    }
+    for error in [
+        registry
+            .permission_subjects(&ctx, &unknown)
+            .expect_err("unknown tool should fail permission subjects"),
+        registry
+            .permission_access(&ctx, &unknown)
+            .expect_err("unknown tool should fail permission access"),
+        registry
+            .permission_default_mode(&ctx, &unknown)
+            .expect_err("unknown tool should fail permission default mode"),
+        registry
+            .egress_audit(&ctx, &unknown)
+            .expect_err("unknown tool should fail egress audit"),
+    ] {
+        assert!(error.to_string().contains("unknown tool missing"));
+    }
+
+    assert_eq!(registry.specs().len(), 1);
     Ok(())
 }

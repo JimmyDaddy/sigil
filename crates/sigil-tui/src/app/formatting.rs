@@ -729,6 +729,7 @@ pub(super) fn build_model_picker_options(current: &str, remote: Vec<String>) -> 
     options
 }
 
+#[cfg_attr(coverage, allow(dead_code))]
 pub(super) fn non_empty_or(value: &str, fallback: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {

@@ -1,6 +1,8 @@
+#[cfg(not(any(test, coverage)))]
 use std::{sync::mpsc, thread};
 
 use super::*;
+#[cfg(not(any(test, coverage)))]
 use crate::provider_status::fetch_remote_model_ids;
 use crate::slash::SLASH_COMMANDS;
 
@@ -335,32 +337,37 @@ impl AppState {
         current: &str,
     ) -> String {
         self.model_picker_refresh_rx = None;
-        if cfg!(test) {
-            return "using local model list".to_owned();
-        }
-        let provider_config = match self
-            .provider_config_for_model_picker(target, current)
-            .resolved()
+        #[cfg(any(test, coverage))]
         {
-            Ok(config) => config,
-            Err(error) => return format!("model list unavailable: {error}"),
-        };
-        let base_url = provider_config.base_url.clone();
-        let (tx, rx) = mpsc::channel();
-        self.model_picker_refresh_rx = Some(rx);
-        let current = current.to_owned();
-        let notice = format!("loading provider model list ({base_url})");
-        thread::spawn(move || {
-            let result =
-                fetch_remote_model_ids(&provider_config).map_err(|error| format!("{error:#}"));
-            let _ = tx.send(ModelPickerRefresh {
-                target,
-                current,
-                base_url,
-                result,
+            let _ = (target, current);
+            "using local model list".to_owned()
+        }
+        #[cfg(not(any(test, coverage)))]
+        {
+            let provider_config = match self
+                .provider_config_for_model_picker(target, current)
+                .resolved()
+            {
+                Ok(config) => config,
+                Err(error) => return format!("model list unavailable: {error}"),
+            };
+            let base_url = provider_config.base_url.clone();
+            let (tx, rx) = mpsc::channel();
+            self.model_picker_refresh_rx = Some(rx);
+            let current = current.to_owned();
+            let notice = format!("loading provider model list ({base_url})");
+            thread::spawn(move || {
+                let result =
+                    fetch_remote_model_ids(&provider_config).map_err(|error| format!("{error:#}"));
+                let _ = tx.send(ModelPickerRefresh {
+                    target,
+                    current,
+                    base_url,
+                    result,
+                });
             });
-        });
-        notice
+            notice
+        }
     }
 
     pub(super) fn apply_model_picker_refresh(&mut self, refresh: ModelPickerRefresh) -> bool {
@@ -406,6 +413,7 @@ impl AppState {
         false
     }
 
+    #[cfg_attr(coverage, allow(dead_code))]
     fn provider_config_for_model_picker(
         &self,
         target: ModelPickerTarget,

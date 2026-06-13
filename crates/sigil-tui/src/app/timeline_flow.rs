@@ -30,7 +30,7 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    fn scrollback_cutoff_line(&self) -> usize {
+    pub(super) fn scrollback_cutoff_line(&self) -> usize {
         let durable_cutoff_entry = match self.streaming_assistant_index {
             Some(index) if index + 1 == self.timeline.len() && self.is_busy => index,
             _ => self.timeline.len(),
@@ -221,7 +221,7 @@ impl AppState {
         }
     }
 
-    fn flush_deferred_timeline_renders(&mut self) -> bool {
+    pub(super) fn flush_deferred_timeline_renders(&mut self) -> bool {
         if self.deferred_timeline_render_indexes.is_empty() {
             return false;
         }
@@ -234,7 +234,7 @@ impl AppState {
         true
     }
 
-    fn append_timeline_render_cache_entry(&mut self, index: usize) {
+    pub(super) fn append_timeline_render_cache_entry(&mut self, index: usize) {
         if index != self.timeline_render_ranges.len() {
             self.rebuild_timeline_render_cache();
             return;
@@ -257,7 +257,7 @@ impl AppState {
         self.timeline_revision = self.timeline_revision.saturating_add(1);
     }
 
-    fn extend_last_render_block_range_by_one_line(&mut self) {
+    pub(super) fn extend_last_render_block_range_by_one_line(&mut self) {
         let Some(old_range) = self.timeline_render_ranges.last().cloned() else {
             return;
         };
@@ -282,7 +282,7 @@ impl AppState {
         }
     }
 
-    fn rebuild_timeline_prefix_hashes_from(&mut self, start_line: usize) {
+    pub(super) fn rebuild_timeline_prefix_hashes_from(&mut self, start_line: usize) {
         let truncate_to = start_line.min(self.timeline_plain_cache.len());
         self.timeline_prefix_hashes.truncate(truncate_to);
         let mut hash = if truncate_to == 0 {
@@ -296,7 +296,7 @@ impl AppState {
         }
     }
 
-    fn trim_trailing_timeline_blanks(&mut self) {
+    pub(super) fn trim_trailing_timeline_blanks(&mut self) {
         while self
             .timeline_render_cache
             .last()

@@ -1,7 +1,12 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, ReadBuf};
 
 use super::*;
 
@@ -200,6 +205,65 @@ async fn lsp_client_wait_for_diagnostics_reads_notifications() {
 }
 
 #[tokio::test]
+async fn lsp_client_ignores_malformed_publish_diagnostics_messages() {
+    let uri = "file:///tmp/workspace/src/main.rs";
+    let mut client = LspClient::new(std::io::Cursor::new(Vec::<u8>::new()), tokio::io::sink());
+
+    for message in [
+        json!({"jsonrpc":"2.0","method":"$/progress"}),
+        json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics"}),
+        json!({
+            "jsonrpc":"2.0",
+            "method":"textDocument/publishDiagnostics",
+            "params": {"diagnostics": []}
+        }),
+    ] {
+        client.handle_server_message(&message);
+    }
+
+    client.handle_server_message(&json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {
+            "uri": uri
+        }
+    }));
+
+    let diagnostics = client
+        .wait_for_diagnostics(uri, Duration::from_millis(1))
+        .await
+        .expect("cached empty diagnostics should return");
+
+    assert!(diagnostics.is_empty());
+}
+
+#[tokio::test]
+async fn lsp_client_wait_for_diagnostics_handles_eof_error_and_timeout() {
+    let mut client = LspClient::new(std::io::Cursor::new(Vec::<u8>::new()), tokio::io::sink());
+    let diagnostics = client
+        .wait_for_diagnostics("file:///tmp/missing.rs", Duration::from_millis(1))
+        .await
+        .expect("eof should return empty diagnostics");
+    assert!(diagnostics.is_empty());
+
+    let mut client = LspClient::new(FailingReader, tokio::io::sink());
+    let error = client
+        .wait_for_diagnostics("file:///tmp/missing.rs", Duration::from_millis(1))
+        .await
+        .expect_err("reader errors should surface");
+    assert!(error.to_string().contains("synthetic read failure"));
+
+    let (client_io, _server_io) = tokio::io::duplex(64);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let mut client = LspClient::new(client_read, client_write);
+    let diagnostics = client
+        .wait_for_diagnostics("file:///tmp/missing.rs", Duration::from_millis(1))
+        .await
+        .expect("timeout should return empty diagnostics");
+    assert!(diagnostics.is_empty());
+}
+
+#[tokio::test]
 async fn read_lsp_message_reports_protocol_errors() {
     let too_large = format!("Content-Length: 1\r\nX:{}\r\n\r\n", "a".repeat(9000));
     let mut reader = BufReader::new(std::io::Cursor::new(too_large.into_bytes()));
@@ -234,6 +298,14 @@ async fn read_lsp_message_reports_protocol_errors() {
         .await
         .expect_err("invalid json should fail");
     assert!(error.to_string().contains("body is not valid json"));
+
+    let mut reader = BufReader::new(std::io::Cursor::new(
+        b"Content-Length: 2\r\nX-\xff: bad\r\n\r\n{}".to_vec(),
+    ));
+    let error = read_lsp_message(&mut reader)
+        .await
+        .expect_err("invalid utf-8 header should fail");
+    assert!(error.to_string().contains("header is not utf-8"));
 }
 
 #[test]
@@ -417,6 +489,18 @@ async fn read_lsp_message_rejects_short_invalid_json_body() {
         .expect_err("invalid json should fail");
 
     assert!(error.to_string().contains("body is not valid json"));
+}
+
+struct FailingReader;
+
+impl AsyncRead for FailingReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(std::io::Error::other("synthetic read failure")))
+    }
 }
 
 #[tokio::test]

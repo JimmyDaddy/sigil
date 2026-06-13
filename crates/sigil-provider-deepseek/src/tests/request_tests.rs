@@ -1,8 +1,8 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    MessageRole, ModelMessage, ReasoningEffort, ToolAccess, ToolCategory, ToolPreviewCapability,
-    ToolSpec,
+    MessageRole, ModelMessage, ProviderContinuationState, ReasoningEffort, ToolAccess,
+    ToolCategory, ToolPreviewCapability, ToolSpec,
 };
 
 use crate::{
@@ -99,6 +99,26 @@ fn fim_builder_uses_explicit_suffix() {
 }
 
 #[test]
+fn fim_builder_uses_explicit_model_and_omits_empty_stop() {
+    let request = build_fim_completion_request(
+        DeepSeekFimCompletionRequest {
+            model: Some("custom-fim".to_owned()),
+            prompt: "left".to_owned(),
+            suffix: "right".to_owned(),
+            max_tokens: None,
+            stop: Vec::new(),
+        },
+        "unused-default",
+    );
+
+    assert_eq!(request.model, "custom-fim");
+    assert_eq!(request.prompt, "left");
+    assert_eq!(request.suffix, "right");
+    assert!(request.max_tokens.is_none());
+    assert!(request.stop.is_none());
+}
+
+#[test]
 fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -> Result<()> {
     let assistant = ModelMessage {
         role: MessageRole::Assistant,
@@ -148,6 +168,85 @@ fn build_chat_request_maps_roles_null_assistant_content_and_reasoning_effort() -
     assert_eq!(prepared.body.reasoning_effort.as_deref(), Some("high"));
     assert_eq!(prepared.body.user_id.as_deref(), Some("workspace-123"));
     assert!(prepared.body.tools.is_none());
+    Ok(())
+}
+
+#[test]
+fn build_chat_request_maps_tool_calls_and_remaining_reasoning_efforts() -> Result<()> {
+    let assistant = ModelMessage::assistant(
+        Some("calling tool".to_owned()),
+        vec![sigil_kernel::ToolCall {
+            id: "call-1".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: r#"{"path":"src/lib.rs"}"#.to_owned(),
+        }],
+    );
+    let request = sigil_kernel::CompletionRequest {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        messages: vec![
+            ModelMessage::system("rules"),
+            ModelMessage::user("hi"),
+            assistant,
+        ],
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        previous_response_handle: None,
+        continuation_states: vec![
+            ProviderContinuationState {
+                provider_name: "deepseek".to_owned(),
+                state_kind: "deepseek.reasoning_replay".to_owned(),
+                message_id: None,
+                opaque_blob: json!({"reasoning_content":"ignored"}),
+            },
+            ProviderContinuationState {
+                provider_name: "deepseek".to_owned(),
+                state_kind: "deepseek.reasoning_replay".to_owned(),
+                message_id: Some("missing-message".to_owned()),
+                opaque_blob: json!({"reasoning_content": 42}),
+            },
+        ],
+        traffic_partition_key: None,
+        background: false,
+        store: false,
+        deterministic_materialization: true,
+    };
+
+    let prepared = build_chat_request(
+        &request,
+        None,
+        StrictToolsMode::Off,
+        &DeepSeekProviderQuirkProfile::default(),
+    )?;
+
+    assert_eq!(prepared.body.messages[0]["role"], "system");
+    assert_eq!(prepared.body.messages[1]["role"], "user");
+    assert_eq!(prepared.body.messages[2]["role"], "assistant");
+    assert_eq!(
+        prepared.body.messages[2]["tool_calls"][0]["function"]["arguments"],
+        r#"{"path":"src/lib.rs"}"#
+    );
+    assert!(prepared.body.messages[2].get("reasoning_content").is_none());
+    assert_eq!(prepared.body.reasoning_effort.as_deref(), Some("medium"));
+
+    let (endpoint, prefix) = build_prefix_completion_request(
+        DeepSeekPrefixCompletionRequest {
+            model: None,
+            prompt: "draft".to_owned(),
+            assistant_prefix: "prefix".to_owned(),
+            stop: Vec::new(),
+            reasoning_effort: Some(ReasoningEffort::Max),
+            traffic_partition_key: None,
+        },
+        "deepseek-v4-flash",
+        None,
+        &DeepSeekProviderQuirkProfile::default(),
+    );
+    assert_eq!(endpoint, DeepSeekEndpointClass::Beta);
+    assert_eq!(prefix.reasoning_effort.as_deref(), Some("max"));
+    assert!(prefix.stop.is_none());
     Ok(())
 }
 

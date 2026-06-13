@@ -79,7 +79,7 @@ fn blank_lines_and_cache_hits_cover_internal_paths() {
 fn cache_eviction_and_style_conversion_cover_remaining_helpers() {
     let mut cache = VecDeque::new();
 
-    for index in 0..=HIGHLIGHT_CACHE_CAPACITY {
+    for index in 0..HIGHLIGHT_CACHE_CAPACITY {
         push_cache_entry(
             &mut cache,
             HighlightCacheEntry {
@@ -91,12 +91,14 @@ fn cache_eviction_and_style_conversion_cover_remaining_helpers() {
     }
 
     assert_eq!(cache.len(), HIGHLIGHT_CACHE_CAPACITY);
-    assert!(cache.iter().all(|entry| entry.code != "code 0"));
-    assert!(
-        cache
-            .iter()
-            .any(|entry| entry.code == format!("code {HIGHLIGHT_CACHE_CAPACITY}"))
+    assert_eq!(
+        cache.front().map(|entry| entry.code.as_str()),
+        Some("code 0")
     );
+    assert!(cache.iter().any(|entry| {
+        let expected = format!("code {}", HIGHLIGHT_CACHE_CAPACITY - 1);
+        entry.code == expected
+    }));
 
     assert_eq!(ansi_palette_color(0x07), RatatuiColor::Gray);
     assert_eq!(ansi_palette_color(0x42), RatatuiColor::Indexed(0x42));
@@ -157,6 +159,77 @@ fn cache_eviction_and_style_conversion_cover_remaining_helpers() {
 }
 
 #[test]
+fn highlight_code_to_spans_prefers_cache_after_first_call() {
+    highlight_cache().lock().expect("cache lock").clear();
+
+    let first = highlight_code_to_spans("let a = 1;", "rust").expect("first hit");
+    assert!(!first.is_empty());
+
+    let second = highlight_code_to_spans("let a = 1;", "rust").expect("cached hit");
+    assert_eq!(first.len(), second.len());
+
+    let matching_entries = {
+        let cache = highlight_cache().lock().expect("cache lock");
+        cache
+            .iter()
+            .filter(|entry| entry.language == "rust" && entry.code == "let a = 1;")
+            .count()
+    };
+    assert_eq!(matching_entries, 1);
+
+    let mut cache = highlight_cache().lock().expect("cache lock");
+    assert!(!cache.is_empty());
+    cache.clear();
+}
+
+#[test]
+fn fetch_cached_highlight_handles_missing_cache_gracefully() {
+    highlight_cache().lock().expect("cache lock").clear();
+    assert!(cached_highlight("not-found", "rust").is_none());
+}
+
+#[test]
+fn cache_helpers_handle_capacity_boundaries() {
+    let mut cache = VecDeque::new();
+
+    for index in 0..HIGHLIGHT_CACHE_CAPACITY {
+        push_cache_entry(
+            &mut cache,
+            HighlightCacheEntry {
+                code: format!("entry {index}"),
+                language: "rust".to_owned(),
+                lines: vec![vec![Span::raw(format!("line {index}"))]],
+            },
+        );
+    }
+
+    assert_eq!(cache.len(), HIGHLIGHT_CACHE_CAPACITY);
+    assert_eq!(
+        cache.front().map(|entry| entry.code.as_str()),
+        Some("entry 0")
+    );
+
+    push_cache_entry(
+        &mut cache,
+        HighlightCacheEntry {
+            code: "overflow".to_owned(),
+            language: "rust".to_owned(),
+            lines: vec![vec![Span::raw("overflow".to_owned())]],
+        },
+    );
+
+    assert_eq!(cache.len(), HIGHLIGHT_CACHE_CAPACITY);
+    assert_eq!(
+        cache.front().map(|entry| entry.code.as_str()),
+        Some("entry 1")
+    );
+    assert_eq!(
+        cache.back().map(|entry| entry.code.as_str()),
+        Some("overflow")
+    );
+}
+
+#[test]
 fn syntax_lookup_covers_alias_name_case_and_extension_fallbacks() {
     assert_eq!(normalized_language_token("csharp"), "c#");
     assert_eq!(normalized_language_token("golang snippet"), "go");
@@ -167,4 +240,45 @@ fn syntax_lookup_covers_alias_name_case_and_extension_fallbacks() {
     );
     assert!(syntax_set().find_syntax_by_extension("rs").is_some());
     assert!(find_syntax("rs").is_some());
+}
+
+#[test]
+fn syntax_lookup_supports_extension_only_and_unmatched_language() {
+    assert!(find_syntax("rs").is_some());
+    assert!(find_syntax("/tmp/test.rs").is_none());
+    assert!(find_syntax("not-a-language").is_none());
+}
+
+#[test]
+fn ansi_color_mapper_covers_remaining_palette_values() {
+    assert_eq!(ansi_palette_color(0x00), RatatuiColor::Black);
+    assert_eq!(ansi_palette_color(0x01), RatatuiColor::Red);
+    assert_eq!(ansi_palette_color(0x02), RatatuiColor::Green);
+    assert_eq!(ansi_palette_color(0x03), RatatuiColor::Yellow);
+    assert_eq!(ansi_palette_color(0x04), RatatuiColor::Blue);
+    assert_eq!(ansi_palette_color(0x05), RatatuiColor::Magenta);
+    assert_eq!(ansi_palette_color(0x06), RatatuiColor::Cyan);
+    assert_eq!(ansi_palette_color(0x07), RatatuiColor::Gray);
+    assert_eq!(ansi_palette_color(0x80), RatatuiColor::Indexed(0x80));
+}
+
+#[test]
+fn convert_syntect_color_covers_alpha_default_case() {
+    assert_eq!(
+        convert_syntect_color(SyntectColor {
+            r: 12,
+            g: 34,
+            b: 56,
+            a: ANSI_ALPHA_DEFAULT,
+        }),
+        None
+    );
+}
+
+#[test]
+fn highlight_code_to_spans_rejects_long_and_whitespace_language_inputs() {
+    let long = "x".repeat(512 * 1024 + 1);
+    assert!(highlight_code_to_spans(&long, "rust").is_none());
+
+    assert!(highlight_code_to_spans("let x=1", "   ").is_none());
 }

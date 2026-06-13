@@ -4,7 +4,10 @@ use anyhow::Result;
 
 use crate::{MemoryConfig, PrefixSnapshot};
 
-use super::{apply_memory_report, inspect_memory_documents, materialize_memory};
+use super::{
+    apply_memory_report, inspect_memory_documents, materialize_memory, parse_memory_file,
+    resolve_import_path, stable_memory_message_id,
+};
 
 #[test]
 fn memory_loader_walks_root_files_and_imports_in_stable_order() -> Result<()> {
@@ -95,6 +98,21 @@ fn memory_loader_returns_empty_report_when_disabled() -> Result<()> {
 }
 
 #[test]
+fn memory_loader_enabled_without_documents_keeps_base_prompt_only() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+
+    let report = inspect_memory_documents(temp.path(), &MemoryConfig { enabled: true })?;
+    let materialized = materialize_memory(temp.path(), &MemoryConfig { enabled: true })?;
+
+    assert!(report.enabled);
+    assert_eq!(report.document_count, 0);
+    assert_eq!(report.fingerprint, "none");
+    assert_eq!(materialized.messages.len(), 1);
+    assert_eq!(materialized.messages[0].id, "system:base");
+    Ok(())
+}
+
+#[test]
 fn memory_loader_reports_missing_workspace_root() {
     let missing_root =
         Path::new("/tmp").join(format!("sigil-memory-missing-{}", uuid::Uuid::new_v4()));
@@ -146,4 +164,37 @@ fn memory_loader_rejects_workspace_escape_imports() -> Result<()> {
 
     assert!(error.to_string().contains("escapes workspace root"));
     Ok(())
+}
+
+#[test]
+fn memory_parser_keeps_empty_import_markers_as_content() {
+    let (content, imports) = parse_memory_file("alpha\n@\n@   \n@ docs/guide.md\nbeta");
+
+    assert_eq!(content, "alpha\n@\n@   \nbeta");
+    assert_eq!(imports, vec!["docs/guide.md"]);
+}
+
+#[test]
+fn memory_import_path_resolution_accepts_relative_and_rejects_absolute() {
+    let base = Path::new("/workspace/docs");
+
+    let relative = resolve_import_path(base, "../AGENTS.md").expect("relative import should work");
+    assert_eq!(relative, Path::new("/workspace/docs/../AGENTS.md"));
+
+    let error =
+        resolve_import_path(base, "/tmp/outside.md").expect_err("absolute import should fail");
+    assert!(error.to_string().contains("memory import must be relative"));
+}
+
+#[test]
+fn stable_memory_message_id_changes_with_path_or_content() {
+    let original = stable_memory_message_id("AGENTS.md", "rules");
+    let same = stable_memory_message_id("AGENTS.md", "rules");
+    let changed_path = stable_memory_message_id("docs/guide.md", "rules");
+    let changed_content = stable_memory_message_id("AGENTS.md", "other rules");
+
+    assert_eq!(original, same);
+    assert_ne!(original, changed_path);
+    assert_ne!(original, changed_content);
+    assert!(original.starts_with("memory:"));
 }

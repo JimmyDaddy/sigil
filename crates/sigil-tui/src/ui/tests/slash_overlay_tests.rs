@@ -100,3 +100,35 @@ fn render_slash_selector_overlay_marks_selected_command() -> anyhow::Result<()> 
     assert!(rendered.contains("resume"));
     Ok(())
 }
+
+#[test]
+fn render_slash_selector_overlay_keeps_title_when_no_candidate_space() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE))?;
+    app.set_terminal_size(80, 8);
+
+    let backend = TestBackend::new(80, 8);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| {
+        render_slash_selector_overlay(frame, Rect::new(0, 0, 80, 8), Rect::new(0, 6, 76, 2), &app)
+    })?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(rendered.contains("Resume session"));
+    assert!(!rendered.contains("up-to-date"));
+    Ok(())
+}

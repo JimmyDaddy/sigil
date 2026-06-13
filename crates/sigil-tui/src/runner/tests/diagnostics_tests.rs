@@ -17,7 +17,8 @@ use super::{
         diagnostics::{
             attach_diagnostics_context, changed_source_files, check_changed_files_diagnostics,
             collect_nul_paths, diagnostics_paths_from_call, diagnostics_tool_event, duration_ms,
-            is_supported_source_file, permission_block_reason,
+            ensure_git_workspace, git_output, has_head, is_supported_source_file,
+            permission_block_reason,
         },
     },
     common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
@@ -140,6 +141,13 @@ fn tool_error_kind(result: &ToolResult) -> ToolErrorKind {
         ToolResultStatus::Error(error) => error.kind,
         ToolResultStatus::Ok => panic!("expected tool error"),
     }
+}
+
+fn session_with_directory_store(workspace_root: &std::path::Path, name: &str) -> Result<Session> {
+    let store_path = workspace_root.join(name);
+    fs::create_dir_all(&store_path)?;
+    let store = JsonlSessionStore::new(store_path)?;
+    Ok(Session::new("planned", "planned-model").with_store(store))
 }
 
 #[test]
@@ -315,6 +323,24 @@ fn changed_source_files_requires_git_workspace() {
 }
 
 #[test]
+fn git_workspace_helpers_track_initialized_and_committed_states() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+
+    assert!(!has_head(&workspace_root));
+    init_git_repo(&workspace_root)?;
+    ensure_git_workspace(&workspace_root)?;
+    assert!(!has_head(&workspace_root));
+
+    fs::write(workspace_root.join("tracked.rs"), "fn main() {}\n")?;
+    run_git(&workspace_root, &["add", "tracked.rs"])?;
+    run_git(&workspace_root, &["commit", "-qm", "initial"])?;
+
+    assert!(has_head(&workspace_root));
+    Ok(())
+}
+
+#[test]
 fn changed_source_files_uses_cached_and_untracked_files_without_head() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -354,9 +380,16 @@ fn collect_nul_paths_discards_empty_segments_and_trims_values() {
 fn supported_source_file_checks_extension_and_real_file() -> Result<()> {
     let temp = tempdir()?;
     fs::write(temp.path().join("ok.rs"), "fn ok() {}\n")?;
+    fs::write(
+        temp.path().join("component.TSX"),
+        "export const X = () => null;\n",
+    )?;
+    fs::write(temp.path().join("script.py"), "print('ok')\n")?;
     fs::write(temp.path().join("skip.txt"), "nope\n")?;
 
     assert!(is_supported_source_file(temp.path(), "ok.rs"));
+    assert!(is_supported_source_file(temp.path(), "component.TSX"));
+    assert!(is_supported_source_file(temp.path(), "script.py"));
     assert!(!is_supported_source_file(temp.path(), "skip.txt"));
     assert!(!is_supported_source_file(temp.path(), "missing.rs"));
     Ok(())
@@ -382,6 +415,21 @@ fn diagnostics_paths_from_call_rejects_invalid_payloads() {
         missing_paths
             .to_string()
             .contains("missing diagnostics paths")
+    );
+
+    let mixed_paths = diagnostics_paths_from_call(&ToolCall {
+        id: "call-1".to_owned(),
+        name: "code_diagnostics".to_owned(),
+        args_json: serde_json::json!({
+            "paths": ["src/main.rs", 42, null, "src/lib.rs"],
+            "max_results": 4
+        })
+        .to_string(),
+    })
+    .expect("mixed path payload should keep string paths");
+    assert_eq!(
+        mixed_paths,
+        vec!["src/main.rs".to_owned(), "src/lib.rs".to_owned()]
     );
 }
 
@@ -518,6 +566,27 @@ fn check_changed_files_diagnostics_errors_when_tool_is_not_registered() -> Resul
 }
 
 #[test]
+fn check_changed_files_diagnostics_propagates_missing_tool_audit_write_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime = test_runtime()?;
+    let mut session = session_with_directory_store(temp.path(), "session-dir")?;
+    let options = test_options(temp.path(), ApprovalMode::Allow);
+
+    let error = check_changed_files_diagnostics(
+        &runtime,
+        &ToolRegistry::new(),
+        &mut session,
+        &options,
+        4,
+        vec!["src/main.rs".to_owned()],
+    )
+    .expect_err("directory store should make audit append fail");
+
+    assert!(error.to_string().contains("failed to open"));
+    Ok(())
+}
+
+#[test]
 fn check_changed_files_diagnostics_surfaces_subject_resolution_errors() -> Result<()> {
     let temp = tempdir()?;
     let runtime = test_runtime()?;
@@ -552,6 +621,40 @@ fn check_changed_files_diagnostics_surfaces_subject_resolution_errors() -> Resul
             .content
             .contains("invalid code diagnostics arguments: bad paths")
     );
+    Ok(())
+}
+
+#[test]
+fn check_changed_files_diagnostics_propagates_subject_audit_write_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime = test_runtime()?;
+    let mut session = session_with_directory_store(temp.path(), "subject-session-dir")?;
+    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(
+        DiagnosticsTestTool::new(
+            ToolAccess::Execute,
+            ExecutePlan::Ok(Box::new(ToolResult::ok(
+                "call-1",
+                "code_diagnostics",
+                "ok",
+                ToolResultMeta::default(),
+            ))),
+        )
+        .with_subjects_error("bad paths"),
+    ));
+
+    let error = check_changed_files_diagnostics(
+        &runtime,
+        &registry,
+        &mut session,
+        &options,
+        4,
+        vec!["src/main.rs".to_owned()],
+    )
+    .expect_err("directory store should make subject failure audit append fail");
+
+    assert!(error.to_string().contains("failed to open"));
     Ok(())
 }
 
@@ -594,6 +697,40 @@ fn check_changed_files_diagnostics_surfaces_access_resolution_errors() -> Result
 }
 
 #[test]
+fn check_changed_files_diagnostics_propagates_access_audit_write_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime = test_runtime()?;
+    let mut session = session_with_directory_store(temp.path(), "access-session-dir")?;
+    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(
+        DiagnosticsTestTool::new(
+            ToolAccess::Execute,
+            ExecutePlan::Ok(Box::new(ToolResult::ok(
+                "call-1",
+                "code_diagnostics",
+                "ok",
+                ToolResultMeta::default(),
+            ))),
+        )
+        .with_access_error("bad access"),
+    ));
+
+    let error = check_changed_files_diagnostics(
+        &runtime,
+        &registry,
+        &mut session,
+        &options,
+        4,
+        vec!["src/main.rs".to_owned()],
+    )
+    .expect_err("directory store should make access failure audit append fail");
+
+    assert!(error.to_string().contains("failed to open"));
+    Ok(())
+}
+
+#[test]
 fn check_changed_files_diagnostics_honors_permission_policy_blocks() -> Result<()> {
     let temp = tempdir()?;
     let runtime = test_runtime()?;
@@ -625,6 +762,37 @@ fn check_changed_files_diagnostics_honors_permission_policy_blocks() -> Result<(
         SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
             if approval.policy_decision == ApprovalMode::Ask
     )));
+    Ok(())
+}
+
+#[test]
+fn check_changed_files_diagnostics_propagates_policy_audit_write_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime = test_runtime()?;
+    let mut session = session_with_directory_store(temp.path(), "policy-session-dir")?;
+    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(DiagnosticsTestTool::new(
+        ToolAccess::Read,
+        ExecutePlan::Ok(Box::new(ToolResult::ok(
+            "call-1",
+            "code_diagnostics",
+            "ok",
+            ToolResultMeta::default(),
+        ))),
+    )));
+
+    let error = check_changed_files_diagnostics(
+        &runtime,
+        &registry,
+        &mut session,
+        &options,
+        4,
+        vec!["src/main.rs".to_owned()],
+    )
+    .expect_err("directory store should make policy audit append fail");
+
+    assert!(error.to_string().contains("failed to open"));
     Ok(())
 }
 
@@ -722,6 +890,39 @@ fn changed_source_files_keeps_supported_tracked_and_untracked_paths() -> Result<
 }
 
 #[test]
+fn git_output_reports_git_stderr_for_failed_commands() {
+    let temp = tempdir().expect("tempdir should build");
+    let error = git_output(temp.path(), &["definitely-not-a-command"])
+        .expect_err("unknown git command should fail");
+
+    let message = error.to_string();
+    assert!(message.contains("git definitely-not-a-command failed under"));
+    assert!(message.contains("definitely-not-a-command"));
+}
+
+#[test]
+fn git_output_reports_failure_even_when_git_stderr_is_empty() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    init_git_repo(&workspace_root)?;
+    fs::write(workspace_root.join("tracked.rs"), "fn main() {}\n")?;
+    run_git(&workspace_root, &["add", "tracked.rs"])?;
+    run_git(&workspace_root, &["commit", "-qm", "initial"])?;
+    fs::write(workspace_root.join("tracked.rs"), "fn changed() {}\n")?;
+
+    let error = git_output(
+        &workspace_root,
+        &["diff", "--quiet", "--exit-code", "HEAD", "--", "tracked.rs"],
+    )
+    .expect_err("changed tracked file should make git diff --quiet fail");
+
+    let message = error.to_string();
+    assert!(message.contains("git diff --quiet --exit-code HEAD -- tracked.rs failed under"));
+    assert!(!message.contains(": "));
+    Ok(())
+}
+
+#[test]
 fn diagnostics_tool_event_wraps_tool_result() {
     let event = diagnostics_tool_event(sigil_kernel::ToolResult::ok(
         "call-1",
@@ -735,6 +936,55 @@ fn diagnostics_tool_event_wraps_tool_result() {
         RunEvent::ToolResult(result)
             if result.tool_name == "code_diagnostics" && !result.is_error()
     ));
+}
+
+#[test]
+fn check_changed_files_diagnostics_completes_and_preserves_existing_call_metadata() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime = test_runtime()?;
+    let mut session = Session::new("planned", "planned-model");
+    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(
+        DiagnosticsTestTool::new(
+            ToolAccess::Read,
+            ExecutePlan::Ok(Box::new(ToolResult::ok(
+                "call-1",
+                "code_diagnostics",
+                "{}",
+                ToolResultMeta {
+                    details: serde_json::json!({
+                        "call": {
+                            "summary": "prebuilt diagnostics metadata"
+                        }
+                    }),
+                    ..ToolResultMeta::default()
+                },
+            ))),
+        )
+        .with_subjects(vec![ToolSubject::path("src/main.rs", "src/main.rs")]),
+    ));
+
+    let result = check_changed_files_diagnostics(
+        &runtime,
+        &registry,
+        &mut session,
+        &options,
+        4,
+        vec!["src/main.rs".to_owned()],
+    )?;
+
+    assert!(!result.is_error());
+    assert_eq!(
+        result.metadata.details["call"]["summary"],
+        serde_json::json!("prebuilt diagnostics metadata")
+    );
+    assert!(session.entries().iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.status == ToolExecutionStatus::Completed
+    )));
+    Ok(())
 }
 
 #[test]

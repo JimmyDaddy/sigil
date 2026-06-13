@@ -49,6 +49,26 @@ fn render_timeline_entry_lines_preserves_multiline_blocks() {
 }
 
 #[test]
+fn render_timeline_entry_lines_handles_empty_user_assistant_and_system_entries() {
+    let empty_user = TimelineEntry {
+        role: TimelineRole::User,
+        text: "   ".to_owned(),
+    };
+    let empty_assistant = TimelineEntry {
+        role: TimelineRole::Assistant,
+        text: "\n".to_owned(),
+    };
+    let empty_system = TimelineEntry {
+        role: TimelineRole::System,
+        text: String::new(),
+    };
+
+    assert!(render_timeline_entry_lines(&empty_user).is_empty());
+    assert!(render_timeline_entry_lines(&empty_assistant).is_empty());
+    assert_eq!(render_timeline_entry_lines(&empty_system).len(), 2);
+}
+
+#[test]
 fn render_timeline_entry_lines_separates_tool_header_and_json_body() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
@@ -393,6 +413,61 @@ fn render_timeline_entry_lines_show_phase_block() {
 }
 
 #[test]
+fn render_timeline_entry_lines_show_phase_tool_streaming_and_unknown_blocks() {
+    let cases = [
+        (
+            TimelineEntry {
+                role: TimelineRole::Phase,
+                text: "tool|bash".to_owned(),
+            },
+            "tool",
+            "running bash",
+        ),
+        (
+            TimelineEntry {
+                role: TimelineRole::Phase,
+                text: "streaming".to_owned(),
+            },
+            "streaming",
+            "writing the reply",
+        ),
+        (
+            TimelineEntry {
+                role: TimelineRole::Phase,
+                text: "compacting|now".to_owned(),
+            },
+            "phase",
+            "compacting|now",
+        ),
+    ];
+
+    for (entry, label, detail) in cases {
+        let plain = rendered_plain_lines(&render_timeline_entry_lines(&entry)).join("\n");
+        assert!(plain.contains(label));
+        assert!(plain.contains(detail));
+    }
+}
+
+#[test]
+fn render_timeline_entry_lines_show_phase_default_summaries_without_detail() {
+    for (kind, expected) in [
+        ("thinking", "reasoning"),
+        ("tool", "running tool"),
+        ("streaming", "writing the reply"),
+    ] {
+        let entry = TimelineEntry {
+            role: TimelineRole::Phase,
+            text: kind.to_owned(),
+        };
+
+        let plain = rendered_plain_lines(&render_timeline_entry_lines(&entry)).join("\n");
+
+        assert!(plain.contains(kind));
+        assert!(plain.contains(expected));
+    }
+}
+
+#[test]
 fn render_timeline_entry_lines_show_thinking_trace_block() {
     let entry = TimelineEntry {
         role: TimelineRole::Thinking,
@@ -463,6 +538,63 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
             .iter()
             .any(|span| span.content.as_ref().contains("step 4"))
     }));
+}
+
+#[test]
+fn thinking_preview_lines_handles_tilde_fences_and_closing_fences() {
+    let preview = thinking_preview_lines("~~~text\nfirst\n~~~\nafter", 1);
+
+    assert_eq!(
+        preview,
+        vec!["~~~text".to_owned(), "first".to_owned(), "~~~".to_owned()]
+    );
+    assert!(is_markdown_fence("   ~~~text"));
+}
+
+#[test]
+fn render_timeline_entry_lines_handles_empty_and_closed_fence_thinking_previews() {
+    let empty = TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: " \n ".to_owned(),
+    };
+    let empty_plain = rendered_plain_lines(&render_timeline_entry_lines(&empty)).join("\n");
+    assert!(empty_plain.contains("1 lines"));
+    assert!(!empty_plain.contains("more lines hidden"));
+
+    let closed_fence = TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: "```rust\nfn main() {}\n```\nnext hidden".to_owned(),
+    };
+    let closed_plain = rendered_plain_lines(&render_timeline_entry_lines(&closed_fence)).join("\n");
+    assert!(closed_plain.contains("fn main"));
+    assert!(closed_plain.contains("rust"));
+    assert!(closed_plain.contains("more lines hidden"));
+}
+
+#[test]
+fn render_timeline_content_spans_covers_all_roles() {
+    let mut state = MarkdownRenderState::default();
+    let options = MarkdownRenderOptions::timeline(80);
+
+    for role in [
+        TimelineRole::Assistant,
+        TimelineRole::Thinking,
+        TimelineRole::Tool,
+        TimelineRole::System,
+        TimelineRole::Phase,
+        TimelineRole::Notice,
+        TimelineRole::User,
+    ] {
+        let spans = render_timeline_content_spans(
+            role,
+            "**body**",
+            ratatui::style::Style::default(),
+            &mut state,
+            options,
+        );
+
+        assert!(!spans.is_empty());
+    }
 }
 
 #[test]
@@ -1699,4 +1831,59 @@ fn render_timeline_entry_lines_label_notice_tones() {
     assert!(ok_plain.contains("saved: config updated"));
     assert!(error_plain.contains("error"));
     assert!(error_plain.contains("missing token"));
+}
+
+#[test]
+fn render_timeline_entry_lines_skips_blank_notice_lines_and_styles_role_spans() {
+    let notice = TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "info: **ready**\n\nplain".to_owned(),
+    };
+    let notice_plain = rendered_plain_lines(&render_timeline_entry_lines(&notice)).join("\n");
+    assert!(notice_plain.contains("info: ready"));
+    assert!(notice_plain.contains("plain"));
+
+    let mut markdown_state = MarkdownRenderState::default();
+    let options = MarkdownRenderOptions::timeline(40);
+    let assistant = render_timeline_content_spans(
+        TimelineRole::Assistant,
+        "**bold**",
+        Style::default(),
+        &mut markdown_state,
+        options,
+    );
+    assert!(assistant.iter().any(|span| span.content.as_ref() == "bold"));
+
+    let mut markdown_state = MarkdownRenderState::default();
+    let thinking = render_timeline_content_spans(
+        TimelineRole::Thinking,
+        "`code`",
+        Style::default(),
+        &mut markdown_state,
+        options,
+    );
+    assert!(thinking.iter().any(|span| span.content.as_ref() == "code"));
+
+    let mut markdown_state = MarkdownRenderState::default();
+    let tool = render_timeline_content_spans(
+        TimelineRole::Tool,
+        "{\"ok\":true}",
+        Style::default(),
+        &mut markdown_state,
+        options,
+    );
+    assert!(tool.iter().any(|span| span.content.as_ref().contains("ok")));
+
+    let mut markdown_state = MarkdownRenderState::default();
+    let user = render_timeline_content_spans(
+        TimelineRole::User,
+        "plain user",
+        Style::default(),
+        &mut markdown_state,
+        options,
+    );
+    assert_eq!(
+        user.first().map(|span| span.content.as_ref()),
+        Some("plain user")
+    );
 }

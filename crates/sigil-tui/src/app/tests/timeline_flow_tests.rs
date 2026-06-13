@@ -6,6 +6,7 @@ use crate::{
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
+    text::Line,
 };
 
 #[test]
@@ -347,6 +348,135 @@ fn streaming_deltas_do_not_fill_ui_event_log() -> Result<()> {
 
     assert!(!app.events.iter().any(|event| event.label == "tool:args"));
     assert_eq!(app.events.len(), after_text_events + 1);
+    Ok(())
+}
+
+#[test]
+fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.timeline.clear();
+    app.timeline_render_cache.clear();
+    app.timeline_plain_cache.clear();
+    app.timeline_prefix_hashes.clear();
+    app.timeline_render_ranges.clear();
+
+    assert_eq!(app.effective_timeline_render_len(), 0);
+    assert_eq!(app.scrollback_prefix_hash(0), 0);
+    assert_eq!(app.visible_timeline_render_range(10), 0..0);
+    assert_eq!(
+        app.transcript_lines(10)
+            .into_iter()
+            .map(|line| line
+                .spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>())
+            .collect::<Vec<_>>(),
+        vec![
+            "no messages yet".to_owned(),
+            "send a prompt to start".to_owned()
+        ]
+    );
+
+    app.rerender_timeline_entry(99);
+    app.append_timeline_render_cache_entry(0);
+    app.extend_last_render_block_range_by_one_line();
+
+    app.timeline.push(crate::timeline::TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "manual notice".to_owned(),
+    });
+    app.append_timeline_render_cache_entry(2);
+    assert_eq!(app.timeline_render_ranges.len(), app.timeline.len());
+
+    app.timeline_render_cache = vec![Line::raw("visible")];
+    app.timeline_plain_cache = vec!["visible".to_owned()];
+    app.timeline_prefix_hashes = vec![99];
+    app.rebuild_timeline_prefix_hashes_from(0);
+    assert_ne!(app.timeline_prefix_hashes[0], 99);
+    let hash_after_zero_rebuild = app.timeline_prefix_hashes[0];
+    app.rebuild_timeline_prefix_hashes_from(1);
+    assert_eq!(app.timeline_prefix_hashes[0], hash_after_zero_rebuild);
+
+    app.timeline_render_cache.push(Line::default());
+    app.timeline_plain_cache.push(String::new());
+    app.timeline_prefix_hashes.push(0);
+    app.timeline_render_ranges = std::iter::once(0..2).collect();
+    app.trim_trailing_timeline_blanks();
+    assert_eq!(
+        app.timeline_render_ranges,
+        std::iter::once(0..1).collect::<Vec<_>>()
+    );
+
+    app.timeline_render_cache.push(Line::default());
+    app.timeline_plain_cache.push(String::new());
+    app.timeline_prefix_hashes.push(0);
+    app.timeline_render_ranges = std::iter::once(1..1).collect();
+    app.trim_trailing_timeline_blanks();
+    assert!(app.timeline_render_ranges.is_empty());
+
+    app.timeline.clear();
+    app.timeline_render_cache.clear();
+    app.timeline_plain_cache.clear();
+    app.timeline_prefix_hashes.clear();
+    app.timeline_render_ranges.clear();
+    app.push_timeline(TimelineRole::Assistant, "streaming answer");
+    app.streaming_assistant_index = Some(0);
+    app.is_busy = true;
+    assert_eq!(app.scrollback_cutoff_line(), 0);
+    Ok(())
+}
+
+#[test]
+fn timeline_scroll_and_live_summary_edges_cover_pending_and_busy_states() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 6);
+    for index in 0..12 {
+        app.push_timeline(TimelineRole::Notice, format!("notice {index}"));
+    }
+
+    app.handle_mouse_scroll(true);
+    assert!(app.timeline_scroll_back > 0);
+    app.handle_mouse_scroll(false);
+    assert_eq!(app.timeline_scroll_back, 0);
+
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    app.handle_mouse_scroll(false);
+    assert_eq!(app.approval_scroll_back, 3);
+    app.handle_mouse_scroll(true);
+    assert_eq!(app.approval_scroll_back, 0);
+
+    app.active_pane = PaneFocus::Activity;
+    app.scroll_active_pane(2);
+    assert_eq!(app.approval_scroll_back, 0);
+    app.unscroll_active_pane(4);
+    assert_eq!(app.approval_scroll_back, 4);
+    app.pending_approval = None;
+    app.scroll_active_pane(5);
+    assert_eq!(app.activity_scroll_back, 5);
+    app.unscroll_active_pane(3);
+    assert_eq!(app.activity_scroll_back, 2);
+
+    assert!(app.live_activity_summary().is_none());
+    app.is_busy = true;
+    app.run_phase = RunPhase::Idle;
+    assert_eq!(
+        app.live_activity_summary()
+            .map(|summary| (summary.label, summary.detail)),
+        Some(("working".to_owned(), "waiting for next event".to_owned()))
+    );
+    app.run_phase = RunPhase::Tool("bash".to_owned());
+    assert_eq!(
+        app.live_activity_summary()
+            .map(|summary| (summary.label, summary.detail)),
+        Some(("tool".to_owned(), "running bash".to_owned()))
+    );
+    app.run_phase = RunPhase::Streaming;
+    assert_eq!(
+        app.live_activity_summary()
+            .map(|summary| (summary.label, summary.detail)),
+        Some(("streaming".to_owned(), "writing the reply".to_owned()))
+    );
     Ok(())
 }
 
@@ -1184,4 +1314,17 @@ fn duplicate_phase_markers_do_not_append_duplicate_events() {
         phase_events,
         vec!["thinking|deepseek-v4-flash", "tool|bash"]
     );
+}
+
+#[test]
+fn transcript_lines_on_empty_timeline_still_renders_placeholder_lines() {
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    let lines = app.transcript_lines(3);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| !span.content.as_ref().trim().is_empty())
+    }));
 }

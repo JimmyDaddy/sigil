@@ -249,7 +249,7 @@ impl AppState {
         }
     }
 
-    fn selected_slash_entry(&self) -> Option<SlashSelectorEntry> {
+    pub(super) fn selected_slash_entry(&self) -> Option<SlashSelectorEntry> {
         let rows = self.slash_selector_entries();
         if rows.is_empty() {
             return None;

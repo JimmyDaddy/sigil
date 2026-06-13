@@ -3,7 +3,10 @@ use std::{io::Cursor, path::PathBuf};
 use super::*;
 use crate::app::tests::common::test_config;
 use serde_json::json;
-use sigil_kernel::ToolResultMeta;
+use sigil_kernel::{
+    McpElicitationDecision, McpElicitationEntry, ToolApprovalAuditAction, ToolApprovalEntry,
+    ToolApprovalUserDecision, ToolError, ToolErrorKind, ToolResultMeta,
+};
 
 #[test]
 fn session_labels_and_identifiers_truncate_as_expected() {
@@ -172,12 +175,12 @@ fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
     assert!(
         preview_lines
             .iter()
-            .any(|line| line.contains("[user] before"))
+            .any(|line: &String| line.contains("[user] before"))
     );
     assert!(
         preview_lines
             .iter()
-            .any(|line| line.contains("[assistant] after"))
+            .any(|line: &String| line.contains("[assistant] after"))
     );
 }
 
@@ -219,7 +222,73 @@ fn session_restore_and_projection_helpers_cover_empty_and_invalid_paths() -> Res
         "fallback-model",
         "restored",
     ));
+
+    let blocked_parent = temp.path().join("not-a-directory");
+    std::fs::write(&blocked_parent, "file parent")?;
+    assert!(!app.restore_session_path_from_disk(
+        blocked_parent.join("session-blocked.jsonl"),
+        "fallback-provider",
+        "fallback-model",
+        "restored",
+    ));
     Ok(())
+}
+
+#[test]
+fn provider_projection_covers_compaction_preview_states() {
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    app.compaction_config = CompactionConfig {
+        enabled: true,
+        tail_messages: 1,
+        context_window_tokens: Some(10_000),
+        ..CompactionConfig::default()
+    };
+    app.sync_current_session_state(vec![
+        SessionLogEntry::User(ModelMessage::user("first")),
+        SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some("second".to_owned()),
+            Vec::new(),
+        )),
+        SessionLogEntry::User(ModelMessage::user("third")),
+        SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some("fourth".to_owned()),
+            Vec::new(),
+        )),
+    ]);
+    let preview = app.provider_projection_lines().join("\n");
+    assert!(preview.contains("/compact preview: fold"));
+    assert!(preview.contains("Before:"));
+    assert!(preview.contains("After:"));
+
+    app.sync_current_session_state(vec![SessionLogEntry::User(ModelMessage::user("only"))]);
+    let nothing = app.provider_projection_lines().join("\n");
+    assert!(nothing.contains("/compact preview: nothing to fold"));
+
+    app.compaction_config.enabled = false;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::User(ModelMessage::user("first")),
+        SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some("second".to_owned()),
+            Vec::new(),
+        )),
+    ]);
+    let unavailable = app.provider_projection_lines().join("\n");
+    assert!(unavailable.contains("/compact preview unavailable"));
+}
+
+#[test]
+fn refresh_memory_summary_records_inspect_errors() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    app.workspace_root = temp.path().join("missing-workspace");
+    app.memory_config = MemoryConfig { enabled: true };
+
+    app.refresh_memory_summary();
+
+    assert!(app.memory_enabled);
+    assert_eq!(app.memory_document_count, 0);
+    assert_ne!(app.memory_last_status, "ok");
+    assert!(!app.memory_last_status.is_empty());
 }
 
 #[test]
@@ -286,12 +355,126 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
         "requested"
     );
     assert_eq!(
+        tool_approval_action_label(sigil_kernel::ToolApprovalAuditAction::PolicyEvaluated),
+        "policy"
+    );
+    assert_eq!(
+        tool_approval_action_label(sigil_kernel::ToolApprovalAuditAction::Resolved),
+        "resolved"
+    );
+    assert_eq!(
         tool_execution_status_label(ToolExecutionStatus::Started),
         "started"
+    );
+    assert_eq!(
+        tool_execution_status_label(ToolExecutionStatus::Completed),
+        "completed"
+    );
+    assert_eq!(
+        tool_execution_status_label(ToolExecutionStatus::Failed),
+        "failed"
     );
     assert_eq!(
         tool_execution_status_label(ToolExecutionStatus::Interrupted),
         "interrupted"
     );
     Ok(())
+}
+
+#[test]
+fn render_session_control_entries_cover_remaining_labels() {
+    let approval = render_session_log_entry(&SessionLogEntry::Control(ControlEntry::ToolApproval(
+        ToolApprovalEntry {
+            action: ToolApprovalAuditAction::Resolved,
+            call_id: "call-approval".to_owned(),
+            tool_name: "write_file".to_owned(),
+            access: sigil_kernel::ToolAccess::Write,
+            subjects: Vec::new(),
+            policy_decision: ApprovalMode::Deny,
+            external_directory_required: false,
+            user_decision: Some(ToolApprovalUserDecision::Denied),
+            reason: Some("denied".to_owned()),
+            preview_hash: None,
+        },
+    )));
+    assert!(approval.contains("action=resolved"));
+
+    for decision in [
+        McpElicitationDecision::Accepted,
+        McpElicitationDecision::Declined,
+        McpElicitationDecision::Cancelled,
+    ] {
+        let line = render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::McpElicitation(Box::new(McpElicitationEntry::new(
+                "server",
+                "message",
+                &json!({
+                    "type": "object",
+                    "properties": {"token": {"type": "string"}},
+                    "required": ["token"]
+                }),
+                decision,
+                Some(&json!({"token": "redacted"})),
+            ))),
+        ));
+        assert!(line.contains("mcp elicitation server"));
+    }
+
+    let execution_with_error = ToolExecutionEntry {
+        call_id: "call-error".to_owned(),
+        tool_name: "bash".to_owned(),
+        status: ToolExecutionStatus::Failed,
+        duration_ms: Some(10),
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta::default(),
+        error: Some(ToolError {
+            kind: ToolErrorKind::Internal,
+            message: "boom".to_owned(),
+            retryable: false,
+            details: serde_json::Value::Null,
+        }),
+        model_content_hash: None,
+    };
+    assert_eq!(
+        restored_tool_execution_content(&execution_with_error),
+        "boom"
+    );
+    assert!(should_render_restored_tool_execution(
+        &ToolExecutionEntry {
+            status: ToolExecutionStatus::Cancelled,
+            ..execution_with_error.clone()
+        },
+        &std::collections::HashSet::new()
+    ));
+}
+
+#[test]
+fn restore_session_view_skips_empty_assistant_and_tool_result_content() {
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    let mut empty_tool = ModelMessage::new(sigil_kernel::MessageRole::Tool, None);
+    empty_tool.tool_call_id = Some("call-empty".to_owned());
+
+    app.restore_session_view(
+        PathBuf::from("session-empty-content.jsonl"),
+        "deepseek".to_owned(),
+        "deepseek-v4-flash".to_owned(),
+        vec![
+            SessionLogEntry::Assistant(ModelMessage::assistant(None, Vec::new())),
+            SessionLogEntry::Assistant(ModelMessage::assistant(Some(String::new()), Vec::new())),
+            SessionLogEntry::ToolResult(empty_tool),
+        ],
+        "restored empty",
+    );
+
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Assistant)
+    );
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Tool)
+    );
 }

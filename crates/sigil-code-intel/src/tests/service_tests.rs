@@ -6,8 +6,8 @@ use sigil_kernel::{
 
 use super::*;
 use crate::tests::common::{
-    fake_lsp_server_config, fake_lsp_server_config_with_env, python3_available, read_counter,
-    write_fake_lsp_scenario, write_fake_lsp_server,
+    fake_lsp_server_config, fake_lsp_server_config_with_env, fake_server, python3_available,
+    read_counter, write_fake_lsp_scenario, write_fake_lsp_server,
 };
 
 fn fake_config() -> CodeIntelligenceConfig {
@@ -423,6 +423,36 @@ fn lazy_discovery_is_deferred_until_first_code_query() {
 }
 
 #[tokio::test]
+async fn lazy_discovery_loads_plan_on_first_query() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\n",
+    )
+    .expect("cargo file should write");
+    fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
+    let service = CodeIntelligenceService::new(
+        temp.path().to_path_buf(),
+        CodeIntelligenceConfig {
+            enabled: true,
+            startup: CodeIntelStartup::Lazy,
+            discovery: CodeIntelligenceDiscoveryConfig {
+                enabled: true,
+                report_missing: true,
+            },
+            ..CodeIntelligenceConfig::default()
+        },
+    );
+
+    let _ = service
+        .workspace_symbols("hello", 10)
+        .await
+        .expect("tree-sitter fallback should succeed");
+
+    assert!(service.server_plan_snapshot().discovery_loaded);
+}
+
+#[tokio::test]
 async fn document_symbols_falls_back_to_tree_sitter_when_lsp_is_unavailable() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     fs::write(
@@ -696,6 +726,30 @@ async fn workspace_symbols_falls_back_to_tree_sitter_when_lsp_is_unavailable() {
             .iter()
             .any(|status| { status.server == "tree-sitter-rust" && status.status == "fallback" })
     );
+}
+
+#[tokio::test]
+async fn workspace_symbols_tree_sitter_fallback_stops_after_limit() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").expect("cargo file");
+    fs::create_dir(temp.path().join("src")).expect("src dir");
+    for index in 0..4 {
+        fs::write(
+            temp.path().join("src").join(format!("file_{index}.rs")),
+            format!("pub fn shared_symbol_{index}() {{}}\n"),
+        )
+        .expect("source should write");
+    }
+    let service = CodeIntelligenceService::new(temp.path().to_path_buf(), fake_config());
+
+    let result = service
+        .workspace_symbols("shared_symbol", 1)
+        .await
+        .expect("fallback workspace symbols should succeed");
+
+    assert_eq!(result.server, "tree-sitter-rust");
+    assert_eq!(result.results.len(), 1);
+    assert!(result.metadata.truncated);
 }
 
 #[tokio::test]
@@ -1095,6 +1149,18 @@ async fn service_basic_accessors_status_and_shutdown_cover_idle_paths() {
     assert_eq!(
         CodeIntelligenceService::configured_status_line(service.config()),
         "lazy"
+    );
+    assert_eq!(
+        CodeIntelligenceService::configured_status_line(&CodeIntelligenceConfig::default()),
+        "off"
+    );
+    assert_eq!(
+        CodeIntelligenceService::configured_status_line(&CodeIntelligenceConfig {
+            enabled: true,
+            startup: CodeIntelStartup::Off,
+            ..CodeIntelligenceConfig::default()
+        }),
+        "off"
     );
 
     service
@@ -1724,5 +1790,82 @@ async fn workspace_symbols_filter_external_and_malformed_entries() {
     assert_eq!(result.results.len(), 1);
     assert_eq!(result.results[0].name, "hello");
     assert_eq!(result.metadata.external_results_filtered, 2);
+    service.shutdown().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn workspace_symbols_labels_multiple_successful_lsp_servers() {
+    if !python3_available() {
+        return;
+    }
+    let _guard = fake_lsp_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname='x'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .expect("cargo file should write");
+    let workspace_file = temp.path().join("src").join("lib.rs");
+    fs::write(&workspace_file, "pub fn hello() {}\n").expect("source should write");
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("multi-workspace-symbols.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "workspaceSymbolProvider": true } }
+                },
+                "workspace/symbol": {
+                    "result": [{
+                        "name": "hello",
+                        "kind": 12,
+                        "location": {
+                            "uri": file_uri_from_path(&workspace_file),
+                            "range": {
+                                "start": { "line": 0, "character": 0 },
+                                "end": { "line": 0, "character": 5 }
+                            }
+                        }
+                    }]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut config = fake_lsp_server_config(&server_script, &scenario_path);
+    config.servers.push(fake_server(
+        "second-rust-analyzer",
+        &["rust"],
+        &["rs"],
+        &["Cargo.toml"],
+        &server_script,
+        &scenario_path,
+        BTreeMap::new(),
+        2_000,
+    ));
+    let service = CodeIntelligenceService::new(temp.path().to_path_buf(), config);
+
+    let result = service
+        .workspace_symbols("hello", 10)
+        .await
+        .expect("workspace symbols should succeed");
+
+    assert_eq!(result.server, "multiple");
+    assert_eq!(result.results.len(), 2);
+    assert!(
+        result
+            .server_statuses
+            .iter()
+            .any(|status| { status.server == "rust-analyzer" && status.status == "ready" })
+    );
+    assert!(
+        result
+            .server_statuses
+            .iter()
+            .any(|status| { status.server == "second-rust-analyzer" && status.status == "ready" })
+    );
     service.shutdown().await.expect("shutdown should succeed");
 }

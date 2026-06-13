@@ -62,18 +62,22 @@ pub fn default_rust_analyzer_server() -> LanguageServerConfig {
         .into_iter()
         .find(|profile| profile.name == "rust-analyzer")
         .map(|profile| profile.to_config())
-        .unwrap_or_else(|| LanguageServerConfig {
-            name: "rust-analyzer".to_owned(),
-            languages: vec!["rust".to_owned()],
-            command: "rust-analyzer".to_owned(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            root_markers: vec!["Cargo.toml".to_owned(), "rust-project.json".to_owned()],
-            file_extensions: vec!["rs".to_owned()],
-            initialization_options: serde_json::json!({ "check": { "command": "check" } }),
-            trust_required: true,
-            startup_timeout_ms: 10_000,
-        })
+        .unwrap_or_else(fallback_rust_analyzer_server)
+}
+
+fn fallback_rust_analyzer_server() -> LanguageServerConfig {
+    LanguageServerConfig {
+        name: "rust-analyzer".to_owned(),
+        languages: vec!["rust".to_owned()],
+        command: "rust-analyzer".to_owned(),
+        args: Vec::new(),
+        env: BTreeMap::new(),
+        root_markers: vec!["Cargo.toml".to_owned(), "rust-project.json".to_owned()],
+        file_extensions: vec!["rs".to_owned()],
+        initialization_options: serde_json::json!({ "check": { "command": "check" } }),
+        trust_required: true,
+        startup_timeout_ms: 10_000,
+    }
 }
 
 pub fn config_enabled(config: &CodeIntelligenceConfig) -> bool {

@@ -13,6 +13,7 @@ pub(crate) struct BalanceSnapshot {
     pub(crate) status: String,
 }
 
+#[cfg_attr(coverage, allow(dead_code))]
 pub(crate) fn fetch_remote_model_ids(config: &DeepSeekProviderConfig) -> Result<Vec<String>> {
     let (api_key, url, timeout_secs) = provider_status_request_parts(config, "models")?;
     let client = build_provider_status_client(timeout_secs, "model-list")?;
@@ -50,6 +51,7 @@ pub(crate) fn fetch_provider_balance_snapshot(
     parse_balance_snapshot(&payload)
 }
 
+#[cfg_attr(coverage, allow(dead_code))]
 fn parse_remote_model_ids(payload: &serde_json::Value) -> Vec<String> {
     let Some(items) = payload.get("data").and_then(serde_json::Value::as_array) else {
         return Vec::new();

@@ -160,31 +160,36 @@ impl RootConfig {
 ///
 /// Returns an error when the current platform does not expose a usable home or config directory.
 pub fn default_user_config_dir() -> Result<PathBuf> {
-    if cfg!(target_os = "windows") {
+    #[cfg(target_os = "windows")]
+    {
         if let Some(app_data) = env::var_os("APPDATA") {
             return Ok(PathBuf::from(app_data).join("sigil"));
         }
-        return Err(anyhow::anyhow!(
+        Err(anyhow::anyhow!(
             "missing APPDATA for sigil config directory"
-        ));
+        ))
     }
 
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         let home = env::var_os("HOME")
             .ok_or_else(|| anyhow::anyhow!("missing HOME for sigil config directory"))?;
-        return Ok(PathBuf::from(home)
+        Ok(PathBuf::from(home)
             .join("Library")
             .join("Application Support")
-            .join("sigil"));
+            .join("sigil"))
     }
 
-    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(xdg).join("sigil"));
-    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
+            return Ok(PathBuf::from(xdg).join("sigil"));
+        }
 
-    let home = env::var_os("HOME")
-        .ok_or_else(|| anyhow::anyhow!("missing HOME for sigil config directory"))?;
-    Ok(PathBuf::from(home).join(".config").join("sigil"))
+        let home = env::var_os("HOME")
+            .ok_or_else(|| anyhow::anyhow!("missing HOME for sigil config directory"))?;
+        Ok(PathBuf::from(home).join(".config").join("sigil"))
+    }
 }
 
 /// Returns the standard per-user config file path for sigil.

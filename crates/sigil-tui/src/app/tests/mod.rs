@@ -39,7 +39,7 @@ use super::{
     AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary, ApprovalDiffLineKind,
     ConfigField, ConfigFooterAction, ConfigSection, ModalState, ModelPickerRefresh,
     ModelPickerTarget, PaneFocus, RunPhase, SessionHistoryRow, SessionViewMode, SetupField,
-    TimelineRole,
+    SidebarCard, TimelineRole,
 };
 
 use common::*;

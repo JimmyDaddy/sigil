@@ -243,6 +243,39 @@ fn register_code_intelligence_tools_skips_disabled_config() {
     assert!(registry.spec_for("code_symbols").is_none());
 }
 
+#[test]
+fn code_intel_tools_expose_permission_subjects_for_file_scoped_calls() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 1,
+    };
+
+    for tool_name in ["code_definition", "code_references", "code_diagnostics"] {
+        let args_json = if tool_name == "code_diagnostics" {
+            json!({ "paths": ["lib.rs"], "max_results": 5 }).to_string()
+        } else {
+            json!({ "path": "lib.rs", "line": 1, "character": 0 }).to_string()
+        };
+        let subjects = registry
+            .permission_subjects(
+                &ctx,
+                &ToolCall {
+                    id: format!("call-{tool_name}"),
+                    name: tool_name.to_owned(),
+                    args_json,
+                },
+            )
+            .expect("subjects should resolve");
+
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].original, "lib.rs");
+    }
+}
+
 #[tokio::test]
 async fn code_symbols_tool_returns_bounded_json_envelope() {
     let temp = tempfile::tempdir().expect("tempdir should build");

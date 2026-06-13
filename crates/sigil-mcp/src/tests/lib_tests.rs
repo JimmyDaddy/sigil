@@ -1776,6 +1776,80 @@ fn mcp_name_hashing_handles_extremely_short_provider_limits() {
     assert!(fitted.len() > 6);
 }
 
+#[test]
+fn mcp_private_helpers_cover_pin_json_and_name_collision_edges() -> Result<()> {
+    assert_eq!(
+        super::mcp_provider_tool_name_prefix("bad server!"),
+        "mcp__bad_server__"
+    );
+    assert_eq!(super::json_type_label(&Value::Null), "null");
+    assert_eq!(super::json_type_label(&json!(false)), "bool");
+    assert_eq!(super::json_type_label(&json!(1)), "number");
+    assert_eq!(super::json_type_label(&json!("value")), "string");
+    assert_eq!(super::json_type_label(&json!([])), "array");
+    assert_eq!(super::json_type_label(&json!({})), "object");
+    assert_eq!(super::summarize_egress_json(&Value::Null)["type"], "null");
+
+    let observed = super::McpServerObservedIdentity {
+        command_fingerprint: "sha256:observed".to_owned(),
+        protocol_version: "2025-06-18".to_owned(),
+        server_name: "observed-server".to_owned(),
+        server_version: "2.0.0".to_owned(),
+    };
+    let disabled = McpServerConfig {
+        name: "unmatched".to_owned(),
+        trust: McpServerTrustPolicy {
+            pin_version: false,
+            ..McpServerTrustPolicy::default()
+        },
+        ..McpServerConfig::default()
+    };
+    super::validate_mcp_pin(&disabled, &observed)?;
+
+    let matching = McpServerConfig {
+        name: "matched".to_owned(),
+        trust: McpServerTrustPolicy {
+            pin_version: true,
+            pinned: Some(observed.as_pinned_identity()),
+            ..McpServerTrustPolicy::default()
+        },
+        ..McpServerConfig::default()
+    };
+    super::validate_mcp_pin(&matching, &observed)?;
+
+    let mismatched = McpServerConfig {
+        name: "mismatched".to_owned(),
+        trust: McpServerTrustPolicy {
+            pin_version: true,
+            pinned: Some(sigil_kernel::McpServerPinnedIdentity {
+                command_fingerprint: "sha256:expected".to_owned(),
+                protocol_version: "2024-11-05".to_owned(),
+                server_name: "expected-server".to_owned(),
+                server_version: "1.0.0".to_owned(),
+            }),
+            ..McpServerTrustPolicy::default()
+        },
+        ..McpServerConfig::default()
+    };
+    let error = super::validate_mcp_pin(&mismatched, &observed)
+        .expect_err("pin mismatch should include every mismatched field");
+    let message = error.to_string();
+    assert!(
+        message.contains("command_fingerprint expected sha256:expected observed sha256:observed")
+    );
+    assert!(message.contains("protocol_version expected 2024-11-05 observed 2025-06-18"));
+    assert!(message.contains("server_name expected expected-server observed observed-server"));
+    assert!(message.contains("server_version expected 1.0.0 observed 2.0.0"));
+
+    let mut used = std::collections::BTreeSet::new();
+    let first = super::McpToolName::new("server", "same tool", 24, &mut used);
+    let second = super::McpToolName::new("server", "same-tool", 24, &mut used);
+    assert_ne!(first.provider_name, second.provider_name);
+    assert_eq!(first.server_name, "server");
+    assert_eq!(first.original_name, "same tool");
+    Ok(())
+}
+
 #[tokio::test]
 async fn mcp_public_capability_wrappers_handle_empty_server_lists() -> Result<()> {
     let temp = tempfile::tempdir()?;

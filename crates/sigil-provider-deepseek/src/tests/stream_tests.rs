@@ -32,6 +32,19 @@ fn decoder_merges_crlf_boundaries_split_across_chunks() -> Result<()> {
 }
 
 #[test]
+fn decoder_normalizes_bare_carriage_return_before_non_newline_character() -> Result<()> {
+    let mut decoder = DeepSeekSseDecoder::default();
+
+    assert!(decoder.push("data: {\"choices\":[]}\r")?.is_empty());
+    let frames = decoder.push("id: ignored\n\n")?;
+
+    assert!(
+        matches!(frames.as_slice(), [DeepSeekSseFrame::Data(data)] if data == "{\"choices\":[]}")
+    );
+    Ok(())
+}
+
+#[test]
 fn parse_sse_frames_dispatches_last_frame_at_eof() -> Result<()> {
     let frames = parse_sse_frames("data: {\"choices\":[]}")?;
     assert!(

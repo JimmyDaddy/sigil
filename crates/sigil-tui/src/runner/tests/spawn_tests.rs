@@ -8,7 +8,9 @@ use sigil_kernel::{
 };
 use tempfile::tempdir;
 
-use super::super::{WorkerCommand, WorkerMessage, spawn_agent_worker};
+use super::super::{
+    WorkerCommand, WorkerMessage, spawn::report_runtime_build_result, spawn_agent_worker,
+};
 
 fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
     RootConfig {
@@ -49,6 +51,22 @@ fn recv_message(message_rx: &mpsc::Receiver<WorkerMessage>) -> Result<WorkerMess
     message_rx
         .recv_timeout(Duration::from_secs(3))
         .map_err(|error| anyhow::anyhow!("timed out waiting for worker message: {error}"))
+}
+
+#[test]
+fn report_runtime_build_result_forwards_runtime_build_failures() -> Result<()> {
+    let (message_tx, message_rx) = mpsc::channel();
+    let runtime = report_runtime_build_result(
+        Err(std::io::Error::other("runtime unavailable")),
+        &message_tx,
+    );
+
+    assert!(runtime.is_none());
+    assert!(matches!(
+        recv_message(&message_rx)?,
+        WorkerMessage::RunFailed(ref message) if message.contains("runtime unavailable")
+    ));
+    Ok(())
 }
 
 #[test]

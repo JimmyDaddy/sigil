@@ -230,7 +230,7 @@ pub(super) fn diagnostics_tool_event(result: ToolResult) -> RunEvent {
     RunEvent::ToolResult(result)
 }
 
-fn ensure_git_workspace(workspace_root: &Path) -> Result<()> {
+pub(super) fn ensure_git_workspace(workspace_root: &Path) -> Result<()> {
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace_root)
@@ -247,7 +247,7 @@ fn ensure_git_workspace(workspace_root: &Path) -> Result<()> {
     }
 }
 
-fn has_head(workspace_root: &Path) -> bool {
+pub(super) fn has_head(workspace_root: &Path) -> bool {
     Command::new("git")
         .arg("-C")
         .arg(workspace_root)
@@ -257,7 +257,7 @@ fn has_head(workspace_root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn git_output(workspace_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+pub(super) fn git_output(workspace_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace_root)

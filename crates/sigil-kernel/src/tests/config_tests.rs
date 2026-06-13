@@ -92,6 +92,54 @@ fn root_config_save_roundtrips() {
 }
 
 #[test]
+fn root_config_save_handles_paths_without_parent() {
+    let file_name = format!("sigil-config-test-{}.toml", uuid::Uuid::new_v4());
+    let path = Path::new(&file_name);
+
+    let config = RootConfig {
+        workspace: WorkspaceConfig::default(),
+        session: Default::default(),
+        agent: AgentConfig {
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-flash".to_owned(),
+            max_turns: None,
+            tool_timeout_secs: 30,
+        },
+        permission: Default::default(),
+        memory: Default::default(),
+        compaction: Default::default(),
+        code_intelligence: Default::default(),
+        providers: BTreeMap::new(),
+        mcp_servers: Vec::new(),
+    };
+
+    config
+        .save(path)
+        .expect("path without parent should save in cwd");
+
+    assert!(path.exists());
+    std::fs::remove_file(path).expect("temporary config should clean up");
+}
+
+#[test]
+fn root_config_loads_agent_and_session_defaults() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#,
+    )
+    .expect("minimal config should parse");
+
+    assert_eq!(config.workspace.root, ".");
+    assert_eq!(config.session.log_dir, ".sigil/sessions");
+    assert_eq!(config.agent.tool_timeout_secs, 30);
+    assert_eq!(config.memory, Default::default());
+    assert_eq!(config.compaction.tail_messages, 6);
+}
+
+#[test]
 fn mcp_server_config_loads_lifecycle_and_trust_policy() {
     let raw = r#"
 [agent]

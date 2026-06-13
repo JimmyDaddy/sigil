@@ -76,9 +76,10 @@ impl AppState {
                 return self.complete_setup();
             }
             KeyCode::Tab | KeyCode::Down => {
-                let Some(state) = self.setup_state.as_mut() else {
-                    return Ok(None);
-                };
+                let state = self
+                    .setup_state
+                    .as_mut()
+                    .expect("setup state was checked before setup key handling");
                 state.selected_field = state.selected_field.next();
                 self.last_notice = Some(format!(
                     "setup field {}",
@@ -87,9 +88,10 @@ impl AppState {
                 return Ok(None);
             }
             KeyCode::BackTab | KeyCode::Up => {
-                let Some(state) = self.setup_state.as_mut() else {
-                    return Ok(None);
-                };
+                let state = self
+                    .setup_state
+                    .as_mut()
+                    .expect("setup state was checked before setup key handling");
                 state.selected_field = state.selected_field.previous();
                 self.last_notice = Some(format!(
                     "setup field {}",
@@ -100,9 +102,10 @@ impl AppState {
             KeyCode::Left | KeyCode::Right | KeyCode::Enter
                 if matches!(selected_field, SetupField::TrustCurrentFolder) =>
             {
-                let Some(state) = self.setup_state.as_mut() else {
-                    return Ok(None);
-                };
+                let state = self
+                    .setup_state
+                    .as_mut()
+                    .expect("setup state was checked before setup key handling");
                 state.trusted_current_folder = !state.trusted_current_folder;
                 self.last_notice = Some(format!(
                     "trust current folder {}",
@@ -151,7 +154,7 @@ impl AppState {
         Ok(None)
     }
 
-    fn complete_setup(&mut self) -> Result<Option<AppAction>> {
+    pub(super) fn complete_setup(&mut self) -> Result<Option<AppAction>> {
         let Some(state) = &mut self.setup_state else {
             return Ok(None);
         };
@@ -243,7 +246,7 @@ fn render_setup_action_row(field: SetupField, selected_field: SetupField, label:
     )
 }
 
-fn validate_setup_state(state: &SetupState) -> Option<String> {
+pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
     if !state.trusted_current_folder {
         return Some("trust the current folder before starting sigil".to_owned());
     }
@@ -257,7 +260,7 @@ fn validate_setup_state(state: &SetupState) -> Option<String> {
     None
 }
 
-fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
+pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> {
     if !state.trusted_current_folder {
         bail!("trust the current folder before starting sigil");
     }

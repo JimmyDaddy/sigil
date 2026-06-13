@@ -232,7 +232,9 @@ fn process_app_action(
     action: AppAction,
 ) -> Result<()> {
     process_app_action_with_spawner(app, worker, action, |_root_config, _app| {
-        unreachable!("test wrapper should not spawn a real worker")
+        Err(anyhow::anyhow!(
+            "test wrapper should not spawn a real worker"
+        ))
     })
 }
 
@@ -371,6 +373,14 @@ fn prepare_scrollback_sync(
     app: &AppState,
     sync_state: &ScrollbackSyncState,
 ) -> Option<PreparedScrollbackSync> {
+    prepare_scrollback_sync_with_chunk_size(app, sync_state, SCROLLBACK_SEED_CHUNK_LINES)
+}
+
+fn prepare_scrollback_sync_with_chunk_size(
+    app: &AppState,
+    sync_state: &ScrollbackSyncState,
+    chunk_size: usize,
+) -> Option<PreparedScrollbackSync> {
     if !should_sync_terminal_scrollback(app) {
         return None;
     }
@@ -384,11 +394,12 @@ fn prepare_scrollback_sync(
     let next_line_count = app.scrollback_line_count();
     let shared_len = sync_state.line_count.min(next_line_count);
     let shared_hash = app.scrollback_prefix_hash(shared_len);
-    let plan = plan_scrollback_sync(
+    let plan = plan_scrollback_sync_with_chunk_size(
         sync_state,
         app.session_id.as_str(),
         next_line_count,
         shared_hash,
+        chunk_size,
     );
     let mut line_batches = Vec::new();
     let mut next_state = ScrollbackSyncState {
@@ -436,6 +447,7 @@ fn prepare_scrollback_sync(
     })
 }
 
+#[cfg(test)]
 fn plan_scrollback_sync(
     sync_state: &ScrollbackSyncState,
     session_id: &str,
@@ -571,11 +583,7 @@ fn wrap_scrollback_text(text: &str, width: usize) -> Vec<String> {
         current_width += grapheme_width;
     }
 
-    if current.is_empty() {
-        rows.push(String::new());
-    } else {
-        rows.push(current);
-    }
+    rows.push(current);
 
     rows
 }

@@ -393,6 +393,12 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     assert!(detail.contains("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server"));
     assert!(!detail.contains("servers:"));
     assert!(!detail.contains("args_csv:"));
+
+    let nav = app.config_nav_lines().join("\n");
+    assert!(nav.contains("MCP: Ctrl-N add"));
+    assert!(nav.contains("MCP: Ctrl-D drop"));
+    assert!(nav.contains("MCP: PgUp/PgDn switch"));
+    assert!(nav.contains("MCP: footer activate lazy"));
 }
 
 #[test]
@@ -1403,5 +1409,79 @@ fn config_mcp_shortcuts_outside_mcp_section_show_guidance() -> Result<()> {
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
     assert_eq!(app.last_notice(), Some("Ctrl-D: MCP only"));
+    Ok(())
+}
+
+#[test]
+fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Mcp);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.last_notice(), Some("no MCP server"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.last_notice(), Some("added MCP server"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
+    assert_eq!(app.last_notice(), Some("removed MCP server"));
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        state.focus_footer(ConfigFooterAction::SaveAndClose);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save"));
+    assert_eq!(app.last_notice(), Some("action save"));
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        state.focus_footer(ConfigFooterAction::ActivateMcp);
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("activate MCP is available in MCP config")
+    );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        state.selected_field = Some(ConfigField::ProviderFimModel);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_field_label(), Some("save"));
+    let before_notice = app.last_notice().map(ToOwned::to_owned);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), before_notice.as_deref());
+
+    app.config_state = None;
+    assert!(
+        app.handle_config_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
+    assert!(
+        app.handle_config_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?
+            .is_none()
+    );
+    assert!(
+        app.handle_config_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?
+            .is_none()
+    );
     Ok(())
 }

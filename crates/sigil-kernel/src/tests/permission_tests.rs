@@ -333,6 +333,34 @@ fn permission_external_directory_rules_can_allow_matching_paths() -> Result<()> 
 }
 
 #[test]
+fn permission_external_directory_uses_default_when_rules_do_not_match() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_root = temp.path().canonicalize()?;
+    std::fs::create_dir_all(external_root.join("allowed"))?;
+    std::fs::create_dir_all(external_root.join("other"))?;
+    let external_path = external_root.join("other").join("note.txt");
+    let config = PermissionConfig {
+        external_directory: ExternalDirectoryConfig {
+            enabled: true,
+            default_mode: ApprovalMode::Deny,
+            rules: vec![ExternalDirectoryRule {
+                path_glob: format!("{}/allowed/**", external_root.display()),
+                mode: ApprovalMode::Allow,
+            }],
+        },
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Read),
+        "read_file",
+        vec![external_path_subject(external_path)],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
 fn permission_external_directory_rules_are_compiled_once_per_policy() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let external_root = temp.path().canonicalize()?;
@@ -526,6 +554,10 @@ fn permission_external_path_helpers_expand_home_and_validate_patterns() -> Resul
         super::expand_external_rule_path("$HOME/sigil")?,
         home.join("sigil").display().to_string()
     );
+    assert_eq!(
+        super::expand_external_rule_path("$HOME")?,
+        home.display().to_string()
+    );
     assert_eq!(super::home_dir()?, home);
 
     let unsupported = super::expand_external_rule_path("$TMP/sigil")
@@ -539,5 +571,13 @@ fn permission_external_path_helpers_expand_home_and_validate_patterns() -> Resul
     let relative = super::canonical_external_rule_pattern("notes/**")
         .expect_err("relative patterns should be rejected");
     assert!(relative.to_string().contains("must be absolute"));
+
+    let missing_prefix = super::canonical_external_rule_pattern(&format!(
+        "{}/sigil-missing-{}/*.txt",
+        std::env::temp_dir().display(),
+        uuid::Uuid::new_v4()
+    ))
+    .expect_err("missing literal prefixes should be rejected");
+    assert!(missing_prefix.to_string().contains("literal prefix"));
     Ok(())
 }
