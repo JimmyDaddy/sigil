@@ -556,6 +556,10 @@ fn live_progress_titles_cover_known_custom_and_phase_labels() {
         "Replying"
     );
     assert_eq!(
+        LiveProgressViewModel::from_parts("mcp", "filesystem: Scanning").title,
+        "MCP"
+    );
+    assert_eq!(
         LiveProgressViewModel::from_parts("approval", "waiting").title,
         "Approval"
     );

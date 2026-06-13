@@ -760,6 +760,90 @@ fn mcp_activate_server_tool_result_marks_lazy_server_ready() -> Result<()> {
 }
 
 #[test]
+fn mcp_runtime_progress_updates_live_activity_without_timeline_notice() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.is_busy = true;
+    app.run_phase = RunPhase::Tool("mcp__filesystem__scan".to_owned());
+    let before_timeline_len = app.timeline.len();
+
+    app.handle_worker_message(WorkerMessage::McpProgress {
+        notification: sigil_runtime::McpProgressNotification {
+            server_name: "filesystem".to_owned(),
+            progress_token: "scan".to_owned(),
+            progress: Some(1.0),
+            total: Some(4.0),
+            message: Some("Scanning".to_owned()),
+        },
+    })?;
+
+    let summary = app.live_activity_summary().expect("expected mcp progress");
+    assert_eq!(summary.label, "mcp");
+    assert_eq!(summary.detail, "filesystem: Scanning 25%");
+    assert_eq!(app.timeline.len(), before_timeline_len);
+
+    app.handle_worker_message(WorkerMessage::McpProgress {
+        notification: sigil_runtime::McpProgressNotification {
+            server_name: "filesystem".to_owned(),
+            progress_token: "scan".to_owned(),
+            progress: Some(7.0),
+            total: None,
+            message: Some(" ".to_owned()),
+        },
+    })?;
+    let summary = app
+        .live_activity_summary()
+        .expect("expected progress-only mcp summary");
+    assert_eq!(summary.detail, "filesystem: working 7");
+
+    app.handle_worker_message(WorkerMessage::McpProgress {
+        notification: sigil_runtime::McpProgressNotification {
+            server_name: "filesystem".to_owned(),
+            progress_token: "scan".to_owned(),
+            progress: None,
+            total: None,
+            message: None,
+        },
+    })?;
+    let summary = app
+        .live_activity_summary()
+        .expect("expected message-only mcp summary");
+    assert_eq!(summary.detail, "filesystem: working");
+    Ok(())
+}
+
+#[test]
+fn mcp_list_changed_marks_server_stale_until_refresh_status_arrives() -> Result<()> {
+    let mut config = test_config();
+    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        name: "filesystem".to_owned(),
+        startup: sigil_kernel::McpServerStartup::Eager,
+        ..sigil_kernel::McpServerConfig::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    app.handle_worker_message(WorkerMessage::McpListChanged {
+        notification: sigil_runtime::McpListChangedNotification {
+            server_name: "filesystem".to_owned(),
+            kind: sigil_runtime::McpListChangedKind::Prompts,
+        },
+    })?;
+
+    assert_eq!(
+        app.mcp_server_runtime_status_label("filesystem").as_deref(),
+        Some("stale prompts")
+    );
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: Some("filesystem".to_owned()),
+        status: McpActivationStatus::Refreshing,
+    })?;
+    assert_eq!(
+        app.mcp_server_runtime_status_label("filesystem").as_deref(),
+        Some("refreshing")
+    );
+    Ok(())
+}
+
+#[test]
 fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "work".to_owned();

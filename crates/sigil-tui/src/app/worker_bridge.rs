@@ -123,6 +123,7 @@ impl AppState {
             WorkerMessage::Event(event) => self.handle(*event)?,
             WorkerMessage::RunStarted { prompt } => {
                 self.run_phase = RunPhase::Thinking;
+                self.mcp_progress = None;
                 self.last_notice = Some("thinking".to_owned());
                 self.push_phase_marker(format!("thinking|{}", self.model_name));
                 self.push_event("run:start", prompt);
@@ -130,6 +131,7 @@ impl AppState {
             WorkerMessage::RunFinished { result, entries } => {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
                 self.pending_approval = None;
                 self.modal_state = None;
                 self.last_phase_marker = None;
@@ -157,6 +159,7 @@ impl AppState {
             } => {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
                 self.pending_approval = None;
                 self.modal_state = None;
                 self.last_phase_marker = None;
@@ -179,6 +182,7 @@ impl AppState {
             } => {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
                 self.pending_approval = None;
                 self.modal_state = None;
                 self.last_phase_marker = None;
@@ -204,6 +208,7 @@ impl AppState {
             } => {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
                 self.pending_approval = None;
                 self.modal_state = None;
                 self.last_phase_marker = None;
@@ -257,6 +262,12 @@ impl AppState {
             } => {
                 self.apply_mcp_activation_status(server_name, status);
             }
+            WorkerMessage::McpProgress { notification } => {
+                self.apply_mcp_progress(notification);
+            }
+            WorkerMessage::McpListChanged { notification } => {
+                self.apply_mcp_list_changed(notification);
+            }
             WorkerMessage::ProviderBalanceRefreshed {
                 request_id,
                 snapshot,
@@ -279,6 +290,7 @@ impl AppState {
             WorkerMessage::RunFailed(error) => {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
                 self.pending_approval = None;
                 self.modal_state = None;
                 self.last_phase_marker = None;
@@ -305,7 +317,11 @@ impl AppState {
         };
         let runtime_status = match &status {
             McpActivationStatus::Activating => McpServerRuntimeStatus::Activating,
+            McpActivationStatus::Refreshing => McpServerRuntimeStatus::Refreshing,
             McpActivationStatus::Deferred => McpServerRuntimeStatus::Deferred,
+            McpActivationStatus::Stale { capability } => McpServerRuntimeStatus::Stale {
+                capability: capability.clone(),
+            },
             McpActivationStatus::Ready { added_tools } => McpServerRuntimeStatus::Ready {
                 tool_count: Some(*added_tools),
             },
@@ -318,6 +334,22 @@ impl AppState {
         self.push_event(
             "mcp",
             mcp_activation_event_detail(Some(&server_name), &status),
+        );
+    }
+
+    fn apply_mcp_progress(&mut self, notification: sigil_runtime::McpProgressNotification) {
+        self.mcp_progress = Some(super::McpProgressState {
+            server_name: notification.server_name.clone(),
+            detail: mcp_progress_detail(&notification),
+        });
+    }
+
+    fn apply_mcp_list_changed(&mut self, notification: sigil_runtime::McpListChangedNotification) {
+        self.apply_mcp_activation_status(
+            Some(notification.server_name),
+            McpActivationStatus::Stale {
+                capability: notification.kind.as_str().to_owned(),
+            },
         );
     }
 
@@ -437,11 +469,32 @@ fn mcp_activation_event_detail(server_name: Option<&str>, status: &McpActivation
         .unwrap_or_default();
     let status = match status {
         McpActivationStatus::Activating => "activating".to_owned(),
+        McpActivationStatus::Refreshing => "refreshing".to_owned(),
         McpActivationStatus::Deferred => "deferred".to_owned(),
+        McpActivationStatus::Stale { capability } => format!("stale {capability}"),
         McpActivationStatus::Ready { added_tools } => format!("ready tools={added_tools}"),
         McpActivationStatus::Failed { error } => format!("failed {}", summarize_error(error)),
     };
     format!("{scope}{status}")
+}
+
+fn mcp_progress_detail(notification: &sigil_runtime::McpProgressNotification) -> String {
+    let message = notification
+        .message
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("working");
+    match (notification.progress, notification.total) {
+        (Some(progress), Some(total)) if total > 0.0 => format!(
+            "{}: {} {:.0}%",
+            notification.server_name,
+            message,
+            (progress / total * 100.0).clamp(0.0, 100.0)
+        ),
+        (Some(progress), _) => format!("{}: {} {:.0}", notification.server_name, message, progress),
+        _ => format!("{}: {}", notification.server_name, message),
+    }
 }
 
 fn code_intelligence_server_lines(result: &ToolResult) -> Option<Vec<(String, String)>> {

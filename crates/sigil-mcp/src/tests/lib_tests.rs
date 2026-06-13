@@ -1,4 +1,7 @@
-use std::{fs, sync::Arc};
+use std::{
+    fs,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -13,9 +16,10 @@ use tokio::{
 };
 
 use super::{
-    McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
+    McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, McpListChangedKind,
+    McpListChangedNotification, McpProgressNotification, McpPromptToolKind, McpRuntimeEventHandler,
     McpToolRegistrationOptions, activate_lazy_mcp_tools, register_mcp_tools,
-    register_mcp_tools_with_options,
+    register_mcp_tools_with_options, unsupported_mcp_runtime_event_handler,
 };
 
 async fn register_mcp_tools_with_capabilities(
@@ -803,6 +807,704 @@ while True:
     }
     assert!(!result.content.contains("sk-secret"));
     Ok(())
+}
+
+#[tokio::test]
+async fn registers_and_calls_mcp_prompt_surface_tools() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("prompt_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"prompt-server","version":"1.0.0"},"capabilities":{"prompts":{}}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+    elif method == "prompts/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"prompts":[{"name":"story_seed","description":"Seed prompt","arguments":[{"name":"genre","required":False}]}]}})
+    elif method == "prompts/get":
+        genre = message["params"].get("arguments", {}).get("genre", "mystery")
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"description":"Seed prompt","messages":[{"role":"user","content":{"type":"text","text":"Write a " + genre + " opening."}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "prompts".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let list_spec = registry
+        .spec_for("mcp__prompts__prompts_list")
+        .expect("prompts/list tool should register");
+    assert_eq!(list_spec.access, ToolAccess::Read);
+    assert!(registry.spec_for("mcp__prompts__prompts_get").is_some());
+
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let list = registry
+        .execute(
+            ctx.clone(),
+            sigil_kernel::ToolCall {
+                id: "call-prompts-list".to_owned(),
+                name: "mcp__prompts__prompts_list".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    assert!(list.content.contains("story_seed"));
+    assert_eq!(list.metadata.details["mcp"]["kind"], "prompt");
+    assert_eq!(list.metadata.details["mcp"]["operation"], "prompts/list");
+
+    let subjects = registry.permission_subjects(
+        &ctx,
+        &sigil_kernel::ToolCall {
+            id: "call-prompt-subjects".to_owned(),
+            name: "mcp__prompts__prompts_get".to_owned(),
+            args_json: r#"{"name":"story_seed"}"#.to_owned(),
+        },
+    )?;
+    assert_eq!(subjects.len(), 2);
+    assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
+    assert_eq!(subjects[0].normalized, "mcp__prompts__prompts_get");
+    assert_eq!(subjects[1].kind, ToolSubjectKind::McpTrustClass);
+    assert_eq!(subjects[1].original, "prompts:self_hosted");
+
+    let default_mode = registry.permission_default_mode(
+        &ctx,
+        &sigil_kernel::ToolCall {
+            id: "call-prompt-default".to_owned(),
+            name: "mcp__prompts__prompts_get".to_owned(),
+            args_json: r#"{"name":"story_seed"}"#.to_owned(),
+        },
+    )?;
+    assert_eq!(default_mode, Some(ApprovalMode::Ask));
+
+    let egress = registry
+        .egress_audit(
+            &ctx,
+            &sigil_kernel::ToolCall {
+                id: "call-prompt-egress".to_owned(),
+                name: "mcp__prompts__prompts_get".to_owned(),
+                args_json: r#"{"name":"story_seed","arguments":{"genre":"fantasy"}}"#.to_owned(),
+            },
+        )?
+        .expect("prompt egress audit should summarize prompt arguments");
+    assert_eq!(egress.destination, "mcp:prompts");
+    assert_eq!(egress.operation, "prompts/get");
+    assert!(!egress.redacted);
+    let payload = serde_json::to_string(&egress.payload)?;
+    assert!(payload.contains(r#""prompt_operation":"prompts_get""#));
+    assert!(payload.contains(r#""top_level_keys":["arguments","name"]"#));
+    assert!(!payload.contains("fantasy"));
+
+    let prompt = registry
+        .execute(
+            ctx,
+            sigil_kernel::ToolCall {
+                id: "call-prompts-get".to_owned(),
+                name: "mcp__prompts__prompts_get".to_owned(),
+                args_json: r#"{"name":"story_seed","arguments":{"genre":"fantasy"}}"#.to_owned(),
+            },
+        )
+        .await?;
+    assert!(prompt.content.contains("fantasy opening"));
+
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "quiet-prompts".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                egress_logging: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+    let quiet_egress = registry.egress_audit(
+        &ToolContext {
+            workspace_root: temp.path().to_path_buf(),
+            timeout_secs: 5,
+        },
+        &sigil_kernel::ToolCall {
+            id: "call-quiet-prompt-egress".to_owned(),
+            name: "mcp__quiet_prompts__prompts_list".to_owned(),
+            args_json: "{}".to_owned(),
+        },
+    )?;
+    assert!(quiet_egress.is_none());
+    Ok(())
+}
+
+#[test]
+fn mcp_prompt_tool_kind_validates_edge_arguments() {
+    assert_eq!(McpPromptToolKind::all().len(), 2);
+    assert_eq!(McpPromptToolKind::List.provider_suffix(), "prompts_list");
+    assert_eq!(McpPromptToolKind::Get.provider_suffix(), "prompts_get");
+    assert!(
+        McpPromptToolKind::List
+            .description()
+            .contains("List MCP prompts")
+    );
+    assert_eq!(McpPromptToolKind::List.method(), "prompts/list");
+    assert_eq!(McpPromptToolKind::Get.method(), "prompts/get");
+    assert_eq!(
+        McpPromptToolKind::List.request_params(&json!({"cursor": "page-2"})),
+        Ok(json!({"cursor": "page-2"}))
+    );
+    assert_eq!(
+        McpPromptToolKind::Get
+            .request_params(&json!({"name": "story", "arguments": {"genre": "fantasy"}})),
+        Ok(json!({"name": "story", "arguments": {"genre": "fantasy"}}))
+    );
+    assert_eq!(
+        McpPromptToolKind::List
+            .request_params(&json!("not-object"))
+            .expect_err("list args must be object"),
+        "MCP prompts/list arguments must be an object"
+    );
+    assert_eq!(
+        McpPromptToolKind::List
+            .request_params(&json!({"cursor": 1}))
+            .expect_err("cursor must be string"),
+        "MCP prompts/list cursor must be a string"
+    );
+    assert_eq!(
+        McpPromptToolKind::Get
+            .request_params(&json!("not-object"))
+            .expect_err("get args must be object"),
+        "MCP prompts/get arguments must be an object"
+    );
+    assert_eq!(
+        McpPromptToolKind::Get
+            .request_params(&json!({}))
+            .expect_err("name is required"),
+        "MCP prompts/get requires a name string"
+    );
+    assert_eq!(
+        McpPromptToolKind::Get
+            .request_params(&json!({"name": "  "}))
+            .expect_err("name must not be blank"),
+        "MCP prompts/get name must not be empty"
+    );
+    assert_eq!(
+        McpPromptToolKind::Get
+            .request_params(&json!({"name": "story", "arguments": 1}))
+            .expect_err("arguments must be object"),
+        "MCP prompts/get arguments must be an object"
+    );
+    assert_eq!(
+        McpPromptToolKind::Get.input_schema()["required"],
+        json!(["name"])
+    );
+}
+
+#[tokio::test]
+async fn mcp_prompt_tools_validate_arguments_and_block_secret_values() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("prompt_secret_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"prompts":{}}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+    elif method == "prompts/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"prompts":[]}})
+    elif method == "prompts/get":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"messages":[]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_capabilities_roots_and_secrets(
+        &mut registry,
+        &[McpServerConfig {
+            name: "prompt-secret".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                allow_secrets: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::from_values(["sk-secret"]),
+    )
+    .await?;
+
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let invalid = registry
+        .execute(
+            ctx.clone(),
+            sigil_kernel::ToolCall {
+                id: "call-invalid-prompt".to_owned(),
+                name: "mcp__prompt_secret__prompts_get".to_owned(),
+                args_json: r#"{"name":"story","arguments":1}"#.to_owned(),
+            },
+        )
+        .await?;
+    match invalid.status {
+        ToolResultStatus::Error(error) => {
+            assert_eq!(error.kind, ToolErrorKind::InvalidInput);
+            assert_eq!(error.message, "MCP prompts/get arguments must be an object");
+        }
+        ToolResultStatus::Ok => panic!("invalid prompt arguments should fail"),
+    }
+
+    let blocked = registry
+        .execute(
+            ctx,
+            sigil_kernel::ToolCall {
+                id: "call-secret-prompt".to_owned(),
+                name: "mcp__prompt_secret__prompts_get".to_owned(),
+                args_json: r#"{"name":"story","arguments":{"token":"sk-secret"}}"#.to_owned(),
+            },
+        )
+        .await?;
+    match blocked.status {
+        ToolResultStatus::Error(error) => {
+            assert_eq!(error.kind, ToolErrorKind::PermissionDenied);
+        }
+        ToolResultStatus::Ok => panic!("secret prompt arguments should be blocked"),
+    }
+    assert!(!blocked.content.contains("sk-secret"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_prompt_tools_surface_protocol_errors_and_missing_results() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("prompt_error_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"prompts":{}}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+    elif method == "prompts/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"list failed"}})
+    elif method == "prompts/get":
+        name = message["params"].get("name")
+        if name == "missing":
+            write_message({"jsonrpc":"2.0","id":message["id"]})
+        else:
+            write_message({"jsonrpc":"2.0","id":message["id"],"error":{"code":-32001,"message":"bad prompt"}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "prompt-errors".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let list_error = registry
+        .execute(
+            ctx.clone(),
+            sigil_kernel::ToolCall {
+                id: "call-prompt-list-error".to_owned(),
+                name: "mcp__prompt_errors__prompts_list".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+    match list_error.status {
+        ToolResultStatus::Error(error) => {
+            assert_eq!(error.kind, ToolErrorKind::Protocol);
+            assert!(error.message.contains("MCP prompts/list failed"));
+        }
+        ToolResultStatus::Ok => panic!("prompt list protocol error should fail"),
+    }
+
+    let get_error = registry
+        .execute(
+            ctx.clone(),
+            sigil_kernel::ToolCall {
+                id: "call-prompt-get-error".to_owned(),
+                name: "mcp__prompt_errors__prompts_get".to_owned(),
+                args_json: r#"{"name":"bad"}"#.to_owned(),
+            },
+        )
+        .await?;
+    match get_error.status {
+        ToolResultStatus::Error(error) => {
+            assert_eq!(error.kind, ToolErrorKind::Protocol);
+            assert!(error.message.contains("MCP prompts/get failed"));
+        }
+        ToolResultStatus::Ok => panic!("prompt get protocol error should fail"),
+    }
+
+    let missing_result = registry
+        .execute(
+            ctx,
+            sigil_kernel::ToolCall {
+                id: "call-prompt-missing-result".to_owned(),
+                name: "mcp__prompt_errors__prompts_get".to_owned(),
+                args_json: r#"{"name":"missing"}"#.to_owned(),
+            },
+        )
+        .await
+        .expect_err("missing prompt result should bubble up");
+    assert!(missing_result.to_string().contains("missing result"));
+    Ok(())
+}
+
+#[test]
+fn mcp_text_budget_truncates_by_lines_and_utf8_boundaries() {
+    let by_lines = super::truncate_text_budget("one\ntwo\nthree\n", 100, 2);
+    assert!(by_lines.truncated);
+    assert_eq!(by_lines.total_lines, 3);
+    assert_eq!(by_lines.returned_lines, 2);
+    assert!(by_lines.content.contains("[MCP output truncated]"));
+
+    let mut utf8 = String::new();
+    super::append_utf8_prefix(&mut utf8, "éx", 1);
+    assert!(utf8.is_empty());
+    super::append_utf8_prefix(&mut utf8, "éx", 2);
+    assert_eq!(utf8, "é");
+    assert_eq!(super::to_u64(7), 7);
+}
+
+#[tokio::test]
+async fn mcp_tool_output_is_bounded_and_reports_truncation_metadata() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("large_output_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"large","inputSchema":{"type":"object"}}]}})
+    elif method == "tools/call":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":"x" * 80000}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "large".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            sigil_kernel::ToolCall {
+                id: "call-large-output".to_owned(),
+                name: "mcp__large__large".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+
+    assert!(result.metadata.truncated);
+    assert_eq!(result.metadata.limit_bytes, Some(64 * 1024));
+    assert_eq!(result.metadata.details["mcp"]["tool"], "large");
+    assert_eq!(result.metadata.details["mcp"]["operation"], "tools/call");
+    assert!(result.content.len() <= 64 * 1024);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_runtime_event_handler_receives_progress_and_list_changed_notifications() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("event_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"prompts":{}}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"scan","progress":1,"total":2,"message":"Scanning"}})
+        write_message({"jsonrpc":"2.0","method":"notifications/prompts/list_changed","params":{}})
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+"#,
+    )?;
+
+    let handler = Arc::new(RecordingMcpRuntimeEventHandler::default());
+    let runtime_handler: Arc<dyn McpRuntimeEventHandler> = handler.clone();
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_options(
+        &mut registry,
+        &[McpServerConfig {
+            name: "events".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+        McpToolRegistrationOptions::eager()?
+            .with_roots(vec![temp.path().to_path_buf()])
+            .with_runtime_event_handler(runtime_handler),
+    )
+    .await?;
+
+    let progress = handler.progress.lock().expect("progress lock").clone();
+    assert_eq!(progress.len(), 1);
+    assert_eq!(progress[0].server_name, "events");
+    assert_eq!(progress[0].progress_token, "scan");
+    assert_eq!(progress[0].message.as_deref(), Some("Scanning"));
+
+    let list_changed = handler.list_changed.lock().expect("list lock").clone();
+    assert_eq!(list_changed.len(), 1);
+    assert_eq!(list_changed[0].kind, super::McpListChangedKind::Prompts);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_mcp_runtime_event_handler_accepts_events_and_kind_labels() -> Result<()> {
+    assert_eq!(McpListChangedKind::Tools.as_str(), "tools");
+    assert_eq!(McpListChangedKind::Resources.as_str(), "resources");
+    assert_eq!(McpListChangedKind::Prompts.as_str(), "prompts");
+    let handler = unsupported_mcp_runtime_event_handler();
+
+    handler
+        .progress(McpProgressNotification {
+            server_name: "events".to_owned(),
+            progress_token: "1".to_owned(),
+            progress: None,
+            total: None,
+            message: None,
+        })
+        .await?;
+    handler
+        .list_changed(McpListChangedNotification {
+            server_name: "events".to_owned(),
+            kind: McpListChangedKind::Tools,
+        })
+        .await?;
+    Ok(())
+}
+
+#[test]
+fn mcp_runtime_notification_helpers_parse_edge_payloads() {
+    let numeric = super::mcp_progress_notification(
+        "server",
+        &json!({
+            "params": {
+                "progressToken": 7,
+                "progress": 2,
+                "total": 4,
+                "message": "Half"
+            }
+        }),
+    )
+    .expect("numeric token should parse");
+    assert_eq!(numeric.progress_token, "7");
+    assert_eq!(numeric.progress, Some(2.0));
+    assert_eq!(numeric.total, Some(4.0));
+    assert_eq!(numeric.message.as_deref(), Some("Half"));
+
+    let structured = super::mcp_progress_notification(
+        "server",
+        &json!({"params": {"progressToken": {"id": "scan"}}}),
+    )
+    .expect("structured token should serialize");
+    assert_eq!(structured.progress_token, r#"{"id":"scan"}"#);
+    assert!(super::mcp_progress_notification("server", &json!({})).is_none());
+    assert_eq!(
+        super::mcp_list_changed_kind("notifications/tools/list_changed"),
+        Some(McpListChangedKind::Tools)
+    );
+    assert_eq!(
+        super::mcp_list_changed_kind("notifications/resources/list_changed"),
+        Some(McpListChangedKind::Resources)
+    );
+    assert_eq!(
+        super::mcp_list_changed_kind("notifications/prompts/list_changed"),
+        Some(McpListChangedKind::Prompts)
+    );
+    assert!(super::mcp_list_changed_kind("notifications/other").is_none());
 }
 
 #[tokio::test]
@@ -3030,6 +3732,31 @@ impl McpElicitationHandler for SecretElicitationHandler {
 
     async fn elicit(&self, _request: McpElicitationRequest) -> Result<McpElicitationResponse> {
         Ok(McpElicitationResponse::accept(json!({"value":"sk-secret"})))
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingMcpRuntimeEventHandler {
+    progress: Mutex<Vec<McpProgressNotification>>,
+    list_changed: Mutex<Vec<McpListChangedNotification>>,
+}
+
+#[async_trait::async_trait]
+impl McpRuntimeEventHandler for RecordingMcpRuntimeEventHandler {
+    async fn progress(&self, notification: McpProgressNotification) -> Result<()> {
+        self.progress
+            .lock()
+            .expect("progress lock should not be poisoned")
+            .push(notification);
+        Ok(())
+    }
+
+    async fn list_changed(&self, notification: McpListChangedNotification) -> Result<()> {
+        self.list_changed
+            .lock()
+            .expect("list_changed lock should not be poisoned")
+            .push(notification);
+        Ok(())
     }
 }
 

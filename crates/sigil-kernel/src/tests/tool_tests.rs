@@ -172,6 +172,36 @@ impl Tool for RegistryFixtureTool {
     }
 }
 
+struct NamedRegistryTool(&'static str);
+
+#[async_trait]
+impl Tool for NamedRegistryTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.0.to_owned(),
+            description: "named fixture".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.0,
+            "ok",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
 #[tokio::test]
 async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()> {
     let mut registry = ToolRegistry::new();
@@ -204,6 +234,43 @@ async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()
         Some(ToolEgressAudit { redacted: true, .. })
     ));
     Ok(())
+}
+
+#[test]
+fn tool_registry_unregisters_tools_by_name_prefix() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NamedRegistryTool("mcp__docs__resources_list")));
+    registry.register(Arc::new(NamedRegistryTool("mcp__docs__read_file")));
+    registry.register(Arc::new(NamedRegistryTool("read_file")));
+
+    let removed = registry.unregister_by_name_prefix("mcp__docs__");
+
+    assert_eq!(removed, 2);
+    assert!(registry.spec_for("mcp__docs__resources_list").is_none());
+    assert!(registry.spec_for("mcp__docs__read_file").is_none());
+    assert!(registry.spec_for("read_file").is_some());
+}
+
+#[test]
+fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NamedRegistryTool("mcp__poisoned__echo")));
+    registry.register(Arc::new(NamedRegistryTool("read_file")));
+    let tools = Arc::clone(&registry.tools);
+
+    let _ = std::thread::spawn(move || {
+        let _guard = tools
+            .write()
+            .expect("registry write lock should be acquired");
+        panic!("poison registry lock for recovery coverage");
+    })
+    .join();
+
+    let drained = registry.drain_by_name_prefix("mcp__poisoned__");
+
+    assert_eq!(drained.len(), 1);
+    assert!(registry.spec_for("mcp__poisoned__echo").is_none());
+    assert!(registry.spec_for("read_file").is_some());
 }
 
 #[tokio::test]

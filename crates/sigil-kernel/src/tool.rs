@@ -876,6 +876,30 @@ impl ToolRegistry {
         tools.insert(name, tool);
     }
 
+    /// Removes registered tools whose names start with the provided prefix.
+    ///
+    /// Returns the number of removed tools.
+    pub fn unregister_by_name_prefix(&mut self, prefix: &str) -> usize {
+        self.drain_by_name_prefix(prefix).len()
+    }
+
+    /// Removes and returns registered tools whose names start with the provided prefix.
+    pub fn drain_by_name_prefix(&mut self, prefix: &str) -> Vec<Arc<dyn Tool>> {
+        let mut tools = match self.tools.write() {
+            Ok(tools) => tools,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let names = tools
+            .keys()
+            .filter(|name| name.starts_with(prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        names
+            .into_iter()
+            .filter_map(|name| tools.remove(&name))
+            .collect()
+    }
+
     /// Returns the full list of registered tool specifications.
     pub fn specs(&self) -> Vec<ToolSpec> {
         let tools = match self.tools.read() {

@@ -18,8 +18,10 @@ use sigil_kernel::{
 };
 
 use super::super::{
-    WorkerCommand, WorkerMessage, elicitation_bridge::ChannelMcpElicitationHandler,
-    worker_loop::run_worker_loop,
+    WorkerCommand, WorkerMessage,
+    elicitation_bridge::ChannelMcpElicitationHandler,
+    mcp_event_bridge::ChannelMcpRuntimeEventHandler,
+    worker_loop::{WorkerLoopMcpHandlers, run_worker_loop},
 };
 
 pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &str) -> RootConfig {
@@ -115,6 +117,8 @@ where
     let provider_capabilities = agent.provider_capabilities();
     let agent = Arc::new(agent);
     let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
+    let (mcp_event_tx, mcp_event_rx) = mpsc::channel();
+    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
     let handle = thread::Builder::new()
         .name("sigil-test-agent-worker".to_owned())
         .spawn(move || {
@@ -132,7 +136,11 @@ where
                 options,
                 command_rx,
                 message_tx,
-                elicitation_handler,
+                WorkerLoopMcpHandlers {
+                    elicitation_handler,
+                    event_handler: mcp_event_handler,
+                    event_rx: mcp_event_rx,
+                },
             );
         })
         .context("failed to spawn test worker")?;

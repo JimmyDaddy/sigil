@@ -30,7 +30,7 @@ sigil/
 - `sigil-provider-deepseek` 支持 DeepSeek 流式对话、工具调用、reasoning replay、usage、pricing、Beta endpoint、prefix 和 FIM 专项入口。
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、搜索、目录枚举和 shell 执行。
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用和诊断只读工具。
-- `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、`roots/list`、elicitation handler、lazy activation 和 trust enforcement。
+- `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
 - `sigil-cli` 当前公开 `run` 自动化入口和 `doctor` 本地诊断入口；`prefix` / `fim` 保留为调试或 provider 专项入口，不作为普通用户主心智。
 - `sigil-tui` 是第一用户入口，承载 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
 
@@ -146,9 +146,13 @@ MCP server 通过 `[[mcp_servers]]` 配置接入。当前支持：
 - `tools/call`
 - `resources/list`
 - `resources/read`
+- `prompts/list`
+- `prompts/get`
 - provider-visible 名称清洗、截断和 hash 去重
 - `roots/list`
 - `elicitation/create`
+- `notifications/progress`
+- `notifications/*/list_changed`
 - lazy activation
 - required / optional server 失败策略
 - trust class
@@ -157,9 +161,11 @@ MCP server 通过 `[[mcp_servers]]` 配置接入。当前支持：
 - secret egress 阻断
 - pinned identity 校验
 
-`resources/list` 和 `resources/read` 只在 server initialize capabilities 声明 `resources` 时注册为 provider-visible 只读工具。它们复用 MCP trust policy、permission subjects、egress logging 和 secret egress 阻断，不会自动注入 system prompt。
+`resources/list` / `resources/read` 和 `prompts/list` / `prompts/get` 只在 server initialize capabilities 声明对应 capability 时注册为 provider-visible 只读工具。它们复用 MCP trust policy、permission subjects、egress logging 和 secret egress 阻断，不会自动注入 system prompt。
 
-`roots/list` 只暴露入口已解析的 workspace root。`notifications/progress` 当前安全忽略，不写 timeline。
+MCP tool/resource/prompt 输出会先脱敏再做默认输出限额，并在 `ToolResultMeta` 中写入 truncation 与 MCP server/tool/trust/operation metadata。
+
+`roots/list` 只暴露入口已解析的 workspace root。`notifications/progress` 进入 TUI live panel，不写重复 timeline；`notifications/tools|resources|prompts/list_changed` 会标记 server stale，并在 worker 空闲边界刷新该 server 的 provider-visible tools。
 
 TUI elicitation 通过 modal 让用户确认 flat primitive object 字段；非交互默认 runtime 明确返回 unsupported。elicitation 决策写入 append-only control state，但不保存用户输入值。
 

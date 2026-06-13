@@ -19,6 +19,7 @@ use super::{
     diagnostics::{changed_source_files, check_changed_files_diagnostics, diagnostics_tool_event},
     elicitation_bridge::{ChannelMcpElicitationHandler, McpElicitationAuditBuffer},
     event_bridge::ChannelEventHandler,
+    mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
     protocol::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage},
     session_flow::{auto_compact_session, load_session, session_compacted_message},
 };
@@ -32,10 +33,15 @@ pub(super) fn run_worker_loop<P>(
     options: AgentRunOptions,
     command_rx: mpsc::Receiver<WorkerCommand>,
     message_tx: mpsc::Sender<WorkerMessage>,
-    elicitation_handler: Arc<ChannelMcpElicitationHandler>,
+    mcp_handlers: WorkerLoopMcpHandlers,
 ) where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    let WorkerLoopMcpHandlers {
+        elicitation_handler,
+        event_handler: mcp_event_handler,
+        event_rx: mcp_event_rx,
+    } = mcp_handlers;
     let mut current_session_log_path = session_log_path;
     let mut current_session = match load_session(
         &root_config.agent.provider,
@@ -56,8 +62,35 @@ pub(super) fn run_worker_loop<P>(
     let mut active_model_refresh: Option<ActiveProviderStatusTask> = None;
     let mut next_run_id = 1_u64;
     let mut discarded_run_ids = BTreeSet::new();
+    let mut pending_mcp_refreshes = BTreeSet::new();
 
     loop {
+        while let Ok(event) = mcp_event_rx.try_recv() {
+            match event {
+                McpRuntimeEvent::Progress(notification) => {
+                    let _ = message_tx.send(WorkerMessage::McpProgress { notification });
+                }
+                McpRuntimeEvent::ListChanged(notification) => {
+                    pending_mcp_refreshes.insert(notification.server_name.clone());
+                    let _ = message_tx.send(WorkerMessage::McpListChanged { notification });
+                }
+            }
+        }
+
+        if active_run.is_none() && !pending_mcp_refreshes.is_empty() {
+            refresh_pending_mcp_servers(
+                &runtime,
+                &mut agent,
+                &root_config,
+                &provider_capabilities,
+                &options,
+                &message_tx,
+                Arc::clone(&elicitation_handler),
+                Arc::clone(&mcp_event_handler),
+                &mut pending_mcp_refreshes,
+            );
+        }
+
         while let Ok(status_result) = provider_status_rx.try_recv() {
             match status_result {
                 ProviderStatusTaskResult::Balance {
@@ -432,13 +465,14 @@ pub(super) fn run_worker_loop<P>(
                     status: McpActivationStatus::Activating,
                 });
                 match runtime.block_on(
-                    sigil_runtime::activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
+                    sigil_runtime::activate_lazy_mcp_tools_detailed_with_mcp_handlers(
                         agent.tool_registry_mut(),
                         &root_config,
                         &provider_capabilities,
                         options.workspace_root.clone(),
                         server_name.as_deref(),
                         elicitation_handler.clone(),
+                        mcp_event_handler.clone(),
                     ),
                 ) {
                     Ok(result) if result.matched_servers == 0 => {
@@ -547,11 +581,94 @@ pub(super) fn run_worker_loop<P>(
     }
 }
 
+pub(super) struct WorkerLoopMcpHandlers {
+    pub(super) elicitation_handler: Arc<ChannelMcpElicitationHandler>,
+    pub(super) event_handler: Arc<ChannelMcpRuntimeEventHandler>,
+    pub(super) event_rx: mpsc::Receiver<McpRuntimeEvent>,
+}
+
 struct ActiveRun {
     run_id: u64,
     handle: tokio::task::JoinHandle<()>,
     approval_tx: mpsc::Sender<ApprovalSignal>,
     elicitation_audit_buffer: McpElicitationAuditBuffer,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_pending_mcp_servers<P>(
+    runtime: &tokio::runtime::Runtime,
+    agent: &mut Arc<Agent<P>>,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    options: &AgentRunOptions,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    elicitation_handler: Arc<ChannelMcpElicitationHandler>,
+    mcp_event_handler: Arc<ChannelMcpRuntimeEventHandler>,
+    pending_mcp_refreshes: &mut BTreeSet<String>,
+) where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let servers = std::mem::take(pending_mcp_refreshes);
+    for server_name in servers {
+        let Some(agent) = Arc::get_mut(agent) else {
+            pending_mcp_refreshes.insert(server_name.clone());
+            let _ = message_tx.send(WorkerMessage::RunFailed(
+                "cannot refresh MCP while agent registry is shared".to_owned(),
+            ));
+            continue;
+        };
+        let _ = message_tx.send(WorkerMessage::McpActivationStatus {
+            server_name: Some(server_name.clone()),
+            status: McpActivationStatus::Refreshing,
+        });
+        let elicitation_handler_trait: Arc<dyn sigil_runtime::McpElicitationHandler> =
+            elicitation_handler.clone();
+        let mcp_event_handler_trait: Arc<dyn sigil_runtime::McpRuntimeEventHandler> =
+            mcp_event_handler.clone();
+        match runtime.block_on(sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers(
+            agent.tool_registry_mut(),
+            root_config,
+            provider_capabilities,
+            options.workspace_root.clone(),
+            &server_name,
+            elicitation_handler_trait,
+            mcp_event_handler_trait,
+        )) {
+            Ok(result) if result.matched_servers == 0 => {
+                let _ = message_tx.send(WorkerMessage::McpActivationStatus {
+                    server_name: Some(server_name.clone()),
+                    status: McpActivationStatus::Deferred,
+                });
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "MCP refresh skipped for unknown server {server_name}"
+                )));
+            }
+            Ok(result) => {
+                let _ = message_tx.send(WorkerMessage::McpActivationStatus {
+                    server_name: Some(server_name.clone()),
+                    status: McpActivationStatus::Ready {
+                        added_tools: result.added_tools,
+                    },
+                });
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "refreshed {} MCP tools for {server_name}",
+                    result.added_tools
+                )));
+            }
+            Err(error) => {
+                let error = format!("{error:#}");
+                let _ = message_tx.send(WorkerMessage::McpActivationStatus {
+                    server_name: Some(server_name.clone()),
+                    status: McpActivationStatus::Failed {
+                        error: error.clone(),
+                    },
+                });
+                let _ = message_tx.send(WorkerMessage::Notice(format!(
+                    "MCP refresh failed for {server_name}: {error}"
+                )));
+            }
+        }
+    }
 }
 
 struct RunTaskResult {

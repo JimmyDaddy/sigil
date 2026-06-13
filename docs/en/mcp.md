@@ -2,7 +2,7 @@
 
 [简体中文](../zh-CN/mcp.md)
 
-Sigil can connect stdio MCP servers as external tool providers. Connected MCP tools enter the same tool registry and use the same approval, activity, session control, and secret egress rules as built-in tools.
+Sigil can connect stdio MCP servers as external tool providers. Connected MCP tools, resources, and prompts enter the same tool registry and use the same approval, activity, session control, and secret egress rules as built-in tools.
 
 ## Minimal Config
 
@@ -49,6 +49,8 @@ The TUI shows lifecycle states:
 
 - `deferred`
 - `activating`
+- `refreshing`
+- `stale <capability>`
 - `ready`
 - `failed`
 
@@ -68,7 +70,7 @@ Fields:
 - `trust_class`: server trust class, one of `official`, `self_hosted`, or `third_party`.
 - `approval_default`: default approval mode for tools from this server; explicit tool/rule overrides still win.
 - `egress_logging`: after approval and before execution, append a safe summary of server, trust class, remote tool, and argument shape to control state.
-- `allow_secrets`: when `false`, blocks MCP tool/resource arguments, `roots/list` payloads, or elicitation responses that contain resolved secrets or secret-like fields.
+- `allow_secrets`: when `false`, blocks MCP tool/resource/prompt arguments, `roots/list` payloads, or elicitation responses that contain resolved secrets or secret-like fields.
 - `pin_version`: when `true`, validates the pinned server identity at startup.
 
 MCP tool permission subjects include `mcp_trust_class:<class>`, so permission rules can match trust class.
@@ -129,6 +131,25 @@ Resource tools use the same MCP trust policy as remote tools:
 
 Sigil does not inject MCP resources into the system prompt. The model must explicitly list and read resources through these tools.
 
+## Prompts
+
+When a server declares the MCP `prompts` capability during `initialize`, Sigil registers two read-only provider-visible tools:
+
+```text
+mcp__<server>__prompts_list
+mcp__<server>__prompts_get
+```
+
+`prompts_list` calls MCP `prompts/list`. It accepts an optional `cursor` string for pagination.
+
+`prompts_get` calls MCP `prompts/get`. It requires a `name` returned by `prompts_list` and accepts an optional `arguments` object.
+
+Prompt tools use the same MCP trust policy, approval defaults, egress logging, and `allow_secrets = false` gate as other MCP surfaces. Sigil does not inject MCP prompts into the system prompt; the model must explicitly list and get prompts through these tools.
+
+## Output Limits
+
+MCP tool, resource, and prompt results are redacted locally and then bounded before becoming model-visible. Large outputs are truncated with metadata such as `truncated`, `limit_bytes`, `limit_lines`, `returned_bytes`, and MCP details including server, remote tool/surface, trust class, operation, and observed server identity.
+
 ## Elicitation
 
 The TUI runtime declares and handles `elicitation/create`. When a server requests user input, Sigil shows a modal with the server, requested fields, and defaults.
@@ -145,7 +166,7 @@ The non-TUI default runtime returns explicit unsupported responses. It does not 
 
 ## Progress Notifications
 
-`notifications/progress` is currently ignored safely and does not write to the timeline. Productized progress display should first define throttling and user-readable mapping.
+`notifications/progress` updates the TUI live panel instead of writing repeated timeline entries. `notifications/tools/list_changed`, `notifications/resources/list_changed`, and `notifications/prompts/list_changed` mark the server as stale and trigger a safe refresh at the next idle worker boundary.
 
 ## FAQ
 

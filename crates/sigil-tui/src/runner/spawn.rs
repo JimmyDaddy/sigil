@@ -10,8 +10,9 @@ use tokio::runtime::Runtime;
 
 use super::{
     elicitation_bridge::ChannelMcpElicitationHandler,
+    mcp_event_bridge::ChannelMcpRuntimeEventHandler,
     protocol::{WorkerCommand, WorkerMessage},
-    worker_loop::run_worker_loop,
+    worker_loop::{WorkerLoopMcpHandlers, run_worker_loop},
 };
 
 pub fn spawn_agent_worker(
@@ -44,12 +45,15 @@ pub fn spawn_agent_worker(
             let provider_capabilities = provider.capabilities();
             let elicitation_handler =
                 Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
+            let (mcp_event_tx, mcp_event_rx) = mpsc::channel();
+            let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
             let registry =
-                match runtime.block_on(sigil_runtime::build_tool_registry_with_mcp_elicitation(
+                match runtime.block_on(sigil_runtime::build_tool_registry_with_mcp_handlers(
                     &root_config,
                     &provider_capabilities,
                     workspace_root.clone(),
                     elicitation_handler.clone(),
+                    mcp_event_handler.clone(),
                 )) {
                     Ok(registry) => registry,
                     Err(error) => {
@@ -67,7 +71,11 @@ pub fn spawn_agent_worker(
                 options,
                 command_rx,
                 message_tx,
-                elicitation_handler,
+                WorkerLoopMcpHandlers {
+                    elicitation_handler,
+                    event_handler: mcp_event_handler,
+                    event_rx: mcp_event_rx,
+                },
             );
         })
         .context("failed to spawn sigil agent worker")?;

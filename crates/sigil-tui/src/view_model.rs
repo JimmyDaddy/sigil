@@ -186,6 +186,7 @@ impl LiveProgressViewModel {
         let title = match label {
             "thinking" => "Thinking".to_owned(),
             "tool" => tool_progress_title(detail),
+            "mcp" => "MCP".to_owned(),
             "streaming" => "Replying".to_owned(),
             "approval" => "Approval".to_owned(),
             _ => "Working".to_owned(),

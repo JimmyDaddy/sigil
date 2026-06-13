@@ -22,8 +22,9 @@ use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
 use super::{
     SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
     build_run_options, build_tool_registry, load_deepseek_config,
-    register_lazy_mcp_activation_tool, resolve_deepseek_api_key,
-    resolve_deepseek_api_key_with_session, secret_redactor_for_root_config,
+    refresh_mcp_server_tools_with_mcp_handlers, register_lazy_mcp_activation_tool,
+    resolve_deepseek_api_key, resolve_deepseek_api_key_with_session,
+    secret_redactor_for_root_config,
 };
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -368,6 +369,138 @@ while True:
 }
 
 #[tokio::test]
+async fn refresh_mcp_server_tools_replaces_existing_server_tool_surface() -> Result<()> {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return Ok(());
+    }
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("refresh_mcp_server.py");
+    std::fs::write(
+        &script,
+        r#"
+import json
+import sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            sys.exit(0)
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    body = sys.stdin.buffer.read(int(headers["content-length"]))
+    return json.loads(body)
+
+def write_message(message):
+    data = json.dumps(message).encode()
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(data)).encode() + b"\r\n\r\n" + data)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","serverInfo":{"name":"refresh","version":"1.0.0"},"capabilities":{"prompts":{}}}})
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"echo","inputSchema":{"type":"object"}}]}})
+    elif method == "prompts/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"prompts":[]}})
+    elif "id" in message:
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{}})
+"#,
+    )?;
+
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        name: "lazy".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.display().to_string()],
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExistingMcpTool));
+
+    let result = refresh_mcp_server_tools_with_mcp_handlers(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        temp.path().to_path_buf(),
+        "lazy",
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await?;
+
+    assert_eq!(result.matched_servers, 1);
+    assert_eq!(result.removed_tools, 1);
+    assert_eq!(result.added_tools, 3);
+    assert!(registry.spec_for("mcp__lazy__echo").is_some());
+    assert!(registry.spec_for("mcp__lazy__prompts_list").is_some());
+    assert!(registry.spec_for("mcp__lazy__prompts_get").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_mcp_server_tools_restores_existing_tools_when_refresh_fails() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        name: "lazy".to_owned(),
+        command: "/definitely/missing/sigil-mcp-server".to_owned(),
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    });
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExistingMcpTool));
+
+    let error = refresh_mcp_server_tools_with_mcp_handlers(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        std::env::current_dir()?,
+        "lazy",
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await
+    .expect_err("missing required server should fail refresh");
+
+    assert!(error.to_string().contains("failed to spawn MCP server"));
+    assert!(registry.spec_for("mcp__lazy__echo").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_mcp_server_tools_returns_zero_for_unknown_server() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let config = test_root_config("deepseek");
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ExistingMcpTool));
+
+    let result = refresh_mcp_server_tools_with_mcp_handlers(
+        &mut registry,
+        &config,
+        &provider.capabilities(),
+        std::env::current_dir()?,
+        "missing",
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await?;
+
+    assert_eq!(result.matched_servers, 0);
+    assert_eq!(result.removed_tools, 0);
+    assert_eq!(result.added_tools, 0);
+    assert!(registry.spec_for("mcp__lazy__echo").is_some());
+    Ok(())
+}
+
+#[tokio::test]
 async fn activate_lazy_mcp_tools_ignores_nonmatching_server_name() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
@@ -459,6 +592,7 @@ fn lazy_mcp_activation_tool_is_not_registered_without_lazy_servers() -> Result<(
         &provider.capabilities(),
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
     );
 
     assert!(registry.spec_for("mcp_activate_server").is_none());
@@ -482,6 +616,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
         &provider.capabilities(),
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
     );
 
     let spec = registry
@@ -644,6 +779,7 @@ fn mcp_activate_server_tool_respects_disabled_egress_logging() -> Result<()> {
         &provider.capabilities(),
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
     );
 
     let audit = registry.egress_audit(

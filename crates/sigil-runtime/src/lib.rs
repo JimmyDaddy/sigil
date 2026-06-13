@@ -12,6 +12,8 @@ use sigil_kernel::{
 };
 pub use sigil_mcp::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
+    McpListChangedKind, McpListChangedNotification, McpProgressNotification,
+    McpRuntimeEventHandler,
 };
 use sigil_provider_deepseek::{
     DeepSeekProvider, DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV,
@@ -64,6 +66,28 @@ pub async fn build_tool_registry_with_mcp_elicitation(
     workspace_root: PathBuf,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
 ) -> Result<ToolRegistry> {
+    build_tool_registry_with_mcp_handlers(
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await
+}
+
+/// Builds the runtime tool registry using caller-provided MCP handlers.
+///
+/// # Errors
+///
+/// Returns an error when one configured MCP server cannot be started or queried.
+pub async fn build_tool_registry_with_mcp_handlers(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
     sigil_tools_builtin::register_builtin_tools(&mut registry);
     sigil_code_intel::register_code_intelligence_tools(
@@ -78,7 +102,8 @@ pub async fn build_tool_registry_with_mcp_elicitation(
             .with_capabilities(provider_capabilities)
             .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
-            .with_elicitation_handler(Arc::clone(&elicitation_handler)),
+            .with_elicitation_handler(Arc::clone(&elicitation_handler))
+            .with_runtime_event_handler(Arc::clone(&runtime_event_handler)),
     )
     .await?;
     register_lazy_mcp_activation_tool(
@@ -87,6 +112,7 @@ pub async fn build_tool_registry_with_mcp_elicitation(
         provider_capabilities,
         workspace_root,
         elicitation_handler,
+        runtime_event_handler,
     );
     Ok(registry)
 }
@@ -160,6 +186,32 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
     server_name: Option<&str>,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
 ) -> Result<LazyMcpActivationResult> {
+    activate_lazy_mcp_tools_detailed_with_mcp_handlers(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        elicitation_handler,
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    )
+    .await
+}
+
+/// Activates lazy MCP servers using caller-provided MCP handlers.
+///
+/// # Errors
+///
+/// Returns an error when a required lazy MCP server cannot be started, initialized, or queried.
+pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: Option<&str>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+) -> Result<LazyMcpActivationResult> {
     let servers = root_config
         .mcp_servers
         .iter()
@@ -182,11 +234,76 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
             .with_capabilities(provider_capabilities)
             .with_roots(vec![canonical_workspace_root(workspace_root)])
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
-            .with_elicitation_handler(elicitation_handler),
+            .with_elicitation_handler(elicitation_handler)
+            .with_runtime_event_handler(runtime_event_handler),
     )
     .await?;
     Ok(LazyMcpActivationResult {
         matched_servers: servers.len(),
+        added_tools: registry.specs().len().saturating_sub(before),
+    })
+}
+
+/// Detailed result for one MCP server refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpRefreshResult {
+    pub matched_servers: usize,
+    pub removed_tools: usize,
+    pub added_tools: usize,
+}
+
+/// Refreshes provider-visible tools for one configured MCP server.
+///
+/// # Errors
+///
+/// Returns an error when a required MCP server cannot be restarted, initialized, or queried.
+pub async fn refresh_mcp_server_tools_with_mcp_handlers(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: &str,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+) -> Result<McpRefreshResult> {
+    let servers = root_config
+        .mcp_servers
+        .iter()
+        .filter(|server| server.name == server_name)
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(server) = servers.first() else {
+        return Ok(McpRefreshResult {
+            matched_servers: 0,
+            removed_tools: 0,
+            added_tools: 0,
+        });
+    };
+
+    let prefix = sigil_mcp::mcp_provider_tool_name_prefix(server_name);
+    let removed = registry.drain_by_name_prefix(&prefix);
+    let removed_tools = removed.len();
+    let before = registry.specs().len();
+    if let Err(error) = sigil_mcp::register_mcp_tools_with_options(
+        registry,
+        &servers,
+        sigil_mcp::McpToolRegistrationOptions::for_startup(server.startup)?
+            .with_capabilities(provider_capabilities)
+            .with_roots(vec![canonical_workspace_root(workspace_root)])
+            .with_secret_redactor(secret_redactor_for_root_config(root_config))
+            .with_elicitation_handler(elicitation_handler)
+            .with_runtime_event_handler(runtime_event_handler),
+    )
+    .await
+    {
+        for tool in removed {
+            registry.register(tool);
+        }
+        return Err(error);
+    }
+    Ok(McpRefreshResult {
+        matched_servers: servers.len(),
+        removed_tools,
         added_tools: registry.specs().len().saturating_sub(before),
     })
 }
@@ -197,6 +314,7 @@ fn register_lazy_mcp_activation_tool(
     provider_capabilities: &ProviderCapabilities,
     workspace_root: PathBuf,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
 ) {
     if !root_config
         .mcp_servers
@@ -211,6 +329,7 @@ fn register_lazy_mcp_activation_tool(
         provider_capabilities: provider_capabilities.clone(),
         workspace_root,
         elicitation_handler,
+        runtime_event_handler,
     }));
 }
 
@@ -221,6 +340,7 @@ struct McpActivateServerTool {
     provider_capabilities: ProviderCapabilities,
     workspace_root: PathBuf,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
 }
 
 #[async_trait]
@@ -309,13 +429,14 @@ impl Tool for McpActivateServerTool {
         }
 
         let mut registry = self.registry.clone();
-        let result = activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
+        let result = activate_lazy_mcp_tools_detailed_with_mcp_handlers(
             &mut registry,
             &self.root_config,
             &self.provider_capabilities,
             self.workspace_root.clone(),
             Some(server_name),
             Arc::clone(&self.elicitation_handler),
+            Arc::clone(&self.runtime_event_handler),
         )
         .await?;
         Ok(activation_result(

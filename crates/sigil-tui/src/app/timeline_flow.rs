@@ -501,6 +501,12 @@ impl AppState {
         if !self.is_busy {
             return None;
         }
+        if let Some(progress) = &self.mcp_progress {
+            return Some(LiveActivitySummary {
+                label: "mcp".to_owned(),
+                detail: progress.detail.clone(),
+            });
+        }
         let (label, detail) = match &self.run_phase {
             RunPhase::Idle => ("working", "waiting for next event".to_owned()),
             RunPhase::Thinking => ("thinking", format!("reasoning with {}", self.model_name)),

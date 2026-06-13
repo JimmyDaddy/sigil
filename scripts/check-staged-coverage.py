@@ -69,6 +69,21 @@ def is_non_executable_added_line(line: str) -> bool:
         return True
     if re.match(r"^(?:pub(?:\([^)]+\))?\s+)?[A-Z][A-Za-z0-9_]*(?:\s*\{)?[,]?$", stripped):
         return True
+    if re.match(r"^[A-Z][A-Za-z0-9_]*(?:,\s*[A-Z][A-Za-z0-9_]*)+,\s*$", stripped):
+        return True
+    type_fragment = (
+        r"(?:[A-Z][A-Za-z0-9_:<> ,&'\[\]]*|"
+        r"[ui](?:8|16|32|64|128|size)|"
+        r"f(?:32|64)|bool|char|str|&[A-Za-z0-9_:<> ,&'\[\]]+)"
+    )
+    if re.match(
+        rf"^(?:pub(?:\([^)]+\))?\s+)?[A-Z][A-Za-z0-9_]*\s*\{{\s*"
+        rf"[A-Za-z_][A-Za-z0-9_]*:\s*{type_fragment}"
+        rf"(?:,\s*[A-Za-z_][A-Za-z0-9_]*:\s*{type_fragment})*"
+        rf"\s*,?\s*\}},?$",
+        stripped,
+    ):
+        return True
     if re.match(
         r"^(?:pub(?:\([^)]+\))?\s+)?[A-Za-z_][A-Za-z0-9_]*:\s*[^=]+,?$",
         stripped,

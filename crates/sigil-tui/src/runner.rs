@@ -2,6 +2,7 @@ mod approval_bridge;
 mod diagnostics;
 mod elicitation_bridge;
 mod event_bridge;
+mod mcp_event_bridge;
 mod protocol;
 mod session_flow;
 mod spawn;

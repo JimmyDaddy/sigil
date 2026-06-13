@@ -120,6 +120,8 @@ fn count_label(count: usize, singular: &str, plural: &str) -> String {
 pub(crate) enum McpServerRuntimeStatus {
     Deferred,
     Activating,
+    Refreshing,
+    Stale { capability: String },
     Ready { tool_count: Option<usize> },
     Failed { message: String },
 }
@@ -129,6 +131,8 @@ impl McpServerRuntimeStatus {
         match self {
             Self::Deferred => "deferred".to_owned(),
             Self::Activating => "activating".to_owned(),
+            Self::Refreshing => "refreshing".to_owned(),
+            Self::Stale { capability } => format!("stale {capability}"),
             Self::Ready { tool_count: None } => "ready".to_owned(),
             Self::Ready {
                 tool_count: Some(count),
@@ -136,6 +140,12 @@ impl McpServerRuntimeStatus {
             Self::Failed { message } => format!("failed: {}", summarize_error(message)),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpProgressState {
+    server_name: String,
+    detail: String,
 }
 
 fn initial_mcp_server_statuses(
@@ -208,6 +218,7 @@ pub struct AppState {
     collapsed_tool_activity_keys: BTreeSet<String>,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     last_notice: Option<String>,
+    mcp_progress: Option<McpProgressState>,
     reasoning_effort: ReasoningEffort,
     run_phase: RunPhase,
     last_phase_marker: Option<String>,
@@ -341,6 +352,7 @@ impl AppState {
             collapsed_tool_activity_keys: BTreeSet::new(),
             pending_mouse_slash_confirmation: None,
             last_notice: None,
+            mcp_progress: None,
             reasoning_effort: ReasoningEffort::Max,
             run_phase: RunPhase::Idle,
             last_phase_marker: None,
@@ -448,6 +460,7 @@ impl AppState {
             collapsed_tool_activity_keys: BTreeSet::new(),
             pending_mouse_slash_confirmation: None,
             last_notice: startup_error,
+            mcp_progress: None,
             reasoning_effort: ReasoningEffort::Max,
             run_phase: RunPhase::Idle,
             last_phase_marker: None,

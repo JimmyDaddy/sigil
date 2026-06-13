@@ -30,7 +30,7 @@ sigil/
 - `sigil-provider-deepseek` supports DeepSeek streaming chat, tool calls, reasoning replay, usage, pricing, Beta endpoints, prefix completion, and FIM-specific entrypoints.
 - `sigil-tools-builtin` provides file read/write/edit/delete, search, directory listing, and shell execution.
 - `sigil-code-intel` provides optional LSP / Tree-sitter code intelligence, including read-only symbol, definition, reference, and diagnostic tools.
-- `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, `roots/list`, elicitation handling, lazy activation, and trust enforcement.
+- `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
 - `sigil-cli` currently exposes the public `run` automation entrypoint and the `doctor` local diagnostics entrypoint; `prefix` and `fim` remain debugging or provider-specific entrypoints rather than normal user concepts.
 - `sigil-tui` is the primary user entrypoint. It owns chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/resume`, approval modal, tool activity, diff preview, session recovery, context compaction, markdown code block highlighting, and code intelligence status display.
 
@@ -144,9 +144,15 @@ MCP servers are configured through `[[mcp_servers]]`. Current support includes:
 - `initialize`
 - `tools/list`
 - `tools/call`
+- `resources/list`
+- `resources/read`
+- `prompts/list`
+- `prompts/get`
 - provider-visible name sanitization, truncation, and hash de-duplication
 - `roots/list`
 - `elicitation/create`
+- `notifications/progress`
+- `notifications/*/list_changed`
 - lazy activation
 - required / optional server failure policy
 - trust class
@@ -155,7 +161,11 @@ MCP servers are configured through `[[mcp_servers]]`. Current support includes:
 - secret egress blocking
 - pinned identity validation
 
-`roots/list` exposes only the resolved workspace root. `notifications/progress` is currently ignored safely and does not write to timeline.
+`resources/list` / `resources/read` and `prompts/list` / `prompts/get` are registered as provider-visible read-only tools only when the server declares the matching initialize capability. They reuse MCP trust policy, permission subjects, egress logging, and secret egress blocking, and they are never injected into the system prompt.
+
+MCP tool/resource/prompt outputs are redacted locally and bounded by default output limits. `ToolResultMeta` records truncation data plus MCP server/tool/trust/operation metadata.
+
+`roots/list` exposes only the resolved workspace root. `notifications/progress` updates the TUI live panel instead of writing repeated timeline entries. `notifications/tools|resources|prompts/list_changed` marks the server stale and refreshes that server's provider-visible tools at an idle worker boundary.
 
 TUI elicitation uses a modal to let users confirm flat primitive object fields. The default non-interactive runtime returns explicit unsupported responses. Elicitation decisions are written to append-only control state, but user-provided values are not stored.
 

@@ -20,6 +20,8 @@ use tracing::warn;
 
 const DEFAULT_PROVIDER_TOOL_NAME_MAX_CHARS: usize = 64;
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
+const MCP_OUTPUT_LIMIT_LINES: usize = 2_000;
 
 #[derive(Clone)]
 pub struct McpToolRegistrationOptions {
@@ -27,6 +29,7 @@ pub struct McpToolRegistrationOptions {
     pub roots: Vec<PathBuf>,
     pub secret_redactor: SecretRedactor,
     pub elicitation_handler: Arc<dyn McpElicitationHandler>,
+    pub runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     pub startup: McpServerStartup,
 }
 
@@ -45,6 +48,7 @@ impl McpToolRegistrationOptions {
             roots: default_mcp_roots()?,
             secret_redactor: SecretRedactor::empty(),
             elicitation_handler: unsupported_mcp_elicitation_handler(),
+            runtime_event_handler: unsupported_mcp_runtime_event_handler(),
             startup,
         })
     }
@@ -69,6 +73,14 @@ impl McpToolRegistrationOptions {
         elicitation_handler: Arc<dyn McpElicitationHandler>,
     ) -> Self {
         self.elicitation_handler = elicitation_handler;
+        self
+    }
+
+    pub fn with_runtime_event_handler(
+        mut self,
+        runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    ) -> Self {
+        self.runtime_event_handler = runtime_event_handler;
         self
     }
 }
@@ -124,6 +136,7 @@ async fn register_mcp_tools_for_startup(
             options.roots.clone(),
             options.secret_redactor.clone(),
             Arc::clone(&options.elicitation_handler),
+            Arc::clone(&options.runtime_event_handler),
         )
         .await
         {
@@ -197,6 +210,32 @@ async fn register_mcp_tools_for_startup(
                     },
                     tool_name,
                     kind: resource_kind,
+                    trust: server.trust.clone(),
+                    secret_redactor: options.secret_redactor.clone(),
+                }));
+            }
+        }
+        if client.supports_prompts() {
+            for prompt_kind in McpPromptToolKind::all() {
+                let original_name = prompt_kind.provider_suffix();
+                let tool_name = McpToolName::new(
+                    &server.name,
+                    original_name,
+                    options.provider_tool_name_max_chars,
+                    &mut used_provider_names,
+                );
+                registry.register(Arc::new(McpPromptTool {
+                    client: Arc::clone(&client),
+                    spec: ToolSpec {
+                        name: tool_name.provider_name.clone(),
+                        description: prompt_kind.description().to_owned(),
+                        input_schema: prompt_kind.input_schema(),
+                        category: ToolCategory::Mcp,
+                        access: ToolAccess::Read,
+                        preview: ToolPreviewCapability::None,
+                    },
+                    tool_name,
+                    kind: prompt_kind,
                     trust: server.trust.clone(),
                     secret_redactor: options.secret_redactor.clone(),
                 }));
@@ -354,6 +393,107 @@ impl McpResourceToolKind {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum McpPromptToolKind {
+    List,
+    Get,
+}
+
+impl McpPromptToolKind {
+    fn all() -> [Self; 2] {
+        [Self::List, Self::Get]
+    }
+
+    fn provider_suffix(self) -> &'static str {
+        match self {
+            Self::List => "prompts_list",
+            Self::Get => "prompts_get",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::List => "List MCP prompts exposed by this server",
+            Self::Get => "Get one MCP prompt by name with optional arguments",
+        }
+    }
+
+    fn input_schema(self) -> Value {
+        match self {
+            Self::List => json!({
+                "type": "object",
+                "properties": {
+                    "cursor": {
+                        "type": "string",
+                        "description": "Optional pagination cursor from a previous prompts/list response"
+                    }
+                },
+                "additionalProperties": false
+            }),
+            Self::Get => json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "MCP prompt name returned by prompts/list"
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Optional prompt arguments matching the prompt argument schema"
+                    }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    fn method(self) -> &'static str {
+        match self {
+            Self::List => "prompts/list",
+            Self::Get => "prompts/get",
+        }
+    }
+
+    fn request_params(self, args: &Value) -> std::result::Result<Value, String> {
+        match self {
+            Self::List => {
+                let Some(object) = args.as_object() else {
+                    return Err("MCP prompts/list arguments must be an object".to_owned());
+                };
+                let mut params = serde_json::Map::new();
+                if let Some(cursor) = object.get("cursor") {
+                    let Some(cursor) = cursor.as_str() else {
+                        return Err("MCP prompts/list cursor must be a string".to_owned());
+                    };
+                    params.insert("cursor".to_owned(), Value::String(cursor.to_owned()));
+                }
+                Ok(Value::Object(params))
+            }
+            Self::Get => {
+                let Some(object) = args.as_object() else {
+                    return Err("MCP prompts/get arguments must be an object".to_owned());
+                };
+                let Some(name) = object.get("name").and_then(Value::as_str) else {
+                    return Err("MCP prompts/get requires a name string".to_owned());
+                };
+                if name.trim().is_empty() {
+                    return Err("MCP prompts/get name must not be empty".to_owned());
+                }
+                let mut params = serde_json::Map::new();
+                params.insert("name".to_owned(), Value::String(name.to_owned()));
+                if let Some(arguments) = object.get("arguments") {
+                    if !arguments.is_object() {
+                        return Err("MCP prompts/get arguments must be an object".to_owned());
+                    }
+                    params.insert("arguments".to_owned(), arguments.clone());
+                }
+                Ok(Value::Object(params))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpElicitationRequest {
     pub server_name: String,
@@ -440,6 +580,59 @@ pub fn unsupported_mcp_elicitation_handler() -> Arc<dyn McpElicitationHandler> {
     Arc::new(UnsupportedMcpElicitationHandler)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpProgressNotification {
+    pub server_name: String,
+    pub progress_token: String,
+    pub progress: Option<f64>,
+    pub total: Option<f64>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpListChangedKind {
+    Tools,
+    Resources,
+    Prompts,
+}
+
+impl McpListChangedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tools => "tools",
+            Self::Resources => "resources",
+            Self::Prompts => "prompts",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpListChangedNotification {
+    pub server_name: String,
+    pub kind: McpListChangedKind,
+}
+
+#[async_trait]
+pub trait McpRuntimeEventHandler: Send + Sync {
+    async fn progress(&self, _notification: McpProgressNotification) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_changed(&self, _notification: McpListChangedNotification) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct UnsupportedMcpRuntimeEventHandler;
+
+#[async_trait]
+impl McpRuntimeEventHandler for UnsupportedMcpRuntimeEventHandler {}
+
+pub fn unsupported_mcp_runtime_event_handler() -> Arc<dyn McpRuntimeEventHandler> {
+    Arc::new(UnsupportedMcpRuntimeEventHandler)
+}
+
 #[derive(Debug, Clone)]
 struct McpServerObservedIdentity {
     command_fingerprint: String,
@@ -496,6 +689,7 @@ struct McpClient {
     trust: McpServerTrustPolicy,
     secret_redactor: SecretRedactor,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     roots: Vec<PathBuf>,
     identity: McpServerObservedIdentity,
     server_capabilities: Value,
@@ -513,6 +707,7 @@ impl McpClient {
         roots: Vec<PathBuf>,
         secret_redactor: SecretRedactor,
         elicitation_handler: Arc<dyn McpElicitationHandler>,
+        runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     ) -> Result<Self> {
         let mut command = Command::new(&config.command);
         command
@@ -545,6 +740,7 @@ impl McpClient {
             trust: config.trust.clone(),
             secret_redactor,
             elicitation_handler,
+            runtime_event_handler,
             roots,
             identity: McpServerObservedIdentity {
                 command_fingerprint: String::new(),
@@ -609,6 +805,12 @@ impl McpClient {
     fn supports_resources(&self) -> bool {
         self.server_capabilities
             .get("resources")
+            .is_some_and(Value::is_object)
+    }
+
+    fn supports_prompts(&self) -> bool {
+        self.server_capabilities
+            .get("prompts")
             .is_some_and(Value::is_object)
     }
 
@@ -689,6 +891,18 @@ impl McpClient {
             return Ok(());
         };
         if method == "notifications/progress" {
+            if let Some(notification) = mcp_progress_notification(&self.server_name, message) {
+                self.runtime_event_handler.progress(notification).await?;
+            }
+            return Ok(());
+        }
+        if let Some(kind) = mcp_list_changed_kind(method) {
+            self.runtime_event_handler
+                .list_changed(McpListChangedNotification {
+                    server_name: self.server_name.clone(),
+                    kind,
+                })
+                .await?;
             return Ok(());
         }
         let Some(id) = message.get("id").cloned() else {
@@ -853,11 +1067,20 @@ impl Tool for McpTool {
             Some(Value::String(value)) => value.clone(),
             _ => serde_json::to_string_pretty(&result)?,
         };
+        let (content, metadata) = bounded_mcp_tool_result(
+            &self.secret_redactor,
+            &self.tool_name,
+            &self.trust,
+            &self.client.identity,
+            "tool",
+            "tools/call",
+            content,
+        );
         Ok(ToolResult::ok(
             call_id,
             self.spec.name.clone(),
-            self.secret_redactor.redact_text(&content),
-            ToolResultMeta::default(),
+            content,
+            metadata,
         ))
     }
 }
@@ -956,13 +1179,254 @@ impl Tool for McpResourceTool {
             .cloned()
             .ok_or_else(|| anyhow!("MCP response missing result"))?;
         let content = serde_json::to_string_pretty(&result)?;
+        let (content, metadata) = bounded_mcp_tool_result(
+            &self.secret_redactor,
+            &self.tool_name,
+            &self.trust,
+            &self.client.identity,
+            "resource",
+            self.kind.method(),
+            content,
+        );
         Ok(ToolResult::ok(
             call_id,
             self.spec.name.clone(),
-            self.secret_redactor.redact_text(&content),
-            ToolResultMeta::default(),
+            content,
+            metadata,
         ))
     }
+}
+
+struct McpPromptTool {
+    client: Arc<McpClient>,
+    spec: ToolSpec,
+    tool_name: McpToolName,
+    kind: McpPromptToolKind,
+    trust: McpServerTrustPolicy,
+    secret_redactor: SecretRedactor,
+}
+
+#[async_trait]
+impl Tool for McpPromptTool {
+    fn spec(&self) -> ToolSpec {
+        self.spec.clone()
+    }
+
+    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
+        Ok(vec![
+            ToolSubject::mcp_tool(self.spec.name.clone()),
+            ToolSubject::mcp_trust_class(
+                self.tool_name.server_name.clone(),
+                self.trust.trust_class.as_str(),
+            ),
+        ])
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(Some(self.trust.approval_default))
+    }
+
+    fn egress_audit(&self, _ctx: &ToolContext, args: &Value) -> Result<Option<ToolEgressAudit>> {
+        if !self.trust.egress_logging {
+            return Ok(None);
+        }
+        let secret_detected = self.secret_redactor.value_contains_secret(args);
+        Ok(Some(ToolEgressAudit {
+            destination: format!("mcp:{}", self.tool_name.server_name),
+            operation: self.kind.method().to_owned(),
+            payload: json!({
+                "server": self.tool_name.server_name,
+                "trust_class": self.trust.trust_class.as_str(),
+                "provider_tool": self.spec.name,
+                "prompt_operation": self.kind.provider_suffix(),
+                "allow_secrets": self.trust.allow_secrets,
+                "secret_detected": secret_detected,
+                "server_identity": self.client.identity.to_json(),
+                "arguments": summarize_egress_json(args),
+            }),
+            redacted: secret_detected,
+        }))
+    }
+
+    async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        if !self.trust.allow_secrets && self.secret_redactor.value_contains_secret(&args) {
+            return Ok(ToolResult::error(
+                call_id,
+                self.spec.name.clone(),
+                ToolErrorKind::PermissionDenied,
+                "MCP prompt arguments contain a secret and this server has allow_secrets = false",
+            ));
+        }
+        let params = match self.kind.request_params(&args) {
+            Ok(params) => params,
+            Err(message) => {
+                return Ok(ToolResult::error(
+                    call_id,
+                    self.spec.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    message,
+                ));
+            }
+        };
+        let response = self
+            .client
+            .send_request_response(self.kind.method(), params)
+            .await?;
+        if let Some(error) = response.get("error") {
+            let redacted_error = self.secret_redactor.redact_value(error);
+            return Ok(ToolResult::error(
+                call_id,
+                self.spec.name.clone(),
+                ToolErrorKind::Protocol,
+                format!("MCP {} failed: {redacted_error}", self.kind.method()),
+            )
+            .with_error_details(false, redacted_error));
+        }
+        let result = response
+            .get("result")
+            .cloned()
+            .ok_or_else(|| anyhow!("MCP response missing result"))?;
+        let content = serde_json::to_string_pretty(&result)?;
+        let (content, metadata) = bounded_mcp_tool_result(
+            &self.secret_redactor,
+            &self.tool_name,
+            &self.trust,
+            &self.client.identity,
+            "prompt",
+            self.kind.method(),
+            content,
+        );
+        Ok(ToolResult::ok(
+            call_id,
+            self.spec.name.clone(),
+            content,
+            metadata,
+        ))
+    }
+}
+
+fn bounded_mcp_tool_result(
+    secret_redactor: &SecretRedactor,
+    tool_name: &McpToolName,
+    trust: &McpServerTrustPolicy,
+    identity: &McpServerObservedIdentity,
+    surface_kind: &str,
+    operation: &str,
+    content: String,
+) -> (String, ToolResultMeta) {
+    let redacted = secret_redactor.redact_text(&content);
+    let budget = truncate_text_budget(&redacted, MCP_OUTPUT_LIMIT_BYTES, MCP_OUTPUT_LIMIT_LINES);
+    let mut metadata = ToolResultMeta {
+        bytes: Some(to_u64(budget.returned_bytes)),
+        truncated: budget.truncated,
+        omitted_bytes: if budget.truncated {
+            Some(to_u64(budget.omitted_bytes))
+        } else {
+            None
+        },
+        limit_bytes: Some(to_u64(MCP_OUTPUT_LIMIT_BYTES)),
+        limit_lines: Some(to_u64(MCP_OUTPUT_LIMIT_LINES)),
+        returned_bytes: Some(to_u64(budget.returned_bytes)),
+        returned_lines: Some(to_u64(budget.returned_lines)),
+        total_bytes: Some(to_u64(budget.total_bytes)),
+        total_lines: Some(to_u64(budget.total_lines)),
+        details: json!({
+            "mcp": {
+                "server": tool_name.server_name,
+                "tool": tool_name.original_name,
+                "trust_class": trust.trust_class.as_str(),
+                "kind": surface_kind,
+                "operation": operation,
+                "server_identity": identity.to_json(),
+            }
+        }),
+        ..ToolResultMeta::default()
+    };
+    if budget.truncated {
+        metadata.details["mcp"]["truncation"] = json!({
+            "omitted_bytes": budget.omitted_bytes,
+            "limit_bytes": MCP_OUTPUT_LIMIT_BYTES,
+            "limit_lines": MCP_OUTPUT_LIMIT_LINES,
+        });
+    }
+    (budget.content, metadata)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextBudgetResult {
+    content: String,
+    truncated: bool,
+    total_bytes: usize,
+    total_lines: usize,
+    returned_bytes: usize,
+    returned_lines: usize,
+    omitted_bytes: usize,
+}
+
+fn truncate_text_budget(text: &str, max_bytes: usize, max_lines: usize) -> TextBudgetResult {
+    let total_bytes = text.len();
+    let total_lines = text.lines().count().max(usize::from(!text.is_empty()));
+    let mut returned = String::new();
+    let mut returned_lines = 0usize;
+    let mut truncated = false;
+
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        if index >= max_lines {
+            truncated = true;
+            break;
+        }
+        if returned.len().saturating_add(line.len()) > max_bytes {
+            let remaining = max_bytes.saturating_sub(returned.len());
+            append_utf8_prefix(&mut returned, line, remaining);
+            truncated = true;
+            break;
+        }
+        returned.push_str(line);
+        returned_lines += 1;
+    }
+
+    if !truncated && returned.len() < total_bytes {
+        truncated = true;
+    }
+    if truncated {
+        let marker = "\n[MCP output truncated]";
+        if returned.len().saturating_add(marker.len()) <= max_bytes {
+            returned.push_str(marker);
+        }
+    }
+    let returned_bytes = returned.len();
+    TextBudgetResult {
+        content: returned,
+        truncated,
+        total_bytes,
+        total_lines,
+        returned_bytes,
+        returned_lines: returned_lines.max(usize::from(returned_bytes > 0)),
+        omitted_bytes: total_bytes.saturating_sub(returned_bytes),
+    }
+}
+
+fn append_utf8_prefix(output: &mut String, text: &str, byte_budget: usize) {
+    if byte_budget == 0 {
+        return;
+    }
+    let mut end = 0usize;
+    for (index, ch) in text.char_indices() {
+        let next = index + ch.len_utf8();
+        if next > byte_budget {
+            break;
+        }
+        end = next;
+    }
+    output.push_str(&text[..end]);
+}
+
+fn to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn validate_mcp_pin(config: &McpServerConfig, observed: &McpServerObservedIdentity) -> Result<()> {
@@ -1012,6 +1476,38 @@ fn validate_mcp_pin(config: &McpServerConfig, observed: &McpServerObservedIdenti
         );
     }
     Ok(())
+}
+
+fn mcp_progress_notification(
+    server_name: &str,
+    message: &Value,
+) -> Option<McpProgressNotification> {
+    let params = message.get("params").and_then(Value::as_object)?;
+    let token = params.get("progressToken")?;
+    let progress_token = match token {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        other => serde_json::to_string(other).ok()?,
+    };
+    Some(McpProgressNotification {
+        server_name: server_name.to_owned(),
+        progress_token,
+        progress: params.get("progress").and_then(Value::as_f64),
+        total: params.get("total").and_then(Value::as_f64),
+        message: params
+            .get("message")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    })
+}
+
+fn mcp_list_changed_kind(method: &str) -> Option<McpListChangedKind> {
+    match method {
+        "notifications/tools/list_changed" => Some(McpListChangedKind::Tools),
+        "notifications/resources/list_changed" => Some(McpListChangedKind::Resources),
+        "notifications/prompts/list_changed" => Some(McpListChangedKind::Prompts),
+        _ => None,
+    }
 }
 
 fn mcp_elicitation_request(server_name: &str, message: &Value) -> Result<McpElicitationRequest> {

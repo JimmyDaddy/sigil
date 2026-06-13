@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use sigil_kernel::{AgentRunResult, CompactionRecord, ReasoningEffort, RunEvent, SessionLogEntry};
 use sigil_provider_deepseek::DeepSeekProviderConfig;
-use sigil_runtime::{McpElicitationRequest, McpElicitationResponse};
+use sigil_runtime::{
+    McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
+    McpProgressNotification,
+};
 use tokio::sync::oneshot;
 
 use crate::provider_status::BalanceSnapshot;
@@ -77,6 +80,12 @@ pub enum WorkerMessage {
         server_name: Option<String>,
         status: McpActivationStatus,
     },
+    McpProgress {
+        notification: McpProgressNotification,
+    },
+    McpListChanged {
+        notification: McpListChangedNotification,
+    },
     ProviderBalanceRefreshed {
         request_id: u64,
         snapshot: BalanceSnapshot,
@@ -102,7 +111,9 @@ pub enum CompactionTrigger {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpActivationStatus {
     Activating,
+    Refreshing,
     Deferred,
+    Stale { capability: String },
     Ready { added_tools: usize },
     Failed { error: String },
 }

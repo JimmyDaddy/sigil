@@ -80,7 +80,7 @@ For examples covering authentication, provider settings, permissions, memory, co
 
 ## MCP
 
-Sigil can connect stdio MCP servers as external tool providers. MCP tools use the same approval, activity, session control, secret egress, and trust policy surfaces as built-in tools.
+Sigil can connect stdio MCP servers as external tool providers. MCP tools, resources, and prompts use the same approval, activity, session control, secret egress, and trust policy surfaces as built-in tools.
 
 See [docs/en/mcp.md](docs/en/mcp.md) for configuration and safety notes.
 

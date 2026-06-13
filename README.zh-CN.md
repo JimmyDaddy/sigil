@@ -80,7 +80,7 @@ Sigil 会按顺序查找配置：
 
 ## MCP
 
-Sigil 可以通过 stdio MCP server 接入外部工具。MCP server 会被包装成同一个工具审批和 activity 展示体系，支持 eager/lazy 启动、required/optional server、trust policy、secret egress 阻断和 pinned identity 校验。
+Sigil 可以通过 stdio MCP server 接入外部工具。MCP tools、resources 和 prompts 会被包装进同一个工具审批和 activity 展示体系，支持 eager/lazy 启动、required/optional server、trust policy、secret egress 阻断和 pinned identity 校验。
 
 配置和安全说明见 [docs/zh-CN/mcp.md](docs/zh-CN/mcp.md)。
 
