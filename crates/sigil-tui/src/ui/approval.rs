@@ -17,7 +17,9 @@ use super::{
         number_unified_diff_lines,
     },
     geometry::{halo_rect, shadow_rect},
-    layout_snapshot::approval_modal_area,
+    layout_snapshot::{
+        approval_diff_view_control_label, approval_metadata_control_label, approval_modal_area,
+    },
     markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_options},
 };
 
@@ -90,7 +92,8 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
     let body_chunks = if !view.file_rows.is_empty() {
         let file_width = if layout[1].width >= 92 { 28 } else { 22 }
             .min(layout[1].width.saturating_sub(18))
-            .max(16);
+            .max(16)
+            .min(layout[1].width);
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(file_width), Constraint::Min(12)])
@@ -342,6 +345,20 @@ fn approval_diff_status_line(view: &ApprovalModalView) -> Line<'static> {
         format!("hunk {}/{}", view.active_hunk_index, view.hunk_total)
     };
     let mut spans = vec![
+        approval_badge("Prev", Color::DarkGray),
+        Span::raw(" "),
+        approval_badge("Next", Color::DarkGray),
+        Span::raw(" "),
+        approval_badge(
+            &approval_diff_view_control_label(view.diff_mode_label),
+            Color::Cyan,
+        ),
+        Span::raw(" "),
+        approval_badge(
+            approval_metadata_control_label(view.metadata_collapsed),
+            Color::DarkGray,
+        ),
+        Span::raw("  "),
         Span::styled("path", Style::default().fg(Color::DarkGray)),
         Span::raw(" "),
         Span::styled(view.diff_label.clone(), Style::default().fg(Color::White)),

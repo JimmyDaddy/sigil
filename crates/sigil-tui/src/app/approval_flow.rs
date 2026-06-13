@@ -143,16 +143,7 @@ impl AppState {
                 Some(None)
             }
             KeyCode::Char('m') | KeyCode::Char('M') => {
-                self.approval_metadata_collapsed = !self.approval_metadata_collapsed;
-                self.approval_scroll_back = 0;
-                self.push_event(
-                    "approval:view",
-                    if self.approval_metadata_collapsed {
-                        "metadata collapsed"
-                    } else {
-                        "metadata expanded"
-                    },
-                );
+                self.toggle_approval_metadata();
                 Some(None)
             }
             KeyCode::Char('[') => {
@@ -172,9 +163,7 @@ impl AppState {
                 Some(None)
             }
             KeyCode::Char('v') | KeyCode::Char('V') => {
-                self.approval_diff_mode = self.approval_diff_mode.next();
-                self.approval_scroll_back = 0;
-                self.push_event("approval:view", self.approval_diff_mode.label());
+                self.cycle_approval_diff_mode();
                 Some(None)
             }
             KeyCode::Left | KeyCode::Right => {
@@ -414,32 +403,65 @@ impl AppState {
             .join("\n")
     }
 
-    pub(super) fn jump_approval_hunk(&mut self, next: bool) {
-        let hunk_positions = self.approval_hunk_positions();
-        if hunk_positions.is_empty() {
-            return;
+    pub(super) fn toggle_approval_metadata(&mut self) -> bool {
+        if self.pending_approval.is_none() {
+            return false;
         }
-        if next {
-            self.approval_selected_hunk_index =
-                (self.approval_selected_hunk_index + 1).min(hunk_positions.len() - 1);
-        } else {
-            self.approval_selected_hunk_index = self.approval_selected_hunk_index.saturating_sub(1);
-        }
-        self.approval_scroll_back = hunk_positions[self.approval_selected_hunk_index];
+        self.approval_metadata_collapsed = !self.approval_metadata_collapsed;
+        self.approval_scroll_back = 0;
+        self.push_event(
+            "approval:view",
+            if self.approval_metadata_collapsed {
+                "metadata collapsed"
+            } else {
+                "metadata expanded"
+            },
+        );
+        true
     }
 
-    pub(super) fn switch_approval_file(&mut self, next: bool) {
+    pub(super) fn cycle_approval_diff_mode(&mut self) -> bool {
+        if self.pending_approval.is_none() {
+            return false;
+        }
+        self.approval_diff_mode = self.approval_diff_mode.next();
+        self.approval_scroll_back = 0;
+        self.push_event("approval:view", self.approval_diff_mode.label());
+        true
+    }
+
+    pub(super) fn jump_approval_hunk(&mut self, next: bool) -> bool {
+        let hunk_positions = self.approval_hunk_positions();
+        if hunk_positions.is_empty() {
+            return false;
+        }
+        let previous_index = self.approval_selected_hunk_index;
+        let next_index = if next {
+            (self.approval_selected_hunk_index + 1).min(hunk_positions.len() - 1)
+        } else {
+            self.approval_selected_hunk_index.saturating_sub(1)
+        };
+        if next_index == previous_index {
+            return false;
+        }
+        self.approval_selected_hunk_index = next_index;
+        self.approval_scroll_back = hunk_positions[self.approval_selected_hunk_index];
+        true
+    }
+
+    pub(super) fn switch_approval_file(&mut self, next: bool) -> bool {
         let Some(preview) = self
             .pending_approval
             .as_ref()
             .and_then(|pending| pending.preview.as_ref())
         else {
-            return;
+            return false;
         };
         if preview.file_diffs.is_empty() {
-            return;
+            return false;
         }
 
+        let previous_index = self.approval_selected_file_index;
         if next {
             self.approval_selected_file_index =
                 (self.approval_selected_file_index + 1).min(preview.file_diffs.len() - 1);
@@ -448,6 +470,7 @@ impl AppState {
         }
         self.approval_selected_hunk_index = 0;
         self.approval_scroll_back = 0;
+        previous_index != self.approval_selected_file_index
     }
 }
 

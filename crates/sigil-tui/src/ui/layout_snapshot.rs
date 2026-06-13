@@ -56,6 +56,11 @@ pub struct SlashOverlayHitAreas {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalModalHitAreas {
     pub modal: Rect,
+    pub diff_area: Rect,
+    pub hunk_previous: Rect,
+    pub hunk_next: Rect,
+    pub diff_view_toggle: Rect,
+    pub metadata_toggle: Rect,
     pub file_rows: Vec<ApprovalFileRowHitArea>,
     pub allow_action: Rect,
     pub deny_action: Rect,
@@ -122,6 +127,18 @@ impl LayoutSnapshot {
 
     pub fn hit_target(&self, column: u16, row: u16) -> HitTarget {
         if let Some(areas) = &self.approval_modal_hit_areas {
+            if contains(areas.hunk_previous, column, row) {
+                return HitTarget::ApprovalHunkPrevious;
+            }
+            if contains(areas.hunk_next, column, row) {
+                return HitTarget::ApprovalHunkNext;
+            }
+            if contains(areas.diff_view_toggle, column, row) {
+                return HitTarget::ApprovalDiffViewToggle;
+            }
+            if contains(areas.metadata_toggle, column, row) {
+                return HitTarget::ApprovalMetadataToggle;
+            }
             for file_row in &areas.file_rows {
                 if contains(file_row.area, column, row) {
                     return HitTarget::ApprovalFileRow {
@@ -134,6 +151,9 @@ impl LayoutSnapshot {
             }
             if contains(areas.deny_action, column, row) {
                 return HitTarget::ApprovalAction { approved: false };
+            }
+            if contains(areas.diff_area, column, row) {
+                return HitTarget::ApprovalDiffArea;
             }
         }
 
@@ -359,9 +379,18 @@ fn approval_modal_hit_areas(
     let footer_area = Rect::new(inner.x, footer_y, inner.width, footer_height);
     let footer_inner = inset_rect(footer_area, 1, 1);
     let (allow_action, deny_action) = approval_action_hit_areas(footer_inner, view.selected_action);
+    let diff_area = approval_diff_area(body_area, view);
+    let diff_inner = inset_rect(diff_area, 1, 1);
+    let diff_status = Rect::new(diff_inner.x, diff_inner.y, diff_inner.width, 1);
+    let diff_controls = approval_diff_control_hit_areas(diff_status, view);
 
     Some(ApprovalModalHitAreas {
         modal,
+        diff_area,
+        hunk_previous: diff_controls.hunk_previous,
+        hunk_next: diff_controls.hunk_next,
+        diff_view_toggle: diff_controls.diff_view_toggle,
+        metadata_toggle: diff_controls.metadata_toggle,
         file_rows: approval_file_row_hit_areas(body_area, view),
         allow_action,
         deny_action,
@@ -412,6 +441,98 @@ fn approval_file_row_hit_areas(
             ),
         })
         .collect()
+}
+
+fn approval_diff_area(body_area: Rect, view: &ApprovalModalView) -> Rect {
+    if body_area.width == 0 || body_area.height == 0 {
+        return Rect::default();
+    }
+    if view.file_rows.is_empty() {
+        return body_area;
+    }
+
+    let file_width = if body_area.width >= 92 { 28 } else { 22 }
+        .min(body_area.width.saturating_sub(18))
+        .max(16)
+        .min(body_area.width);
+    let diff_x = body_area.x.saturating_add(file_width);
+    Rect::new(
+        diff_x,
+        body_area.y,
+        body_area
+            .x
+            .saturating_add(body_area.width)
+            .saturating_sub(diff_x),
+        body_area.height,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ApprovalDiffControlHitAreas {
+    pub hunk_previous: Rect,
+    pub hunk_next: Rect,
+    pub diff_view_toggle: Rect,
+    pub metadata_toggle: Rect,
+}
+
+pub(super) fn approval_diff_control_hit_areas(
+    status_area: Rect,
+    view: &ApprovalModalView,
+) -> ApprovalDiffControlHitAreas {
+    if status_area.width == 0 || status_area.height == 0 {
+        return ApprovalDiffControlHitAreas {
+            hunk_previous: Rect::default(),
+            hunk_next: Rect::default(),
+            diff_view_toggle: Rect::default(),
+            metadata_toggle: Rect::default(),
+        };
+    }
+
+    let end = status_area.x.saturating_add(status_area.width);
+    let mut cursor = status_area.x;
+    let hunk_previous = approval_status_badge_rect(status_area.y, &mut cursor, end, "Prev");
+    let hunk_next = approval_status_badge_rect(status_area.y, &mut cursor, end, "Next");
+    let diff_view_toggle = approval_status_badge_rect(
+        status_area.y,
+        &mut cursor,
+        end,
+        &approval_diff_view_control_label(view.diff_mode_label),
+    );
+    let metadata_toggle = approval_status_badge_rect(
+        status_area.y,
+        &mut cursor,
+        end,
+        approval_metadata_control_label(view.metadata_collapsed),
+    );
+
+    ApprovalDiffControlHitAreas {
+        hunk_previous,
+        hunk_next,
+        diff_view_toggle,
+        metadata_toggle,
+    }
+}
+
+pub(super) fn approval_diff_view_control_label(diff_mode_label: &str) -> String {
+    format!("View {diff_mode_label}")
+}
+
+pub(super) fn approval_metadata_control_label(metadata_collapsed: bool) -> &'static str {
+    if metadata_collapsed {
+        "Meta hidden"
+    } else {
+        "Meta"
+    }
+}
+
+fn approval_status_badge_rect(y: u16, cursor: &mut u16, end: u16, label: &str) -> Rect {
+    if *cursor >= end {
+        return Rect::default();
+    }
+    let width = label.chars().count().saturating_add(2) as u16;
+    let rect = Rect::new(*cursor, y, width.min(end.saturating_sub(*cursor)), 1);
+    *cursor = (*cursor).saturating_add(width).saturating_add(1);
+    rect
 }
 
 fn approval_action_hit_areas(footer_inner: Rect, selected_action: ApprovalAction) -> (Rect, Rect) {

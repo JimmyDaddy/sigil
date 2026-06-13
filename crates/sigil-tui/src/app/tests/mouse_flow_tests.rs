@@ -769,6 +769,80 @@ fn mouse_scroll_approval_file_row_scrolls_modal() -> Result<()> {
 }
 
 #[test]
+fn mouse_click_approval_diff_controls_update_modal_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 24);
+    inject_write_file_approval(&mut app, multi_file_approval_preview())?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let hit_areas = layout
+        .approval_modal_hit_areas
+        .as_ref()
+        .expect("expected approval hit areas");
+
+    let (column, row) = point_in(hit_areas.hunk_next);
+    let hunk_next =
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(hunk_next, AppMouseOutcome::Redraw));
+    assert_eq!(app.approval_selected_hunk_index, 1);
+    assert!(app.approval_scroll_back > 0);
+
+    let (column, row) = point_in(hit_areas.hunk_previous);
+    let hunk_previous =
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(hunk_previous, AppMouseOutcome::Redraw));
+    assert_eq!(app.approval_selected_hunk_index, 0);
+
+    let (column, row) = point_in(hit_areas.diff_view_toggle);
+    let view_toggle =
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(view_toggle, AppMouseOutcome::Redraw));
+    assert_eq!(app.approval_diff_mode.label(), "current-hunk");
+    assert_eq!(app.approval_scroll_back, 0);
+
+    let (column, row) = point_in(hit_areas.metadata_toggle);
+    let metadata_toggle =
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(metadata_toggle, AppMouseOutcome::Redraw));
+    assert!(app.approval_metadata_collapsed);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_approval_hunk_control_without_available_move_is_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 24);
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let hit_areas = layout
+        .approval_modal_hit_areas
+        .as_ref()
+        .expect("expected approval hit areas");
+    let (column, row) = point_in(hit_areas.hunk_previous);
+
+    let previous = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(previous, AppMouseOutcome::Noop));
+    assert_eq!(app.approval_selected_hunk_index, 0);
+    assert_eq!(app.approval_scroll_back, 0);
+
+    let (column, row) = point_in(hit_areas.hunk_next);
+    let next = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(next, AppMouseOutcome::Noop));
+    assert_eq!(app.approval_selected_hunk_index, 0);
+    assert_eq!(app.approval_scroll_back, 0);
+    Ok(())
+}
+
+#[test]
+fn approval_mouse_helpers_without_pending_approval_are_noop() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    assert!(!app.toggle_approval_metadata());
+    assert!(!app.cycle_approval_diff_mode());
+}
+
+#[test]
 fn mouse_scroll_stale_approval_action_target_without_pending_is_noop() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 24);

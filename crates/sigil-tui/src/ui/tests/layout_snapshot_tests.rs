@@ -178,6 +178,29 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
         approval.hit_target(hit_areas.deny_action.x, hit_areas.deny_action.y),
         HitTarget::ApprovalAction { approved: false }
     );
+    assert_eq!(
+        approval.hit_target(
+            hit_areas.diff_area.x,
+            hit_areas.diff_area.y.saturating_add(2)
+        ),
+        HitTarget::ApprovalDiffArea
+    );
+    assert_eq!(
+        approval.hit_target(hit_areas.hunk_previous.x, hit_areas.hunk_previous.y),
+        HitTarget::ApprovalHunkPrevious
+    );
+    assert_eq!(
+        approval.hit_target(hit_areas.hunk_next.x, hit_areas.hunk_next.y),
+        HitTarget::ApprovalHunkNext
+    );
+    assert_eq!(
+        approval.hit_target(hit_areas.diff_view_toggle.x, hit_areas.diff_view_toggle.y),
+        HitTarget::ApprovalDiffViewToggle
+    );
+    assert_eq!(
+        approval.hit_target(hit_areas.metadata_toggle.x, hit_areas.metadata_toggle.y),
+        HitTarget::ApprovalMetadataToggle
+    );
 }
 
 #[test]
@@ -342,6 +365,20 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         approval_action_hit_areas(Rect::new(0, 0, 0, 0), ApprovalAction::Allow),
         (Rect::default(), Rect::default())
     );
+    assert_eq!(
+        approval_diff_control_hit_areas(Rect::new(0, 0, 0, 0), &view),
+        ApprovalDiffControlHitAreas {
+            hunk_previous: Rect::default(),
+            hunk_next: Rect::default(),
+            diff_view_toggle: Rect::default(),
+            metadata_toggle: Rect::default(),
+        }
+    );
+    let controls = approval_diff_control_hit_areas(Rect::new(3, 7, 30, 1), &view);
+    assert_eq!(controls.hunk_previous, Rect::new(3, 7, 6, 1));
+    assert_eq!(controls.hunk_next.y, 7);
+    assert!(controls.diff_view_toggle.x > controls.hunk_next.x);
+    assert!(controls.metadata_toggle.x > controls.diff_view_toggle.x);
 
     view.metadata_collapsed = false;
     view.preview_summary = "line one\nline two\nline three".to_owned();

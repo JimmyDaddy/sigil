@@ -23,6 +23,34 @@ impl AppState {
                         Ok(crate::mouse::AppMouseOutcome::Noop)
                     }
                 }
+                crate::mouse::HitTarget::ApprovalHunkPrevious
+                    if self.pending_approval.is_some() =>
+                {
+                    if self.jump_approval_hunk(false) {
+                        Ok(crate::mouse::AppMouseOutcome::Redraw)
+                    } else {
+                        Ok(crate::mouse::AppMouseOutcome::Noop)
+                    }
+                }
+                crate::mouse::HitTarget::ApprovalHunkNext if self.pending_approval.is_some() => {
+                    if self.jump_approval_hunk(true) {
+                        Ok(crate::mouse::AppMouseOutcome::Redraw)
+                    } else {
+                        Ok(crate::mouse::AppMouseOutcome::Noop)
+                    }
+                }
+                crate::mouse::HitTarget::ApprovalDiffViewToggle
+                    if self.pending_approval.is_some() =>
+                {
+                    self.cycle_approval_diff_mode();
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                }
+                crate::mouse::HitTarget::ApprovalMetadataToggle
+                    if self.pending_approval.is_some() =>
+                {
+                    self.toggle_approval_metadata();
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                }
                 crate::mouse::HitTarget::ApprovalAction { approved }
                     if self.pending_approval.is_some() =>
                 {
@@ -114,8 +142,13 @@ impl AppState {
         if self.pending_approval.is_some() {
             return match target {
                 crate::mouse::HitTarget::ApprovalModal
+                | crate::mouse::HitTarget::ApprovalDiffArea
                 | crate::mouse::HitTarget::ApprovalFileRow { .. }
-                | crate::mouse::HitTarget::ApprovalAction { .. } => {
+                | crate::mouse::HitTarget::ApprovalAction { .. }
+                | crate::mouse::HitTarget::ApprovalHunkPrevious
+                | crate::mouse::HitTarget::ApprovalHunkNext
+                | crate::mouse::HitTarget::ApprovalDiffViewToggle
+                | crate::mouse::HitTarget::ApprovalMetadataToggle => {
                     self.scroll_approval_with_mouse(upward);
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 }
@@ -125,7 +158,12 @@ impl AppState {
 
         match target {
             crate::mouse::HitTarget::ApprovalFileRow { .. }
-            | crate::mouse::HitTarget::ApprovalAction { .. } => {
+            | crate::mouse::HitTarget::ApprovalAction { .. }
+            | crate::mouse::HitTarget::ApprovalDiffArea
+            | crate::mouse::HitTarget::ApprovalHunkPrevious
+            | crate::mouse::HitTarget::ApprovalHunkNext
+            | crate::mouse::HitTarget::ApprovalDiffViewToggle
+            | crate::mouse::HitTarget::ApprovalMetadataToggle => {
                 Ok(crate::mouse::AppMouseOutcome::Noop)
             }
             crate::mouse::HitTarget::InfoRail => {
