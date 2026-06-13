@@ -1,9 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    env,
     ops::Range,
     path::{Path, PathBuf},
-    sync::mpsc::Receiver,
 };
 
 mod approval_flow;
@@ -20,17 +18,15 @@ mod timeline_flow;
 mod tool_focus;
 mod worker_bridge;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
-    AgentConfig, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
-    CompactionRecord, CompactionThresholdStatus, McpServerConfig, McpServerStartup, MemoryConfig,
-    PermissionConfig, ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig,
-    SessionLogEntry, SessionStats, ToolPreviewSnapshot, WorkspaceConfig, resolve_workspace_root,
+    ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig, CompactionRecord,
+    CompactionThresholdStatus, McpServerConfig, McpServerStartup, MemoryConfig, ReasoningEffort,
+    RootConfig, SecretRedactor, Session, SessionLogEntry, SessionStats, ToolPreviewSnapshot,
+    resolve_workspace_root,
 };
-use sigil_provider_deepseek::{DeepSeekProviderConfig, SIGIL_API_KEY_ENV, StrictToolsMode};
-use sigil_runtime::{McpElicitationRequest, McpElicitationResponse};
 use uuid::Uuid;
 
 pub(crate) use crate::approval::{
@@ -38,20 +34,17 @@ pub(crate) use crate::approval::{
     ApprovalFileRow, ApprovalModalView,
 };
 pub use crate::approval::{ApprovalDiffMode, PendingApproval};
-use crate::commands::{
-    UiCommand, command_for_key_event, keyboard_help_lines, metadata_slash_commands,
-    metadata_slash_help_lines,
-};
+use crate::commands::{UiCommand, command_for_key_event};
 pub(crate) use crate::config_panel::{
-    ConfigDraft, ConfigField, ConfigFieldMove, ConfigFooterAction, ConfigSection, ConfigState,
-    config_field_accepts_char, default_deepseek_provider_config, load_deepseek_provider_config,
-    render_config_readonly_row, render_config_value_row, serialize_deepseek_provider_value,
+    ConfigState, default_deepseek_provider_config, load_deepseek_provider_config,
+    serialize_deepseek_provider_value,
 };
 use crate::context_window::{
     ContextWindowSource, effective_compaction_config, resolve_context_window_tokens,
 };
 pub use crate::input::PaneFocus;
 use crate::provider_status::BalanceSnapshot;
+use crate::runner::WorkerCommand;
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
 pub(crate) use crate::setup::{SetupField, SetupState};
 use crate::slash::ResolvedSlashCommand;
@@ -63,10 +56,7 @@ pub(crate) use crate::timeline::{
 
 use self::config_flow::cycle_approval_mode;
 use self::formatting::*;
-use self::modal_flow::{
-    ModalState, ModelPickerRefresh, ModelPickerTarget, SecretInputTarget, TextInputState,
-    TextInputTarget,
-};
+use self::modal_flow::{ModalState, ModelPickerRefresh, PendingModelPickerRefresh};
 use self::session_flow::{current_focus_label, short_session_token};
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
@@ -234,8 +224,10 @@ pub struct AppState {
     sidebar_selected_card: SidebarCard,
     sidebar_agent_selected: usize,
     balance_snapshot: BalanceSnapshot,
-    balance_refresh_rx: Option<Receiver<BalanceSnapshot>>,
-    model_picker_refresh_rx: Option<Receiver<ModelPickerRefresh>>,
+    next_background_request_id: u64,
+    pending_worker_commands: Vec<WorkerCommand>,
+    active_balance_refresh_id: Option<u64>,
+    active_model_picker_refresh: Option<PendingModelPickerRefresh>,
     terminal_width: u16,
     terminal_height: u16,
     input_cursor: usize,
@@ -368,8 +360,10 @@ impl AppState {
                 status: "pending".to_owned(),
                 ..BalanceSnapshot::default()
             },
-            balance_refresh_rx: None,
-            model_picker_refresh_rx: None,
+            next_background_request_id: 1,
+            pending_worker_commands: Vec::new(),
+            active_balance_refresh_id: None,
+            active_model_picker_refresh: None,
             terminal_width: 120,
             terminal_height: 32,
             input_cursor: 0,
@@ -473,8 +467,10 @@ impl AppState {
                 status: "missing auth".to_owned(),
                 ..BalanceSnapshot::default()
             },
-            balance_refresh_rx: None,
-            model_picker_refresh_rx: None,
+            next_background_request_id: 1,
+            pending_worker_commands: Vec::new(),
+            active_balance_refresh_id: None,
+            active_model_picker_refresh: None,
             terminal_width: 120,
             terminal_height: 32,
             input_cursor: 0,

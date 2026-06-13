@@ -31,6 +31,26 @@ fn default_config_deserializes_all_provider_defaults() -> Result<()> {
 }
 
 #[test]
+fn default_for_model_reuses_provider_defaults_with_model_override() {
+    let config = DeepSeekProviderConfig::default_for_model("deepseek-v4-custom");
+
+    assert_eq!(config.base_url, "https://api.deepseek.com");
+    assert_eq!(config.beta_base_url, "https://api.deepseek.com/beta");
+    assert_eq!(
+        config.anthropic_base_url,
+        "https://api.deepseek.com/anthropic"
+    );
+    assert_eq!(config.model, "deepseek-v4-custom");
+    assert_eq!(config.fim_model, "deepseek-v4-pro");
+    assert_eq!(
+        config.user_id_strategy.as_deref(),
+        Some("stable_per_end_user")
+    );
+    assert_eq!(config.request_timeout_secs, 120);
+    assert_eq!(config.strict_tools_mode, StrictToolsMode::Auto);
+}
+
+#[test]
 fn resolved_applies_sigil_env_overrides() -> Result<()> {
     let _guard = crate::test_env::lock();
     let _scope = EnvScope::set_many(&[

@@ -1,9 +1,17 @@
-#[cfg(not(any(test, coverage)))]
-use std::{sync::mpsc, thread};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use sigil_provider_deepseek::DeepSeekProviderConfig;
+use sigil_runtime::{McpElicitationRequest, McpElicitationResponse};
 
-use super::*;
-#[cfg(not(any(test, coverage)))]
-use crate::provider_status::fetch_remote_model_ids;
+use super::{
+    AppState, PaneFocus, TimelineRole,
+    formatting::{build_model_picker_options, non_empty_or},
+};
+use crate::commands::{keyboard_help_lines, metadata_slash_commands, metadata_slash_help_lines};
+use crate::config_panel::{
+    ConfigField, config_field_accepts_char, default_deepseek_provider_config,
+    load_deepseek_provider_config,
+};
+use crate::runner::WorkerCommand;
 use crate::slash::SLASH_COMMANDS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +51,13 @@ pub(super) struct ModelPickerRefresh {
     pub(super) current: String,
     pub(super) base_url: String,
     pub(super) result: Result<Vec<String>, String>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PendingModelPickerRefresh {
+    pub(super) request_id: u64,
+    pub(super) target: ModelPickerTarget,
+    pub(super) current: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,38 +351,26 @@ impl AppState {
         target: ModelPickerTarget,
         current: &str,
     ) -> String {
-        self.model_picker_refresh_rx = None;
-        #[cfg(any(test, coverage))]
+        self.cancel_model_picker_refresh();
+        let provider_config = match self
+            .provider_config_for_model_picker(target, current)
+            .resolved()
         {
-            let _ = (target, current);
-            "using local model list".to_owned()
-        }
-        #[cfg(not(any(test, coverage)))]
-        {
-            let provider_config = match self
-                .provider_config_for_model_picker(target, current)
-                .resolved()
-            {
-                Ok(config) => config,
-                Err(error) => return format!("model list unavailable: {error}"),
-            };
-            let base_url = provider_config.base_url.clone();
-            let (tx, rx) = mpsc::channel();
-            self.model_picker_refresh_rx = Some(rx);
-            let current = current.to_owned();
-            let notice = format!("loading provider model list ({base_url})");
-            thread::spawn(move || {
-                let result =
-                    fetch_remote_model_ids(&provider_config).map_err(|error| format!("{error:#}"));
-                let _ = tx.send(ModelPickerRefresh {
-                    target,
-                    current,
-                    base_url,
-                    result,
-                });
-            });
-            notice
-        }
+            Ok(config) => config,
+            Err(error) => return format!("model list unavailable: {error}"),
+        };
+        let base_url = provider_config.base_url.clone();
+        let request_id = self.next_background_request_id();
+        self.active_model_picker_refresh = Some(PendingModelPickerRefresh {
+            request_id,
+            target,
+            current: current.to_owned(),
+        });
+        self.enqueue_worker_command(WorkerCommand::RefreshProviderModels {
+            request_id,
+            provider_config,
+        });
+        format!("loading provider model list ({base_url})")
     }
 
     pub(super) fn apply_model_picker_refresh(&mut self, refresh: ModelPickerRefresh) -> bool {
@@ -420,38 +423,43 @@ impl AppState {
         current: &str,
     ) -> DeepSeekProviderConfig {
         if let Some(state) = &self.config_state {
-            return DeepSeekProviderConfig {
-                base_url: non_empty_or(&state.draft.provider_base_url, "https://api.deepseek.com"),
-                beta_base_url: non_empty_or(
-                    &state.draft.provider_beta_base_url,
-                    "https://api.deepseek.com/beta",
-                ),
-                anthropic_base_url: non_empty_or(
-                    &state.draft.provider_anthropic_base_url,
-                    "https://api.deepseek.com/anthropic",
-                ),
-                model: match target {
-                    ModelPickerTarget::ProviderFim => state.draft.provider_model.clone(),
-                    _ => current.trim().to_owned(),
-                },
-                api_key: (!state.draft.provider_api_key.trim().is_empty())
-                    .then(|| state.draft.provider_api_key.trim().to_owned()),
-                user_id_strategy: (!state.draft.provider_user_id_strategy.trim().is_empty())
-                    .then(|| state.draft.provider_user_id_strategy.trim().to_owned()),
-                strict_tools_mode: state.draft.provider_strict_tools_mode,
-                fim_model: match target {
-                    ModelPickerTarget::ProviderFim => current.trim().to_owned(),
-                    _ => state.draft.provider_fim_model.clone(),
-                },
-                request_timeout_secs: state
-                    .draft
-                    .provider_request_timeout_secs
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .unwrap_or(120),
+            let mut provider_config = match target {
+                ModelPickerTarget::ProviderFim => {
+                    DeepSeekProviderConfig::default_for_model(&state.draft.provider_model)
+                }
+                _ => DeepSeekProviderConfig::default_for_model(current.trim()),
             };
+            provider_config.base_url =
+                non_empty_or(&state.draft.provider_base_url, &provider_config.base_url);
+            provider_config.beta_base_url = non_empty_or(
+                &state.draft.provider_beta_base_url,
+                &provider_config.beta_base_url,
+            );
+            provider_config.anthropic_base_url = non_empty_or(
+                &state.draft.provider_anthropic_base_url,
+                &provider_config.anthropic_base_url,
+            );
+            provider_config.api_key = (!state.draft.provider_api_key.trim().is_empty())
+                .then(|| state.draft.provider_api_key.trim().to_owned());
+            let default_user_id_strategy = provider_config.user_id_strategy.clone();
+            provider_config.user_id_strategy =
+                (!state.draft.provider_user_id_strategy.trim().is_empty())
+                    .then(|| state.draft.provider_user_id_strategy.trim().to_owned())
+                    .or(default_user_id_strategy);
+            provider_config.strict_tools_mode = state.draft.provider_strict_tools_mode;
+            provider_config.fim_model = match target {
+                ModelPickerTarget::ProviderFim => current.trim().to_owned(),
+                _ => non_empty_or(&state.draft.provider_fim_model, &provider_config.fim_model),
+            };
+            provider_config.request_timeout_secs = state
+                .draft
+                .provider_request_timeout_secs
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .unwrap_or(provider_config.request_timeout_secs);
+            return provider_config;
         }
 
         if let Some(state) = &self.setup_state {
@@ -543,6 +551,7 @@ impl AppState {
         match modal_state {
             ModalState::ModelPicker(state) => match key.code {
                 KeyCode::Esc => {
+                    self.cancel_model_picker_refresh();
                     self.modal_state = None;
                     ModalOutcome::Dismissed("closed picker".to_owned())
                 }
@@ -584,6 +593,7 @@ impl AppState {
                         return ModalOutcome::Dismissed("closed picker".to_owned());
                     };
                     let target = state.target;
+                    self.cancel_model_picker_refresh();
                     self.modal_state = None;
                     ModalOutcome::ModelSelected { target, value }
                 }
@@ -661,10 +671,12 @@ impl AppState {
         match modal_state {
             ModalState::ModelPicker(state) => {
                 let Some(value) = state.options.get(state.selected).cloned() else {
+                    self.cancel_model_picker_refresh();
                     self.modal_state = None;
                     return ModalOutcome::Dismissed("closed picker".to_owned());
                 };
                 let target = state.target;
+                self.cancel_model_picker_refresh();
                 self.modal_state = None;
                 ModalOutcome::ModelSelected { target, value }
             }

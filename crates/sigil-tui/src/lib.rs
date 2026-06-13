@@ -5,7 +5,7 @@ pub(crate) mod config_panel;
 pub(crate) mod context_window;
 pub(crate) mod input;
 pub mod mouse;
-pub(crate) mod provider_status;
+pub mod provider_status;
 pub mod runner;
 pub(crate) mod sessions;
 pub(crate) mod setup;

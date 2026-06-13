@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::tests::common::test_config;
+use crate::config_panel::ConfigState;
 
 #[test]
 fn provider_config_for_model_picker_prefers_config_setup_and_snapshot() {

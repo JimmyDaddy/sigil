@@ -1,6 +1,14 @@
+use std::ops::Range;
+
 use ratatui::text::Line;
 
-use super::*;
+use super::{
+    AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase, ThinkingBlockMode,
+    TimelineEntry, TimelineRole,
+    formatting::{
+        hash_timeline_line, line_has_visible_content, plain_line_text, sidebar_width_for_terminal,
+    },
+};
 
 impl AppState {
     pub(super) fn live_panel_height(&self) -> u16 {

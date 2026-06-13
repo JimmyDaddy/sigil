@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 
 use sigil_kernel::{AgentRunResult, CompactionRecord, ReasoningEffort, RunEvent, SessionLogEntry};
+use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::{McpElicitationRequest, McpElicitationResponse};
 use tokio::sync::oneshot;
+
+use crate::provider_status::BalanceSnapshot;
 
 pub(crate) type McpElicitationResponseTx = oneshot::Sender<McpElicitationResponse>;
 
@@ -19,6 +22,17 @@ pub enum WorkerCommand {
     CancelRun,
     CompactNow,
     CheckChangedFilesDiagnostics,
+    RefreshProviderBalance {
+        request_id: u64,
+        provider_config: DeepSeekProviderConfig,
+    },
+    RefreshProviderModels {
+        request_id: u64,
+        provider_config: DeepSeekProviderConfig,
+    },
+    CancelProviderModelsRefresh {
+        request_id: u64,
+    },
     ActivateLazyMcp {
         server_name: Option<String>,
     },
@@ -62,6 +76,15 @@ pub enum WorkerMessage {
     McpActivationStatus {
         server_name: Option<String>,
         status: McpActivationStatus,
+    },
+    ProviderBalanceRefreshed {
+        request_id: u64,
+        snapshot: BalanceSnapshot,
+    },
+    ProviderModelsRefreshed {
+        request_id: u64,
+        base_url: String,
+        result: Result<Vec<String>, String>,
     },
     McpElicitationRequest {
         request: McpElicitationRequest,

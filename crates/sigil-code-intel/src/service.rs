@@ -152,10 +152,12 @@ struct ServiceInner {
     workspace_root: PathBuf,
     config: CodeIntelligenceConfig,
     server_plan: RwLock<ServerPlanState>,
-    clients: Mutex<BTreeMap<String, ProcessLanguageServer>>,
+    clients: Mutex<BTreeMap<String, LanguageServerHandle>>,
     status: Mutex<CodeIntelStatus>,
     symbol_cache: Mutex<TimedCache<CodeIntelResponse<CodeSymbol>>>,
 }
+
+type LanguageServerHandle = Arc<Mutex<Option<ProcessLanguageServer>>>;
 
 #[derive(Clone, Default)]
 struct ServerPlanState {
@@ -259,12 +261,18 @@ impl CodeIntelligenceService {
 
     pub async fn shutdown(&self) -> Result<()> {
         let started = Instant::now();
-        let mut clients = self.inner.clients.lock().await;
-        for server in clients.values_mut() {
-            server.shutdown(self.request_timeout()).await;
+        let handles = {
+            let mut clients = self.inner.clients.lock().await;
+            let handles = clients.values().cloned().collect::<Vec<_>>();
+            clients.clear();
+            handles
+        };
+        let stopped = handles.len();
+        for handle in handles {
+            if let Some(server) = handle.lock().await.as_mut() {
+                server.shutdown(self.request_timeout()).await;
+            }
         }
-        let stopped = clients.len();
-        clients.clear();
         *self.inner.status.lock().await = CodeIntelStatus::Off;
         tracing::debug!(
             stopped,
@@ -508,8 +516,9 @@ impl CodeIntelligenceService {
         let limit = self.limit(max_results);
         let path = self.resolve_file(requested)?;
         self.ensure_server_plan().await;
-        let mut clients = self.inner.clients.lock().await;
-        let server = self.ensure_client_locked(&mut clients, &path).await?;
+        let server_handle = self.ensure_client(&path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "textDocument/definition")?;
         if !definition_supported(&server.capabilities) {
             return Err(CodeIntelError::UnsupportedCapability {
                 server: server.config.name.clone(),
@@ -526,10 +535,12 @@ impl CodeIntelligenceService {
                 self.request_timeout(),
             )
             .await?;
+        let server_name = server.config.name.clone();
+        let languages = server.config.languages.clone();
         let (locations, filtered) = self.parse_locations(response_array(value)).await?;
         Ok(self.with_discovery_statuses(response_with_filtered(
-            server.config.name.clone(),
-            server.config.languages.clone(),
+            server_name,
+            languages,
             "textDocument/definition".to_owned(),
             locations,
             limit,
@@ -550,8 +561,9 @@ impl CodeIntelligenceService {
         let limit = self.limit(max_results);
         let path = self.resolve_file(requested)?;
         self.ensure_server_plan().await;
-        let mut clients = self.inner.clients.lock().await;
-        let server = self.ensure_client_locked(&mut clients, &path).await?;
+        let server_handle = self.ensure_client(&path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "textDocument/references")?;
         if !references_supported(&server.capabilities) {
             return Err(CodeIntelError::UnsupportedCapability {
                 server: server.config.name.clone(),
@@ -566,10 +578,12 @@ impl CodeIntelligenceService {
             .client
             .request("textDocument/references", params, self.request_timeout())
             .await?;
+        let server_name = server.config.name.clone();
+        let languages = server.config.languages.clone();
         let (locations, filtered) = self.parse_locations(response_array(value)).await?;
         Ok(self.with_discovery_statuses(response_with_filtered(
-            server.config.name.clone(),
-            server.config.languages.clone(),
+            server_name,
+            languages,
             "textDocument/references".to_owned(),
             locations,
             limit,
@@ -677,8 +691,9 @@ impl CodeIntelligenceService {
         limit: usize,
         started: Instant,
     ) -> Result<CodeIntelResponse<CodeSymbol>> {
-        let mut clients = self.inner.clients.lock().await;
-        let server = self.ensure_client_locked(&mut clients, path).await?;
+        let server_handle = self.ensure_client(path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "textDocument/documentSymbol")?;
         if !document_symbol_supported(&server.capabilities) {
             return Err(CodeIntelError::UnsupportedCapability {
                 server: server.config.name.clone(),
@@ -695,6 +710,8 @@ impl CodeIntelligenceService {
                 self.request_timeout(),
             )
             .await?;
+        let server_name = server.config.name.clone();
+        let languages = server.config.languages.clone();
         let query = query.map(str::to_ascii_lowercase);
         let mut symbols = Vec::new();
         collect_lsp_symbols(
@@ -704,8 +721,8 @@ impl CodeIntelligenceService {
             &mut symbols,
         );
         Ok(self.with_discovery_statuses(response(
-            server.config.name.clone(),
-            server.config.languages.clone(),
+            server_name,
+            languages,
             "textDocument/documentSymbol".to_owned(),
             symbols,
             limit,
@@ -724,7 +741,6 @@ impl CodeIntelligenceService {
         if configs.is_empty() {
             return Err(CodeIntelError::Disabled.into());
         }
-        let mut clients = self.inner.clients.lock().await;
         let mut symbols = Vec::new();
         let mut filtered = 0usize;
         let mut successful_servers = Vec::new();
@@ -732,7 +748,7 @@ impl CodeIntelligenceService {
 
         for config in configs {
             match self
-                .lsp_workspace_symbols_for_server_locked(&mut clients, &config.name, query)
+                .lsp_workspace_symbols_for_server(&config.name, query)
                 .await
             {
                 Ok((server_symbols, server_filtered, languages)) => {
@@ -786,15 +802,14 @@ impl CodeIntelligenceService {
         )))
     }
 
-    async fn lsp_workspace_symbols_for_server_locked(
+    async fn lsp_workspace_symbols_for_server(
         &self,
-        clients: &mut BTreeMap<String, ProcessLanguageServer>,
         server_name: &str,
         query: &str,
     ) -> Result<(Vec<CodeSymbol>, usize, Vec<String>)> {
-        let server = self
-            .ensure_client_by_name_locked(clients, server_name)
-            .await?;
+        let server_handle = self.ensure_client_by_name(server_name).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "workspace/symbol")?;
         if !workspace_symbol_supported(&server.capabilities) {
             return Err(CodeIntelError::UnsupportedCapability {
                 server: server.config.name.clone(),
@@ -826,8 +841,9 @@ impl CodeIntelligenceService {
         &self,
         path: &Path,
     ) -> Result<(String, Vec<String>, String, Vec<CodeDiagnostic>)> {
-        let mut clients = self.inner.clients.lock().await;
-        let server = self.ensure_client_locked(&mut clients, path).await?;
+        let server_handle = self.ensure_client(path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "textDocument/diagnostic")?;
         server.sync_document(path).await?;
         let uri = file_uri_from_path(path);
         let (mut raw, capability) = if diagnostics_supported(&server.capabilities) {
@@ -868,62 +884,78 @@ impl CodeIntelligenceService {
         ))
     }
 
-    async fn ensure_client_locked<'a>(
-        &self,
-        clients: &'a mut BTreeMap<String, ProcessLanguageServer>,
-        path: &Path,
-    ) -> Result<&'a mut ProcessLanguageServer> {
+    async fn ensure_client(&self, path: &Path) -> Result<LanguageServerHandle> {
         let config = server_for_path(&self.current_servers(), path)
             .cloned()
             .ok_or_else(|| CodeIntelError::NoServerForPath {
                 path: workspace_relative_path(&self.inner.workspace_root, path),
             })?;
-        self.ensure_client_by_name_locked(clients, &config.name)
-            .await
+        self.ensure_client_by_name(&config.name).await
     }
 
-    async fn ensure_client_by_name_locked<'a>(
-        &self,
-        clients: &'a mut BTreeMap<String, ProcessLanguageServer>,
-        server_name: &str,
-    ) -> Result<&'a mut ProcessLanguageServer> {
+    async fn ensure_client_by_name(&self, server_name: &str) -> Result<LanguageServerHandle> {
         if !self.enabled() {
             return Err(CodeIntelError::Disabled.into());
         }
-        if !clients.contains_key(server_name) {
-            let config = self
-                .server_plan_snapshot()
-                .servers
-                .iter()
-                .find(|server| server.name == server_name)
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown language server {server_name}"))?;
-            *self.inner.status.lock().await = CodeIntelStatus::Starting {
-                server: config.name.clone(),
-            };
-            match self.start_server(config.clone()).await {
-                Ok(server) => {
-                    clients.insert(server_name.to_owned(), server);
-                    *self.inner.status.lock().await = CodeIntelStatus::Ready {
-                        servers: clients.len(),
-                    };
+        if let Some(handle) = self.inner.clients.lock().await.get(server_name).cloned() {
+            return Ok(handle);
+        }
+
+        let config = self
+            .server_plan_snapshot()
+            .servers
+            .iter()
+            .find(|server| server.name == server_name)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown language server {server_name}"))?;
+        let handle = {
+            let mut clients = self.inner.clients.lock().await;
+            clients
+                .entry(server_name.to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .clone()
+        };
+        let mut server_slot = handle.lock().await;
+        if server_slot.is_some() {
+            drop(server_slot);
+            return Ok(handle);
+        }
+
+        *self.inner.status.lock().await = CodeIntelStatus::Starting {
+            server: config.name.clone(),
+        };
+        match self.start_server(config.clone()).await {
+            Ok(server) => {
+                *server_slot = Some(server);
+                drop(server_slot);
+                let servers = self.inner.clients.lock().await.len();
+                *self.inner.status.lock().await = CodeIntelStatus::Ready { servers };
+                Ok(handle)
+            }
+            Err(error) => {
+                drop(server_slot);
+                self.remove_client_handle(server_name, &handle).await;
+                let reason = lsp_error_to_reason(error);
+                *self.inner.status.lock().await = CodeIntelStatus::Degraded {
+                    reason: format!("{server_name} {reason}"),
+                };
+                Err(CodeIntelError::ServerUnavailable {
+                    server: server_name.to_owned(),
+                    reason,
                 }
-                Err(error) => {
-                    let reason = lsp_error_to_reason(error);
-                    *self.inner.status.lock().await = CodeIntelStatus::Degraded {
-                        reason: format!("{server_name} {reason}"),
-                    };
-                    return Err(CodeIntelError::ServerUnavailable {
-                        server: server_name.to_owned(),
-                        reason,
-                    }
-                    .into());
-                }
+                .into())
             }
         }
-        clients
-            .get_mut(server_name)
-            .ok_or_else(|| anyhow!("language server {server_name} missing after startup"))
+    }
+
+    async fn remove_client_handle(&self, server_name: &str, handle: &LanguageServerHandle) {
+        let mut clients = self.inner.clients.lock().await;
+        if clients
+            .get(server_name)
+            .is_some_and(|existing| Arc::ptr_eq(existing, handle))
+        {
+            clients.remove(server_name);
+        }
     }
 
     async fn start_server(&self, config: LanguageServerConfig) -> Result<ProcessLanguageServer> {
@@ -1061,6 +1093,14 @@ impl ProcessLanguageServer {
         self.versions.insert(path.to_path_buf(), version);
         Ok(())
     }
+}
+
+fn language_server_mut<'a>(
+    slot: &'a mut Option<ProcessLanguageServer>,
+    capability: &str,
+) -> Result<&'a mut ProcessLanguageServer> {
+    slot.as_mut()
+        .ok_or_else(|| anyhow!("language server unavailable while handling {capability}"))
 }
 
 fn drain_stderr(server: String, mut stderr: ChildStderr) {

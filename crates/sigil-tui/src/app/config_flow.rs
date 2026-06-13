@@ -1,9 +1,23 @@
-use super::*;
 use crate::config_panel::{
     CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
-    CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT,
+    CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField, ConfigFieldMove,
+    ConfigFooterAction, ConfigSection, ConfigState, render_config_readonly_row,
+    render_config_value_row,
 };
-use sigil_kernel::{McpServerConfig, McpServerStartup};
+use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use sigil_kernel::{ApprovalMode, McpServerConfig, McpServerStartup, RootConfig};
+use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+
+use super::{
+    AppAction, AppState, McpServerRuntimeStatus, code_intelligence_config_status,
+    formatting::{format_token_count, persisted_root_config},
+    initial_mcp_server_status, initial_mcp_server_statuses,
+    modal_flow::{
+        ModalState, ModelPickerTarget, SecretInputTarget, TextInputState, TextInputTarget,
+    },
+};
+use crate::context_window::{ContextWindowSource, resolve_context_window_tokens};
 
 impl AppState {
     pub fn config_section_title(&self) -> Option<&'static str> {
@@ -765,7 +779,7 @@ impl AppState {
         self.memory_config = root_config.memory.clone();
         self.compaction_config = root_config.compaction.clone();
         self.code_intelligence_status =
-            super::code_intelligence_config_status(&root_config.code_intelligence);
+            code_intelligence_config_status(&root_config.code_intelligence);
         self.code_intelligence_server_lines.clear();
         self.code_intelligence_diagnostics_line = None;
         self.code_intelligence_diagnostics_by_path.clear();

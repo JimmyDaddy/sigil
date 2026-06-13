@@ -1070,7 +1070,7 @@ pub struct ProviderCapabilities {
 - `tokio`：async runtime
 - `futures` / `tokio-stream`：stream 组合
 - `serde`、`serde_json`、`toml`：配置和协议序列化
-- `reqwest`：HTTP model / MCP client
+- `reqwest`：provider HTTP client / TUI provider status client；MCP 当前走 stdio client
 - `async-trait`：第一阶段先解决 object-safe async trait 问题
 - `thiserror` + `anyhow`：错误分层
 - `tracing` + `tracing-subscriber`：结构化日志

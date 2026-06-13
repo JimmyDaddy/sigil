@@ -881,23 +881,17 @@ async fn definition_references_workspace_symbols_and_diagnostics_use_lsp() {
 }
 
 #[tokio::test]
-async fn ensure_client_by_name_locked_reports_disabled_and_unknown_server() {
+async fn ensure_client_by_name_reports_disabled_and_unknown_server() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let disabled = CodeIntelligenceService::new(temp.path().to_path_buf(), Default::default());
-    let disabled_error = match disabled
-        .ensure_client_by_name_locked(&mut BTreeMap::new(), "rust-analyzer")
-        .await
-    {
+    let disabled_error = match disabled.ensure_client_by_name("rust-analyzer").await {
         Ok(_) => panic!("disabled service should reject clients"),
         Err(error) => error,
     };
     assert!(disabled_error.to_string().contains("disabled"));
 
     let enabled = CodeIntelligenceService::new(temp.path().to_path_buf(), fake_config());
-    let unknown_error = match enabled
-        .ensure_client_by_name_locked(&mut BTreeMap::new(), "other")
-        .await
-    {
+    let unknown_error = match enabled.ensure_client_by_name("other").await {
         Ok(_) => panic!("unknown server should fail"),
         Err(error) => error,
     };
@@ -1230,15 +1224,12 @@ async fn lsp_helpers_report_unsupported_capabilities_and_missing_servers() {
     );
 
     let workspace_error = service
-        .lsp_workspace_symbols_for_server_locked(&mut BTreeMap::new(), "rust-analyzer", "hello")
+        .lsp_workspace_symbols_for_server("rust-analyzer", "hello")
         .await
         .expect_err("workspace symbols should require capability");
     assert!(workspace_error.to_string().contains("workspace/symbol"));
 
-    let no_server_error = match service
-        .ensure_client_locked(&mut BTreeMap::new(), &python_path)
-        .await
-    {
+    let no_server_error = match service.ensure_client(&python_path).await {
         Ok(_) => panic!("non-rust files should not match rust-analyzer"),
         Err(error) => error,
     };

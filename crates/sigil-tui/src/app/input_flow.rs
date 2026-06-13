@@ -1,6 +1,6 @@
 use unicode_width::UnicodeWidthChar;
 
-use super::*;
+use super::{AppState, char_to_byte_index, formatting::sidebar_width_for_terminal};
 
 impl AppState {
     pub fn input_cursor_visual_position(&self) -> (u16, u16) {

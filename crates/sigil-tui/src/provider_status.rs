@@ -1,20 +1,20 @@
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use reqwest::blocking::Client as BlockingClient;
+use reqwest::Client;
 use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::resolve_deepseek_api_key;
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(crate) struct BalanceSnapshot {
-    pub(crate) total: Option<f64>,
-    pub(crate) currency: Option<String>,
-    pub(crate) available: bool,
-    pub(crate) status: String,
+pub struct BalanceSnapshot {
+    pub total: Option<f64>,
+    pub currency: Option<String>,
+    pub available: bool,
+    pub status: String,
 }
 
 #[cfg_attr(coverage, allow(dead_code))]
-pub(crate) fn fetch_remote_model_ids(config: &DeepSeekProviderConfig) -> Result<Vec<String>> {
+pub(crate) async fn fetch_remote_model_ids(config: &DeepSeekProviderConfig) -> Result<Vec<String>> {
     let (api_key, url, timeout_secs) = provider_status_request_parts(config, "models")?;
     let client = build_provider_status_client(timeout_secs, "model-list")?;
     let response = client
@@ -22,10 +22,12 @@ pub(crate) fn fetch_remote_model_ids(config: &DeepSeekProviderConfig) -> Result<
         .bearer_auth(api_key)
         .header("Accept", "application/json")
         .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
+        .await
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|error| anyhow!("failed to fetch provider models: {error}"))?;
     let payload = response
         .json::<serde_json::Value>()
+        .await
         .map_err(|error| anyhow!("failed to decode provider models: {error}"))?;
     let models = parse_remote_model_ids(&payload);
     if models.is_empty() {
@@ -34,7 +36,7 @@ pub(crate) fn fetch_remote_model_ids(config: &DeepSeekProviderConfig) -> Result<
     Ok(models)
 }
 
-pub(crate) fn fetch_provider_balance_snapshot(
+pub(crate) async fn fetch_provider_balance_snapshot(
     config: &DeepSeekProviderConfig,
 ) -> Result<BalanceSnapshot> {
     let (api_key, url, timeout_secs) = provider_status_request_parts(config, "user/balance")?;
@@ -44,9 +46,11 @@ pub(crate) fn fetch_provider_balance_snapshot(
         .bearer_auth(api_key)
         .header("Accept", "application/json")
         .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
+        .await
+        .and_then(reqwest::Response::error_for_status)
         .map_err(|error| anyhow!("failed to fetch balance: {error}"))?
         .json::<serde_json::Value>()
+        .await
         .map_err(|error| anyhow!("failed to decode balance payload: {error}"))?;
     parse_balance_snapshot(&payload)
 }
@@ -94,8 +98,8 @@ fn provider_status_url(config: &DeepSeekProviderConfig, path_suffix: &str) -> St
     )
 }
 
-fn build_provider_status_client(timeout_secs: u64, label: &str) -> Result<BlockingClient> {
-    BlockingClient::builder()
+fn build_provider_status_client(timeout_secs: u64, label: &str) -> Result<Client> {
+    Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()
         .map_err(|error| anyhow!("failed to build {label} client: {error}"))

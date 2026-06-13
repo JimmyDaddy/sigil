@@ -39,6 +39,13 @@ pub struct DeepSeekProviderConfig {
 }
 
 impl DeepSeekProviderConfig {
+    pub fn default_for_model(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            ..Self::default()
+        }
+    }
+
     pub fn resolved(self) -> Result<Self> {
         let mut resolved = self;
 
@@ -85,6 +92,22 @@ impl DeepSeekProviderConfig {
             default_thinking: true,
             default_reasoning_effort: ReasoningEffort::Max,
             quirks: DeepSeekProviderQuirkProfile::default(),
+        }
+    }
+}
+
+impl Default for DeepSeekProviderConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_primary_base_url(),
+            beta_base_url: default_beta_base_url(),
+            anthropic_base_url: default_anthropic_base_url(),
+            model: default_model(),
+            api_key: None,
+            user_id_strategy: default_user_id_strategy(),
+            strict_tools_mode: StrictToolsMode::default(),
+            fim_model: default_fim_model(),
+            request_timeout_secs: default_request_timeout_secs(),
         }
     }
 }

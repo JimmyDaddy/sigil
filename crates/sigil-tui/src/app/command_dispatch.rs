@@ -1,4 +1,6 @@
-use super::*;
+use super::{AppAction, AppState, PaneFocus};
+use crate::commands::UiCommand;
+use sigil_kernel::CodeIntelStartup;
 
 impl AppState {
     pub(super) fn request_changed_files_diagnostics(&mut self) -> Option<AppAction> {

@@ -211,38 +211,35 @@ fn esc_interrupts_active_run() -> Result<()> {
 }
 
 #[test]
-fn poll_background_tasks_applies_latest_balance_and_model_refresh() -> Result<()> {
+fn worker_messages_apply_balance_and_model_refresh() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+    let model_request_id = app
+        .active_model_picker_refresh
+        .as_ref()
+        .expect("model picker refresh should be active")
+        .request_id;
 
-    let (balance_tx, balance_rx) = std::sync::mpsc::channel();
-    balance_tx.send(crate::provider_status::BalanceSnapshot {
-        total: Some(1.0),
-        currency: Some("USD".to_owned()),
-        available: true,
-        status: "USD 1.00".to_owned(),
+    let balance_request_id = app.next_background_request_id();
+    app.active_balance_refresh_id = Some(balance_request_id);
+    app.handle_worker_message(WorkerMessage::ProviderBalanceRefreshed {
+        request_id: balance_request_id,
+        snapshot: crate::provider_status::BalanceSnapshot {
+            total: Some(2.0),
+            currency: Some("USD".to_owned()),
+            available: true,
+            status: "USD 2.00".to_owned(),
+        },
     })?;
-    balance_tx.send(crate::provider_status::BalanceSnapshot {
-        total: Some(2.0),
-        currency: Some("USD".to_owned()),
-        available: true,
-        status: "USD 2.00".to_owned(),
-    })?;
-    app.balance_refresh_rx = Some(balance_rx);
-
-    let (model_tx, model_rx) = std::sync::mpsc::channel();
-    model_tx.send(ModelPickerRefresh {
-        target: ModelPickerTarget::Provider,
-        current: "custom-model".to_owned(),
+    app.handle_worker_message(WorkerMessage::ProviderModelsRefreshed {
+        request_id: model_request_id,
         base_url: "https://example.com".to_owned(),
         result: Ok(vec!["remote-model".to_owned()]),
     })?;
-    app.model_picker_refresh_rx = Some(model_rx);
 
-    assert!(app.poll_background_tasks());
     assert_eq!(app.balance_snapshot.status, "USD 2.00");
-    assert!(app.balance_refresh_rx.is_none());
-    assert!(app.model_picker_refresh_rx.is_none());
+    assert!(app.active_balance_refresh_id.is_none());
+    assert!(app.active_model_picker_refresh.is_none());
     assert_eq!(
         app.last_notice(),
         Some("loaded provider model list (https://example.com)")
@@ -257,18 +254,70 @@ fn poll_background_tasks_applies_latest_balance_and_model_refresh() -> Result<()
 }
 
 #[test]
+fn pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    assert!(!app.poll_background_tasks());
+    assert!(!app.has_pending_worker_commands());
+
+    app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
+    let model_request_id = app
+        .active_model_picker_refresh
+        .as_ref()
+        .expect("model picker refresh should be active")
+        .request_id;
+    assert!(app.has_pending_worker_commands());
+
+    let commands = app.drain_pending_worker_commands();
+    assert!(matches!(
+        commands.as_slice(),
+        [WorkerCommand::RefreshProviderModels { request_id, .. }] if *request_id == model_request_id
+    ));
+    assert!(!app.has_pending_worker_commands());
+    assert!(app.drain_pending_worker_commands().is_empty());
+
+    app.handle_worker_message(WorkerMessage::ProviderModelsRefreshed {
+        request_id: model_request_id + 1,
+        base_url: "https://stale.example".to_owned(),
+        result: Ok(vec!["stale".to_owned()]),
+    })?;
+    assert!(app.active_model_picker_refresh.is_some());
+
+    app.active_model_picker_refresh = None;
+    app.handle_worker_message(WorkerMessage::ProviderModelsRefreshed {
+        request_id: model_request_id,
+        base_url: "https://none.example".to_owned(),
+        result: Ok(vec!["ignored".to_owned()]),
+    })?;
+
+    app.active_balance_refresh_id = Some(7);
+    let previous_status = app.balance_snapshot.status.clone();
+    app.handle_worker_message(WorkerMessage::ProviderBalanceRefreshed {
+        request_id: 8,
+        snapshot: crate::provider_status::BalanceSnapshot {
+            total: Some(1.0),
+            currency: Some("USD".to_owned()),
+            available: true,
+            status: "USD 1.00".to_owned(),
+        },
+    })?;
+    assert_eq!(app.active_balance_refresh_id, Some(7));
+    assert_eq!(app.balance_snapshot.status, previous_status);
+    Ok(())
+}
+
+#[test]
 fn schedule_balance_refresh_handles_missing_config_and_auth() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.config_snapshot = None;
     app.schedule_balance_refresh();
     assert_eq!(app.balance_snapshot.status, "n/a");
-    assert!(app.balance_refresh_rx.is_none());
+    assert!(app.active_balance_refresh_id.is_none());
 
     app.apply_runtime_config_snapshot(&test_config());
     app.schedule_balance_refresh();
     assert_eq!(app.balance_snapshot.status, "missing auth");
-    assert!(app.balance_refresh_rx.is_none());
+    assert!(app.active_balance_refresh_id.is_none());
 
     let temp = tempdir().expect("tempdir should be created");
     let mut setup_app = AppState::from_setup(
@@ -277,7 +326,7 @@ fn schedule_balance_refresh_handles_missing_config_and_auth() {
         None,
     );
     setup_app.schedule_balance_refresh();
-    assert!(setup_app.balance_refresh_rx.is_none());
+    assert!(setup_app.active_balance_refresh_id.is_none());
 }
 
 #[test]

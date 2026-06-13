@@ -1,4 +1,4 @@
-use super::*;
+use super::{AppState, TimelineEntry, TimelineRole, ToolActivityCacheEntry};
 
 impl AppState {
     pub(crate) fn has_tool_cards(&self) -> bool {

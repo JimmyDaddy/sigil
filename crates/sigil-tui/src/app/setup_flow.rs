@@ -1,4 +1,19 @@
-use super::*;
+use std::env;
+
+use anyhow::{Result, bail};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use sigil_kernel::{
+    AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
+    WorkspaceConfig,
+};
+use sigil_provider_deepseek::{DeepSeekProviderConfig, SIGIL_API_KEY_ENV};
+
+use super::{
+    AppAction, AppState, SetupField, SetupState,
+    formatting::persisted_root_config,
+    modal_flow::{ModelPickerTarget, SecretInputTarget, TextInputTarget},
+};
+use crate::config_panel::serialize_deepseek_provider_value;
 
 impl AppState {
     pub fn setup_lines(&self) -> Vec<String> {
@@ -272,17 +287,8 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
         bail!("provide api_key or export {SIGIL_API_KEY_ENV}");
     }
 
-    let provider_config = DeepSeekProviderConfig {
-        base_url: "https://api.deepseek.com".to_owned(),
-        beta_base_url: "https://api.deepseek.com/beta".to_owned(),
-        anthropic_base_url: "https://api.deepseek.com/anthropic".to_owned(),
-        model: model.to_owned(),
-        api_key: (!state.api_key.trim().is_empty()).then(|| state.api_key.clone()),
-        user_id_strategy: Some("stable_per_end_user".to_owned()),
-        strict_tools_mode: StrictToolsMode::Auto,
-        fim_model: "deepseek-v4-pro".to_owned(),
-        request_timeout_secs: 120,
-    };
+    let mut provider_config = DeepSeekProviderConfig::default_for_model(model);
+    provider_config.api_key = (!state.api_key.trim().is_empty()).then(|| state.api_key.clone());
 
     let provider_value = serialize_deepseek_provider_value(&provider_config)?;
     Ok(RootConfig {

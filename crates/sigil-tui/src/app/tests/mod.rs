@@ -32,14 +32,15 @@ use sigil_kernel::{
 use sigil_runtime::{McpElicitationAction, McpElicitationRequest};
 use tempfile::tempdir;
 
+use crate::config_panel::{ConfigField, ConfigFooterAction, ConfigSection};
 use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 use crate::slash::SLASH_COMMANDS;
 
+use super::modal_flow::ModelPickerTarget;
 use super::{
     AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary, ApprovalDiffLineKind,
-    ConfigField, ConfigFooterAction, ConfigSection, ModalState, ModelPickerRefresh,
-    ModelPickerTarget, PaneFocus, RunPhase, SessionHistoryRow, SessionViewMode, SetupField,
-    SidebarCard, TimelineRole,
+    ModalState, ModelPickerRefresh, PaneFocus, RunPhase, SessionHistoryRow, SessionViewMode,
+    SetupField, SidebarCard, TimelineRole,
 };
 
 use common::*;

@@ -1,4 +1,5 @@
-use super::*;
+use super::{AppState, PaneFocus};
+use anyhow::Result;
 
 impl AppState {
     pub fn handle_mouse_event(

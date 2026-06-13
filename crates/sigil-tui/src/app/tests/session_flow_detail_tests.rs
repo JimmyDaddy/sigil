@@ -2,10 +2,12 @@ use std::{io::Cursor, path::PathBuf};
 
 use super::*;
 use crate::app::tests::common::test_config;
+use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    McpElicitationDecision, McpElicitationEntry, ToolApprovalAuditAction, ToolApprovalEntry,
-    ToolApprovalUserDecision, ToolError, ToolErrorKind, ToolResultMeta,
+    ApprovalMode, CompactionConfig, CompactionRecord, McpElicitationDecision, McpElicitationEntry,
+    MemoryConfig, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolError,
+    ToolErrorKind, ToolResultMeta, WorkspaceConfig,
 };
 
 #[test]

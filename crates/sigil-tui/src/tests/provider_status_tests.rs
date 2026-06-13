@@ -106,8 +106,8 @@ fn resolve_provider_api_key_uses_inline_config_secret() {
     );
 }
 
-#[test]
-fn remote_model_fetch_fails_fast_without_auth() {
+#[tokio::test]
+async fn remote_model_fetch_fails_fast_without_auth() {
     if std::env::var(SIGIL_API_KEY_ENV).is_ok()
         || std::env::var(LEGACY_DEEPSEEK_API_KEY_ENV).is_ok()
     {
@@ -115,13 +115,15 @@ fn remote_model_fetch_fails_fast_without_auth() {
     }
     let config = provider_config(None);
 
-    let error = fetch_remote_model_ids(&config).expect_err("missing auth should fail before http");
+    let error = fetch_remote_model_ids(&config)
+        .await
+        .expect_err("missing auth should fail before http");
 
     assert_eq!(error.to_string(), "missing auth");
 }
 
-#[test]
-fn balance_fetch_fails_fast_without_auth() {
+#[tokio::test]
+async fn balance_fetch_fails_fast_without_auth() {
     if std::env::var(SIGIL_API_KEY_ENV).is_ok()
         || std::env::var(LEGACY_DEEPSEEK_API_KEY_ENV).is_ok()
     {
@@ -129,8 +131,9 @@ fn balance_fetch_fails_fast_without_auth() {
     }
     let config = provider_config(None);
 
-    let error =
-        fetch_provider_balance_snapshot(&config).expect_err("missing auth should fail before http");
+    let error = fetch_provider_balance_snapshot(&config)
+        .await
+        .expect_err("missing auth should fail before http");
 
     assert_eq!(error.to_string(), "missing auth");
 }
@@ -338,13 +341,15 @@ fn parse_balance_snapshot_rejects_unparseable_items() {
     );
 }
 
-#[test]
-fn fetch_remote_model_ids_reports_http_errors() {
+#[tokio::test]
+async fn fetch_remote_model_ids_reports_http_errors() {
     let (base_url, server) = spawn_mock_http_server(500, r#"{ \"error\": \"down\" }"#.to_owned());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
 
-    let error = fetch_remote_model_ids(&config).expect_err("server error should fail");
+    let error = fetch_remote_model_ids(&config)
+        .await
+        .expect_err("server error should fail");
     assert!(
         error
             .to_string()
@@ -354,13 +359,15 @@ fn fetch_remote_model_ids_reports_http_errors() {
     let _ = server.join();
 }
 
-#[test]
-fn fetch_remote_model_ids_reports_decode_errors() {
+#[tokio::test]
+async fn fetch_remote_model_ids_reports_decode_errors() {
     let (base_url, server) = spawn_mock_http_server(200, "not-json".to_owned());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
 
-    let error = fetch_remote_model_ids(&config).expect_err("invalid json should fail");
+    let error = fetch_remote_model_ids(&config)
+        .await
+        .expect_err("invalid json should fail");
     assert!(
         error
             .to_string()
@@ -370,8 +377,8 @@ fn fetch_remote_model_ids_reports_decode_errors() {
     let _ = server.join();
 }
 
-#[test]
-fn fetch_remote_model_ids_returns_remote_ids_from_http_payload() {
+#[tokio::test]
+async fn fetch_remote_model_ids_returns_remote_ids_from_http_payload() {
     let (base_url, server) = spawn_mock_http_server(
         200,
         json!({
@@ -386,43 +393,51 @@ fn fetch_remote_model_ids_returns_remote_ids_from_http_payload() {
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
 
-    let models = fetch_remote_model_ids(&config).expect("valid remote model list should parse");
+    let models = fetch_remote_model_ids(&config)
+        .await
+        .expect("valid remote model list should parse");
 
     assert_eq!(models, vec!["deepseek-v4-flash", "deepseek-v4-pro"]);
     let _ = server.join();
 }
 
-#[test]
-fn fetch_remote_model_ids_rejects_empty_remote_model_list() {
+#[tokio::test]
+async fn fetch_remote_model_ids_rejects_empty_remote_model_list() {
     let (base_url, server) = spawn_mock_http_server(200, json!({"data": []}).to_string());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
 
-    let error = fetch_remote_model_ids(&config).expect_err("empty model list should fail");
+    let error = fetch_remote_model_ids(&config)
+        .await
+        .expect_err("empty model list should fail");
 
     assert_eq!(error.to_string(), "provider returned no model ids");
     let _ = server.join();
 }
 
-#[test]
-fn fetch_provider_balance_snapshot_reports_http_errors() {
+#[tokio::test]
+async fn fetch_provider_balance_snapshot_reports_http_errors() {
     let (base_url, server) = spawn_mock_http_server(503, r#"{ \"error\": \"down\" }"#.to_owned());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
 
-    let error = fetch_provider_balance_snapshot(&config).expect_err("server error should fail");
+    let error = fetch_provider_balance_snapshot(&config)
+        .await
+        .expect_err("server error should fail");
     assert!(error.to_string().contains("failed to fetch balance"));
 
     let _ = server.join();
 }
 
-#[test]
-fn fetch_provider_balance_snapshot_reports_decode_errors() {
+#[tokio::test]
+async fn fetch_provider_balance_snapshot_reports_decode_errors() {
     let (base_url, server) = spawn_mock_http_server(200, "not-json".to_owned());
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
 
-    let error = fetch_provider_balance_snapshot(&config).expect_err("invalid json should fail");
+    let error = fetch_provider_balance_snapshot(&config)
+        .await
+        .expect_err("invalid json should fail");
     assert!(
         error
             .to_string()
@@ -432,8 +447,8 @@ fn fetch_provider_balance_snapshot_reports_decode_errors() {
     let _ = server.join();
 }
 
-#[test]
-fn fetch_provider_balance_snapshot_returns_http_balance_payload() {
+#[tokio::test]
+async fn fetch_provider_balance_snapshot_returns_http_balance_payload() {
     let (base_url, server) = spawn_mock_http_server(
         200,
         json!({
@@ -447,8 +462,9 @@ fn fetch_provider_balance_snapshot_returns_http_balance_payload() {
     let mut config = provider_config(Some("test-key"));
     config.base_url = base_url;
 
-    let snapshot =
-        fetch_provider_balance_snapshot(&config).expect("valid remote balance should parse");
+    let snapshot = fetch_provider_balance_snapshot(&config)
+        .await
+        .expect("valid remote balance should parse");
 
     assert_eq!(snapshot.total, Some(18.50));
     assert_eq!(snapshot.currency.as_deref(), Some("CNY"));
@@ -459,5 +475,5 @@ fn fetch_provider_balance_snapshot_returns_http_balance_payload() {
 
 #[test]
 fn build_provider_status_client_accepts_small_timeout_values() {
-    build_provider_status_client(1, "balance").expect("expected blocking client");
+    build_provider_status_client(1, "balance").expect("expected provider status client");
 }

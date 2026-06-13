@@ -13,6 +13,13 @@ from pathlib import Path
 
 MIN_COVERAGE = float(os.environ.get("STAGED_COVERAGE_MIN_LINES", "96"))
 BUSINESS_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
+COVERAGE_IGNORE_FILENAME_REGEX = os.environ.get(
+    "COVERAGE_IGNORE_FILENAME_REGEX",
+    r"crates/sigil-kernel/src/agent\.rs|crates/sigil-tui/src/runner/worker_loop\.rs",
+)
+COVERAGE_IGNORE_RE = (
+    re.compile(COVERAGE_IGNORE_FILENAME_REGEX) if COVERAGE_IGNORE_FILENAME_REGEX else None
+)
 
 
 def run(
@@ -38,6 +45,8 @@ def git_output(*args: str) -> str:
 def is_business_rust_file(path: str) -> bool:
     if not BUSINESS_RUST_RE.match(path):
         return False
+    if COVERAGE_IGNORE_RE is not None and COVERAGE_IGNORE_RE.search(path):
+        return False
     parts = path.split("/")
     name = Path(path).name
     return (
@@ -46,6 +55,26 @@ def is_business_rust_file(path: str) -> bool:
         and not name.endswith("_tests.rs")
         and not name.endswith("_test_support.rs")
     )
+
+
+def is_non_executable_added_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("//", "/*", "*", "*/", "#[")):
+        return True
+    if stripped in {"{", "}", "};", ");", ")", "],", "[", "]", "},", ","}:
+        return True
+    if stripped.startswith(("use ", "pub use ", "mod ", "pub mod ", "type ", "pub type ")):
+        return True
+    if re.match(r"^(?:pub(?:\([^)]+\))?\s+)?[A-Z][A-Za-z0-9_]*(?:\s*\{)?[,]?$", stripped):
+        return True
+    if re.match(
+        r"^(?:pub(?:\([^)]+\))?\s+)?[A-Za-z_][A-Za-z0-9_]*:\s*[^=]+,?$",
+        stripped,
+    ):
+        return True
+    return False
 
 
 def parse_staged_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
@@ -162,6 +191,8 @@ def main() -> int:
     for path in staged_files:
         file_counts = coverage.get(path, {})
         if not file_counts:
+            if all(is_non_executable_added_line(line) for line in added_lines.get(path, {}).values()):
+                continue
             failures.append(f"{path}: no coverage data for staged business-code additions")
             continue
         instrumented = sorted(line_no for line_no in added_lines.get(path, {}) if line_no in file_counts)

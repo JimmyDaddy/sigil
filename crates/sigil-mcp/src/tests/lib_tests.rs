@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, sync::Arc};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -13,12 +13,141 @@ use tokio::{
 };
 
 use super::{
-    McpElicitationHandler, McpElicitationRequest, McpElicitationResponse, activate_lazy_mcp_tools,
-    activate_lazy_mcp_tools_with_capabilities_roots_and_secrets, register_mcp_tools,
-    register_mcp_tools_with_capabilities_and_roots,
-    register_mcp_tools_with_capabilities_roots_and_secrets,
-    register_mcp_tools_with_capabilities_roots_secrets_and_elicitation,
+    McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
+    McpToolRegistrationOptions, activate_lazy_mcp_tools, register_mcp_tools,
+    register_mcp_tools_with_options,
 };
+
+async fn register_mcp_tools_with_capabilities(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+) -> Result<()> {
+    register_mcp_tools_with_options(
+        registry,
+        servers,
+        McpToolRegistrationOptions::eager()?.with_capabilities(capabilities),
+    )
+    .await
+}
+
+async fn register_mcp_tools_with_capabilities_and_roots(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<std::path::PathBuf>,
+) -> Result<()> {
+    register_mcp_tools_with_options(
+        registry,
+        servers,
+        McpToolRegistrationOptions::eager()?
+            .with_capabilities(capabilities)
+            .with_roots(roots),
+    )
+    .await
+}
+
+async fn register_mcp_tools_with_capabilities_roots_and_secrets(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<std::path::PathBuf>,
+    secret_redactor: SecretRedactor,
+) -> Result<()> {
+    register_mcp_tools_with_options(
+        registry,
+        servers,
+        McpToolRegistrationOptions::eager()?
+            .with_capabilities(capabilities)
+            .with_roots(roots)
+            .with_secret_redactor(secret_redactor),
+    )
+    .await
+}
+
+async fn register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<std::path::PathBuf>,
+    secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+) -> Result<()> {
+    register_mcp_tools_with_options(
+        registry,
+        servers,
+        McpToolRegistrationOptions::eager()?
+            .with_capabilities(capabilities)
+            .with_roots(roots)
+            .with_secret_redactor(secret_redactor)
+            .with_elicitation_handler(elicitation_handler),
+    )
+    .await
+}
+
+async fn activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<std::path::PathBuf>,
+    secret_redactor: SecretRedactor,
+) -> Result<()> {
+    register_mcp_tools_with_options(
+        registry,
+        servers,
+        McpToolRegistrationOptions::lazy()?
+            .with_capabilities(capabilities)
+            .with_roots(roots)
+            .with_secret_redactor(secret_redactor),
+    )
+    .await
+}
+
+async fn activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    capabilities: &ProviderCapabilities,
+    roots: Vec<std::path::PathBuf>,
+    secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+) -> Result<()> {
+    register_mcp_tools_with_options(
+        registry,
+        servers,
+        McpToolRegistrationOptions::lazy()?
+            .with_capabilities(capabilities)
+            .with_roots(roots)
+            .with_secret_redactor(secret_redactor)
+            .with_elicitation_handler(elicitation_handler),
+    )
+    .await
+}
+
+async fn register_mcp_tools_with_name_limit(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    provider_tool_name_max_chars: usize,
+) -> Result<()> {
+    let mut options = McpToolRegistrationOptions::eager()?;
+    options.provider_tool_name_max_chars = provider_tool_name_max_chars;
+    register_mcp_tools_with_options(registry, servers, options).await
+}
+
+async fn register_mcp_tools_with_name_limit_and_roots(
+    registry: &mut ToolRegistry,
+    servers: &[McpServerConfig],
+    provider_tool_name_max_chars: usize,
+    roots: Vec<std::path::PathBuf>,
+    secret_redactor: SecretRedactor,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+) -> Result<()> {
+    let mut options = McpToolRegistrationOptions::eager()?
+        .with_roots(roots)
+        .with_secret_redactor(secret_redactor)
+        .with_elicitation_handler(elicitation_handler);
+    options.provider_tool_name_max_chars = provider_tool_name_max_chars;
+    register_mcp_tools_with_options(registry, servers, options).await
+}
 
 fn write_fake_server_script(path: &std::path::Path, body: &str) -> Result<()> {
     fs::write(path, body)?;
@@ -1148,7 +1277,7 @@ while True:
     )?;
 
     let mut registry = ToolRegistry::new();
-    super::register_mcp_tools_with_name_limit_and_roots(
+    register_mcp_tools_with_name_limit_and_roots(
         &mut registry,
         &[McpServerConfig {
             name: "roots".to_owned(),
@@ -1217,7 +1346,7 @@ while True:
     )?;
 
     let mut registry = ToolRegistry::new();
-    let error = super::register_mcp_tools_with_name_limit_and_roots(
+    let error = register_mcp_tools_with_name_limit_and_roots(
         &mut registry,
         &[McpServerConfig {
             name: "secret_roots".to_owned(),
@@ -1455,7 +1584,7 @@ while True:
     )?;
 
     let mut registry = ToolRegistry::new();
-    super::register_mcp_tools_with_name_limit(
+    register_mcp_tools_with_name_limit(
         &mut registry,
         &[McpServerConfig {
             name: "bad server!".to_owned(),
@@ -1542,7 +1671,7 @@ while True:
     )?;
 
     let mut registry = ToolRegistry::new();
-    super::register_mcp_tools_with_name_limit(
+    register_mcp_tools_with_name_limit(
         &mut registry,
         &[
             McpServerConfig {
@@ -1859,15 +1988,15 @@ async fn mcp_public_capability_wrappers_handle_empty_server_lists() -> Result<()
     };
     let mut registry = ToolRegistry::new();
 
-    super::register_mcp_tools_with_capabilities(&mut registry, &[], &capabilities).await?;
-    super::register_mcp_tools_with_capabilities_and_roots(
+    register_mcp_tools_with_capabilities(&mut registry, &[], &capabilities).await?;
+    register_mcp_tools_with_capabilities_and_roots(
         &mut registry,
         &[],
         &capabilities,
         vec![temp.path().to_path_buf()],
     )
     .await?;
-    super::activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
+    activate_lazy_mcp_tools_with_capabilities_roots_and_secrets(
         &mut registry,
         &[],
         &capabilities,
@@ -1875,7 +2004,7 @@ async fn mcp_public_capability_wrappers_handle_empty_server_lists() -> Result<()
         SecretRedactor::empty(),
     )
     .await?;
-    super::activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+    activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
         &mut registry,
         &[],
         &capabilities,

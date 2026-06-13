@@ -1,9 +1,15 @@
-use std::{sync::mpsc, thread};
+use std::collections::BTreeMap;
 
-use super::*;
-use crate::provider_status::{
-    BalanceSnapshot, fetch_provider_balance_snapshot, resolve_provider_api_key,
+use anyhow::Result;
+
+use super::{
+    AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary, McpServerRuntimeStatus,
+    ModelPickerRefresh, PaneFocus, PendingApproval, RunPhase, TimelineRole,
+    formatting::{format_tool_result_block_redacted, summarize_error},
 };
+use crate::config_panel::default_deepseek_provider_config;
+use crate::provider_status::BalanceSnapshot;
+use crate::provider_status::resolve_provider_api_key;
 use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 use sigil_kernel::{
     ControlEntry, EventHandler, RunEvent, ToolDiffBudget, ToolPreviewSnapshot, ToolResult,
@@ -11,35 +17,37 @@ use sigil_kernel::{
 
 impl AppState {
     pub fn poll_background_tasks(&mut self) -> bool {
-        let mut dirty = false;
-        let mut latest_balance = None;
-        if let Some(receiver) = &self.balance_refresh_rx {
-            while let Ok(snapshot) = receiver.try_recv() {
-                latest_balance = Some(snapshot);
-            }
+        false
+    }
+
+    pub fn has_pending_worker_commands(&self) -> bool {
+        !self.pending_worker_commands.is_empty()
+    }
+
+    pub fn drain_pending_worker_commands(&mut self) -> Vec<WorkerCommand> {
+        std::mem::take(&mut self.pending_worker_commands)
+    }
+
+    pub(super) fn enqueue_worker_command(&mut self, command: WorkerCommand) {
+        self.pending_worker_commands.push(command);
+    }
+
+    pub(super) fn next_background_request_id(&mut self) -> u64 {
+        let request_id = self.next_background_request_id;
+        self.next_background_request_id = self.next_background_request_id.saturating_add(1);
+        request_id
+    }
+
+    pub(super) fn cancel_model_picker_refresh(&mut self) {
+        if let Some(refresh) = self.active_model_picker_refresh.take() {
+            self.enqueue_worker_command(WorkerCommand::CancelProviderModelsRefresh {
+                request_id: refresh.request_id,
+            });
         }
-        if let Some(snapshot) = latest_balance {
-            self.balance_snapshot = snapshot.clone();
-            self.balance_refresh_rx = None;
-            self.push_event("balance", snapshot.status);
-            self.refresh_usage_sidebar_cache();
-            dirty = true;
-        }
-        let mut latest_model_picker = None;
-        if let Some(receiver) = &self.model_picker_refresh_rx {
-            while let Ok(refresh) = receiver.try_recv() {
-                latest_model_picker = Some(refresh);
-            }
-        }
-        if let Some(refresh) = latest_model_picker {
-            self.model_picker_refresh_rx = None;
-            dirty |= self.apply_model_picker_refresh(refresh);
-        }
-        dirty
     }
 
     pub(super) fn schedule_balance_refresh(&mut self) {
-        if self.balance_refresh_rx.is_some() || self.is_setup_mode() {
+        if self.active_balance_refresh_id.is_some() || self.is_setup_mode() {
             return;
         }
         let Some(root_config) = self.config_snapshot.as_ref() else {
@@ -63,16 +71,51 @@ impl AppState {
 
         self.balance_snapshot.status = "loading".to_owned();
         self.refresh_usage_sidebar_cache();
-        let (tx, rx) = mpsc::channel();
-        self.balance_refresh_rx = Some(rx);
-        thread::spawn(move || {
-            let snapshot =
-                fetch_provider_balance_snapshot(&provider_config).unwrap_or(BalanceSnapshot {
-                    status: "balance unavailable".to_owned(),
-                    ..BalanceSnapshot::default()
-                });
-            let _ = tx.send(snapshot);
+        let request_id = self.next_background_request_id();
+        self.active_balance_refresh_id = Some(request_id);
+        self.enqueue_worker_command(WorkerCommand::RefreshProviderBalance {
+            request_id,
+            provider_config,
         });
+    }
+
+    fn apply_provider_balance_refresh(
+        &mut self,
+        request_id: u64,
+        snapshot: BalanceSnapshot,
+    ) -> bool {
+        if self.active_balance_refresh_id != Some(request_id) {
+            return false;
+        }
+        self.active_balance_refresh_id = None;
+        self.balance_snapshot = snapshot.clone();
+        self.push_event("balance", snapshot.status);
+        self.refresh_usage_sidebar_cache();
+        true
+    }
+
+    fn apply_provider_models_refresh(
+        &mut self,
+        request_id: u64,
+        base_url: String,
+        result: Result<Vec<String>, String>,
+    ) -> bool {
+        let Some(active) = self.active_model_picker_refresh.as_ref() else {
+            return false;
+        };
+        if active.request_id != request_id {
+            return false;
+        }
+        let active = self
+            .active_model_picker_refresh
+            .take()
+            .expect("active refresh checked above");
+        self.apply_model_picker_refresh(ModelPickerRefresh {
+            target: active.target,
+            current: active.current,
+            base_url,
+            result,
+        })
     }
 
     pub fn handle_worker_message(&mut self, message: WorkerMessage) -> Result<()> {
@@ -213,6 +256,19 @@ impl AppState {
                 status,
             } => {
                 self.apply_mcp_activation_status(server_name, status);
+            }
+            WorkerMessage::ProviderBalanceRefreshed {
+                request_id,
+                snapshot,
+            } => {
+                self.apply_provider_balance_refresh(request_id, snapshot);
+            }
+            WorkerMessage::ProviderModelsRefreshed {
+                request_id,
+                base_url,
+                result,
+            } => {
+                self.apply_provider_models_refresh(request_id, base_url, result);
             }
             WorkerMessage::McpElicitationRequest {
                 request,

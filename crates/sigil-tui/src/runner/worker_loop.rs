@@ -9,7 +9,10 @@ use sigil_kernel::{
     Agent, AgentRunOptions, AgentRunResult, ProviderCapabilities, RootConfig, Session, ToolApproval,
 };
 
-use crate::context_window::effective_compaction_config;
+use crate::{
+    context_window::effective_compaction_config,
+    provider_status::{BalanceSnapshot, fetch_provider_balance_snapshot, fetch_remote_model_ids},
+};
 
 use super::{
     approval_bridge::{ApprovalSignal, ChannelApprovalHandler},
@@ -47,11 +50,51 @@ pub(super) fn run_worker_loop<P>(
     };
 
     let (task_result_tx, task_result_rx) = mpsc::channel::<RunTaskResult>();
+    let (provider_status_tx, provider_status_rx) = mpsc::channel::<ProviderStatusTaskResult>();
     let mut active_run: Option<ActiveRun> = None;
+    let mut active_balance_refresh: Option<ActiveProviderStatusTask> = None;
+    let mut active_model_refresh: Option<ActiveProviderStatusTask> = None;
     let mut next_run_id = 1_u64;
     let mut discarded_run_ids = BTreeSet::new();
 
     loop {
+        while let Ok(status_result) = provider_status_rx.try_recv() {
+            match status_result {
+                ProviderStatusTaskResult::Balance {
+                    request_id,
+                    snapshot,
+                } => {
+                    if active_balance_refresh
+                        .as_ref()
+                        .is_some_and(|task| task.request_id == request_id)
+                    {
+                        active_balance_refresh = None;
+                        let _ = message_tx.send(WorkerMessage::ProviderBalanceRefreshed {
+                            request_id,
+                            snapshot,
+                        });
+                    }
+                }
+                ProviderStatusTaskResult::Models {
+                    request_id,
+                    base_url,
+                    result,
+                } => {
+                    if active_model_refresh
+                        .as_ref()
+                        .is_some_and(|task| task.request_id == request_id)
+                    {
+                        active_model_refresh = None;
+                        let _ = message_tx.send(WorkerMessage::ProviderModelsRefreshed {
+                            request_id,
+                            base_url,
+                            result,
+                        });
+                    }
+                }
+            }
+        }
+
         while let Ok(task_result) = task_result_rx.try_recv() {
             if discarded_run_ids.remove(&task_result.run_id) {
                 continue;
@@ -319,6 +362,58 @@ pub(super) fn run_worker_loop<P>(
                     }
                 }
             }
+            Ok(WorkerCommand::RefreshProviderBalance {
+                request_id,
+                provider_config,
+            }) => {
+                if let Some(task) = active_balance_refresh.take() {
+                    task.handle.abort();
+                }
+                let provider_status_tx = provider_status_tx.clone();
+                let handle = runtime.spawn(async move {
+                    let snapshot = fetch_provider_balance_snapshot(&provider_config)
+                        .await
+                        .unwrap_or(BalanceSnapshot {
+                            status: "balance unavailable".to_owned(),
+                            ..BalanceSnapshot::default()
+                        });
+                    let _ = provider_status_tx.send(ProviderStatusTaskResult::Balance {
+                        request_id,
+                        snapshot,
+                    });
+                });
+                active_balance_refresh = Some(ActiveProviderStatusTask { request_id, handle });
+            }
+            Ok(WorkerCommand::RefreshProviderModels {
+                request_id,
+                provider_config,
+            }) => {
+                if let Some(task) = active_model_refresh.take() {
+                    task.handle.abort();
+                }
+                let base_url = provider_config.base_url.clone();
+                let provider_status_tx = provider_status_tx.clone();
+                let handle = runtime.spawn(async move {
+                    let result = fetch_remote_model_ids(&provider_config)
+                        .await
+                        .map_err(|error| format!("{error:#}"));
+                    let _ = provider_status_tx.send(ProviderStatusTaskResult::Models {
+                        request_id,
+                        base_url,
+                        result,
+                    });
+                });
+                active_model_refresh = Some(ActiveProviderStatusTask { request_id, handle });
+            }
+            Ok(WorkerCommand::CancelProviderModelsRefresh { request_id }) => {
+                if active_model_refresh
+                    .as_ref()
+                    .is_some_and(|task| task.request_id == request_id)
+                    && let Some(task) = active_model_refresh.take()
+                {
+                    task.handle.abort();
+                }
+            }
             Ok(WorkerCommand::ActivateLazyMcp { server_name }) => {
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
@@ -431,11 +526,24 @@ pub(super) fn run_worker_loop<P>(
                     let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
                     active_run.handle.abort();
                 }
+                if let Some(task) = active_balance_refresh.take() {
+                    task.handle.abort();
+                }
+                if let Some(task) = active_model_refresh.take() {
+                    task.handle.abort();
+                }
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+
+    if let Some(task) = active_balance_refresh.take() {
+        task.handle.abort();
+    }
+    if let Some(task) = active_model_refresh.take() {
+        task.handle.abort();
     }
 }
 
@@ -450,6 +558,23 @@ struct RunTaskResult {
     run_id: u64,
     session: Session,
     result: std::result::Result<AgentRunResult, String>,
+}
+
+struct ActiveProviderStatusTask {
+    request_id: u64,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+enum ProviderStatusTaskResult {
+    Balance {
+        request_id: u64,
+        snapshot: BalanceSnapshot,
+    },
+    Models {
+        request_id: u64,
+        base_url: String,
+        result: std::result::Result<Vec<String>, String>,
+    },
 }
 
 fn append_mcp_elicitation_audits(

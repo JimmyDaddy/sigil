@@ -82,8 +82,15 @@ fn model_picker_opens_with_local_options_before_remote_refresh() -> Result<()> {
     app.open_model_picker(ModelPickerTarget::Provider, "custom-model");
 
     assert!(matches!(app.modal_state, Some(ModalState::ModelPicker(_))));
-    assert!(app.model_picker_refresh_rx.is_none());
-    assert_eq!(app.last_notice(), Some("using local model list"));
+    assert!(app.active_model_picker_refresh.is_some());
+    assert!(matches!(
+        app.pending_worker_commands.last(),
+        Some(WorkerCommand::RefreshProviderModels { .. })
+    ));
+    assert_eq!(
+        app.last_notice(),
+        Some("loading provider model list (https://api.deepseek.com)")
+    );
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("deepseek-v4-flash"));
     assert!(lines.contains("custom-model"));
@@ -243,7 +250,10 @@ fn model_picker_refresh_mismatch_is_ignored() -> Result<()> {
     });
 
     assert!(!changed);
-    assert_eq!(app.last_notice(), Some("using local model list"));
+    assert_eq!(
+        app.last_notice(),
+        Some("loading provider model list (https://api.deepseek.com)")
+    );
     assert_eq!(app.modal_lines().join("\n"), before);
     let lines = app.modal_lines().join("\n");
     assert!(lines.contains("custom-model"));

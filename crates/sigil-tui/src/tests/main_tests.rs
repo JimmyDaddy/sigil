@@ -7,6 +7,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use serde_json::json;
 use sigil_kernel::{
     AgentConfig, CompactionConfig, MemoryConfig, ModelMessage, PermissionConfig, RootConfig,
     SessionConfig, SessionLogEntry, WorkspaceConfig,
@@ -20,11 +21,11 @@ use super::{
     AppMouseOutcome, BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, SCROLLBACK_SEED_POLL_INTERVAL,
     ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
     apply_key_action, apply_mouse_outcome, build_initial_app, drain_worker_messages,
-    next_poll_interval, plan_scrollback_sync, plan_scrollback_sync_with_chunk_size, poll_interval,
-    prepare_scrollback_sync, prepare_scrollback_sync_with_chunk_size, process_app_action,
-    process_app_action_with_spawner, render_scrollback_rows, scrollback_plain_line,
-    scrollback_row_style, scrollback_separator, scrollback_wrapped_rows,
-    should_sync_terminal_scrollback, wrap_scrollback_text,
+    flush_pending_worker_commands, next_poll_interval, plan_scrollback_sync,
+    plan_scrollback_sync_with_chunk_size, poll_interval, prepare_scrollback_sync,
+    prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
+    render_scrollback_rows, scrollback_plain_line, scrollback_row_style, scrollback_separator,
+    scrollback_wrapped_rows, should_sync_terminal_scrollback, wrap_scrollback_text,
 };
 
 fn test_config() -> RootConfig {
@@ -421,6 +422,49 @@ fn process_app_action_ignores_worker_command_without_runtime() -> anyhow::Result
     process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
 
     assert!(worker.is_none());
+    Ok(())
+}
+
+#[test]
+fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> anyhow::Result<()> {
+    let mut app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+    let mut worker = None;
+    assert!(!flush_pending_worker_commands(&mut app, &mut worker)?);
+
+    let mut config = test_config();
+    config.providers.insert(
+        "deepseek".to_owned(),
+        json!({
+            "base_url": "https://example.com",
+            "model": "deepseek-v4-flash",
+            "api_key": "test-key",
+            "request_timeout_secs": 1
+        }),
+    );
+    app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    assert!(app.has_pending_worker_commands());
+    assert!(!flush_pending_worker_commands(&mut app, &mut worker)?);
+    assert!(app.has_pending_worker_commands());
+
+    let (worker_tx, command_rx) = mpsc::channel();
+    let (_message_tx, worker_rx) = mpsc::channel();
+    worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+    });
+    assert!(flush_pending_worker_commands(&mut app, &mut worker)?);
+
+    let command = command_rx.recv_timeout(Duration::from_secs(1))?;
+    assert!(matches!(
+        command,
+        WorkerCommand::RefreshProviderBalance { .. }
+    ));
+    assert!(!app.has_pending_worker_commands());
+    assert!(!flush_pending_worker_commands(&mut app, &mut worker)?);
     Ok(())
 }
 

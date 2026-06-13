@@ -121,6 +121,7 @@ fn run_app(
         let mut dirty = needs_render;
         dirty |= drain_worker_messages(app, worker)?;
         dirty |= app.poll_background_tasks();
+        dirty |= flush_pending_worker_commands(app, worker)?;
 
         let size = terminal.size()?;
         dirty |= app.set_terminal_size(size.width, size.height);
@@ -184,6 +185,7 @@ where
             let mut app = AppState::from_root_config(&config_path, &root_config);
             app.restore_latest_session_from_disk(&root_config);
             worker = Some(spawn_worker_fn(root_config, &app)?);
+            flush_pending_worker_commands(&mut app, &mut worker)?;
             app
         }
         Err(error) => AppState::from_setup(config_path.clone(), cwd, Some(error.to_string())),
@@ -222,6 +224,7 @@ where
             }
         }
     }
+    flush_pending_worker_commands(app, worker)?;
     Ok(())
 }
 
@@ -257,6 +260,24 @@ fn drain_worker_messages(app: &mut AppState, worker: &mut Option<WorkerRuntime>)
         dirty = true;
     }
     Ok(dirty | app.flush_timeline_render_batch())
+}
+
+fn flush_pending_worker_commands(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+) -> Result<bool> {
+    if !app.has_pending_worker_commands() {
+        return Ok(false);
+    }
+    let Some(runtime) = worker.as_ref() else {
+        return Ok(false);
+    };
+    let commands = app.drain_pending_worker_commands();
+    let dirty = !commands.is_empty();
+    for command in commands {
+        runtime.worker_tx.send(command)?;
+    }
+    Ok(dirty)
 }
 
 fn apply_mouse_outcome<F>(

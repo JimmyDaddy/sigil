@@ -69,13 +69,14 @@ pub async fn build_tool_registry_with_mcp_elicitation(
         &root_config.code_intelligence,
         workspace_root.clone(),
     );
-    sigil_mcp::register_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+    sigil_mcp::register_mcp_tools_with_options(
         &mut registry,
         &root_config.mcp_servers,
-        provider_capabilities,
-        vec![canonical_workspace_root(workspace_root.clone())],
-        secret_redactor_for_root_config(root_config),
-        Arc::clone(&elicitation_handler),
+        sigil_mcp::McpToolRegistrationOptions::eager()?
+            .with_capabilities(provider_capabilities)
+            .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
+            .with_secret_redactor(secret_redactor_for_root_config(root_config))
+            .with_elicitation_handler(Arc::clone(&elicitation_handler)),
     )
     .await?;
     register_lazy_mcp_activation_tool(
@@ -172,13 +173,14 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_elicitation(
     }
 
     let before = registry.specs().len();
-    sigil_mcp::activate_lazy_mcp_tools_with_capabilities_roots_secrets_and_elicitation(
+    sigil_mcp::register_mcp_tools_with_options(
         registry,
         &servers,
-        provider_capabilities,
-        vec![canonical_workspace_root(workspace_root)],
-        secret_redactor_for_root_config(root_config),
-        elicitation_handler,
+        sigil_mcp::McpToolRegistrationOptions::lazy()?
+            .with_capabilities(provider_capabilities)
+            .with_roots(vec![canonical_workspace_root(workspace_root)])
+            .with_secret_redactor(secret_redactor_for_root_config(root_config))
+            .with_elicitation_handler(elicitation_handler),
     )
     .await?;
     Ok(LazyMcpActivationResult {

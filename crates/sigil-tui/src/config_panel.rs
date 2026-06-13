@@ -840,17 +840,7 @@ pub(crate) fn load_deepseek_provider_config(
 }
 
 pub(crate) fn default_deepseek_provider_config(model: &str) -> DeepSeekProviderConfig {
-    DeepSeekProviderConfig {
-        base_url: "https://api.deepseek.com".to_owned(),
-        beta_base_url: "https://api.deepseek.com/beta".to_owned(),
-        anthropic_base_url: "https://api.deepseek.com/anthropic".to_owned(),
-        model: model.to_owned(),
-        api_key: None,
-        user_id_strategy: Some("stable_per_end_user".to_owned()),
-        strict_tools_mode: StrictToolsMode::Auto,
-        fim_model: "deepseek-v4-pro".to_owned(),
-        request_timeout_secs: 120,
-    }
+    DeepSeekProviderConfig::default_for_model(model)
 }
 
 pub(crate) fn serialize_deepseek_provider_value(
