@@ -452,6 +452,7 @@ fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
     )?;
 
     assert!(command_rx.recv_timeout(Duration::from_millis(10)).is_err());
+    assert_eq!(app.last_notice(), Some("copied 1 line(s), 8 char(s)"));
     Ok(())
 }
 

@@ -91,8 +91,8 @@ impl AppState {
                 crate::mouse::HitTarget::ToolCard { entry_index }
                     if self.pending_approval.is_none() =>
                 {
-                    if let Some(line_index) = layout.live_text_line_at(input.column, input.row) {
-                        self.begin_timeline_text_selection(line_index);
+                    if let Some(position) = layout.live_text_position_at(input.column, input.row) {
+                        self.begin_timeline_text_selection_at(position.line_index, position.column);
                     } else {
                         self.clear_timeline_text_selection();
                     }
@@ -113,8 +113,10 @@ impl AppState {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 }
                 _ if self.pending_approval.is_none() => {
-                    if let Some(line_index) = layout.live_text_line_at(input.column, input.row) {
-                        if self.begin_timeline_text_selection(line_index) {
+                    if let Some(position) = layout.live_text_position_at(input.column, input.row) {
+                        if self
+                            .begin_timeline_text_selection_at(position.line_index, position.column)
+                        {
                             Ok(crate::mouse::AppMouseOutcome::Redraw)
                         } else {
                             Ok(crate::mouse::AppMouseOutcome::Noop)
@@ -128,8 +130,9 @@ impl AppState {
                 _ => Ok(crate::mouse::AppMouseOutcome::Noop),
             },
             crate::mouse::MouseInputKind::Drag if self.pending_approval.is_none() => {
-                if let Some(line_index) = layout.live_text_line_at(input.column, input.row) {
-                    if self.update_timeline_text_selection(line_index) {
+                if let Some(position) = layout.live_text_position_at(input.column, input.row) {
+                    if self.update_timeline_text_selection_at(position.line_index, position.column)
+                    {
                         Ok(crate::mouse::AppMouseOutcome::Redraw)
                     } else {
                         Ok(crate::mouse::AppMouseOutcome::Noop)

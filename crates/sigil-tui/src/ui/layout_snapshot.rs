@@ -53,6 +53,12 @@ pub struct LiveTextRowHitArea {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveTextPosition {
+    pub line_index: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlashOverlayHitAreas {
     pub overlay: Rect,
     pub content: Rect,
@@ -280,6 +286,15 @@ impl LayoutSnapshot {
         self.live_text_rows
             .iter()
             .find_map(|hit| contains(hit.area, column, row).then_some(hit.line_index))
+    }
+
+    pub fn live_text_position_at(&self, column: u16, row: u16) -> Option<LiveTextPosition> {
+        self.live_text_rows.iter().find_map(|hit| {
+            contains(hit.area, column, row).then_some(LiveTextPosition {
+                line_index: hit.line_index,
+                column: column.saturating_sub(hit.area.x) as usize,
+            })
+        })
     }
 }
 

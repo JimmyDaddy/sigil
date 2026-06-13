@@ -70,13 +70,48 @@ const USD_TO_CNY: f64 = 7.2;
 pub(crate) struct TimelineTextSelection {
     pub anchor: usize,
     pub cursor: usize,
+    pub anchor_column: Option<usize>,
+    pub cursor_column: Option<usize>,
 }
 
 impl TimelineTextSelection {
+    pub(crate) fn line(anchor: usize, cursor: usize) -> Self {
+        Self {
+            anchor,
+            cursor,
+            anchor_column: None,
+            cursor_column: None,
+        }
+    }
+
+    pub(crate) fn column(
+        anchor: usize,
+        anchor_column: usize,
+        cursor: usize,
+        cursor_column: usize,
+    ) -> Self {
+        Self {
+            anchor,
+            cursor,
+            anchor_column: Some(anchor_column),
+            cursor_column: Some(cursor_column),
+        }
+    }
+
     pub(crate) fn normalized_range(self) -> Range<usize> {
         let start = self.anchor.min(self.cursor);
         let end = self.anchor.max(self.cursor).saturating_add(1);
         start..end
+    }
+
+    pub(crate) fn normalized_column_bounds(self) -> Option<(usize, usize, usize, usize)> {
+        let anchor_column = self.anchor_column?;
+        let cursor_column = self.cursor_column?;
+        if (self.anchor, anchor_column) <= (self.cursor, cursor_column) {
+            Some((self.anchor, anchor_column, self.cursor, cursor_column))
+        } else {
+            Some((self.cursor, cursor_column, self.anchor, anchor_column))
+        }
     }
 }
 
@@ -246,6 +281,7 @@ pub struct AppState {
     timeline_render_ranges: Vec<Range<usize>>,
     timeline_text_selection: Option<TimelineTextSelection>,
     timeline_text_selection_anchor: Option<usize>,
+    timeline_text_selection_anchor_column: Option<usize>,
     timeline_revision: u64,
     defer_timeline_renders: bool,
     deferred_timeline_render_indexes: BTreeSet<usize>,
@@ -385,6 +421,7 @@ impl AppState {
             timeline_render_ranges: Vec::new(),
             timeline_text_selection: None,
             timeline_text_selection_anchor: None,
+            timeline_text_selection_anchor_column: None,
             timeline_revision: 0,
             defer_timeline_renders: false,
             deferred_timeline_render_indexes: BTreeSet::new(),
@@ -495,6 +532,7 @@ impl AppState {
             timeline_render_ranges: Vec::new(),
             timeline_text_selection: None,
             timeline_text_selection_anchor: None,
+            timeline_text_selection_anchor_column: None,
             timeline_revision: 0,
             defer_timeline_renders: false,
             deferred_timeline_render_indexes: BTreeSet::new(),
@@ -677,8 +715,14 @@ impl AppState {
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if let Some(text) = self.selected_timeline_text() {
-                self.last_notice = Some("copied selection".to_owned());
-                self.push_event("selection:copy", "timeline");
+                self.last_notice = Some(format!(
+                    "copy pending {}",
+                    timeline_flow::clipboard_copy_status(&text)
+                ));
+                self.push_event(
+                    "selection:copy",
+                    format!("pending {}", timeline_flow::clipboard_copy_status(&text)),
+                );
                 return Ok(Some(AppAction::CopyToClipboard { text }));
             }
             self.modal_state = None;

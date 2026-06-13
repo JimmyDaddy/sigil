@@ -2,8 +2,10 @@ use std::ops::Range;
 
 use ratatui::{
     style::{Color, Style},
-    text::Line,
+    text::{Line, Span},
 };
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use super::{
     AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase, ThinkingBlockMode,
@@ -475,7 +477,9 @@ impl AppState {
             .enumerate()
             .map(|(offset, line)| {
                 let line_index = visible_range.start.saturating_add(offset);
-                if selection
+                if let Some(columns) = self.selected_timeline_column_range(line_index) {
+                    selected_timeline_line_columns(line.clone(), columns)
+                } else if selection
                     .as_ref()
                     .is_some_and(|range| range.contains(&line_index))
                 {
@@ -495,14 +499,36 @@ impl AppState {
 
     pub(crate) fn selected_timeline_text(&self) -> Option<String> {
         let range = self.selected_timeline_line_range()?;
+        if self
+            .timeline_text_selection
+            .and_then(TimelineTextSelection::normalized_column_bounds)
+            .is_some()
+        {
+            return Some(
+                range
+                    .filter_map(|line_index| {
+                        let line = self.timeline_plain_cache.get(line_index)?;
+                        let columns = self.selected_timeline_column_range(line_index)?;
+                        Some(text_by_display_columns(line, columns.start, columns.end))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .filter(|text| !text.is_empty());
+        }
         Some(self.timeline_plain_cache[range].join("\n")).filter(|text| !text.is_empty())
     }
 
-    pub(crate) fn begin_timeline_text_selection(&mut self, line_index: usize) -> bool {
+    pub(crate) fn begin_timeline_text_selection_at(
+        &mut self,
+        line_index: usize,
+        column: usize,
+    ) -> bool {
         if line_index >= self.timeline_plain_cache.len() {
             return self.clear_timeline_text_selection();
         }
         self.timeline_text_selection_anchor = Some(line_index);
+        self.timeline_text_selection_anchor_column = Some(column);
         self.timeline_text_selection.take().is_some()
     }
 
@@ -515,7 +541,34 @@ impl AppState {
             return false;
         }
         let cursor = line_index.min(len.saturating_sub(1));
-        let next = Some(TimelineTextSelection { anchor, cursor });
+        let next = Some(TimelineTextSelection::line(anchor, cursor));
+        let changed = self.timeline_text_selection != next;
+        self.timeline_text_selection = next;
+        changed
+    }
+
+    pub(crate) fn update_timeline_text_selection_at(
+        &mut self,
+        line_index: usize,
+        column: usize,
+    ) -> bool {
+        let Some(anchor) = self.timeline_text_selection_anchor else {
+            return false;
+        };
+        let Some(anchor_column) = self.timeline_text_selection_anchor_column else {
+            return self.update_timeline_text_selection(line_index);
+        };
+        let len = self.timeline_plain_cache.len();
+        if len == 0 {
+            return false;
+        }
+        let cursor = line_index.min(len.saturating_sub(1));
+        let next = Some(TimelineTextSelection::column(
+            anchor,
+            anchor_column,
+            cursor,
+            column,
+        ));
         let changed = self.timeline_text_selection != next;
         self.timeline_text_selection = next;
         changed
@@ -530,11 +583,40 @@ impl AppState {
     }
 
     fn clear_timeline_text_selection_state(&mut self) -> bool {
-        let changed =
-            self.timeline_text_selection.is_some() || self.timeline_text_selection_anchor.is_some();
+        let changed = self.timeline_text_selection.is_some()
+            || self.timeline_text_selection_anchor.is_some()
+            || self.timeline_text_selection_anchor_column.is_some();
         self.timeline_text_selection = None;
         self.timeline_text_selection_anchor = None;
+        self.timeline_text_selection_anchor_column = None;
         changed
+    }
+
+    fn selected_timeline_column_range(&self, line_index: usize) -> Option<Range<usize>> {
+        let selection = self.timeline_text_selection?;
+        let (start_line, start_column, end_line, end_column) =
+            selection.normalized_column_bounds()?;
+        if line_index < start_line || line_index > end_line {
+            return None;
+        }
+        let line = self.timeline_plain_cache.get(line_index)?;
+        let line_width = UnicodeWidthStr::width(line.as_str());
+        let start = if line_index == start_line {
+            start_column.min(line_width)
+        } else {
+            0
+        };
+        let end = if line_index == end_line {
+            end_column.min(line_width)
+        } else {
+            line_width
+        };
+        (start < end).then_some(start..end)
+    }
+
+    pub fn record_clipboard_copy_success(&mut self, text: &str) {
+        self.last_notice = Some(format!("copied {}", clipboard_copy_status(text)));
+        self.push_event("selection:copy", clipboard_copy_status(text));
     }
 
     pub fn timeline_revision(&self) -> u64 {
@@ -593,9 +675,129 @@ impl AppState {
 }
 
 fn selected_timeline_line(line: Line<'static>) -> Line<'static> {
-    line.patch_style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Rgb(242, 171, 122)),
-    )
+    line.patch_style(timeline_selection_style())
+}
+
+fn selected_timeline_line_columns(line: Line<'static>, columns: Range<usize>) -> Line<'static> {
+    if columns.start >= columns.end {
+        return line;
+    }
+    let mut display_column = 0usize;
+    let mut selected_line = line;
+    let spans = std::mem::take(&mut selected_line.spans);
+    selected_line.spans = spans
+        .into_iter()
+        .flat_map(|span| split_span_for_column_selection(span, &mut display_column, &columns))
+        .collect();
+    selected_line
+}
+
+fn split_span_for_column_selection(
+    span: Span<'static>,
+    display_column: &mut usize,
+    columns: &Range<usize>,
+) -> Vec<Span<'static>> {
+    let mut pieces = Vec::new();
+    let mut current_text = String::new();
+    let mut current_selected: Option<bool> = None;
+    for grapheme in span.content.as_ref().graphemes(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        let next_column = display_column.saturating_add(width);
+        let selected = if width == 0 {
+            *display_column >= columns.start && *display_column < columns.end
+        } else {
+            next_column > columns.start && *display_column < columns.end
+        };
+        if current_selected != Some(selected) && !current_text.is_empty() {
+            pieces.push(selection_span_piece(
+                &span,
+                &current_text,
+                current_selected == Some(true),
+            ));
+            current_text.clear();
+        }
+        current_selected = Some(selected);
+        current_text.push_str(grapheme);
+        *display_column = next_column;
+    }
+    if !current_text.is_empty() {
+        pieces.push(selection_span_piece(
+            &span,
+            &current_text,
+            current_selected == Some(true),
+        ));
+    }
+    pieces
+}
+
+fn selection_span_piece(source: &Span<'static>, text: &str, selected: bool) -> Span<'static> {
+    let style = if selected {
+        source.style.patch(timeline_selection_style())
+    } else {
+        source.style
+    };
+    Span::styled(text.to_owned(), style)
+}
+
+fn timeline_selection_style() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Rgb(242, 171, 122))
+}
+
+fn text_by_display_columns(text: &str, start: usize, end: usize) -> String {
+    if start >= end {
+        return String::new();
+    }
+    let mut output = String::new();
+    let mut display_column = 0usize;
+    for grapheme in text.graphemes(true) {
+        let width = UnicodeWidthStr::width(grapheme);
+        let next_column = display_column.saturating_add(width);
+        let selected = if width == 0 {
+            display_column >= start && display_column < end
+        } else {
+            next_column > start && display_column < end
+        };
+        if selected {
+            output.push_str(grapheme);
+        }
+        display_column = next_column;
+    }
+    output
+}
+
+pub(super) fn clipboard_copy_status(text: &str) -> String {
+    let lines = text.lines().count().max(1);
+    let chars = text.chars().count();
+    format!("{lines} line(s), {chars} char(s)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn column_selection_helpers_cover_empty_and_zero_width_edges() {
+        let unchanged = selected_timeline_line_columns(Line::from(Span::raw("abc")), 2..2);
+        assert_eq!(unchanged.spans.len(), 1);
+        assert_eq!(unchanged.spans[0].content.as_ref(), "abc");
+
+        let selected = selected_timeline_line_columns(Line::from(Span::raw("\u{0301}a")), 0..1);
+        let selected_text = selected
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(selected_text, "\u{0301}a");
+        assert!(
+            selected
+                .spans
+                .iter()
+                .any(|span| span.style.bg == Some(Color::Rgb(242, 171, 122)))
+        );
+
+        assert_eq!(text_by_display_columns("abc", 2, 2), "");
+        assert_eq!(text_by_display_columns("\u{0301}a", 0, 1), "\u{0301}a");
+    }
 }

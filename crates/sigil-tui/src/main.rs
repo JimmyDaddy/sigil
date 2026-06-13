@@ -220,6 +220,7 @@ where
         }
         AppAction::CopyToClipboard { text } => {
             copy_text_to_terminal_clipboard(&text)?;
+            app.record_clipboard_copy_success(&text);
         }
         action => {
             if let Some(runtime) = worker.as_ref() {

@@ -174,6 +174,13 @@ fn layout_snapshot_exposes_live_text_rows() {
         layout.live_text_line_at(row.area.x, row.area.y),
         Some(row.line_index)
     );
+    assert_eq!(
+        layout.live_text_position_at(row.area.x.saturating_add(3), row.area.y),
+        Some(LiveTextPosition {
+            line_index: row.line_index,
+            column: 3
+        })
+    );
 }
 
 #[test]

@@ -4,6 +4,7 @@ use crate::{
     ui::{LayoutMode, LayoutSnapshot},
 };
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr;
 
 fn mouse(kind: MouseInputKind, column: u16, row: u16) -> MouseInput {
     MouseInput {
@@ -116,6 +117,36 @@ fn live_text_point_containing(
         })
         .expect("expected visible live text row containing text");
     (hit_area.area.x, hit_area.area.y)
+}
+
+fn live_text_point_at_text_offset(
+    app: &AppState,
+    layout: &LayoutSnapshot,
+    expected_text: &str,
+    offset: usize,
+) -> (u16, u16) {
+    let hit_area = layout
+        .live_text_rows
+        .iter()
+        .find(|hit| {
+            app.timeline_plain_cache
+                .get(hit.line_index)
+                .is_some_and(|line| line.contains(expected_text))
+        })
+        .expect("expected visible live text row containing text");
+    let line = app
+        .timeline_plain_cache
+        .get(hit_area.line_index)
+        .expect("expected plain timeline line");
+    let text_start = line.find(expected_text).expect("expected text in line");
+    let text_start_width = UnicodeWidthStr::width(&line[..text_start]);
+    (
+        hit_area
+            .area
+            .x
+            .saturating_add(text_start_width.saturating_add(offset) as u16),
+        hit_area.area.y,
+    )
 }
 
 fn push_sample_tool_cards(app: &mut AppState) {
@@ -505,7 +536,8 @@ fn mouse_drag_selects_live_text_and_ctrl_c_copies_selection() -> Result<()> {
     assert!(layout.live_text_rows.len() >= 2);
     let (start_column, start_row) =
         live_text_point_containing(&app, &layout, "first selectable line");
-    let (end_column, end_row) = live_text_point_containing(&app, &layout, "second selectable line");
+    let (end_column, end_row) =
+        live_text_point_at_text_offset(&app, &layout, "second selectable line", 80);
 
     let down = app.handle_mouse_event(
         mouse(MouseInputKind::LeftDown, start_column, start_row),
@@ -532,7 +564,37 @@ fn mouse_drag_selects_live_text_and_ctrl_c_copies_selection() -> Result<()> {
         action,
         Some(AppAction::CopyToClipboard { text }) if text == selected_text
     ));
-    assert_eq!(app.last_notice(), Some("copied selection"));
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.starts_with("copy pending "))
+    );
+    Ok(())
+}
+
+#[test]
+fn mouse_drag_selects_timeline_text_by_columns() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.push_timeline(TimelineRole::User, "abcdef");
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (start_column, start_row) = live_text_point_at_text_offset(&app, &layout, "abcdef", 1);
+    let (end_column, end_row) = live_text_point_at_text_offset(&app, &layout, "abcdef", 4);
+
+    let _ = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, start_column, start_row),
+        &layout,
+    )?;
+    let drag = app.handle_mouse_event(mouse(MouseInputKind::Drag, end_column, end_row), &layout)?;
+    assert!(matches!(drag, AppMouseOutcome::Redraw));
+
+    assert_eq!(app.selected_timeline_text().as_deref(), Some("bcd"));
+    let rendered = app.transcript_lines(usize::MAX);
+    assert!(
+        rendered
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.contains("bcd") && span.style.bg.is_some())
+    );
     Ok(())
 }
 
@@ -586,9 +648,13 @@ fn timeline_text_selection_helpers_cover_invalid_and_empty_states() {
     app.set_terminal_size(120, 20);
 
     assert!(!app.update_timeline_text_selection(0));
+    assert!(!app.update_timeline_text_selection_at(0, 0));
     app.timeline_plain_cache.clear();
     app.timeline_text_selection_anchor = Some(0);
     assert!(!app.update_timeline_text_selection(0));
+    assert!(!app.update_timeline_text_selection_at(0, 0));
+    app.timeline_text_selection_anchor_column = Some(0);
+    assert!(!app.update_timeline_text_selection_at(0, 0));
 
     app.push_timeline(TimelineRole::User, "line");
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
@@ -597,9 +663,12 @@ fn timeline_text_selection_helpers_cover_invalid_and_empty_states() {
         .first()
         .expect("expected live text row")
         .line_index;
-    assert!(!app.begin_timeline_text_selection(first_line));
+    assert!(!app.begin_timeline_text_selection_at(first_line, 0));
     assert!(app.update_timeline_text_selection(first_line));
-    assert!(app.begin_timeline_text_selection(usize::MAX));
+    assert!(app.begin_timeline_text_selection_at(first_line, 1));
+    assert!(app.update_timeline_text_selection_at(first_line, 1));
+    assert!(app.selected_timeline_text().is_none());
+    assert!(app.begin_timeline_text_selection_at(usize::MAX, 0));
     assert!(app.selected_timeline_text().is_none());
 }
 
@@ -648,12 +717,17 @@ fn mouse_click_tool_card_without_text_hit_clears_selection() -> Result<()> {
     app.push_timeline(TimelineRole::User, "selected text");
     push_sample_tool_cards(&mut app);
     let mut layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
-    let (text_column, text_row) = live_text_point_containing(&app, &layout, "selected text");
+    let (text_column, text_row) = live_text_point_at_text_offset(&app, &layout, "selected text", 0);
+    let (text_end_column, text_end_row) =
+        live_text_point_at_text_offset(&app, &layout, "selected text", 20);
     let _ = app.handle_mouse_event(
         mouse(MouseInputKind::LeftDown, text_column, text_row),
         &layout,
     )?;
-    let _ = app.handle_mouse_event(mouse(MouseInputKind::Drag, text_column, text_row), &layout)?;
+    let _ = app.handle_mouse_event(
+        mouse(MouseInputKind::Drag, text_end_column, text_end_row),
+        &layout,
+    )?;
     assert!(app.selected_timeline_text().is_some());
 
     layout.live_text_rows.clear();
