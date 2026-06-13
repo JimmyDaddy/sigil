@@ -116,23 +116,40 @@ pub(crate) fn composer_cursor_origin(
     area: Rect,
     view_model: &ComposerViewModel,
 ) -> Option<(u16, u16)> {
-    let inner = inset_rect(area, COMPOSER_HORIZONTAL_INSET, COMPOSER_VERTICAL_INSET);
-    let input_height = inner
-        .height
-        .saturating_sub(COMPOSER_HEADER_HEIGHT + COMPOSER_HEADER_INPUT_GAP);
-    if inner.width == 0 || input_height == 0 {
+    let input_area = composer_input_area(area, view_model.input_rows);
+    if input_area.width == 0 || input_area.height == 0 {
         return None;
     }
-    let input_area_y = inner
-        .y
-        .saturating_add(COMPOSER_HEADER_HEIGHT + COMPOSER_HEADER_INPUT_GAP);
-    let input_inner_x = inner.x;
     let cursor_row = view_model.cursor_position.1;
-    let row_offset = cursor_row.saturating_sub(input_height.saturating_sub(1));
+    let row_offset = cursor_row.saturating_sub(input_area.height.saturating_sub(1));
     Some((
-        input_inner_x,
-        input_area_y.saturating_add(cursor_row.saturating_sub(row_offset)),
+        input_area.x,
+        input_area
+            .y
+            .saturating_add(cursor_row.saturating_sub(row_offset)),
     ))
+}
+
+pub(crate) fn composer_input_area(area: Rect, input_rows: u16) -> Rect {
+    let inner = inset_rect(area, COMPOSER_HORIZONTAL_INSET, COMPOSER_VERTICAL_INSET);
+    if inner.width == 0 || inner.height == 0 {
+        return Rect::default();
+    }
+    let input_height = input_rows.min(
+        inner
+            .height
+            .saturating_sub(COMPOSER_HEADER_HEIGHT + COMPOSER_HEADER_INPUT_GAP)
+            .max(1),
+    );
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(COMPOSER_HEADER_HEIGHT),
+            Constraint::Length(COMPOSER_HEADER_INPUT_GAP),
+            Constraint::Min(input_height),
+        ])
+        .split(inner);
+    layout[2]
 }
 
 fn render_composer_gutter(frame: &mut Frame, area: Rect, accent: Color) {

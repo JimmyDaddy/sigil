@@ -153,12 +153,14 @@ model = "deepseek-v4-flash"
 [terminal]
 mouse_capture = false
 osc52_clipboard = false
+scroll_sensitivity = 5
 "#,
     )
     .expect("terminal config should parse");
 
     assert!(!config.terminal.mouse_capture);
     assert!(!config.terminal.osc52_clipboard);
+    assert_eq!(config.terminal.scroll_sensitivity, 5);
 }
 
 #[test]

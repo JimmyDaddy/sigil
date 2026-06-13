@@ -525,6 +525,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("Mouse capture: yes"));
     assert!(detail.contains("OSC52 clipboard: yes"));
+    assert!(detail.contains("Scroll sensitivity: 3 rows"));
     assert!(detail.contains("[compatibility]"));
     assert!(detail.contains("Turn mouse_capture off"));
     assert!(detail.contains("Turn osc52_clipboard off"));
@@ -573,6 +574,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.code_intelligence_discovery_report_missing = true;
     state.draft.terminal_mouse_capture = false;
     state.draft.terminal_osc52_clipboard = false;
+    state.draft.terminal_scroll_sensitivity = "6".to_owned();
     state.dirty = true;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
@@ -595,6 +597,7 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert!(root_config.code_intelligence.discovery.report_missing);
     assert!(!root_config.terminal.mouse_capture);
     assert!(!root_config.terminal.osc52_clipboard);
+    assert_eq!(root_config.terminal.scroll_sensitivity, 6);
     assert!(!app.config_is_dirty());
     assert_eq!(app.permission_default_mode, "allow");
     assert!(!app.memory_enabled);
@@ -613,6 +616,9 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     );
     assert!(!saved.code_intelligence.discovery.enabled);
     assert!(saved.code_intelligence.discovery.report_missing);
+    assert!(!saved.terminal.mouse_capture);
+    assert!(!saved.terminal.osc52_clipboard);
+    assert_eq!(saved.terminal.scroll_sensitivity, 6);
     let saved_raw = std::fs::read_to_string(&config_path)?;
     assert!(saved_raw.contains("fallback_context_window_tokens = 64000"));
     assert!(

@@ -33,6 +33,7 @@ pub(crate) struct TimelineRenderOptions {
     pub expand_tool_previews: bool,
     pub expand_thinking_blocks: bool,
     pub selected_tool_activity_key: Option<String>,
+    pub hovered_tool_activity_key: Option<String>,
     pub expanded_tool_activity_keys: BTreeSet<String>,
     pub collapsed_tool_activity_keys: BTreeSet<String>,
     pub max_content_width: usize,

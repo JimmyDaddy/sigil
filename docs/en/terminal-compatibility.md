@@ -10,7 +10,7 @@ Start with diagnostics:
 cargo run -p sigil-cli -- doctor
 ```
 
-Inside the TUI, run `/doctor` to see the same terminal checks in the transcript. The report reads `[terminal].mouse_capture`, `[terminal].osc52_clipboard`, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk.
+Inside the TUI, run `/doctor` to see the same terminal checks in the transcript. The report reads `[terminal].mouse_capture`, `[terminal].osc52_clipboard`, `[terminal].scroll_sensitivity`, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk.
 
 ## Baseline
 
@@ -18,6 +18,7 @@ Inside the TUI, run `/doctor` to see the same terminal checks in the transcript.
 2. Open `/config` and review the `Terminal` section.
 3. Keep `mouse_capture = true` unless the terminal or multiplexer mishandles mouse mode.
 4. Keep `osc52_clipboard = true` unless copy sequences are blocked or printed visibly.
+5. Keep `scroll_sensitivity = 3` unless the mouse wheel feels too fast or too slow in transcript and approval diff views.
 
 ## Mouse Smoke
 
@@ -52,7 +53,7 @@ These layers commonly require explicit clipboard or mouse pass-through:
 4. If mouse events are broken, set `[terminal].mouse_capture = false` and restart the TUI.
 5. If copy is blocked or control sequences are visible, set `[terminal].osc52_clipboard = false`.
 
-`mouse_capture` applies on the next launch. `osc52_clipboard` is checked on each copy action.
+`mouse_capture` applies on the next launch. `osc52_clipboard` is checked on each copy action. `scroll_sensitivity` applies after the saved config is reloaded.
 
 ## Result Template
 
@@ -62,6 +63,7 @@ TERM:
 Layers: none / tmux / screen / SSH / WSL
 mouse_capture:
 osc52_clipboard:
+scroll_sensitivity:
 Doctor terminal status:
 Mouse smoke:
 Text selection:

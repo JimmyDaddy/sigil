@@ -81,6 +81,7 @@ impl AppState {
                 crate::mouse::HitTarget::SlashCandidate { index }
                     if self.pending_approval.is_none() =>
                 {
+                    self.set_mouse_hover_target(None);
                     self.clear_timeline_text_selection();
                     self.active_pane = PaneFocus::Composer;
                     match self.handle_mouse_slash_candidate(index)? {
@@ -88,9 +89,21 @@ impl AppState {
                         None => Ok(crate::mouse::AppMouseOutcome::Redraw),
                     }
                 }
+                crate::mouse::HitTarget::ToolCardHeader { entry_index }
+                    if self.pending_approval.is_none() =>
+                {
+                    self.set_mouse_hover_target(Some(target));
+                    self.clear_timeline_text_selection();
+                    if self.toggle_tool_activity_entry(entry_index) {
+                        Ok(crate::mouse::AppMouseOutcome::Redraw)
+                    } else {
+                        Ok(crate::mouse::AppMouseOutcome::Noop)
+                    }
+                }
                 crate::mouse::HitTarget::ToolCard { entry_index }
                     if self.pending_approval.is_none() =>
                 {
+                    self.set_mouse_hover_target(Some(target));
                     if let Some(position) = layout.live_text_position_at(input.column, input.row) {
                         self.begin_timeline_text_selection_at(position.line_index, position.column);
                     } else {
@@ -103,16 +116,20 @@ impl AppState {
                     }
                 }
                 crate::mouse::HitTarget::Composer if self.pending_approval.is_none() => {
+                    self.set_mouse_hover_target(Some(target));
                     self.clear_timeline_text_selection();
                     self.active_pane = PaneFocus::Composer;
+                    self.position_input_cursor_from_mouse(input.column, input.row, layout);
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 }
                 crate::mouse::HitTarget::InfoRail if self.pending_approval.is_none() => {
+                    self.set_mouse_hover_target(Some(target));
                     self.clear_timeline_text_selection();
                     self.active_pane = PaneFocus::Activity;
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 }
                 _ if self.pending_approval.is_none() => {
+                    self.set_mouse_hover_target(None);
                     if let Some(position) = layout.live_text_position_at(input.column, input.row) {
                         if self
                             .begin_timeline_text_selection_at(position.line_index, position.column)
@@ -143,6 +160,13 @@ impl AppState {
             }
             crate::mouse::MouseInputKind::LeftUp if self.pending_approval.is_none() => {
                 if self.finish_timeline_text_selection() {
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                } else {
+                    Ok(crate::mouse::AppMouseOutcome::Noop)
+                }
+            }
+            crate::mouse::MouseInputKind::Moved => {
+                if self.set_mouse_hover_target(hover_target_for(target)) {
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 } else {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
@@ -203,7 +227,8 @@ impl AppState {
                 self.handle_mouse_scroll(upward);
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
-            crate::mouse::HitTarget::ToolCard { .. } => {
+            crate::mouse::HitTarget::ToolCardHeader { .. }
+            | crate::mouse::HitTarget::ToolCard { .. } => {
                 self.handle_mouse_scroll(upward);
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
@@ -319,17 +344,77 @@ impl AppState {
     }
 
     fn scroll_approval_with_mouse(&mut self, upward: bool) {
-        let delta = 3;
+        let delta = self.terminal_scroll_sensitivity();
         if upward {
             self.approval_scroll_back = self.approval_scroll_back.saturating_sub(delta);
         } else {
             self.approval_scroll_back = self.approval_scroll_back.saturating_add(delta);
         }
     }
+
+    fn position_input_cursor_from_mouse(
+        &mut self,
+        column: u16,
+        row: u16,
+        layout: &crate::ui::LayoutSnapshot,
+    ) -> bool {
+        let Some(position) = layout.composer_input_position_at(column, row) else {
+            return false;
+        };
+        let width = layout.composer_input.width.max(1) as usize;
+        let visible_rows = layout.composer_input.height.max(1) as usize;
+        let current_row = self.input_cursor_visual_row();
+        let row_offset = current_row.saturating_sub(visible_rows.saturating_sub(1));
+        let next_cursor = self.cursor_for_visual_position(
+            row_offset.saturating_add(position.row),
+            position.column,
+            width,
+        );
+        if next_cursor == self.input_cursor {
+            return false;
+        }
+        self.input_cursor = next_cursor;
+        self.reset_input_history_navigation();
+        self.reset_slash_selector();
+        true
+    }
+
+    fn set_mouse_hover_target(&mut self, target: Option<crate::mouse::HitTarget>) -> bool {
+        if self.mouse_hover_target == target {
+            return false;
+        }
+        let previous_tool = tool_hover_entry_index(self.mouse_hover_target);
+        let next_tool = tool_hover_entry_index(target);
+        self.mouse_hover_target = target;
+        if previous_tool != next_tool {
+            if let Some(index) = previous_tool {
+                self.rerender_timeline_entry(index);
+            }
+            if let Some(index) = next_tool {
+                self.rerender_timeline_entry(index);
+            }
+        }
+        true
+    }
 }
 
 fn enter_key() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+}
+
+fn hover_target_for(target: crate::mouse::HitTarget) -> Option<crate::mouse::HitTarget> {
+    match target {
+        crate::mouse::HitTarget::Background => None,
+        _ => Some(target),
+    }
+}
+
+fn tool_hover_entry_index(target: Option<crate::mouse::HitTarget>) -> Option<usize> {
+    match target? {
+        crate::mouse::HitTarget::ToolCardHeader { entry_index }
+        | crate::mouse::HitTarget::ToolCard { entry_index } => Some(entry_index),
+        _ => None,
+    }
 }
 
 fn mouse_action_outcome(action: Option<AppAction>) -> crate::mouse::AppMouseOutcome {

@@ -30,6 +30,24 @@ impl AppState {
         true
     }
 
+    pub(crate) fn toggle_tool_activity_entry(&mut self, entry_index: usize) -> bool {
+        if !self.select_tool_activity_entry(entry_index) {
+            return false;
+        }
+        self.toggle_selected_tool_card()
+    }
+
+    pub(crate) fn hovered_tool_activity_key(&self) -> Option<String> {
+        let entry_index = match self.mouse_hover_target? {
+            crate::mouse::HitTarget::ToolCardHeader { entry_index }
+            | crate::mouse::HitTarget::ToolCard { entry_index } => entry_index,
+            _ => return None,
+        };
+        self.tool_activity_cache
+            .iter()
+            .find_map(|activity| (activity.index == entry_index).then(|| activity.key.clone()))
+    }
+
     pub(super) fn focus_latest_tool_card(&mut self) -> bool {
         let Some(entries) = self.tool_activity_entries() else {
             self.last_notice = Some("no activities yet".to_owned());

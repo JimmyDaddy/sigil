@@ -49,6 +49,10 @@ pub(crate) fn render_tool_entry_lines(
         .selected_tool_activity_key
         .as_deref()
         .is_some_and(|selected| selected == activity.key.as_str());
+    let hovered = options
+        .hovered_tool_activity_key
+        .as_deref()
+        .is_some_and(|hovered| hovered == activity.key.as_str());
     let default_expanded = activity.defaults_expanded;
     let expanded = options.expand_tool_previews
         || options.expanded_tool_activity_keys.contains(&activity.key)
@@ -56,6 +60,7 @@ pub(crate) fn render_tool_entry_lines(
     let mut lines = vec![tool_card_header_line(
         &display,
         selected,
+        hovered,
         expanded,
         options.max_content_width,
     )];
@@ -142,10 +147,15 @@ fn tool_available_preview_lines(summary: &ToolCardRender) -> usize {
 fn tool_card_header_line(
     display: &ToolCardDisplay,
     selected: bool,
+    hovered: bool,
     expanded: bool,
     max_content_width: usize,
 ) -> Line<'static> {
-    let accent = accent_rose();
+    let accent = if hovered {
+        accent_gold()
+    } else {
+        accent_rose()
+    };
     let mut spans = vec![
         Span::styled(
             "▎",

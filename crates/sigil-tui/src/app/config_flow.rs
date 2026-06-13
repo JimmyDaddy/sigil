@@ -310,6 +310,10 @@ impl AppState {
                     config_state,
                     ConfigField::TerminalOsc52Clipboard,
                 ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::TerminalScrollSensitivity,
+                ));
                 lines.push(String::new());
                 lines.push("[compatibility]".to_owned());
                 lines.push(render_config_hint_row(

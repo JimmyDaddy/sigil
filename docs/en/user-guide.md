@@ -137,7 +137,7 @@ For temporary use or CI, prefer an environment variable such as `SIGIL_API_KEY`.
 
 ### What if my terminal has broken mouse or clipboard support?
 
-Use the `Terminal` section in `/config`, or set `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` in `sigil.toml`. Mouse capture changes apply on the next launch; OSC52 clipboard changes apply to the next copy action.
+Use the `Terminal` section in `/config`, or set `[terminal].mouse_capture = false` / `[terminal].osc52_clipboard = false` / `[terminal].scroll_sensitivity = 3` in `sigil.toml`. Mouse capture changes apply on the next launch; OSC52 clipboard changes apply to the next copy action; scroll sensitivity controls mouse wheel row steps in transcript and approval diff views.
 
 Run `/doctor` to see the detected terminal profile, multiplexer or remote layers, and clipboard bridge warnings.
 

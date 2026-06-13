@@ -10,7 +10,7 @@
 cargo run -p sigil-cli -- doctor
 ```
 
-在 TUI 里可以运行 `/doctor`，同一份 terminal 检查会渲染到 transcript。报告会读取 `[terminal].mouse_capture`、`[terminal].osc52_clipboard`、`TERM`、常见终端 profile 变量、tmux/screen、SSH、WSL 和剪贴板桥接风险。
+在 TUI 里可以运行 `/doctor`，同一份 terminal 检查会渲染到 transcript。报告会读取 `[terminal].mouse_capture`、`[terminal].osc52_clipboard`、`[terminal].scroll_sensitivity`、`TERM`、常见终端 profile 变量、tmux/screen、SSH、WSL 和剪贴板桥接风险。
 
 ## 基线
 
@@ -18,6 +18,7 @@ cargo run -p sigil-cli -- doctor
 2. 打开 `/config`，查看 `Terminal` 区块。
 3. 除非终端或 multiplexer 不能正确处理 mouse mode，否则保持 `mouse_capture = true`。
 4. 除非复制序列被拦截或被可见打印出来，否则保持 `osc52_clipboard = true`。
+5. 除非 transcript 和 approval diff 的滚轮速度过快或过慢，否则保持 `scroll_sensitivity = 3`。
 
 ## 鼠标 Smoke
 
@@ -52,7 +53,7 @@ cargo run -p sigil-cli -- doctor
 4. 如果鼠标事件不正常，设置 `[terminal].mouse_capture = false`，并重启 TUI。
 5. 如果复制被拦截或控制序列可见，设置 `[terminal].osc52_clipboard = false`。
 
-`mouse_capture` 下一次启动生效。`osc52_clipboard` 每次复制时都会读取当前配置。
+`mouse_capture` 下一次启动生效。`osc52_clipboard` 每次复制时都会读取当前配置。`scroll_sensitivity` 在保存配置并重新加载后生效。
 
 ## 结果模板
 
@@ -62,6 +63,7 @@ TERM:
 Layers: none / tmux / screen / SSH / WSL
 mouse_capture:
 osc52_clipboard:
+scroll_sensitivity:
 Doctor terminal status:
 Mouse smoke:
 Text selection:

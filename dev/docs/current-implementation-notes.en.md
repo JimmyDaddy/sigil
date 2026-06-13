@@ -135,9 +135,9 @@ Root config is parsed by `sigil-kernel`:
 
 DeepSeek provider configuration lives under `[providers.deepseek]`. OpenAI-compatible provider configuration lives under `[providers.openai_compat]`; `agent.provider` uses `openai_compat` and accepts `openai-compatible` / `openai_compatible` as input aliases. Runtime environment overrides are resolved in the provider config layer: DeepSeek uses `SIGIL_API_KEY` / `DEEPSEEK_API_KEY`, while OpenAI-compatible uses `SIGIL_OPENAI_COMPATIBLE_API_KEY` / `OPENAI_API_KEY`.
 
-TUI `/config` exposes only high-frequency provider fields, permissions, memory, compaction, code intelligence controls, terminal mouse/OSC52 compatibility switches, and common MCP server fields. It can switch between `deepseek` and `openai_compat`; DeepSeek FIM is shown as a provider-specific advanced field, while OpenAI-compatible marks it unsupported. Lower-frequency provider-specific fields remain available through config files and environment variables.
+TUI `/config` exposes only high-frequency provider fields, permissions, memory, compaction, code intelligence controls, terminal mouse/OSC52/scroll sensitivity compatibility settings, and common MCP server fields. It can switch between `deepseek` and `openai_compat`; DeepSeek FIM is shown as a provider-specific advanced field, while OpenAI-compatible marks it unsupported. Lower-frequency provider-specific fields remain available through config files and environment variables.
 
-`sigil doctor` and TUI `/doctor` reuse runtime diagnostics to check config loading, workspace resolution, session log location, provider/auth source, MCP command/trust state, code intelligence LSP plan, terminal `TERM`, terminal profile/layers, and mouse/OSC52 compatibility switches. Diagnostics report only the secret source, not secret values.
+`sigil doctor` and TUI `/doctor` reuse runtime diagnostics to check config loading, workspace resolution, session log location, provider/auth source, MCP command/trust state, code intelligence LSP plan, terminal `TERM`, terminal profile/layers, and mouse/OSC52/scroll sensitivity compatibility settings. Diagnostics report only the secret source, not secret values.
 
 ## Current MCP Implementation
 

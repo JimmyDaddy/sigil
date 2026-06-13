@@ -268,6 +268,7 @@ pub struct AppState {
     expanded_tool_activity_keys: BTreeSet<String>,
     collapsed_tool_activity_keys: BTreeSet<String>,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
+    mouse_hover_target: Option<crate::mouse::HitTarget>,
     last_notice: Option<String>,
     mcp_progress: Option<McpProgressState>,
     reasoning_effort: ReasoningEffort,
@@ -408,6 +409,7 @@ impl AppState {
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
             pending_mouse_slash_confirmation: None,
+            mouse_hover_target: None,
             last_notice: None,
             mcp_progress: None,
             reasoning_effort: ReasoningEffort::Max,
@@ -519,6 +521,7 @@ impl AppState {
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
             pending_mouse_slash_confirmation: None,
+            mouse_hover_target: None,
             last_notice: startup_error,
             mcp_progress: None,
             reasoning_effort: ReasoningEffort::Max,
@@ -698,6 +701,7 @@ impl AppState {
         self.expanded_tool_activity_keys.clear();
         self.collapsed_tool_activity_keys.clear();
         self.pending_mouse_slash_confirmation = None;
+        self.mouse_hover_target = None;
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
@@ -986,6 +990,14 @@ impl AppState {
         self.config_snapshot
             .as_ref()
             .is_none_or(|config| config.terminal.osc52_clipboard)
+    }
+
+    pub fn terminal_scroll_sensitivity(&self) -> usize {
+        self.config_snapshot
+            .as_ref()
+            .map(|config| config.terminal.scroll_sensitivity as usize)
+            .unwrap_or(sigil_kernel::config::DEFAULT_TERMINAL_SCROLL_SENSITIVITY as usize)
+            .max(1)
     }
 
     pub fn set_terminal_size(&mut self, width: u16, height: u16) -> bool {

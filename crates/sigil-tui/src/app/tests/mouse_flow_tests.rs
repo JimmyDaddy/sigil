@@ -54,6 +54,34 @@ fn tool_card_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
     (hit_area.area.x, hit_area.area.y)
 }
 
+fn tool_card_header_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .tool_cards
+        .iter()
+        .find(|area| area.entry_index == entry_index)
+        .expect("expected visible tool card hit area");
+    point_in(
+        hit_area
+            .header_area
+            .expect("expected visible tool card header"),
+    )
+}
+
+fn tool_card_body_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .tool_cards
+        .iter()
+        .find(|area| area.entry_index == entry_index)
+        .expect("expected visible tool card hit area");
+    (
+        hit_area.area.x,
+        hit_area
+            .area
+            .y
+            .saturating_add(u16::from(hit_area.area.height > 1)),
+    )
+}
+
 fn setup_field_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
     let hit_area = layout
         .setup_hit_areas
@@ -516,7 +544,16 @@ fn layout_snapshot_hits_visible_tool_cards_over_live_panel() {
     push_sample_tool_cards(&mut app);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let first_entry_index = app.tool_activity_entry_indices()[0];
-    let (column, row) = tool_card_point(&layout, first_entry_index);
+    let (column, row) = tool_card_header_point(&layout, first_entry_index);
+
+    assert_eq!(
+        layout.hit_target(column, row),
+        HitTarget::ToolCardHeader {
+            entry_index: first_entry_index
+        }
+    );
+
+    let (column, row) = tool_card_body_point(&layout, first_entry_index);
 
     assert_eq!(
         layout.hit_target(column, row),
@@ -673,29 +710,54 @@ fn timeline_text_selection_helpers_cover_invalid_and_empty_states() {
 }
 
 #[test]
-fn mouse_click_composer_focuses_composer() -> Result<()> {
+fn mouse_click_composer_focuses_and_positions_cursor() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
+    app.input = "hello world".to_owned();
+    app.input_cursor = app.input_char_len();
     app.active_pane = PaneFocus::Activity;
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
-    let (column, row) = point_in(layout.composer);
+    let column = layout.composer_input.x.saturating_add(2);
+    let row = layout.composer_input.y;
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert_eq!(app.input_cursor, 2);
+
+    let unchanged =
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(unchanged, AppMouseOutcome::Redraw));
+    assert_eq!(app.input_cursor, 2);
+
+    let mut composer_only_layout = layout.clone();
+    composer_only_layout.composer_input = Rect::default();
+    app.input_cursor = 7;
+    let focus_only = app.handle_mouse_event(
+        mouse(
+            MouseInputKind::LeftDown,
+            composer_only_layout.composer.x,
+            composer_only_layout.composer.y,
+        ),
+        &composer_only_layout,
+    )?;
+
+    assert!(matches!(focus_only, AppMouseOutcome::Redraw));
+    assert_eq!(app.input_cursor, 7);
     Ok(())
 }
 
 #[test]
-fn mouse_click_tool_card_selects_without_toggling() -> Result<()> {
+fn mouse_click_tool_card_body_selects_without_toggling() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.input = "draft".to_owned();
     push_sample_tool_cards(&mut app);
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let first_entry_index = app.tool_activity_entry_indices()[0];
-    let (column, row) = tool_card_point(&layout, first_entry_index);
+    let (column, row) = tool_card_body_point(&layout, first_entry_index);
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
@@ -707,6 +769,75 @@ fn mouse_click_tool_card_selects_without_toggling() -> Result<()> {
     assert_eq!(app.input, "draft");
     assert!(app.expanded_tool_activity_keys.is_empty());
     assert!(app.collapsed_tool_activity_keys.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mouse_click_tool_card_header_toggles_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_header_point(&layout, first_entry_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.selected_tool_activity_key,
+        Some("call:call-first".to_owned())
+    );
+    assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
+    assert_eq!(
+        app.mouse_hover_target,
+        Some(HitTarget::ToolCardHeader {
+            entry_index: first_entry_index
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn mouse_move_tool_card_updates_hover_visual_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_header_point(&layout, first_entry_index);
+    let revision = app.timeline_revision();
+
+    let hover = app.handle_mouse_event(mouse(MouseInputKind::Moved, column, row), &layout)?;
+
+    assert!(matches!(hover, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.mouse_hover_target,
+        Some(HitTarget::ToolCardHeader {
+            entry_index: first_entry_index
+        })
+    );
+    assert!(app.timeline_revision() > revision);
+
+    let clear = app.handle_mouse_event(
+        mouse(MouseInputKind::Moved, layout.footer.x, layout.footer.y),
+        &layout,
+    )?;
+
+    assert!(matches!(clear, AppMouseOutcome::Redraw));
+    assert_eq!(app.mouse_hover_target, None);
+    assert_eq!(app.hovered_tool_activity_key(), None);
+    app.mouse_hover_target = Some(HitTarget::Composer);
+    assert_eq!(app.hovered_tool_activity_key(), None);
+    app.mouse_hover_target = None;
+
+    let no_change = app.handle_mouse_event(
+        mouse(MouseInputKind::Moved, layout.footer.x, layout.footer.y),
+        &layout,
+    )?;
+
+    assert!(matches!(no_change, AppMouseOutcome::Noop));
+    assert_eq!(app.mouse_hover_target, None);
     Ok(())
 }
 
@@ -732,7 +863,7 @@ fn mouse_click_tool_card_without_text_hit_clears_selection() -> Result<()> {
 
     layout.live_text_rows.clear();
     let first_entry_index = app.tool_activity_entry_indices()[0];
-    let (column, row) = tool_card_point(&layout, first_entry_index);
+    let (column, row) = tool_card_body_point(&layout, first_entry_index);
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
@@ -1020,6 +1151,7 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
         mode: LayoutMode::Main,
         live_panel: Rect::new(0, 0, 80, 12),
         composer: Rect::new(0, 12, 80, 4),
+        composer_input: Rect::default(),
         footer: Rect::new(0, 16, 80, 4),
         info_rail: Rect::new(60, 0, 20, 12),
         live_text_rows: Vec::new(),
@@ -1048,6 +1180,7 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
         mode: LayoutMode::Main,
         live_panel: Rect::new(0, 0, 80, 12),
         composer: Rect::new(0, 12, 80, 4),
+        composer_input: Rect::default(),
         footer: Rect::new(0, 16, 80, 4),
         info_rail: Rect::new(60, 0, 20, 12),
         live_text_rows: Vec::new(),
@@ -1098,6 +1231,25 @@ fn mouse_scroll_tool_card_scrolls_timeline() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert!(app.timeline_scroll_back > before);
+    Ok(())
+}
+
+#[test]
+fn mouse_scroll_uses_terminal_scroll_sensitivity() -> Result<()> {
+    let mut config = test_config();
+    config.terminal.scroll_sensitivity = 5;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.set_terminal_size(80, 12);
+    for index in 0..8 {
+        app.push_timeline(TimelineRole::Assistant, format!("message {index}"));
+    }
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 80, 12), &app);
+    let (column, row) = point_in(layout.live_panel);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::ScrollUp, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(app.timeline_scroll_back, 5);
     Ok(())
 }
 

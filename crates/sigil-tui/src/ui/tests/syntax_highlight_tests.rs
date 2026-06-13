@@ -1,7 +1,9 @@
 use ratatui::style::{Modifier, Style};
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Mutex};
 
 use super::*;
+
+static HIGHLIGHT_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn plain_text(spans: &[Vec<Span<'static>>]) -> String {
     spans
@@ -64,6 +66,7 @@ fn refuses_oversized_inputs() {
 
 #[test]
 fn blank_lines_and_cache_hits_cover_internal_paths() {
+    let _cache_guard = HIGHLIGHT_CACHE_TEST_LOCK.lock().expect("cache test lock");
     highlight_cache().lock().expect("cache lock").clear();
 
     let spans = highlight_code_to_spans("\n", "rust").expect("blank rust line should render");
@@ -160,6 +163,7 @@ fn cache_eviction_and_style_conversion_cover_remaining_helpers() {
 
 #[test]
 fn highlight_code_to_spans_prefers_cache_after_first_call() {
+    let _cache_guard = HIGHLIGHT_CACHE_TEST_LOCK.lock().expect("cache test lock");
     highlight_cache().lock().expect("cache lock").clear();
 
     let first = highlight_code_to_spans("let a = 1;", "rust").expect("first hit");
@@ -184,6 +188,7 @@ fn highlight_code_to_spans_prefers_cache_after_first_call() {
 
 #[test]
 fn fetch_cached_highlight_handles_missing_cache_gracefully() {
+    let _cache_guard = HIGHLIGHT_CACHE_TEST_LOCK.lock().expect("cache test lock");
     highlight_cache().lock().expect("cache lock").clear();
     assert!(cached_highlight("not-found", "rust").is_none());
 }

@@ -7,6 +7,7 @@ use crate::{
 };
 
 use super::{
+    composer::composer_input_area,
     geometry::{centered_rect, inset_rect, sidebar_width_for_terminal},
     live_panel::{LIVE_PANEL_BOTTOM_PADDING, LIVE_PROGRESS_ROWS},
     setup_config::{
@@ -29,6 +30,7 @@ pub struct LayoutSnapshot {
     pub mode: LayoutMode,
     pub live_panel: Rect,
     pub composer: Rect,
+    pub composer_input: Rect,
     pub footer: Rect,
     pub info_rail: Rect,
     pub live_text_rows: Vec<LiveTextRowHitArea>,
@@ -44,6 +46,7 @@ pub struct LayoutSnapshot {
 pub struct ToolCardHitArea {
     pub entry_index: usize,
     pub area: Rect,
+    pub header_area: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +58,12 @@ pub struct LiveTextRowHitArea {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveTextPosition {
     pub line_index: usize,
+    pub column: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComposerInputPosition {
+    pub row: usize,
     pub column: usize,
 }
 
@@ -149,6 +158,7 @@ impl LayoutSnapshot {
             mode: LayoutMode::Main,
             live_panel: shell.live_panel,
             composer: shell.composer,
+            composer_input: composer_input_area(shell.composer, app.composer_input_rows()),
             footer: shell.footer,
             info_rail: shell.info_rail,
             live_text_rows: live_text_row_hit_areas(shell.live_panel, app),
@@ -171,6 +181,7 @@ impl LayoutSnapshot {
             mode,
             live_panel: Rect::default(),
             composer: Rect::default(),
+            composer_input: Rect::default(),
             footer: Rect::default(),
             info_rail: Rect::default(),
             live_text_rows: Vec::new(),
@@ -267,6 +278,13 @@ impl LayoutSnapshot {
             return HitTarget::Composer;
         }
         for tool_card in &self.tool_cards {
+            if let Some(header_area) = tool_card.header_area
+                && contains(header_area, column, row)
+            {
+                return HitTarget::ToolCardHeader {
+                    entry_index: tool_card.entry_index,
+                };
+            }
             if contains(tool_card.area, column, row) {
                 return HitTarget::ToolCard {
                     entry_index: tool_card.entry_index,
@@ -294,6 +312,17 @@ impl LayoutSnapshot {
                 line_index: hit.line_index,
                 column: column.saturating_sub(hit.area.x) as usize,
             })
+        })
+    }
+
+    pub fn composer_input_position_at(
+        &self,
+        column: u16,
+        row: u16,
+    ) -> Option<ComposerInputPosition> {
+        contains(self.composer_input, column, row).then_some(ComposerInputPosition {
+            row: row.saturating_sub(self.composer_input.y) as usize,
+            column: column.saturating_sub(self.composer_input.x) as usize,
         })
     }
 }
@@ -562,15 +591,28 @@ fn tool_card_hit_areas(live_area: Rect, app: &AppState) -> Vec<ToolCardHitArea> 
             let range = app.timeline_entry_render_range(entry_index)?;
             let start = range.start.max(rows.visible_start);
             let end = range.end.min(rows.visible_end);
-            (start < end).then(|| ToolCardHitArea {
-                entry_index,
-                area: Rect::new(
-                    rows.content_frame.x,
-                    rows.content_y
-                        .saturating_add((start - rows.visible_start) as u16),
-                    rows.content_frame.width,
-                    (end - start) as u16,
-                ),
+            (start < end).then(|| {
+                let header_area =
+                    (range.start >= rows.visible_start && range.start < end).then(|| {
+                        Rect::new(
+                            rows.content_frame.x,
+                            rows.content_y
+                                .saturating_add((range.start - rows.visible_start) as u16),
+                            rows.content_frame.width,
+                            1,
+                        )
+                    });
+                ToolCardHitArea {
+                    entry_index,
+                    area: Rect::new(
+                        rows.content_frame.x,
+                        rows.content_y
+                            .saturating_add((start - rows.visible_start) as u16),
+                        rows.content_frame.width,
+                        (end - start) as u16,
+                    ),
+                    header_area,
+                }
             })
         })
         .collect()

@@ -92,6 +92,8 @@ impl Default for CodeIntelligenceDiscoveryConfig {
 }
 
 /// Terminal integration controls for interactive entrypoints.
+pub const DEFAULT_TERMINAL_SCROLL_SENSITIVITY: u16 = 3;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct TerminalConfig {
@@ -99,6 +101,8 @@ pub struct TerminalConfig {
     pub mouse_capture: bool,
     #[serde(default = "default_terminal_osc52_clipboard")]
     pub osc52_clipboard: bool,
+    #[serde(default = "default_terminal_scroll_sensitivity")]
+    pub scroll_sensitivity: u16,
 }
 
 impl Default for TerminalConfig {
@@ -106,6 +110,7 @@ impl Default for TerminalConfig {
         Self {
             mouse_capture: default_terminal_mouse_capture(),
             osc52_clipboard: default_terminal_osc52_clipboard(),
+            scroll_sensitivity: default_terminal_scroll_sensitivity(),
         }
     }
 }
@@ -573,6 +578,10 @@ fn default_terminal_mouse_capture() -> bool {
 
 fn default_terminal_osc52_clipboard() -> bool {
     true
+}
+
+fn default_terminal_scroll_sensitivity() -> u16 {
+    DEFAULT_TERMINAL_SCROLL_SENSITIVITY
 }
 
 fn default_lsp_trust_required() -> bool {

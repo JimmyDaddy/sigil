@@ -200,6 +200,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         &[
             ConfigField::TerminalMouseCapture,
             ConfigField::TerminalOsc52Clipboard,
+            ConfigField::TerminalScrollSensitivity,
         ]
     );
     assert_eq!(
@@ -215,12 +216,20 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::McpCommand.label(), "command");
     assert_eq!(ConfigField::McpArgsCsv.label(), "args_csv");
     assert_eq!(ConfigField::CodeIntelStartup.label(), "startup");
+    assert_eq!(
+        ConfigField::TerminalScrollSensitivity.label(),
+        "scroll_sensitivity"
+    );
     assert_eq!(ConfigField::ProviderApiKey.action_label(), "Enter input");
     assert_eq!(ConfigField::CodeIntelStartup.action_label(), "Enter cycle");
     assert_eq!(ConfigField::CodeIntelEnabled.action_label(), "Enter toggle");
     assert_eq!(
         ConfigField::TerminalMouseCapture.action_label(),
         "Enter toggle"
+    );
+    assert_eq!(
+        ConfigField::TerminalScrollSensitivity.action_label(),
+        "Enter input"
     );
     assert_eq!(ConfigField::McpCommand.action_label(), "Enter input");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
@@ -232,6 +241,11 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::ProviderApiKey
             .help_text()
             .contains("SIGIL_API_KEY")
+    );
+    assert!(
+        ConfigField::TerminalScrollSensitivity
+            .help_text()
+            .contains("Mouse wheel rows")
     );
     assert!(
         ConfigField::CompactionSoftThresholdRatio
@@ -550,6 +564,11 @@ fn config_draft_validates_provider_and_compaction_values() {
             draft.compaction_tail_messages = "0".to_owned();
             (draft, "tail_messages must be greater than 0")
         },
+        {
+            let mut draft = base.clone();
+            draft.terminal_scroll_sensitivity = "0".to_owned();
+            (draft, "scroll_sensitivity must be greater than 0")
+        },
     ] {
         let error = draft.to_root_config().expect_err(expected);
         assert!(
@@ -625,6 +644,14 @@ fn config_field_character_filter_matches_field_kind() {
         ConfigField::CompactionContextWindowTokens,
         '7'
     ));
+    assert!(config_field_accepts_char(
+        ConfigField::TerminalScrollSensitivity,
+        '7'
+    ));
+    assert!(!config_field_accepts_char(
+        ConfigField::TerminalScrollSensitivity,
+        '.'
+    ));
     assert!(!config_field_accepts_char(
         ConfigField::CompactionContextWindowTokens,
         '.'
@@ -660,7 +687,7 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
     config.compaction.soft_threshold_ratio = 0.25;
     config.compaction.hard_threshold_ratio = 0.5;
     config.compaction.context_window_tokens = Some(64000);
-    let state = ConfigState::from_root_config(&config);
+    let mut state = ConfigState::from_root_config(&config);
 
     assert_eq!(state.display_value(ConfigField::MemoryEnabled), "yes");
     assert_eq!(
@@ -679,13 +706,26 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
         state.display_value(ConfigField::TerminalOsc52Clipboard),
         "yes"
     );
+    assert_eq!(
+        state.display_value(ConfigField::TerminalScrollSensitivity),
+        "3 rows"
+    );
+    *state
+        .field_text_value_mut(ConfigField::TerminalScrollSensitivity)
+        .expect("terminal scroll sensitivity should be mutable") = "9".to_owned();
+    assert_eq!(
+        state.field_text_value(ConfigField::TerminalScrollSensitivity),
+        Some("9")
+    );
 
     let mut draft = state.draft.clone();
     draft.terminal_mouse_capture = false;
     draft.terminal_osc52_clipboard = false;
+    draft.terminal_scroll_sensitivity = "7".to_owned();
     let root_config = draft.to_root_config()?;
     assert!(!root_config.terminal.mouse_capture);
     assert!(!root_config.terminal.osc52_clipboard);
+    assert_eq!(root_config.terminal.scroll_sensitivity, 7);
 
     assert_eq!(display_ratio("not-a-number"), "not-a-number");
     Ok(())

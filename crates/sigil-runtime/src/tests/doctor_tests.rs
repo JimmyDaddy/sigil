@@ -730,6 +730,7 @@ fn terminal_checks_report_disabled_config_and_smoke_checklist() {
     let config = TerminalConfig {
         mouse_capture: false,
         osc52_clipboard: false,
+        ..TerminalConfig::default()
     };
     let environment = TerminalEnvironment {
         term: Some("xterm-256color".to_owned()),
@@ -742,7 +743,7 @@ fn terminal_checks_report_disabled_config_and_smoke_checklist() {
     assert_eq!(report.overall_status(), DoctorStatus::Ok);
     assert!(report.checks.iter().any(|check| {
         check.name == "terminal:config"
-            && check.message == "mouse_capture=false osc52_clipboard=false"
+            && check.message == "mouse_capture=false osc52_clipboard=false scroll_sensitivity=3"
     }));
     assert!(report.checks.iter().any(|check| {
         check.name == "terminal:mouse"

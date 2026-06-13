@@ -74,6 +74,7 @@ tool_timeout_secs = 30
 [terminal]
 mouse_capture = true
 osc52_clipboard = true
+scroll_sensitivity = 3
 
 [providers.deepseek]
 model = "deepseek-v4-flash"
@@ -246,13 +247,16 @@ trust_required = true
 [terminal]
 mouse_capture = true
 osc52_clipboard = true
+scroll_sensitivity = 3
 ```
 
 `mouse_capture` lets the TUI request terminal mouse events for clicks, scrolling, approval controls, setup/config/session selection, and transcript drag selection. Turn it off if your terminal or multiplexer mishandles mouse mode; keyboard controls remain available.
 
 `osc52_clipboard` lets `Ctrl-C` copy selected transcript text by writing an OSC52 clipboard sequence. Turn it off if your terminal blocks OSC52 or shows the sequence as text. When disabled, Sigil reports `clipboard unavailable` instead of writing to the terminal.
 
-The TUI `/config` panel includes a `Terminal` section for both switches. `mouse_capture` is applied on the next launch; `osc52_clipboard` is checked for each copy action.
+`scroll_sensitivity` sets how many rows a mouse wheel tick moves in transcript and approval diff views. The default is `3`; use a smaller value for high-resolution wheels and a larger value for slower terminal scroll events.
+
+The TUI `/config` panel includes a `Terminal` section for these controls. `mouse_capture` is applied on the next launch; `osc52_clipboard` is checked for each copy action; `scroll_sensitivity` applies to the running config after it is saved and reloaded.
 
 `doctor` reports the configured switches, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk. For a repeatable manual checklist across iTerm2, Terminal.app, WezTerm, kitty, tmux, and SSH, see [terminal-compatibility.md](terminal-compatibility.md).
 

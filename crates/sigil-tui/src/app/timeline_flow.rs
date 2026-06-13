@@ -362,7 +362,7 @@ impl AppState {
     }
 
     pub fn handle_mouse_scroll(&mut self, upward: bool) {
-        let delta = 3;
+        let delta = self.terminal_scroll_sensitivity();
         if self.pending_approval.is_some() {
             if upward {
                 self.approval_scroll_back = self.approval_scroll_back.saturating_sub(delta);
@@ -633,6 +633,7 @@ impl AppState {
             expand_tool_previews: false,
             expand_thinking_blocks: matches!(self.thinking_block_mode, ThinkingBlockMode::Expanded),
             selected_tool_activity_key: self.selected_tool_activity_key.clone(),
+            hovered_tool_activity_key: self.hovered_tool_activity_key(),
             expanded_tool_activity_keys: self.expanded_tool_activity_keys.clone(),
             collapsed_tool_activity_keys: self.collapsed_tool_activity_keys.clone(),
             max_content_width: self.timeline_content_width(),

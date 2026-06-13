@@ -114,6 +114,7 @@ pub(crate) enum ConfigField {
     CodeIntelDiscoveryReportMissing,
     TerminalMouseCapture,
     TerminalOsc52Clipboard,
+    TerminalScrollSensitivity,
     McpName,
     McpCommand,
     McpArgsCsv,
@@ -143,7 +144,11 @@ impl ConfigField {
         Self::CodeIntelDiscoveryEnabled,
         Self::CodeIntelDiscoveryReportMissing,
     ];
-    const TERMINAL_FIELDS: [Self; 2] = [Self::TerminalMouseCapture, Self::TerminalOsc52Clipboard];
+    const TERMINAL_FIELDS: [Self; 3] = [
+        Self::TerminalMouseCapture,
+        Self::TerminalOsc52Clipboard,
+        Self::TerminalScrollSensitivity,
+    ];
     const MCP_FIELDS: [Self; 4] = [
         Self::McpName,
         Self::McpCommand,
@@ -187,6 +192,7 @@ impl ConfigField {
             Self::CodeIntelDiscoveryReportMissing => "report_missing",
             Self::TerminalMouseCapture => "mouse_capture",
             Self::TerminalOsc52Clipboard => "osc52_clipboard",
+            Self::TerminalScrollSensitivity => "scroll_sensitivity",
             Self::McpName => "name",
             Self::McpCommand => "command",
             Self::McpArgsCsv => "args_csv",
@@ -214,6 +220,7 @@ impl ConfigField {
             Self::CodeIntelDiscoveryReportMissing => "Missing reports",
             Self::TerminalMouseCapture => "Mouse capture",
             Self::TerminalOsc52Clipboard => "OSC52 clipboard",
+            Self::TerminalScrollSensitivity => "Scroll sensitivity",
             Self::McpName => "Name",
             Self::McpCommand => "Command",
             Self::McpArgsCsv => "Arguments",
@@ -277,6 +284,9 @@ impl ConfigField {
             Self::TerminalOsc52Clipboard => {
                 "Copies selected transcript text through OSC52. Turn off when the terminal blocks clipboard writes."
             }
+            Self::TerminalScrollSensitivity => {
+                "Mouse wheel rows per tick for transcript and approval diff scrolling."
+            }
             Self::McpName => "Stable local name for this MCP server.",
             Self::McpCommand => "Executable used to start the MCP server process.",
             Self::McpArgsCsv => "Comma-separated startup arguments for the MCP server.",
@@ -294,6 +304,7 @@ impl ConfigField {
                 | Self::CompactionHardThresholdRatio
                 | Self::CompactionContextWindowTokens
                 | Self::CompactionTailMessages
+                | Self::TerminalScrollSensitivity
                 | Self::McpName
                 | Self::McpCommand
                 | Self::McpArgsCsv
@@ -314,6 +325,7 @@ impl ConfigField {
             | Self::CodeIntelDiscoveryReportMissing
             | Self::TerminalMouseCapture
             | Self::TerminalOsc52Clipboard => "Enter toggle",
+            Self::TerminalScrollSensitivity => "Enter input",
             _ if self.accepts_text_input() => "Enter input",
             _ => "",
         }
@@ -487,6 +499,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) code_intelligence_discovery_report_missing: bool,
     pub(crate) terminal_mouse_capture: bool,
     pub(crate) terminal_osc52_clipboard: bool,
+    pub(crate) terminal_scroll_sensitivity: String,
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
 
@@ -551,6 +564,7 @@ impl ConfigDraft {
                 .report_missing,
             terminal_mouse_capture: root_config.terminal.mouse_capture,
             terminal_osc52_clipboard: root_config.terminal.osc52_clipboard,
+            terminal_scroll_sensitivity: root_config.terminal.scroll_sensitivity.to_string(),
             mcp_servers: root_config
                 .mcp_servers
                 .iter()
@@ -638,6 +652,14 @@ impl ConfigDraft {
         if tail_messages == 0 {
             bail!("tail_messages must be greater than 0");
         }
+        let terminal_scroll_sensitivity = self
+            .terminal_scroll_sensitivity
+            .trim()
+            .parse::<u16>()
+            .map_err(|error| anyhow!("scroll_sensitivity must be a positive integer: {error}"))?;
+        if terminal_scroll_sensitivity == 0 {
+            bail!("scroll_sensitivity must be greater than 0");
+        }
 
         let mut root_config = self.base_root_config.clone();
         root_config.agent.provider = provider_name.to_owned();
@@ -652,6 +674,7 @@ impl ConfigDraft {
         root_config.code_intelligence = self.code_intelligence_config();
         root_config.terminal.mouse_capture = self.terminal_mouse_capture;
         root_config.terminal.osc52_clipboard = self.terminal_osc52_clipboard;
+        root_config.terminal.scroll_sensitivity = terminal_scroll_sensitivity;
         root_config.mcp_servers = self
             .mcp_servers
             .iter()
@@ -921,6 +944,7 @@ impl ConfigState {
                 Some(&self.draft.compaction_context_window_tokens)
             }
             ConfigField::CompactionTailMessages => Some(&self.draft.compaction_tail_messages),
+            ConfigField::TerminalScrollSensitivity => Some(&self.draft.terminal_scroll_sensitivity),
             ConfigField::McpName => self
                 .selected_mcp_server()
                 .map(|server| server.name.as_str()),
@@ -962,6 +986,9 @@ impl ConfigState {
                 Some(&mut self.draft.compaction_context_window_tokens)
             }
             ConfigField::CompactionTailMessages => Some(&mut self.draft.compaction_tail_messages),
+            ConfigField::TerminalScrollSensitivity => {
+                Some(&mut self.draft.terminal_scroll_sensitivity)
+            }
             ConfigField::McpName => self
                 .selected_mcp_server_mut()
                 .map(|server| &mut server.name),
@@ -1029,6 +1056,7 @@ impl ConfigState {
             ConfigField::CompactionSoftThresholdRatio
             | ConfigField::CompactionHardThresholdRatio => display_ratio(text_value),
             ConfigField::CompactionTailMessages => format!("{text_value} messages"),
+            ConfigField::TerminalScrollSensitivity => format!("{text_value} rows"),
             ConfigField::McpArgsCsv if text_value.trim().is_empty() => "none".to_owned(),
             ConfigField::McpStartupTimeoutSecs => format!("{text_value} seconds"),
             ConfigField::CompactionContextWindowTokens if text_value.trim().is_empty() => {
@@ -1137,6 +1165,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
     match field {
         ConfigField::CompactionContextWindowTokens
         | ConfigField::CompactionTailMessages
+        | ConfigField::TerminalScrollSensitivity
         | ConfigField::McpStartupTimeoutSecs => character.is_ascii_digit(),
         ConfigField::CompactionSoftThresholdRatio | ConfigField::CompactionHardThresholdRatio => {
             character.is_ascii_digit() || character == '.'

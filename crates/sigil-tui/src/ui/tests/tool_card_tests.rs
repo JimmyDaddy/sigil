@@ -389,6 +389,33 @@ fn tool_card_render_entry_lines_respect_selection_and_hidden_preview_state() {
 }
 
 #[test]
+fn tool_card_render_entry_lines_styles_hovered_header() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: json!({
+            "call_id": "call-hover",
+            "tool_name": "read_file",
+            "status": "ok",
+            "preview_kind": "markdown",
+            "summary": "first 1/1 lines · 12 B",
+            "preview_lines": ["body"],
+            "hidden_lines": 0
+        })
+        .to_string(),
+    };
+    let options = TimelineRenderOptions {
+        hovered_tool_activity_key: Some("call:call-hover".to_owned()),
+        max_content_width: 72,
+        ..TimelineRenderOptions::default()
+    };
+
+    let lines = render_tool_entry_lines(&entry, &options, 0);
+
+    assert_eq!(lines[0].spans[0].style.fg, Some(accent_gold()));
+    assert!(!plain_text(&lines).contains("●"));
+}
+
+#[test]
 fn tool_card_activity_view_uses_stable_hash_without_call_id() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
