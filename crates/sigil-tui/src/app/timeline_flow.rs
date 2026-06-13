@@ -1,10 +1,13 @@
 use std::ops::Range;
 
-use ratatui::text::Line;
+use ratatui::{
+    style::{Color, Style},
+    text::Line,
+};
 
 use super::{
     AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase, ThinkingBlockMode,
-    TimelineEntry, TimelineRole,
+    TimelineEntry, TimelineRole, TimelineTextSelection,
     formatting::{
         hash_timeline_line, line_has_visible_content, plain_line_text, sidebar_width_for_terminal,
     },
@@ -63,6 +66,7 @@ impl AppState {
 
     pub(super) fn push_timeline(&mut self, role: TimelineRole, text: impl Into<String>) {
         self.flush_deferred_timeline_renders();
+        self.clear_timeline_text_selection_state();
         let is_tool = role == TimelineRole::Tool;
         let previous_selected_tool = self.selected_tool_activity_key.clone();
         let entry_index = self.timeline.len();
@@ -149,6 +153,7 @@ impl AppState {
     }
 
     pub(super) fn rebuild_timeline_render_cache(&mut self) {
+        self.clear_timeline_text_selection_state();
         self.deferred_timeline_render_indexes.clear();
         let options = self.timeline_render_options();
         self.timeline_render_cache.clear();
@@ -170,6 +175,7 @@ impl AppState {
     }
 
     pub(super) fn rerender_timeline_entry(&mut self, index: usize) {
+        self.clear_timeline_text_selection_state();
         self.deferred_timeline_render_indexes.remove(&index);
         let Some(existing_range) = self.timeline_render_ranges.get(index).cloned() else {
             self.rebuild_timeline_render_cache();
@@ -243,6 +249,7 @@ impl AppState {
     }
 
     pub(super) fn append_timeline_render_cache_entry(&mut self, index: usize) {
+        self.clear_timeline_text_selection_state();
         if index != self.timeline_render_ranges.len() {
             self.rebuild_timeline_render_cache();
             return;
@@ -462,7 +469,72 @@ impl AppState {
                 Line::from("send a prompt to start"),
             ];
         }
-        self.timeline_render_cache[visible_range].to_vec()
+        let selection = self.selected_timeline_line_range();
+        self.timeline_render_cache[visible_range.clone()]
+            .iter()
+            .enumerate()
+            .map(|(offset, line)| {
+                let line_index = visible_range.start.saturating_add(offset);
+                if selection
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&line_index))
+                {
+                    selected_timeline_line(line.clone())
+                } else {
+                    line.clone()
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn selected_timeline_line_range(&self) -> Option<Range<usize>> {
+        let range = self.timeline_text_selection?.normalized_range();
+        let end = range.end.min(self.timeline_plain_cache.len());
+        (range.start < end).then_some(range.start..end)
+    }
+
+    pub(crate) fn selected_timeline_text(&self) -> Option<String> {
+        let range = self.selected_timeline_line_range()?;
+        Some(self.timeline_plain_cache[range].join("\n")).filter(|text| !text.is_empty())
+    }
+
+    pub(crate) fn begin_timeline_text_selection(&mut self, line_index: usize) -> bool {
+        if line_index >= self.timeline_plain_cache.len() {
+            return self.clear_timeline_text_selection();
+        }
+        self.timeline_text_selection_anchor = Some(line_index);
+        self.timeline_text_selection.take().is_some()
+    }
+
+    pub(crate) fn update_timeline_text_selection(&mut self, line_index: usize) -> bool {
+        let Some(anchor) = self.timeline_text_selection_anchor else {
+            return false;
+        };
+        let len = self.timeline_plain_cache.len();
+        if len == 0 {
+            return false;
+        }
+        let cursor = line_index.min(len.saturating_sub(1));
+        let next = Some(TimelineTextSelection { anchor, cursor });
+        let changed = self.timeline_text_selection != next;
+        self.timeline_text_selection = next;
+        changed
+    }
+
+    pub(crate) fn finish_timeline_text_selection(&mut self) -> bool {
+        self.timeline_text_selection_anchor.take().is_some()
+    }
+
+    pub(crate) fn clear_timeline_text_selection(&mut self) -> bool {
+        self.clear_timeline_text_selection_state()
+    }
+
+    fn clear_timeline_text_selection_state(&mut self) -> bool {
+        let changed =
+            self.timeline_text_selection.is_some() || self.timeline_text_selection_anchor.is_some();
+        self.timeline_text_selection = None;
+        self.timeline_text_selection_anchor = None;
+        changed
     }
 
     pub fn timeline_revision(&self) -> u64 {
@@ -518,4 +590,12 @@ impl AppState {
             detail,
         })
     }
+}
+
+fn selected_timeline_line(line: Line<'static>) -> Line<'static> {
+    line.patch_style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Rgb(242, 171, 122)),
+    )
 }

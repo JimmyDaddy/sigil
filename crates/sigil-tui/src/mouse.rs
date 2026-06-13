@@ -32,6 +32,8 @@ pub enum AppMouseOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitTarget {
     ApprovalModal,
+    ApprovalFileRow { index: usize },
+    ApprovalAction { approved: bool },
     SlashOverlay,
     SlashCandidate { index: usize },
     ToolCard { entry_index: usize },

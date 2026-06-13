@@ -14,9 +14,31 @@ impl AppState {
                 self.handle_mouse_scroll_target(target, false)
             }
             crate::mouse::MouseInputKind::LeftDown => match target {
+                crate::mouse::HitTarget::ApprovalFileRow { index }
+                    if self.pending_approval.is_some() =>
+                {
+                    if self.select_approval_file_index(index) {
+                        Ok(crate::mouse::AppMouseOutcome::Redraw)
+                    } else {
+                        Ok(crate::mouse::AppMouseOutcome::Noop)
+                    }
+                }
+                crate::mouse::HitTarget::ApprovalAction { approved }
+                    if self.pending_approval.is_some() =>
+                {
+                    let call_id = self
+                        .pending_approval
+                        .as_ref()
+                        .map(|pending| pending.call.id.clone())
+                        .expect("approval action target requires pending approval");
+                    Ok(crate::mouse::AppMouseOutcome::Action(
+                        crate::app::AppAction::ApprovalDecision { call_id, approved },
+                    ))
+                }
                 crate::mouse::HitTarget::SlashCandidate { index }
                     if self.pending_approval.is_none() =>
                 {
+                    self.clear_timeline_text_selection();
                     self.active_pane = PaneFocus::Composer;
                     match self.handle_mouse_slash_candidate(index)? {
                         Some(action) => Ok(crate::mouse::AppMouseOutcome::Action(action)),
@@ -26,6 +48,11 @@ impl AppState {
                 crate::mouse::HitTarget::ToolCard { entry_index }
                     if self.pending_approval.is_none() =>
                 {
+                    if let Some(line_index) = layout.live_text_line_at(input.column, input.row) {
+                        self.begin_timeline_text_selection(line_index);
+                    } else {
+                        self.clear_timeline_text_selection();
+                    }
                     if self.select_tool_activity_entry(entry_index) {
                         Ok(crate::mouse::AppMouseOutcome::Redraw)
                     } else {
@@ -33,15 +60,48 @@ impl AppState {
                     }
                 }
                 crate::mouse::HitTarget::Composer if self.pending_approval.is_none() => {
+                    self.clear_timeline_text_selection();
                     self.active_pane = PaneFocus::Composer;
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 }
                 crate::mouse::HitTarget::InfoRail if self.pending_approval.is_none() => {
+                    self.clear_timeline_text_selection();
                     self.active_pane = PaneFocus::Activity;
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 }
+                _ if self.pending_approval.is_none() => {
+                    if let Some(line_index) = layout.live_text_line_at(input.column, input.row) {
+                        if self.begin_timeline_text_selection(line_index) {
+                            Ok(crate::mouse::AppMouseOutcome::Redraw)
+                        } else {
+                            Ok(crate::mouse::AppMouseOutcome::Noop)
+                        }
+                    } else if self.clear_timeline_text_selection() {
+                        Ok(crate::mouse::AppMouseOutcome::Redraw)
+                    } else {
+                        Ok(crate::mouse::AppMouseOutcome::Noop)
+                    }
+                }
                 _ => Ok(crate::mouse::AppMouseOutcome::Noop),
             },
+            crate::mouse::MouseInputKind::Drag if self.pending_approval.is_none() => {
+                if let Some(line_index) = layout.live_text_line_at(input.column, input.row) {
+                    if self.update_timeline_text_selection(line_index) {
+                        Ok(crate::mouse::AppMouseOutcome::Redraw)
+                    } else {
+                        Ok(crate::mouse::AppMouseOutcome::Noop)
+                    }
+                } else {
+                    Ok(crate::mouse::AppMouseOutcome::Noop)
+                }
+            }
+            crate::mouse::MouseInputKind::LeftUp if self.pending_approval.is_none() => {
+                if self.finish_timeline_text_selection() {
+                    Ok(crate::mouse::AppMouseOutcome::Redraw)
+                } else {
+                    Ok(crate::mouse::AppMouseOutcome::Noop)
+                }
+            }
             _ => Ok(crate::mouse::AppMouseOutcome::Noop),
         }
     }
@@ -53,7 +113,9 @@ impl AppState {
     ) -> Result<crate::mouse::AppMouseOutcome> {
         if self.pending_approval.is_some() {
             return match target {
-                crate::mouse::HitTarget::ApprovalModal => {
+                crate::mouse::HitTarget::ApprovalModal
+                | crate::mouse::HitTarget::ApprovalFileRow { .. }
+                | crate::mouse::HitTarget::ApprovalAction { .. } => {
                     self.scroll_approval_with_mouse(upward);
                     Ok(crate::mouse::AppMouseOutcome::Redraw)
                 }
@@ -62,6 +124,10 @@ impl AppState {
         }
 
         match target {
+            crate::mouse::HitTarget::ApprovalFileRow { .. }
+            | crate::mouse::HitTarget::ApprovalAction { .. } => {
+                Ok(crate::mouse::AppMouseOutcome::Noop)
+            }
             crate::mouse::HitTarget::InfoRail => {
                 self.active_pane = PaneFocus::Activity;
                 self.move_sidebar_selection(!upward);
@@ -84,6 +150,24 @@ impl AppState {
             crate::mouse::HitTarget::ApprovalModal => Ok(crate::mouse::AppMouseOutcome::Noop),
             crate::mouse::HitTarget::Composer => Ok(crate::mouse::AppMouseOutcome::Noop),
         }
+    }
+
+    fn select_approval_file_index(&mut self, index: usize) -> bool {
+        let Some(file_count) = self
+            .pending_approval
+            .as_ref()
+            .and_then(|pending| pending.preview.as_ref())
+            .map(|preview| preview.file_diffs.len())
+        else {
+            return false;
+        };
+        if index >= file_count || self.approval_selected_file_index == index {
+            return false;
+        }
+        self.approval_selected_file_index = index;
+        self.approval_selected_hunk_index = 0;
+        self.approval_scroll_back = 0;
+        true
     }
 
     fn scroll_approval_with_mouse(&mut self, upward: bool) {

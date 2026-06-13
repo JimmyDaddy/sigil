@@ -67,6 +67,20 @@ const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
 const USD_TO_CNY: f64 = 7.2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TimelineTextSelection {
+    pub anchor: usize,
+    pub cursor: usize,
+}
+
+impl TimelineTextSelection {
+    pub(crate) fn normalized_range(self) -> Range<usize> {
+        let start = self.anchor.min(self.cursor);
+        let end = self.anchor.max(self.cursor).saturating_add(1);
+        start..end
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UsageCostCurrency {
     Usd,
     Cny,
@@ -230,6 +244,8 @@ pub struct AppState {
     timeline_plain_cache: Vec<String>,
     timeline_prefix_hashes: Vec<u64>,
     timeline_render_ranges: Vec<Range<usize>>,
+    timeline_text_selection: Option<TimelineTextSelection>,
+    timeline_text_selection_anchor: Option<usize>,
     timeline_revision: u64,
     defer_timeline_renders: bool,
     deferred_timeline_render_indexes: BTreeSet<usize>,
@@ -263,6 +279,9 @@ pub enum AppAction {
         approved: bool,
     },
     CancelRun,
+    CopyToClipboard {
+        text: String,
+    },
     CompactNow,
     CheckChangedFilesDiagnostics,
     ActivateLazyMcp {
@@ -364,6 +383,8 @@ impl AppState {
             timeline_plain_cache: Vec::new(),
             timeline_prefix_hashes: Vec::new(),
             timeline_render_ranges: Vec::new(),
+            timeline_text_selection: None,
+            timeline_text_selection_anchor: None,
             timeline_revision: 0,
             defer_timeline_renders: false,
             deferred_timeline_render_indexes: BTreeSet::new(),
@@ -472,6 +493,8 @@ impl AppState {
             timeline_plain_cache: Vec::new(),
             timeline_prefix_hashes: Vec::new(),
             timeline_render_ranges: Vec::new(),
+            timeline_text_selection: None,
+            timeline_text_selection_anchor: None,
             timeline_revision: 0,
             defer_timeline_renders: false,
             deferred_timeline_render_indexes: BTreeSet::new(),
@@ -653,6 +676,11 @@ impl AppState {
         }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(text) = self.selected_timeline_text() {
+                self.last_notice = Some("copied selection".to_owned());
+                self.push_event("selection:copy", "timeline");
+                return Ok(Some(AppAction::CopyToClipboard { text }));
+            }
             self.modal_state = None;
             if self.is_busy {
                 self.last_notice = Some("cancellation requested".to_owned());

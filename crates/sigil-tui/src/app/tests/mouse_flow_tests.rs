@@ -53,6 +53,23 @@ fn tool_card_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
     (hit_area.area.x, hit_area.area.y)
 }
 
+fn live_text_point_containing(
+    app: &AppState,
+    layout: &LayoutSnapshot,
+    expected_text: &str,
+) -> (u16, u16) {
+    let hit_area = layout
+        .live_text_rows
+        .iter()
+        .find(|hit| {
+            app.timeline_plain_cache
+                .get(hit.line_index)
+                .is_some_and(|line| line.contains(expected_text))
+        })
+        .expect("expected visible live text row containing text");
+    (hit_area.area.x, hit_area.area.y)
+}
+
 fn push_sample_tool_cards(app: &mut AppState) {
     app.push_timeline(
         TimelineRole::Tool,
@@ -134,6 +151,114 @@ fn layout_snapshot_hits_visible_tool_cards_over_live_panel() {
 }
 
 #[test]
+fn mouse_drag_selects_live_text_and_ctrl_c_copies_selection() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.push_timeline(TimelineRole::User, "first selectable line");
+    app.push_timeline(TimelineRole::Assistant, "second selectable line");
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    assert!(layout.live_text_rows.len() >= 2);
+    let (start_column, start_row) =
+        live_text_point_containing(&app, &layout, "first selectable line");
+    let (end_column, end_row) = live_text_point_containing(&app, &layout, "second selectable line");
+
+    let down = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, start_column, start_row),
+        &layout,
+    )?;
+    assert!(matches!(
+        down,
+        AppMouseOutcome::Noop | AppMouseOutcome::Redraw
+    ));
+
+    let drag = app.handle_mouse_event(mouse(MouseInputKind::Drag, end_column, end_row), &layout)?;
+    assert!(matches!(drag, AppMouseOutcome::Redraw));
+
+    let up = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, end_column, end_row), &layout)?;
+    assert!(matches!(up, AppMouseOutcome::Redraw));
+    let selected_text = app
+        .selected_timeline_text()
+        .expect("expected selected timeline text");
+    assert!(selected_text.contains("first selectable line"));
+    assert!(!app.transcript_lines(usize::MAX).is_empty());
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::CopyToClipboard { text }) if text == selected_text
+    ));
+    assert_eq!(app.last_notice(), Some("copied selection"));
+    Ok(())
+}
+
+#[test]
+fn mouse_selection_edges_cover_reselect_clear_drag_and_idle_left_up() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.push_timeline(TimelineRole::User, "alpha selectable line");
+    app.push_timeline(TimelineRole::Assistant, "beta selectable line");
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (alpha_column, alpha_row) =
+        live_text_point_containing(&app, &layout, "alpha selectable line");
+    let (beta_column, beta_row) = live_text_point_containing(&app, &layout, "beta selectable line");
+
+    let idle_up = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftUp, alpha_column, alpha_row),
+        &layout,
+    )?;
+    assert!(matches!(idle_up, AppMouseOutcome::Noop));
+
+    let _ = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, alpha_column, alpha_row),
+        &layout,
+    )?;
+    let drag =
+        app.handle_mouse_event(mouse(MouseInputKind::Drag, beta_column, beta_row), &layout)?;
+    assert!(matches!(drag, AppMouseOutcome::Redraw));
+    let repeated_drag =
+        app.handle_mouse_event(mouse(MouseInputKind::Drag, beta_column, beta_row), &layout)?;
+    assert!(matches!(repeated_drag, AppMouseOutcome::Noop));
+
+    let reselect = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, alpha_column, alpha_row),
+        &layout,
+    )?;
+    assert!(matches!(reselect, AppMouseOutcome::Redraw));
+
+    let (footer_column, footer_row) = point_in(layout.footer);
+    let cleared = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, footer_column, footer_row),
+        &layout,
+    )?;
+    assert!(matches!(cleared, AppMouseOutcome::Redraw));
+    assert!(app.selected_timeline_text().is_none());
+    Ok(())
+}
+
+#[test]
+fn timeline_text_selection_helpers_cover_invalid_and_empty_states() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+
+    assert!(!app.update_timeline_text_selection(0));
+    app.timeline_plain_cache.clear();
+    app.timeline_text_selection_anchor = Some(0);
+    assert!(!app.update_timeline_text_selection(0));
+
+    app.push_timeline(TimelineRole::User, "line");
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_line = layout
+        .live_text_rows
+        .first()
+        .expect("expected live text row")
+        .line_index;
+    assert!(!app.begin_timeline_text_selection(first_line));
+    assert!(app.update_timeline_text_selection(first_line));
+    assert!(app.begin_timeline_text_selection(usize::MAX));
+    assert!(app.selected_timeline_text().is_none());
+}
+
+#[test]
 fn mouse_click_composer_focuses_composer() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
@@ -168,6 +293,31 @@ fn mouse_click_tool_card_selects_without_toggling() -> Result<()> {
     assert_eq!(app.input, "draft");
     assert!(app.expanded_tool_activity_keys.is_empty());
     assert!(app.collapsed_tool_activity_keys.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mouse_click_tool_card_without_text_hit_clears_selection() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.push_timeline(TimelineRole::User, "selected text");
+    push_sample_tool_cards(&mut app);
+    let mut layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (text_column, text_row) = live_text_point_containing(&app, &layout, "selected text");
+    let _ = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, text_column, text_row),
+        &layout,
+    )?;
+    let _ = app.handle_mouse_event(mouse(MouseInputKind::Drag, text_column, text_row), &layout)?;
+    assert!(app.selected_timeline_text().is_some());
+
+    layout.live_text_rows.clear();
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_point(&layout, first_entry_index);
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert!(app.selected_timeline_text().is_none());
     Ok(())
 }
 
@@ -453,9 +603,11 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
         composer: Rect::new(0, 12, 80, 4),
         footer: Rect::new(0, 16, 80, 4),
         info_rail: Rect::new(60, 0, 20, 12),
+        live_text_rows: Vec::new(),
         tool_cards: Vec::new(),
         slash_overlay: None,
         approval_modal: Some(Rect::new(10, 2, 20, 6)),
+        approval_modal_hit_areas: None,
     };
     let (column, row) = point_in(layout.approval_modal.expect("expected approval area"));
 
@@ -477,9 +629,11 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
         composer: Rect::new(0, 12, 80, 4),
         footer: Rect::new(0, 16, 80, 4),
         info_rail: Rect::new(60, 0, 20, 12),
+        live_text_rows: Vec::new(),
         tool_cards: Vec::new(),
         slash_overlay: None,
         approval_modal: None,
+        approval_modal_hit_areas: None,
     };
     let (column, row) = point_in(layout.composer);
 
@@ -538,5 +692,124 @@ fn mouse_scroll_approval_with_pending_approval_scrolls_upward() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.approval_scroll_back, 2);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_approval_file_row_selects_file() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 24);
+    inject_write_file_approval(&mut app, multi_file_approval_preview())?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let hit_areas = layout
+        .approval_modal_hit_areas
+        .as_ref()
+        .expect("expected approval hit areas");
+    let second_file = hit_areas.file_rows[1];
+    let (column, row) = point_in(second_file.area);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(app.approval_selected_file_index, 1);
+    assert_eq!(app.approval_selected_hunk_index, 0);
+    assert_eq!(app.approval_scroll_back, 0);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_selected_or_missing_approval_file_is_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 24);
+    inject_write_file_approval(&mut app, multi_file_approval_preview())?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let first_file = layout
+        .approval_modal_hit_areas
+        .as_ref()
+        .expect("expected approval hit areas")
+        .file_rows[0];
+    let (column, row) = point_in(first_file.area);
+
+    let same = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(same, AppMouseOutcome::Noop));
+
+    app.pending_approval
+        .as_mut()
+        .and_then(|pending| pending.preview.as_mut())
+        .expect("expected preview")
+        .file_diffs
+        .clear();
+    let missing_file =
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(missing_file, AppMouseOutcome::Noop));
+    Ok(())
+}
+
+#[test]
+fn mouse_scroll_approval_file_row_scrolls_modal() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 24);
+    inject_write_file_approval(&mut app, multi_file_approval_preview())?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let first_file = layout
+        .approval_modal_hit_areas
+        .as_ref()
+        .expect("expected approval hit areas")
+        .file_rows[0];
+    let (column, row) = point_in(first_file.area);
+
+    let outcome =
+        app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(app.approval_scroll_back, 3);
+    Ok(())
+}
+
+#[test]
+fn mouse_scroll_stale_approval_action_target_without_pending_is_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 24);
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let allow_action = layout
+        .approval_modal_hit_areas
+        .as_ref()
+        .expect("expected approval hit areas")
+        .allow_action;
+    app.pending_approval = None;
+    let (column, row) = point_in(allow_action);
+
+    let outcome =
+        app.handle_mouse_event(mouse(MouseInputKind::ScrollDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    Ok(())
+}
+
+#[test]
+fn mouse_click_approval_action_returns_decision() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 24);
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let allow_action = layout
+        .approval_modal_hit_areas
+        .as_ref()
+        .expect("expected approval hit areas")
+        .allow_action;
+    let (column, row) = point_in(allow_action);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(
+        outcome,
+        AppMouseOutcome::Action(AppAction::ApprovalDecision {
+            call_id,
+            approved: true
+        }) if call_id == "call-1"
+    ));
     Ok(())
 }

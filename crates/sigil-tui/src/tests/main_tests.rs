@@ -20,12 +20,13 @@ use sigil_tui::{
 use super::{
     AppMouseOutcome, BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, SCROLLBACK_SEED_POLL_INTERVAL,
     ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
-    apply_key_action, apply_mouse_outcome, build_initial_app, drain_worker_messages,
-    flush_pending_worker_commands, next_poll_interval, plan_scrollback_sync,
-    plan_scrollback_sync_with_chunk_size, poll_interval, prepare_scrollback_sync,
-    prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
-    render_scrollback_rows, scrollback_plain_line, scrollback_row_style, scrollback_separator,
-    scrollback_wrapped_rows, should_sync_terminal_scrollback, wrap_scrollback_text,
+    apply_key_action, apply_mouse_outcome, base64_encode, build_initial_app, drain_worker_messages,
+    flush_pending_worker_commands, next_poll_interval, osc52_clipboard_sequence,
+    plan_scrollback_sync, plan_scrollback_sync_with_chunk_size, poll_interval,
+    prepare_scrollback_sync, prepare_scrollback_sync_with_chunk_size, process_app_action,
+    process_app_action_with_spawner, render_scrollback_rows, scrollback_plain_line,
+    scrollback_row_style, scrollback_separator, scrollback_wrapped_rows,
+    should_sync_terminal_scrollback, wrap_scrollback_text,
 };
 
 fn test_config() -> RootConfig {
@@ -49,6 +50,13 @@ fn test_config() -> RootConfig {
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     }
+}
+
+#[test]
+fn osc52_clipboard_sequence_encodes_text() {
+    assert_eq!(base64_encode(b"h"), "aA==");
+    assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    assert_eq!(osc52_clipboard_sequence("hi"), "\x1b]52;c;aGk=\x07");
 }
 
 #[test]
@@ -422,6 +430,28 @@ fn process_app_action_ignores_worker_command_without_runtime() -> anyhow::Result
     process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
 
     assert!(worker.is_none());
+    Ok(())
+}
+
+#[test]
+fn process_app_action_handles_clipboard_copy_locally() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (worker_tx, command_rx) = mpsc::channel();
+    let (_message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+    });
+
+    process_app_action(
+        &mut app,
+        &mut worker,
+        AppAction::CopyToClipboard {
+            text: "selected".to_owned(),
+        },
+    )?;
+
+    assert!(command_rx.recv_timeout(Duration::from_millis(10)).is_err());
     Ok(())
 }
 

@@ -385,7 +385,8 @@ impl AppState {
             }
             AppAction::SetupCompleted { .. }
             | AppAction::ConfigSaved { .. }
-            | AppAction::RuntimeConfigUpdated { .. } => unreachable!(
+            | AppAction::RuntimeConfigUpdated { .. }
+            | AppAction::CopyToClipboard { .. } => unreachable!(
                 "setup/config/runtime updates are handled before worker command conversion"
             ),
         }
