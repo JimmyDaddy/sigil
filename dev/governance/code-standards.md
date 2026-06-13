@@ -244,6 +244,14 @@ cargo clippy --all-targets -- -D warnings
 
 覆盖率门禁默认聚焦可单测的领域逻辑和状态模型；`scripts/coverage.sh` 会排除少量 orchestration loop 文件，这些文件主要承载 raw terminal / worker / agent 主循环调度和 I/O 失败出口，回归应通过其下层模块单测、状态转换测试和必要的人工冒烟覆盖。新增业务逻辑不要为了规避覆盖率而放进这些排除文件。
 
+本地提交应启用仓库内版本化 hook：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+pre-commit hook 通过 `scripts/check-staged-coverage.py` 检查 staged 的 Rust 业务代码新增可执行行覆盖率，默认要求 `>= 96%`。检查范围为 `crates/*/src/**/*.rs`，排除测试文件与测试辅助文件。新增业务代码如果没有 coverage 数据视为不合格；同一业务文件同时存在 staged 与 unstaged 修改时必须先整理 staging，避免覆盖率结果和提交内容不一致。
+
 如果只改文档，可以不跑全量 gate，但至少确认：
 
 - 链接有效

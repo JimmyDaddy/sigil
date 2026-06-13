@@ -283,6 +283,22 @@ cargo install cargo-llvm-cov --version 0.8.7 --locked
 rustup component add llvm-tools-preview
 ```
 
+### 提交 hook
+
+仓库提供版本化的 pre-commit hook。首次启用：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+提交时 hook 会检查 staged 的 Rust 业务代码新增可执行行覆盖率，默认要求 `>= 96%`。检查范围为 `crates/*/src/**/*.rs`，排除 `tests/*`、`*_tests.rs` 和 `*_test_support.rs`。如果同一个业务文件同时存在 staged 与 unstaged 修改，hook 会要求先整理 staging，避免用工作区覆盖率误判 staged snapshot。
+
+如需单独运行：
+
+```bash
+./scripts/check-staged-coverage.py
+```
+
 这组质量门也已经固化在 GitHub Actions：
 
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml)

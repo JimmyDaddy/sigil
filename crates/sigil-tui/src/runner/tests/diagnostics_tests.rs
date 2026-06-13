@@ -837,36 +837,34 @@ fn check_changed_files_diagnostics_converts_execute_failures_to_internal_tool_er
 }
 
 fn init_git_repo(workspace_root: &std::path::Path) -> Result<()> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
-        .args(["init", "-q"])
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "failed to initialize git repo under {}",
-            workspace_root.display()
-        ))
-    }
+    run_git_status(workspace_root, &["init", "-q"])?;
+    run_git_status(
+        workspace_root,
+        &["config", "user.email", "sigil-tests@example.invalid"],
+    )?;
+    run_git_status(workspace_root, &["config", "user.name", "Sigil Tests"])?;
+    Ok(())
 }
 
-fn run_git(workspace_root: &std::path::Path, args: &[&str]) -> Result<()> {
+fn run_git_status(workspace_root: &std::path::Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git")
         .arg("-C")
         .arg(workspace_root)
         .args(args)
         .status()?;
-    if status.success() {
-        Ok(())
-    } else {
+    if !status.success() {
         Err(anyhow!(
             "git {} failed under {}",
             args.join(" "),
             workspace_root.display()
         ))
+    } else {
+        Ok(())
     }
+}
+
+fn run_git(workspace_root: &std::path::Path, args: &[&str]) -> Result<()> {
+    run_git_status(workspace_root, args)
 }
 
 #[test]

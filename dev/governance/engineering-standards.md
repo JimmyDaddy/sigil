@@ -87,6 +87,14 @@ cargo clippy --all-targets -- -D warnings
 
 覆盖率门禁默认要求 workspace 单测行覆盖率 `>= 96%`，由 `cargo-llvm-cov` 执行；CI 和本地必须使用同一个脚本入口，避免阈值或统计范围漂移。默认统计范围排除少量 orchestration loop 文件，具体列表以 `scripts/coverage.sh` 为准；这些文件只能承载入口调度和 I/O 桥接，不应成为新增业务逻辑的覆盖率逃逸区。
 
+本地提交 hook 使用仓库内 `.githooks/pre-commit`。启用方式：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行覆盖率是否 `>= 96%`。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
+
 ### 5.2 何时需要更强验证
 
 以下情况建议至少做一次针对性人工冒烟：
