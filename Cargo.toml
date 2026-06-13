@@ -2,6 +2,7 @@
 members = [
     "crates/sigil-kernel",
     "crates/sigil-provider-deepseek",
+    "crates/sigil-provider-openai-compat",
     "crates/sigil-tools-builtin",
     "crates/sigil-code-intel",
     "crates/sigil-mcp",

@@ -77,6 +77,11 @@ def is_non_executable_added_line(line: str) -> bool:
         return True
     if stripped.startswith(("use ", "pub use ", "mod ", "pub mod ", "type ", "pub type ")):
         return True
+    if re.match(
+        r"^(?:pub(?:\([^)]+\))?\s+)?(?:struct|enum)\s+[A-Z][A-Za-z0-9_]*(?:<[^>]+>)?\s*\{?$",
+        stripped,
+    ):
+        return True
     if re.match(r"^(?:pub(?:\([^)]+\))?\s+)?[A-Z][A-Za-z0-9_]*(?:\s*\{)?[,]?$", stripped):
         return True
     if re.match(r"^[A-Z][A-Za-z0-9_]*(?:,\s*[A-Z][A-Za-z0-9_]*)+,\s*$", stripped):

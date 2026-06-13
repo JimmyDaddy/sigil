@@ -90,6 +90,15 @@ sigil/
         endpoint.rs
         errors.rs
         fim.rs
+    sigil-provider-openai-compat/
+      src/
+        capabilities.rs
+        client.rs
+        config.rs
+        mapper.rs
+        provider.rs
+        request.rs
+        stream.rs
         mapper.rs
         models.rs
         prefix.rs
@@ -159,6 +168,7 @@ sigil/
 
 - `sigil-kernel`：承载 provider、tool、session、event、approval、permission、memory、config 和 agent loop 等通用契约。当前采用 flat public module 文件，测试统一收纳在 `src/tests/*_tests.rs`；这里不出现 DeepSeek 专有字段，也不持有 TUI 状态。
 - `sigil-provider-deepseek`：首个旗舰 provider，内部拆成 transport、endpoint、request、response、stream、mapper、reasoning、tools、pricing 等模块。DeepSeek 专项能力在这里解释和降级，不反向污染 kernel。
+- `sigil-provider-openai-compat`：OpenAI-compatible Chat Completions provider，覆盖通用 streaming text、tool call、usage 和 endpoint/header 配置，不承载 DeepSeek reasoning replay、strict tools、prefix/FIM 或 beta endpoint 语义。
 - `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。
 - `sigil-code-intel`：隔离 LSP client 生命周期、Rust Tree-sitter fallback、符号/诊断缓存、只读 code intelligence tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态代码智能结果只通过 bounded tool result 进入 provider-visible history，不注入 system prompt。
 - `sigil-mcp`：隔离 stdio MCP client 与工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。

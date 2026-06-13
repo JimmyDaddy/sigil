@@ -16,6 +16,9 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     let api_key_details = render_config_selection_details(&state).join("\n");
     assert!(api_key_details.contains("override: SIGIL_API_KEY"));
     assert!(api_key_details.contains("storage: saved api_key is plaintext in sigil.toml"));
+    state.draft.provider_name = "openai_compat".to_owned();
+    let api_key_details = render_config_selection_details(&state).join("\n");
+    assert!(api_key_details.contains("override: SIGIL_OPENAI_COMPATIBLE_API_KEY"));
 
     state.selected_field = Some(ConfigField::ProviderFimModel);
     let fim_details = render_config_selection_details(&state).join("\n");

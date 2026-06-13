@@ -330,6 +330,32 @@ fn schedule_balance_refresh_handles_missing_config_and_auth() {
 }
 
 #[test]
+fn schedule_balance_refresh_skips_non_deepseek_provider() {
+    let mut config = test_config();
+    config.agent.provider = "openai_compat".to_owned();
+    config.agent.model = "gpt-test".to_owned();
+    config.providers.insert(
+        "openai_compat".to_owned(),
+        json!({
+            "base_url": "https://openai.example.com/v1",
+            "model": "gpt-test",
+            "api_key": "openai-key"
+        }),
+    );
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    app.schedule_balance_refresh();
+
+    assert_eq!(app.balance_snapshot.status, "n/a");
+    assert!(app.active_balance_refresh_id.is_none());
+    assert!(
+        !app.drain_pending_worker_commands()
+            .iter()
+            .any(|command| matches!(command, WorkerCommand::RefreshProviderBalance { .. }))
+    );
+}
+
+#[test]
 fn code_intelligence_results_update_status_lines_and_diagnostics() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 

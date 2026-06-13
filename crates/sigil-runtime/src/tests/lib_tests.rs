@@ -18,13 +18,14 @@ use sigil_kernel::{
     WorkspaceConfig,
 };
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
+use sigil_provider_openai_compat::{OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV};
 
 use super::{
     SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
-    build_run_options, build_tool_registry, load_deepseek_config,
+    build_run_options, build_tool_registry, load_deepseek_config, load_openai_compat_config,
     refresh_mcp_server_tools_with_mcp_handlers, register_lazy_mcp_activation_tool,
-    resolve_deepseek_api_key, resolve_deepseek_api_key_with_session,
-    secret_redactor_for_root_config,
+    resolve_deepseek_api_key, resolve_deepseek_api_key_with_session, resolve_openai_compat_api_key,
+    resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
 };
 
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -47,19 +48,32 @@ fn test_root_config(provider: &str) -> RootConfig {
         memory: MemoryConfig { enabled: true },
         compaction: sigil_kernel::CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
-        providers: BTreeMap::from([(
-            "deepseek".to_owned(),
-            json!({
-                "base_url": "https://example.com",
-                "beta_base_url": "https://example.com/beta",
-                "anthropic_base_url": "https://example.com/anthropic",
-                "model": "deepseek-v4-flash",
-                "fim_model": "deepseek-v4-pro",
-                "api_key": "test-key",
-                "strict_tools_mode": "auto",
-                "request_timeout_secs": 15
-            }),
-        )]),
+        providers: BTreeMap::from([
+            (
+                "deepseek".to_owned(),
+                json!({
+                    "base_url": "https://example.com",
+                    "beta_base_url": "https://example.com/beta",
+                    "anthropic_base_url": "https://example.com/anthropic",
+                    "model": "deepseek-v4-flash",
+                    "fim_model": "deepseek-v4-pro",
+                    "api_key": "test-key",
+                    "strict_tools_mode": "auto",
+                    "request_timeout_secs": 15
+                }),
+            ),
+            (
+                "openai_compat".to_owned(),
+                json!({
+                    "base_url": "https://openai.example.com/v1",
+                    "model": "gpt-test",
+                    "api_key": "openai-config-key",
+                    "organization": "org-test",
+                    "project": "project-test",
+                    "request_timeout_secs": 20
+                }),
+            ),
+        ]),
         mcp_servers: Vec::new(),
     }
 }
@@ -102,6 +116,19 @@ fn load_deepseek_config_reads_provider_block() -> Result<()> {
     assert_eq!(config.model, "deepseek-v4-flash");
     assert_eq!(config.fim_model, "deepseek-v4-pro");
     assert_eq!(config.api_key.as_deref(), Some("test-key"));
+    Ok(())
+}
+
+#[test]
+fn load_openai_compat_config_reads_provider_block() -> Result<()> {
+    let config = load_openai_compat_config(&test_root_config("openai_compat"))?;
+
+    assert_eq!(config.base_url, "https://openai.example.com/v1");
+    assert_eq!(config.model, "gpt-test");
+    assert_eq!(config.api_key.as_deref(), Some("openai-config-key"));
+    assert_eq!(config.organization.as_deref(), Some("org-test"));
+    assert_eq!(config.project.as_deref(), Some("project-test"));
+    assert_eq!(config.request_timeout_secs, 20);
     Ok(())
 }
 
@@ -149,6 +176,51 @@ fn resolve_deepseek_api_key_supports_deepseek_env_and_config_fallback() -> Resul
 }
 
 #[test]
+fn resolve_openai_compat_api_key_prefers_env_session_then_config() -> Result<()> {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let config = load_openai_compat_config(&test_root_config("openai_compat"))?;
+
+    {
+        let _scope = EnvScope::set_many(&[(OPENAI_COMPATIBLE_API_KEY_ENV, "sigil-openai-key")]);
+        let resolved =
+            resolve_openai_compat_api_key(&config).expect("expected OpenAI-compatible api key");
+        assert_eq!(resolved.value, "sigil-openai-key");
+        assert_eq!(
+            resolved.source,
+            SecretSource::Environment(OPENAI_COMPATIBLE_API_KEY_ENV)
+        );
+    }
+
+    {
+        let _scope = EnvScope::set_many(&[
+            (OPENAI_COMPATIBLE_API_KEY_ENV, "   "),
+            (OPENAI_API_KEY_ENV, "openai-env-key"),
+        ]);
+        let resolved =
+            resolve_openai_compat_api_key(&config).expect("expected OpenAI-compatible api key");
+        assert_eq!(resolved.value, "openai-env-key");
+        assert_eq!(
+            resolved.source,
+            SecretSource::Environment(OPENAI_API_KEY_ENV)
+        );
+    }
+
+    let resolved = resolve_openai_compat_api_key_with_session(&config, Some(" session-key "))
+        .expect("expected session api key");
+    assert_eq!(resolved.value, "session-key");
+    assert_eq!(resolved.source, SecretSource::Session);
+
+    let resolved = resolve_openai_compat_api_key_with_session(&config, Some("   "))
+        .expect("expected config fallback");
+    assert_eq!(resolved.value, "openai-config-key");
+    assert_eq!(resolved.source, SecretSource::ConfigPlaintext);
+    Ok(())
+}
+
+#[test]
 fn secret_redactor_for_root_config_redacts_resolved_api_key() {
     let _guard = ENV_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -160,6 +232,22 @@ fn secret_redactor_for_root_config_redacts_resolved_api_key() {
 
     assert_eq!(
         redactor.redact_text("Authorization: Bearer env-secret-key"),
+        "Authorization: [redacted] [redacted]"
+    );
+}
+
+#[test]
+fn secret_redactor_for_root_config_redacts_openai_compat_api_key() {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let _scope = EnvScope::set_many(&[(OPENAI_COMPATIBLE_API_KEY_ENV, "openai-env-secret")]);
+
+    let redactor = secret_redactor_for_root_config(&test_root_config("openai_compat"));
+
+    assert_eq!(
+        redactor.redact_text("Authorization: Bearer openai-env-secret"),
         "Authorization: [redacted] [redacted]"
     );
 }
@@ -183,6 +271,25 @@ fn build_provider_supports_deepseek_and_missing_provider_config_errors() -> Resu
     missing.providers.clear();
     let error = load_deepseek_config(&missing).expect_err("missing provider config should fail");
     assert!(error.to_string().contains("missing [providers.deepseek]"));
+    Ok(())
+}
+
+#[test]
+fn build_provider_supports_openai_compat_aliases_and_missing_config_errors() -> Result<()> {
+    for provider_name in ["openai_compat", "openai-compatible", "openai_compatible"] {
+        let provider = build_provider(&test_root_config(provider_name))?;
+        assert_eq!(provider.name(), "openai_compat");
+    }
+
+    let mut missing = test_root_config("openai_compat");
+    missing.providers.remove("openai_compat");
+    let error = load_openai_compat_config(&missing)
+        .expect_err("missing OpenAI-compatible provider config should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("missing [providers.openai_compat]")
+    );
     Ok(())
 }
 

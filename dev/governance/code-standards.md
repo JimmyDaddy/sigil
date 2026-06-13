@@ -80,7 +80,13 @@
 - 不要把 kernel 可以表达的通用能力重新定义一套
 - provider 特有 quirk 应集中表达，不要散落在多个 crate 的临时判断里
 
-### 3.3 `sigil-tools-builtin`
+### 3.3 `sigil-provider-openai-compat`
+
+- 负责：OpenAI-compatible Chat Completions 请求构造、SSE 解析、流式 tool call 映射、usage 和 base_url / organization / project 配置
+- 不负责：DeepSeek reasoning replay、strict tools、prefix/FIM 或 beta endpoint
+- 对兼容 provider 的差异只做通用 OpenAI-compatible fallback，不把某个厂商私有字段上移到 kernel
+
+### 3.4 `sigil-tools-builtin`
 
 - 工具必须有稳定 `ToolSpec`
 - `ToolSpec` 必须表达 provider-neutral 的 `category / access / preview`，不要退回 read/write 二分

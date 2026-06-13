@@ -78,6 +78,10 @@ Common per-user config paths:
 
 For examples covering authentication, provider settings, permissions, memory, compaction, code intelligence, and environment variable overrides, see [docs/en/configuration.md](docs/en/configuration.md).
 
+## Providers
+
+Sigil currently supports DeepSeek and OpenAI-compatible Chat Completions providers. DeepSeek remains the default Quick Setup path; OpenAI-compatible endpoints are configured with `provider = "openai_compat"` and `[providers.openai_compat]`.
+
 ## MCP
 
 Sigil can connect stdio MCP servers as external tool providers. MCP tools, resources, and prompts use the same approval, activity, session control, secret egress, and trust policy surfaces as built-in tools.

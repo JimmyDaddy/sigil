@@ -40,6 +40,8 @@ class StagedCoverageHelpersTests(unittest.TestCase):
             "McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,",
             "notification: McpProgressNotification,",
             "pub type ProviderMap = BTreeMap<String, Value>;",
+            "pub struct OpenAiStreamEnvelope {",
+            "pub enum ProviderMode {",
             "#[derive(Debug)]",
             "}",
             "use std::path::PathBuf;",

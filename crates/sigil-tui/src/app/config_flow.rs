@@ -1,13 +1,14 @@
 use crate::config_panel::{
     CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
     CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField, ConfigFieldMove,
-    ConfigFooterAction, ConfigSection, ConfigState, render_config_readonly_row,
-    render_config_value_row,
+    ConfigFooterAction, ConfigSection, ConfigState, cycle_provider_name,
+    render_config_readonly_row, render_config_value_row,
 };
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{ApprovalMode, CodeIntelStartup, McpServerConfig, McpServerStartup, RootConfig};
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 use sigil_runtime::doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks};
 
 use super::{
@@ -172,6 +173,12 @@ impl AppState {
 
         match section {
             ConfigSection::Provider => {
+                lines.push("[runtime]".to_owned());
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::ProviderName,
+                ));
+                lines.push(String::new());
                 lines.push("[model]".to_owned());
                 lines.push(render_config_value_row(
                     config_state,
@@ -576,6 +583,14 @@ impl AppState {
                                 config_state.draft.provider_model.clone(),
                             ));
                         }
+                        ConfigField::ProviderName => {
+                            config_state.draft.provider_name =
+                                cycle_provider_name(&config_state.draft.provider_name);
+                            config_state.dirty = true;
+                            self.last_notice =
+                                Some(format!("provider -> {}", config_state.draft.provider_name));
+                            return Ok(None);
+                        }
                         ConfigField::ProviderFimModel => {
                             open_model_picker = Some((
                                 ModelPickerTarget::ProviderFim,
@@ -946,7 +961,7 @@ fn render_effective_context_window(config_state: &ConfigState) -> String {
         .ok()
         .filter(|tokens| *tokens > 0);
     let resolved = resolve_context_window_tokens(
-        &config_state.draft.base_root_config.agent.provider,
+        &config_state.draft.provider_name,
         config_state.draft.provider_model.trim(),
         fallback_tokens,
     );
@@ -994,7 +1009,12 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     ];
 
     if matches!(field, ConfigField::ProviderApiKey) {
-        lines.push(format!("override: {SIGIL_API_KEY_ENV}"));
+        let env_name = if config_state.draft.provider_name == "openai_compat" {
+            OPENAI_COMPATIBLE_API_KEY_ENV
+        } else {
+            SIGIL_API_KEY_ENV
+        };
+        lines.push(format!("override: {env_name}"));
         lines.push("storage: saved api_key is plaintext in sigil.toml".to_owned());
     }
     if matches!(field, ConfigField::ProviderFimModel) {

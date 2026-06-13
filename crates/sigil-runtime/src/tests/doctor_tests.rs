@@ -419,10 +419,92 @@ base_url = 123
 }
 
 #[test]
+fn doctor_reports_openai_compat_provider_config_and_plaintext_auth() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "openai_compat"
+model = "gpt-test"
+
+[providers.openai_compat]
+base_url = "https://openai.example.com/v1"
+model = "gpt-test"
+api_key = "test-secret-key"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "provider:openai_compat"
+                && check.status == DoctorStatus::Ok
+                && check.message.contains("model=gpt-test"))
+    );
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "provider:auth"
+                && check.status == DoctorStatus::Warn
+                && check.message.contains("config plaintext"))
+    );
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|check| check.message.contains("test-secret-key"))
+    );
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_openai_compat_provider_config_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "openai_compat"
+model = "gpt-test"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "provider:openai_compat"
+                && check.status == DoctorStatus::Error
+                && check.message.contains("missing [providers.openai_compat]"))
+    );
+    Ok(())
+}
+
+#[test]
 fn provider_auth_check_reports_missing_api_key_remediation() {
     let mut report = DoctorReport::default();
 
-    push_provider_auth_check(&mut report, None);
+    push_provider_auth_check(
+        &mut report,
+        None,
+        "TEST_API_KEY",
+        "[providers.test].api_key",
+    );
 
     assert!(report.checks.iter().any(|check| {
         check.name == "provider:auth"

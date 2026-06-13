@@ -3,6 +3,10 @@ use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, RootConfig,
 };
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
+use sigil_provider_openai_compat::OpenAiCompatibleProviderConfig;
+
+pub(crate) const DEEPSEEK_PROVIDER_KEY: &str = "deepseek";
+pub(crate) const OPENAI_COMPAT_PROVIDER_KEY: &str = "openai_compat";
 
 pub(crate) const CONFIG_SECTION_NAV_HINT: &str = "Tab section";
 pub(crate) const CONFIG_FIELD_NAV_HINT: &str = "Up/Down field";
@@ -84,6 +88,7 @@ impl ConfigSection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigField {
+    ProviderName,
     ProviderModel,
     ProviderApiKey,
     ProviderBaseUrl,
@@ -106,11 +111,12 @@ pub(crate) enum ConfigField {
 }
 
 impl ConfigField {
-    const PROVIDER_FIELDS: [Self; 4] = [
+    const PROVIDER_FIELDS: [Self; 5] = [
         Self::ProviderModel,
         Self::ProviderApiKey,
         Self::ProviderBaseUrl,
         Self::ProviderFimModel,
+        Self::ProviderName,
     ];
     const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionsDefaultMode];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
@@ -147,6 +153,7 @@ impl ConfigField {
 
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::ProviderName => "provider",
             Self::ProviderModel => "model",
             Self::ProviderApiKey => "api_key",
             Self::ProviderBaseUrl => "base_url",
@@ -171,6 +178,7 @@ impl ConfigField {
 
     pub(crate) fn display_label(self) -> &'static str {
         match self {
+            Self::ProviderName => "Provider",
             Self::ProviderModel => "Model",
             Self::ProviderApiKey => "API key",
             Self::ProviderBaseUrl => "Endpoint",
@@ -195,6 +203,9 @@ impl ConfigField {
 
     pub(crate) fn help_text(self) -> &'static str {
         match self {
+            Self::ProviderName => {
+                "Runtime provider used for new sessions. Switching provider starts later runs with that provider."
+            }
             Self::ProviderModel => {
                 "Chat model used for new runs. Switching the saved default does not rewrite the current session."
             }
@@ -202,10 +213,10 @@ impl ConfigField {
                 "Saved locally when entered here. SIGIL_API_KEY still overrides it at runtime."
             }
             Self::ProviderBaseUrl => {
-                "OpenAI-compatible DeepSeek endpoint. Leave this unchanged unless you use a proxy."
+                "Provider API base URL. Leave this unchanged unless you use a proxy or compatible endpoint."
             }
             Self::ProviderFimModel => {
-                "Model used by prefix/FIM helpers. This is advanced; chat runs use Model."
+                "DeepSeek-only model used by prefix/FIM helpers. Chat runs use Model."
             }
             Self::PermissionsDefaultMode => {
                 "Fallback approval mode for tool calls not covered by a more specific rule."
@@ -267,6 +278,7 @@ impl ConfigField {
     pub(crate) fn action_label(self) -> &'static str {
         match self {
             Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
+            Self::ProviderName => "Enter cycle",
             Self::ProviderApiKey => "Enter input",
             Self::PermissionsDefaultMode | Self::CodeIntelStartup => "Enter cycle",
             Self::MemoryEnabled
@@ -419,6 +431,7 @@ impl McpServerDraft {
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigDraft {
     pub(crate) base_root_config: RootConfig,
+    pub(crate) provider_name: String,
     pub(crate) provider_model: String,
     pub(crate) provider_api_key: String,
     pub(crate) provider_base_url: String,
@@ -444,19 +457,39 @@ pub(crate) struct ConfigDraft {
 
 impl ConfigDraft {
     pub(crate) fn from_root_config(root_config: &RootConfig) -> Self {
-        let provider = load_deepseek_provider_config(root_config)
+        let provider_name = normalize_provider_name(&root_config.agent.provider).to_owned();
+        let deepseek_provider = load_deepseek_provider_config(root_config)
             .unwrap_or_else(|| default_deepseek_provider_config(&root_config.agent.model));
+        let openai_provider = load_openai_compat_provider_config(root_config)
+            .unwrap_or_else(|| default_openai_compat_provider_config(&root_config.agent.model));
         Self {
             base_root_config: root_config.clone(),
-            provider_model: provider.model,
-            provider_api_key: provider.api_key.unwrap_or_default(),
-            provider_base_url: provider.base_url,
-            provider_beta_base_url: provider.beta_base_url,
-            provider_anthropic_base_url: provider.anthropic_base_url,
-            provider_user_id_strategy: provider.user_id_strategy.unwrap_or_default(),
-            provider_strict_tools_mode: provider.strict_tools_mode,
-            provider_fim_model: provider.fim_model,
-            provider_request_timeout_secs: provider.request_timeout_secs.to_string(),
+            provider_name: provider_name.clone(),
+            provider_model: if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
+                openai_provider.model
+            } else {
+                deepseek_provider.model
+            },
+            provider_api_key: if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
+                openai_provider.api_key.unwrap_or_default()
+            } else {
+                deepseek_provider.api_key.unwrap_or_default()
+            },
+            provider_base_url: if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
+                openai_provider.base_url
+            } else {
+                deepseek_provider.base_url
+            },
+            provider_beta_base_url: deepseek_provider.beta_base_url,
+            provider_anthropic_base_url: deepseek_provider.anthropic_base_url,
+            provider_user_id_strategy: deepseek_provider.user_id_strategy.unwrap_or_default(),
+            provider_strict_tools_mode: deepseek_provider.strict_tools_mode,
+            provider_fim_model: deepseek_provider.fim_model,
+            provider_request_timeout_secs: if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
+                openai_provider.request_timeout_secs.to_string()
+            } else {
+                deepseek_provider.request_timeout_secs.to_string()
+            },
             permission_default_mode: root_config.permission.default_mode,
             memory_enabled: root_config.memory.enabled,
             compaction_enabled: root_config.compaction.enabled,
@@ -490,6 +523,7 @@ impl ConfigDraft {
     }
 
     pub(crate) fn to_root_config(&self) -> Result<RootConfig> {
+        let provider_name = normalize_provider_name(&self.provider_name);
         let model = self.provider_model.trim();
         if model.is_empty() {
             bail!("model cannot be empty");
@@ -499,17 +533,19 @@ impl ConfigDraft {
         if base_url.is_empty() {
             bail!("base_url cannot be empty");
         }
-        let beta_base_url = self.provider_beta_base_url.trim();
-        if beta_base_url.is_empty() {
-            bail!("beta_base_url cannot be empty");
-        }
-        let anthropic_base_url = self.provider_anthropic_base_url.trim();
-        if anthropic_base_url.is_empty() {
-            bail!("anthropic_base_url cannot be empty");
-        }
-        let fim_model = self.provider_fim_model.trim();
-        if fim_model.is_empty() {
-            bail!("fim_model cannot be empty");
+        if provider_name == DEEPSEEK_PROVIDER_KEY {
+            let beta_base_url = self.provider_beta_base_url.trim();
+            if beta_base_url.is_empty() {
+                bail!("beta_base_url cannot be empty");
+            }
+            let anthropic_base_url = self.provider_anthropic_base_url.trim();
+            if anthropic_base_url.is_empty() {
+                bail!("anthropic_base_url cannot be empty");
+            }
+            let fim_model = self.provider_fim_model.trim();
+            if fim_model.is_empty() {
+                bail!("fim_model cannot be empty");
+            }
         }
 
         let request_timeout_secs = self
@@ -567,6 +603,7 @@ impl ConfigDraft {
         }
 
         let mut root_config = self.base_root_config.clone();
+        root_config.agent.provider = provider_name.to_owned();
         root_config.agent.model = model.to_owned();
         root_config.permission.default_mode = self.permission_default_mode;
         root_config.memory.enabled = self.memory_enabled;
@@ -583,23 +620,39 @@ impl ConfigDraft {
             .map(|(index, server)| server.to_config(index))
             .collect::<Result<Vec<_>>>()?;
 
-        let mut provider_config = load_deepseek_provider_config(&root_config)
-            .unwrap_or_else(|| default_deepseek_provider_config(model));
-        provider_config.model = model.to_owned();
-        provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
-        provider_config.base_url = base_url.to_owned();
-        provider_config.beta_base_url = beta_base_url.to_owned();
-        provider_config.anthropic_base_url = anthropic_base_url.to_owned();
-        provider_config.user_id_strategy = (!self.provider_user_id_strategy.trim().is_empty())
-            .then(|| self.provider_user_id_strategy.trim().to_owned());
-        provider_config.strict_tools_mode = self.provider_strict_tools_mode;
-        provider_config.fim_model = fim_model.to_owned();
-        provider_config.request_timeout_secs = request_timeout_secs;
+        if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
+            let mut provider_config = load_openai_compat_provider_config(&root_config)
+                .unwrap_or_else(|| default_openai_compat_provider_config(model));
+            provider_config.model = model.to_owned();
+            provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
+            provider_config.base_url = base_url.to_owned();
+            provider_config.request_timeout_secs = request_timeout_secs;
+            let provider_value = serialize_openai_compat_provider_value(&provider_config)?;
+            root_config
+                .providers
+                .insert(OPENAI_COMPAT_PROVIDER_KEY.to_owned(), provider_value);
+        } else {
+            let beta_base_url = self.provider_beta_base_url.trim();
+            let anthropic_base_url = self.provider_anthropic_base_url.trim();
+            let fim_model = self.provider_fim_model.trim();
+            let mut provider_config = load_deepseek_provider_config(&root_config)
+                .unwrap_or_else(|| default_deepseek_provider_config(model));
+            provider_config.model = model.to_owned();
+            provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
+            provider_config.base_url = base_url.to_owned();
+            provider_config.beta_base_url = beta_base_url.to_owned();
+            provider_config.anthropic_base_url = anthropic_base_url.to_owned();
+            provider_config.user_id_strategy = (!self.provider_user_id_strategy.trim().is_empty())
+                .then(|| self.provider_user_id_strategy.trim().to_owned());
+            provider_config.strict_tools_mode = self.provider_strict_tools_mode;
+            provider_config.fim_model = fim_model.to_owned();
+            provider_config.request_timeout_secs = request_timeout_secs;
 
-        let provider_value = serialize_deepseek_provider_value(&provider_config)?;
-        root_config
-            .providers
-            .insert("deepseek".to_owned(), provider_value);
+            let provider_value = serialize_deepseek_provider_value(&provider_config)?;
+            root_config
+                .providers
+                .insert(DEEPSEEK_PROVIDER_KEY.to_owned(), provider_value);
+        }
         Ok(root_config)
     }
 
@@ -802,6 +855,7 @@ impl ConfigState {
 
     pub(crate) fn field_text_value(&self, field: ConfigField) -> Option<&str> {
         match field {
+            ConfigField::ProviderName => Some(&self.draft.provider_name),
             ConfigField::ProviderModel => Some(&self.draft.provider_model),
             ConfigField::ProviderApiKey => Some(&self.draft.provider_api_key),
             ConfigField::ProviderBaseUrl => Some(&self.draft.provider_base_url),
@@ -840,6 +894,7 @@ impl ConfigState {
 
     pub(crate) fn field_text_value_mut(&mut self, field: ConfigField) -> Option<&mut String> {
         match field {
+            ConfigField::ProviderName => Some(&mut self.draft.provider_name),
             ConfigField::ProviderModel => Some(&mut self.draft.provider_model),
             ConfigField::ProviderApiKey => Some(&mut self.draft.provider_api_key),
             ConfigField::ProviderBaseUrl => Some(&mut self.draft.provider_base_url),
@@ -878,6 +933,11 @@ impl ConfigState {
 
     pub(crate) fn display_value(&self, field: ConfigField) -> String {
         let text_value = match field {
+            ConfigField::ProviderFimModel
+                if normalize_provider_name(&self.draft.provider_name) != DEEPSEEK_PROVIDER_KEY =>
+            {
+                return "not supported".to_owned();
+            }
             ConfigField::ProviderApiKey => return mask_secret(&self.draft.provider_api_key),
             ConfigField::PermissionsDefaultMode => {
                 return self.draft.permission_default_mode.as_str().to_owned();
@@ -929,8 +989,22 @@ pub(crate) fn load_deepseek_provider_config(
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
+pub(crate) fn load_openai_compat_provider_config(
+    root_config: &RootConfig,
+) -> Option<OpenAiCompatibleProviderConfig> {
+    root_config
+        .providers
+        .get(OPENAI_COMPAT_PROVIDER_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
 pub(crate) fn default_deepseek_provider_config(model: &str) -> DeepSeekProviderConfig {
     DeepSeekProviderConfig::default_for_model(model)
+}
+
+pub(crate) fn default_openai_compat_provider_config(model: &str) -> OpenAiCompatibleProviderConfig {
+    OpenAiCompatibleProviderConfig::default_for_model(model)
 }
 
 pub(crate) fn serialize_deepseek_provider_value(
@@ -942,6 +1016,31 @@ pub(crate) fn serialize_deepseek_provider_value(
         object.retain(|_, entry| !entry.is_null());
     }
     Ok(value)
+}
+
+pub(crate) fn serialize_openai_compat_provider_value(
+    provider_config: &OpenAiCompatibleProviderConfig,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(provider_config)
+        .map_err(|error| anyhow!("failed to serialize openai_compat provider config: {error}"))?;
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|_, entry| !entry.is_null());
+    }
+    Ok(value)
+}
+
+pub(crate) fn normalize_provider_name(provider: &str) -> &'static str {
+    match provider {
+        "openai-compatible" | "openai_compatible" | "openai_compat" => OPENAI_COMPAT_PROVIDER_KEY,
+        _ => DEEPSEEK_PROVIDER_KEY,
+    }
+}
+
+pub(crate) fn cycle_provider_name(provider: &str) -> String {
+    match normalize_provider_name(provider) {
+        DEEPSEEK_PROVIDER_KEY => OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
+        _ => DEEPSEEK_PROVIDER_KEY.to_owned(),
+    }
 }
 
 pub(crate) fn render_config_value_row(state: &ConfigState, field: ConfigField) -> String {
@@ -988,6 +1087,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::McpCommand
         | ConfigField::McpArgsCsv => !character.is_control(),
         ConfigField::ProviderApiKey
+        | ConfigField::ProviderName
         | ConfigField::PermissionsDefaultMode
         | ConfigField::MemoryEnabled
         | ConfigField::CompactionEnabled

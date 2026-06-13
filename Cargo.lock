@@ -2209,6 +2209,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-provider-openai-compat"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "sigil-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2220,6 +2235,7 @@ dependencies = [
  "sigil-kernel",
  "sigil-mcp",
  "sigil-provider-deepseek",
+ "sigil-provider-openai-compat",
  "sigil-tools-builtin",
  "tempfile",
  "tokio",
@@ -2257,6 +2273,7 @@ dependencies = [
  "serde_json",
  "sigil-kernel",
  "sigil-provider-deepseek",
+ "sigil-provider-openai-compat",
  "sigil-runtime",
  "syntect",
  "tempfile",

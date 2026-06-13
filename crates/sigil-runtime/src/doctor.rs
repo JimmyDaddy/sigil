@@ -5,8 +5,12 @@ use std::{
 
 use sigil_kernel::{McpServerConfig, McpServerStartup, RootConfig, resolve_workspace_root};
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 
-use crate::{SecretResolution, SecretSource, load_deepseek_config, resolve_deepseek_api_key};
+use crate::{
+    SecretResolution, SecretSource, load_deepseek_config, load_openai_compat_config,
+    resolve_deepseek_api_key, resolve_openai_compat_api_key,
+};
 
 /// Severity for one local diagnostics check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,11 +238,14 @@ fn check_session_log_dir(
 fn check_provider(report: &mut DoctorReport, root_config: &RootConfig) {
     match root_config.agent.provider.as_str() {
         "deepseek" => check_deepseek_provider(report, root_config),
+        "openai_compat" | "openai-compatible" | "openai_compatible" => {
+            check_openai_compat_provider(report, root_config);
+        }
         other => report.push_with_remediation(
             DoctorStatus::Error,
             "provider",
             format!("unsupported provider {other}"),
-            Some("set [agent].provider = \"deepseek\" until another provider is implemented"),
+            Some("set [agent].provider to \"deepseek\" or \"openai_compat\""),
         ),
     }
 }
@@ -262,17 +269,54 @@ fn check_deepseek_provider(report: &mut DoctorReport, root_config: &RootConfig) 
         format!("model={} base_url={}", config.model, config.base_url),
     );
 
-    push_provider_auth_check(report, resolve_deepseek_api_key(&config));
+    push_provider_auth_check(
+        report,
+        resolve_deepseek_api_key(&config),
+        SIGIL_API_KEY_ENV,
+        "[providers.deepseek].api_key",
+    );
 }
 
-fn push_provider_auth_check(report: &mut DoctorReport, secret: Option<SecretResolution>) {
+fn check_openai_compat_provider(report: &mut DoctorReport, root_config: &RootConfig) {
+    let config = match load_openai_compat_config(root_config).and_then(|config| config.resolved()) {
+        Ok(config) => config,
+        Err(error) => {
+            report.push_with_remediation(
+                DoctorStatus::Error,
+                "provider:openai_compat",
+                error.to_string(),
+                Some("add a valid [providers.openai_compat] block"),
+            );
+            return;
+        }
+    };
+    report.push(
+        DoctorStatus::Ok,
+        "provider:openai_compat",
+        format!("model={} base_url={}", config.model, config.base_url),
+    );
+
+    push_provider_auth_check(
+        report,
+        resolve_openai_compat_api_key(&config),
+        OPENAI_COMPATIBLE_API_KEY_ENV,
+        "[providers.openai_compat].api_key",
+    );
+}
+
+fn push_provider_auth_check(
+    report: &mut DoctorReport,
+    secret: Option<SecretResolution>,
+    preferred_env: &'static str,
+    config_key: &'static str,
+) {
     match secret {
         Some(secret) if secret.source == SecretSource::ConfigPlaintext => report.push_with_remediation(
             DoctorStatus::Warn,
             "provider:auth",
             "resolved from config plaintext",
             Some(format!(
-                "prefer {SIGIL_API_KEY_ENV} for temporary use; if api_key stays in sigil.toml, keep the file private and never commit it",
+                "prefer {preferred_env} for temporary use; if api_key stays in sigil.toml, keep the file private and never commit it",
             )),
         ),
         Some(secret) => report.push(
@@ -284,10 +328,10 @@ fn push_provider_auth_check(report: &mut DoctorReport, secret: Option<SecretReso
             DoctorStatus::Error,
             "provider:auth",
             format!(
-                "missing api key; set {SIGIL_API_KEY_ENV} or [providers.deepseek].api_key",
+                "missing api key; set {preferred_env} or {config_key}",
             ),
             Some(format!(
-                "for temporary use, export {SIGIL_API_KEY_ENV}; if you save api_key in sigil.toml, it is plaintext",
+                "for temporary use, export {preferred_env}; if you save api_key in sigil.toml, it is plaintext",
             )),
         ),
     }

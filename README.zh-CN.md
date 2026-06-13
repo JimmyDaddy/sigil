@@ -78,6 +78,10 @@ Sigil 会按顺序查找配置：
 
 认证、provider、permission、memory、compaction、code intelligence 和环境变量 override 的完整配置示例见 [docs/zh-CN/configuration.md](docs/zh-CN/configuration.md)。
 
+## Provider
+
+Sigil 当前支持 DeepSeek 和 OpenAI-compatible Chat Completions provider。Quick Setup 仍默认走 DeepSeek；OpenAI-compatible endpoint 使用 `provider = "openai_compat"` 和 `[providers.openai_compat]` 配置。
+
 ## MCP
 
 Sigil 可以通过 stdio MCP server 接入外部工具。MCP tools、resources 和 prompts 会被包装进同一个工具审批和 activity 展示体系，支持 eager/lazy 启动、required/optional server、trust policy、secret egress 阻断和 pinned identity 校验。

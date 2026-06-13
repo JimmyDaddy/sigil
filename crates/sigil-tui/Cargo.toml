@@ -17,6 +17,7 @@ toml.workspace = true
 tokio.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
+sigil-provider-openai-compat = { path = "../sigil-provider-openai-compat" }
 sigil-runtime = { path = "../sigil-runtime" }
 two-face.workspace = true
 unicode-segmentation.workspace = true

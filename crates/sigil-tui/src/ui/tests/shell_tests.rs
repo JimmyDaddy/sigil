@@ -727,7 +727,7 @@ fn render_config_text_modal_uses_field_help_and_value_label() -> anyhow::Result<
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Endpoint"));
-    assert!(rendered.contains("OpenAI-compatible DeepSeek endpoint"));
+    assert!(rendered.contains("Provider API base URL"));
     assert!(rendered.contains("key base_url"));
     assert!(rendered.contains("value: https://api.deepseek.com"));
     Ok(())
@@ -889,7 +889,7 @@ fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Resul
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    let backend = TestBackend::new(48, 28);
+    let backend = TestBackend::new(48, 32);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render(frame, &app))?;

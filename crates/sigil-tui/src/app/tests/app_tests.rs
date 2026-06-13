@@ -316,3 +316,43 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
     assert!(action.is_none());
     Ok(())
 }
+
+#[test]
+fn model_command_updates_openai_compat_provider_block() -> Result<()> {
+    let mut config = test_config();
+    config.agent.provider = "openai_compat".to_owned();
+    config.agent.model = "gpt-old".to_owned();
+    config.providers.insert(
+        "openai_compat".to_owned(),
+        json!({
+            "base_url": "https://openai.example.com/v1",
+            "model": "gpt-old",
+            "api_key": "openai-key",
+            "request_timeout_secs": 20
+        }),
+    );
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    let action = app.execute_slash_command(
+        crate::slash::ResolvedSlashCommand {
+            canonical: "/model",
+            arg: "gpt-new".to_owned(),
+        },
+        "/model gpt-new".to_owned(),
+    )?;
+
+    let Some(AppAction::RuntimeConfigUpdated { root_config }) = action else {
+        panic!("expected runtime config update");
+    };
+    assert_eq!(root_config.agent.provider, "openai_compat");
+    assert_eq!(root_config.agent.model, "gpt-new");
+    assert_eq!(
+        root_config.providers["openai_compat"]["model"],
+        serde_json::Value::String("gpt-new".to_owned())
+    );
+    assert_eq!(
+        root_config.providers["openai_compat"]["api_key"],
+        serde_json::Value::String("openai-key".to_owned())
+    );
+    Ok(())
+}

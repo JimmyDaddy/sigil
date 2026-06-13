@@ -29,6 +29,7 @@
 ### 2.3 基础能力层
 
 - `crates/sigil-provider-deepseek`：DeepSeek provider
+- `crates/sigil-provider-openai-compat`：OpenAI-compatible provider
 - `crates/sigil-tools-builtin`：内置工具
 - `crates/sigil-mcp`：MCP 接入
 - `crates/sigil-runtime`：跨 TUI / CLI 的 provider、tool registry、run options 装配

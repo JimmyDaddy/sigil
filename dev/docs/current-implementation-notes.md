@@ -11,6 +11,7 @@ sigil/
   crates/
     sigil-kernel/              # 通用 agent 内核与领域契约
     sigil-provider-deepseek/   # DeepSeek provider 实现
+    sigil-provider-openai-compat/ # OpenAI-compatible provider 实现
     sigil-tools-builtin/       # 内置工具
     sigil-code-intel/          # LSP client、Tree-sitter fallback 与 code intelligence tools
     sigil-mcp/                 # stdio MCP client 与工具适配
@@ -28,6 +29,7 @@ sigil/
 - `sigil-kernel` 统一承载 provider、tool、session、approval、permission、event、memory 和 compaction 契约。
 - `sigil-runtime` 统一装配 provider、内置工具、MCP 工具和 run options。
 - `sigil-provider-deepseek` 支持 DeepSeek 流式对话、工具调用、reasoning replay、usage、pricing、Beta endpoint、prefix 和 FIM 专项入口。
+- `sigil-provider-openai-compat` 支持 OpenAI-compatible Chat Completions 流式对话、工具调用、usage、base URL、organization/project header 和模型配置。
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、搜索、目录枚举和 shell 执行。
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用、诊断、code action 查询，以及需要审批 diff 的 code action / rename edit 工具。
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
@@ -130,9 +132,9 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 - `[providers.*]`
 - `[[mcp_servers]]`
 
-DeepSeek provider 配置位于 `[providers.deepseek]`。运行时环境变量 override 在 provider config 层解析，其中 `SIGIL_API_KEY` 优先级最高，`DEEPSEEK_API_KEY` 作为备用来源保留。
+DeepSeek provider 配置位于 `[providers.deepseek]`。OpenAI-compatible provider 配置位于 `[providers.openai_compat]`，`agent.provider` 使用 `openai_compat`，并兼容 `openai-compatible` / `openai_compatible` 输入别名。运行时环境变量 override 在 provider config 层解析；DeepSeek 使用 `SIGIL_API_KEY` / `DEEPSEEK_API_KEY`，OpenAI-compatible 使用 `SIGIL_OPENAI_COMPATIBLE_API_KEY` / `OPENAI_API_KEY`。
 
-TUI `/config` 只暴露 provider 高频项、permissions、memory、compaction 和 MCP server 常用字段。低频 provider 专项字段继续保留给配置文件和环境变量。
+TUI `/config` 只暴露 provider 高频项、permissions、memory、compaction 和 MCP server 常用字段。它可以在 `deepseek` 与 `openai_compat` 间切换；DeepSeek FIM 显示为 provider 专项高级项，OpenAI-compatible 下标记为不支持。低频 provider 专项字段继续保留给配置文件和环境变量。
 
 `sigil doctor` 与 TUI `/doctor` 复用 runtime 诊断逻辑，检查配置加载、workspace、session log、provider/auth 来源、MCP command/trust、code intelligence LSP plan 和 terminal `TERM`。诊断只展示 secret 来源，不输出 secret 值。
 

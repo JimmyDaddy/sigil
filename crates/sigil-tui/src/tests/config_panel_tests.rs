@@ -317,7 +317,7 @@ fn config_state_moves_fields_and_footer_boundaries() {
         ConfigFooterAction::SaveAndClose
     );
     assert!(state.focus_last_field());
-    assert_eq!(state.selected_field, Some(ConfigField::ProviderFimModel));
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
     assert!(!state.footer_selected);
 }
 
@@ -373,6 +373,62 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     assert_eq!(config.mcp_servers[0].args, vec!["server.js", "--stdio"]);
     assert_eq!(config.mcp_servers[0].startup_timeout_secs, 15);
     Ok(())
+}
+
+#[test]
+fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
+    let mut root_config = test_root_config();
+    root_config.agent.provider = "openai-compatible".to_owned();
+    root_config.agent.model = "gpt-old".to_owned();
+    root_config.providers.insert(
+        "openai_compat".to_owned(),
+        serde_json::json!({
+            "base_url": "https://openai.example.com/v1",
+            "model": "gpt-old",
+            "api_key": "old-key",
+            "request_timeout_secs": 20
+        }),
+    );
+
+    let mut state = ConfigState::from_root_config(&root_config);
+    assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
+    assert_eq!(
+        state.display_value(ConfigField::ProviderFimModel),
+        "not supported"
+    );
+
+    state.draft.provider_model = " gpt-new ".to_owned();
+    state.draft.provider_api_key = " new-key ".to_owned();
+    state.draft.provider_base_url = " https://proxy.example.test/v1 ".to_owned();
+    state.draft.provider_fim_model = " ".to_owned();
+    state.draft.provider_request_timeout_secs = "45".to_owned();
+
+    let config = state.draft.to_root_config()?;
+    let provider =
+        load_openai_compat_provider_config(&config).expect("openai_compat should serialize");
+
+    assert_eq!(config.agent.provider, OPENAI_COMPAT_PROVIDER_KEY);
+    assert_eq!(config.agent.model, "gpt-new");
+    assert_eq!(provider.model, "gpt-new");
+    assert_eq!(provider.api_key.as_deref(), Some("new-key"));
+    assert_eq!(provider.base_url, "https://proxy.example.test/v1");
+    assert_eq!(provider.request_timeout_secs, 45);
+    Ok(())
+}
+
+#[test]
+fn provider_name_helpers_normalize_aliases_and_cycle_known_providers() {
+    assert_eq!(
+        normalize_provider_name("openai-compatible"),
+        "openai_compat"
+    );
+    assert_eq!(
+        normalize_provider_name("openai_compatible"),
+        "openai_compat"
+    );
+    assert_eq!(normalize_provider_name("deepseek"), "deepseek");
+    assert_eq!(cycle_provider_name("deepseek"), "openai_compat");
+    assert_eq!(cycle_provider_name("openai_compat"), "deepseek");
 }
 
 #[test]

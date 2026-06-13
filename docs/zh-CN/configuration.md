@@ -53,7 +53,7 @@ cargo run -p sigil-cli -- doctor
 cargo run -p sigil-cli -- --config ./sigil.toml doctor
 ```
 
-报告会检查配置加载、workspace 解析、session log 位置、DeepSeek provider 设置、API key 来源、MCP command 与 trust 设置、code intelligence language server 可用性，以及当前 `TERM`。它只展示 API key 的来源，不会打印密钥值。warning 和 error 会附带 `fix:` 修复建议；如果 key 只来自明文配置，doctor 会给出 warning，提示你改用 `SIGIL_API_KEY` 或确认本地配置不会被提交。
+报告会检查配置加载、workspace 解析、session log 位置、provider 设置、API key 来源、MCP command 与 trust 设置、code intelligence language server 可用性，以及当前 `TERM`。它只展示 API key 的来源，不会打印密钥值。warning 和 error 会附带 `fix:` 修复建议；如果 key 只来自明文配置，doctor 会给出 warning，提示你改用环境变量或确认本地配置不会被提交。
 
 ## 最小配置示例
 
@@ -80,6 +80,21 @@ fim_model = "deepseek-v4-pro"
 
 `SIGIL_API_KEY` 优先级高于配置文件里的 `api_key`。旧环境变量 `DEEPSEEK_API_KEY` 仍作为 DeepSeek provider 的备用来源读取。`doctor` 会对仅来自明文配置的认证给 warning，但不会阻止运行。
 
+如果要接 OpenAI-compatible endpoint，把 provider 切到 `[providers.openai_compat]`：
+
+```toml
+[agent]
+provider = "openai_compat"
+model = "gpt-4.1"
+tool_timeout_secs = 30
+
+[providers.openai_compat]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1"
+# 优先使用 SIGIL_OPENAI_COMPATIBLE_API_KEY 或 OPENAI_API_KEY。
+# api_key = "sk-..."
+```
+
 ## Workspace
 
 ```toml
@@ -101,7 +116,7 @@ tool_timeout_secs = 30
 # max_turns = 20
 ```
 
-- `provider`：当前 runtime 使用的 provider 名称。
+- `provider`：当前 runtime 使用的 provider 名称。当前支持 `deepseek` 和 `openai_compat`。
 - `model`：默认模型。
 - `tool_timeout_secs`：工具执行超时。
 - `max_turns`：可选保险丝。默认不限制；如果显式设置，模型连续达到阈值仍只请求工具而没有最终回答时，本轮会可恢复地停止。
@@ -122,6 +137,22 @@ request_timeout_secs = 120
 ```
 
 TUI 的 `/config` 只暴露高频项，例如 `model`、`api_key`、`base_url` 和 `fim_model`。通过 `/config` 保存 `api_key` 会把它以明文写入 `sigil.toml`；临时或 CI 场景优先用 `SIGIL_API_KEY`。`beta_base_url`、`anthropic_base_url`、`user_id_strategy`、`request_timeout_secs` 和 `strict_tools_mode` 属于低频或 provider 专项项，保留给配置文件和环境变量。
+
+## OpenAI-compatible Provider
+
+```toml
+[providers.openai_compat]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1"
+# api_key = "sk-..."
+organization = "org_..."
+project = "proj_..."
+request_timeout_secs = 120
+```
+
+这个 provider 使用 Chat Completions streaming 形态，支持 text delta、流式 tool calls、usage 和可选 `system_fingerprint`。它不提供 DeepSeek 专属的 prefix/FIM、reasoning replay、strict tools mode 或 beta endpoint 配置。
+
+对这个 provider，`SIGIL_OPENAI_COMPATIBLE_API_KEY` 优先级最高，`OPENAI_API_KEY` 作为备用来源读取。`SIGIL_OPENAI_COMPATIBLE_MODEL`、`SIGIL_OPENAI_COMPATIBLE_BASE_URL` 和 `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS` 会覆盖对应配置项。
 
 ## Permission
 
@@ -209,6 +240,8 @@ trust_required = true
 
 当前支持：
 
+DeepSeek：
+
 - `SIGIL_MODEL`
 - `SIGIL_API_KEY`
 - `SIGIL_BASE_URL`
@@ -220,6 +253,15 @@ trust_required = true
 - `SIGIL_STRICT_TOOLS_MODE`
 
 `SIGIL_API_KEY` 优先级最高。`DEEPSEEK_API_KEY` 作为 DeepSeek provider 的备用来源继续兼容读取。如果只配置了 `[providers.deepseek].api_key`，Sigil 会把它视为明文配置认证，`doctor` 会输出 warning 和修复建议。
+
+OpenAI-compatible：
+
+- `SIGIL_OPENAI_COMPATIBLE_MODEL`
+- `SIGIL_OPENAI_COMPATIBLE_API_KEY`
+- `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
+- `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS`
+
+`OPENAI_API_KEY` 作为 OpenAI-compatible provider 的备用来源继续读取。
 
 ## MCP
 

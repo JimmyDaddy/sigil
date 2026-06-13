@@ -18,6 +18,10 @@ pub use sigil_mcp::{
 use sigil_provider_deepseek::{
     DeepSeekProvider, DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV,
 };
+use sigil_provider_openai_compat::{
+    OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OpenAiCompatibleProvider,
+    OpenAiCompatibleProviderConfig,
+};
 
 pub mod doctor;
 
@@ -28,10 +32,13 @@ pub mod doctor;
 /// Returns an error when the configured provider is unsupported or its provider-specific
 /// configuration cannot be parsed or initialized.
 pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
-    match root_config.agent.provider.as_str() {
+    match provider_config_key(&root_config.agent.provider) {
         "deepseek" => Ok(Box::new(DeepSeekProvider::new(resolve_deepseek_config(
             root_config,
         )?)?)),
+        "openai_compat" => Ok(Box::new(OpenAiCompatibleProvider::new(
+            resolve_openai_compat_config(root_config)?,
+        )?)),
         other => Err(anyhow!("unsupported provider {other}")),
     }
 }
@@ -540,6 +547,22 @@ pub fn load_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProvider
     serde_json::from_value(provider_config_value).context("invalid deepseek provider config")
 }
 
+/// Parses the OpenAI-compatible provider block from the shared root config.
+///
+/// # Errors
+///
+/// Returns an error when `[providers.openai_compat]` is missing or malformed.
+pub fn load_openai_compat_config(
+    root_config: &RootConfig,
+) -> Result<OpenAiCompatibleProviderConfig> {
+    let provider_config_value = root_config
+        .providers
+        .get("openai_compat")
+        .cloned()
+        .ok_or_else(|| anyhow!("missing [providers.openai_compat] in sigil.toml"))?;
+    serde_json::from_value(provider_config_value).context("invalid openai_compat provider config")
+}
+
 /// Source used for a resolved runtime secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretSource {
@@ -563,6 +586,18 @@ pub struct SecretResolution {
 /// invalid.
 pub fn resolve_deepseek_config(root_config: &RootConfig) -> Result<DeepSeekProviderConfig> {
     load_deepseek_config(root_config)?.resolved()
+}
+
+/// Resolves OpenAI-compatible configuration with runtime overrides applied.
+///
+/// # Errors
+///
+/// Returns an error when provider config is missing, malformed, or an environment override is
+/// invalid.
+pub fn resolve_openai_compat_config(
+    root_config: &RootConfig,
+) -> Result<OpenAiCompatibleProviderConfig> {
+    load_openai_compat_config(root_config)?.resolved()
 }
 
 #[must_use]
@@ -604,10 +639,55 @@ pub fn resolve_deepseek_api_key_with_session(
 }
 
 #[must_use]
+pub fn resolve_openai_compat_api_key(
+    config: &OpenAiCompatibleProviderConfig,
+) -> Option<SecretResolution> {
+    resolve_openai_compat_api_key_with_session(config, None)
+}
+
+#[must_use]
+pub fn resolve_openai_compat_api_key_with_session(
+    config: &OpenAiCompatibleProviderConfig,
+    session_value: Option<&str>,
+) -> Option<SecretResolution> {
+    for name in [OPENAI_COMPATIBLE_API_KEY_ENV, OPENAI_API_KEY_ENV] {
+        if let Some(value) = read_secret_env(name) {
+            return Some(SecretResolution {
+                value,
+                source: SecretSource::Environment(name),
+            });
+        }
+    }
+    if let Some(value) = session_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(SecretResolution {
+            value: value.to_owned(),
+            source: SecretSource::Session,
+        });
+    }
+    config
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| SecretResolution {
+            value: value.to_owned(),
+            source: SecretSource::ConfigPlaintext,
+        })
+}
+
+#[must_use]
 pub fn secret_redactor_for_root_config(root_config: &RootConfig) -> SecretRedactor {
     let mut redactor = SecretRedactor::empty();
     if let Ok(config) = load_deepseek_config(root_config)
         && let Some(api_key) = resolve_deepseek_api_key(&config)
+    {
+        redactor.add_secret(api_key.value);
+    }
+    if let Ok(config) = load_openai_compat_config(root_config)
+        && let Some(api_key) = resolve_openai_compat_api_key(&config)
     {
         redactor.add_secret(api_key.value);
     }
@@ -626,12 +706,19 @@ fn canonical_workspace_root(workspace_root: PathBuf) -> PathBuf {
 }
 
 fn default_reasoning_effort(root_config: &RootConfig) -> ReasoningEffort {
-    if root_config.agent.provider == "deepseek"
+    if provider_config_key(&root_config.agent.provider) == "deepseek"
         && let Ok(config) = load_deepseek_config(root_config)
     {
         return config.profile().default_reasoning_effort;
     }
     ReasoningEffort::Max
+}
+
+fn provider_config_key(provider: &str) -> &str {
+    match provider {
+        "openai-compatible" | "openai_compatible" => "openai_compat",
+        other => other,
+    }
 }
 
 fn workspace_partition_key(workspace_root: &std::path::Path) -> String {

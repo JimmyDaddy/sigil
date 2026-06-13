@@ -7,7 +7,9 @@ use super::{
     ModelPickerRefresh, PaneFocus, PendingApproval, RunPhase, TimelineRole,
     formatting::{format_tool_result_block_redacted, summarize_error},
 };
-use crate::config_panel::default_deepseek_provider_config;
+use crate::config_panel::{
+    DEEPSEEK_PROVIDER_KEY, default_deepseek_provider_config, normalize_provider_name,
+};
 use crate::provider_status::BalanceSnapshot;
 use crate::provider_status::resolve_provider_api_key;
 use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
@@ -55,6 +57,12 @@ impl AppState {
             self.refresh_usage_sidebar_cache();
             return;
         };
+        if normalize_provider_name(&root_config.agent.provider) != DEEPSEEK_PROVIDER_KEY {
+            self.balance_snapshot.available = false;
+            self.balance_snapshot.status = "n/a".to_owned();
+            self.refresh_usage_sidebar_cache();
+            return;
+        }
         let provider_config = sigil_runtime::resolve_deepseek_config(root_config)
             .or_else(|_| default_deepseek_provider_config(&root_config.agent.model).resolved());
         let Ok(provider_config) = provider_config else {

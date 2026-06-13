@@ -311,11 +311,11 @@ cargo test -p sigil-tui timeline_flow_tests
 
 交付物：
 
-1. 新 crate：`crates/sigil-provider-openai-compat`。
-2. 支持 chat streaming、tool calls、usage、model config、base_url。
-3. runtime `build_provider` 支持 `deepseek` 和 `openai_compat`。
-4. `/model` 和 `/config` 支持 provider-aware model selection。
-5. README 明确 provider matrix。
+1. 新 crate：`crates/sigil-provider-openai-compat`。（已落地）
+2. 支持 chat streaming、tool calls、usage、model config、base_url。（已落地）
+3. runtime `build_provider` 支持 `deepseek` 和 `openai_compat`。（已落地）
+4. `/model` 和 `/config` 支持 provider-aware model selection。（已落地）
+5. README 明确 provider matrix。（已落地）
 
 验收标准：
 

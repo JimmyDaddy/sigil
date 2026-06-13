@@ -53,7 +53,7 @@ Use the same config override if you launch Sigil with a non-default config:
 cargo run -p sigil-cli -- --config ./sigil.toml doctor
 ```
 
-The report checks config loading, workspace resolution, session log location, DeepSeek provider settings, API key source, configured MCP commands and trust settings, code intelligence language-server availability, and the current `TERM`. It reports where the API key was resolved from, but never prints the secret value. Warning and error checks include `fix:` remediation lines; a key resolved only from plaintext config is a warning so users can move it to `SIGIL_API_KEY` or keep the local config private intentionally.
+The report checks config loading, workspace resolution, session log location, provider settings, API key source, configured MCP commands and trust settings, code intelligence language-server availability, and the current `TERM`. It reports where the API key was resolved from, but never prints the secret value. Warning and error checks include `fix:` remediation lines; a key resolved only from plaintext config is a warning so users can move it to an environment variable or keep the local config private intentionally.
 
 ## Minimal Config Example
 
@@ -80,6 +80,21 @@ fim_model = "deepseek-v4-pro"
 
 `SIGIL_API_KEY` has higher priority than `api_key` in the config file. The legacy `DEEPSEEK_API_KEY` environment variable is still read as a fallback for the DeepSeek provider. `doctor` warns when auth only comes from plaintext config, but it does not block the run.
 
+For an OpenAI-compatible endpoint, switch the provider and use `[providers.openai_compat]`:
+
+```toml
+[agent]
+provider = "openai_compat"
+model = "gpt-4.1"
+tool_timeout_secs = 30
+
+[providers.openai_compat]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1"
+# Prefer SIGIL_OPENAI_COMPATIBLE_API_KEY or OPENAI_API_KEY.
+# api_key = "sk-..."
+```
+
 ## Workspace
 
 ```toml
@@ -101,7 +116,7 @@ tool_timeout_secs = 30
 # max_turns = 20
 ```
 
-- `provider`: the runtime provider name.
+- `provider`: the runtime provider name. Supported values are `deepseek` and `openai_compat`.
 - `model`: the default model.
 - `tool_timeout_secs`: tool execution timeout.
 - `max_turns`: optional guard. It is disabled by default; when set, a run stops recoverably if the model keeps requesting tools without producing a final answer.
@@ -122,6 +137,22 @@ request_timeout_secs = 120
 ```
 
 The TUI `/config` surface exposes only high-frequency fields such as `model`, `api_key`, `base_url`, and `fim_model`. Saving `api_key` through `/config` writes plaintext to `sigil.toml`; prefer `SIGIL_API_KEY` for temporary or CI use. Lower-frequency provider-specific fields, including `beta_base_url`, `anthropic_base_url`, `user_id_strategy`, `request_timeout_secs`, and `strict_tools_mode`, remain file/env configuration.
+
+## OpenAI-compatible Provider
+
+```toml
+[providers.openai_compat]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4.1"
+# api_key = "sk-..."
+organization = "org_..."
+project = "proj_..."
+request_timeout_secs = 120
+```
+
+This provider uses the Chat Completions streaming shape with text deltas, streamed tool calls, usage, and optional `system_fingerprint`. It does not expose DeepSeek-only prefix/FIM, reasoning replay, strict tools mode, or beta endpoint settings.
+
+`SIGIL_OPENAI_COMPATIBLE_API_KEY` has the highest priority for this provider. `OPENAI_API_KEY` is read as a fallback. `SIGIL_OPENAI_COMPATIBLE_MODEL`, `SIGIL_OPENAI_COMPATIBLE_BASE_URL`, and `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS` override the matching config fields.
 
 ## Permission
 
@@ -209,6 +240,8 @@ trust_required = true
 
 Supported variables:
 
+DeepSeek:
+
 - `SIGIL_MODEL`
 - `SIGIL_API_KEY`
 - `SIGIL_BASE_URL`
@@ -220,6 +253,15 @@ Supported variables:
 - `SIGIL_STRICT_TOOLS_MODE`
 
 `SIGIL_API_KEY` has the highest priority. `DEEPSEEK_API_KEY` remains a fallback source for the DeepSeek provider. If only `[providers.deepseek].api_key` is present, Sigil treats it as plaintext config auth and `doctor` reports a warning with remediation.
+
+OpenAI-compatible:
+
+- `SIGIL_OPENAI_COMPATIBLE_MODEL`
+- `SIGIL_OPENAI_COMPATIBLE_API_KEY`
+- `SIGIL_OPENAI_COMPATIBLE_BASE_URL`
+- `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS`
+
+`OPENAI_API_KEY` remains a fallback source for the OpenAI-compatible provider.
 
 ## MCP
 

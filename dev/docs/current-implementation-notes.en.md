@@ -11,6 +11,7 @@ sigil/
   crates/
     sigil-kernel/              # Generic agent kernel and domain contracts
     sigil-provider-deepseek/   # DeepSeek provider implementation
+    sigil-provider-openai-compat/ # OpenAI-compatible provider implementation
     sigil-tools-builtin/       # Built-in tools
     sigil-code-intel/          # LSP client, Tree-sitter fallback, and code intelligence tools
     sigil-mcp/                 # stdio MCP client and tool adapter
@@ -28,6 +29,7 @@ sigil/
 - `sigil-kernel` owns generic provider, tool, session, approval, permission, event, memory, and compaction contracts.
 - `sigil-runtime` assembles providers, built-in tools, MCP tools, and run options.
 - `sigil-provider-deepseek` supports DeepSeek streaming chat, tool calls, reasoning replay, usage, pricing, Beta endpoints, prefix completion, and FIM-specific entrypoints.
+- `sigil-provider-openai-compat` supports OpenAI-compatible Chat Completions streaming chat, tool calls, usage, base URL, organization/project headers, and model configuration.
 - `sigil-tools-builtin` provides file read/write/edit/delete, search, directory listing, and shell execution.
 - `sigil-code-intel` provides optional LSP / Tree-sitter code intelligence, including read-only symbol, definition, reference, diagnostic, and code action query tools, plus code action / rename edit tools with approval diff previews.
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
@@ -130,9 +132,9 @@ Root config is parsed by `sigil-kernel`:
 - `[providers.*]`
 - `[[mcp_servers]]`
 
-DeepSeek provider configuration lives under `[providers.deepseek]`. Runtime environment overrides are resolved in the provider config layer, with `SIGIL_API_KEY` taking highest priority and `DEEPSEEK_API_KEY` retained as a fallback source.
+DeepSeek provider configuration lives under `[providers.deepseek]`. OpenAI-compatible provider configuration lives under `[providers.openai_compat]`; `agent.provider` uses `openai_compat` and accepts `openai-compatible` / `openai_compatible` as input aliases. Runtime environment overrides are resolved in the provider config layer: DeepSeek uses `SIGIL_API_KEY` / `DEEPSEEK_API_KEY`, while OpenAI-compatible uses `SIGIL_OPENAI_COMPATIBLE_API_KEY` / `OPENAI_API_KEY`.
 
-TUI `/config` exposes only high-frequency provider fields, permissions, memory, compaction, and common MCP server fields. Lower-frequency provider-specific fields remain available through config files and environment variables.
+TUI `/config` exposes only high-frequency provider fields, permissions, memory, compaction, and common MCP server fields. It can switch between `deepseek` and `openai_compat`; DeepSeek FIM is shown as a provider-specific advanced field, while OpenAI-compatible marks it unsupported. Lower-frequency provider-specific fields remain available through config files and environment variables.
 
 `sigil doctor` and TUI `/doctor` reuse runtime diagnostics to check config loading, workspace resolution, session log location, provider/auth source, MCP command/trust state, code intelligence LSP plan, and terminal `TERM`. Diagnostics report only the secret source, not secret values.
 

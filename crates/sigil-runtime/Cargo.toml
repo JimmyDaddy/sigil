@@ -13,6 +13,7 @@ sigil-kernel = { path = "../sigil-kernel" }
 sigil-code-intel = { path = "../sigil-code-intel" }
 sigil-mcp = { path = "../sigil-mcp" }
 sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
+sigil-provider-openai-compat = { path = "../sigil-provider-openai-compat" }
 sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 
 [dev-dependencies]

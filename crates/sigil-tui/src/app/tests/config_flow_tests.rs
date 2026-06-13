@@ -35,13 +35,35 @@ fn config_up_down_moves_between_fields_in_current_step() -> Result<()> {
 }
 
 #[test]
+fn config_enter_on_provider_name_cycles_provider() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .selected_field = Some(ConfigField::ProviderName);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should still exist");
+    assert_eq!(state.draft.provider_name, "openai_compat");
+    assert!(state.dirty);
+    assert_eq!(app.last_notice(), Some("provider -> openai_compat"));
+    Ok(())
+}
+
+#[test]
 fn config_down_to_footer_focuses_actions() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     app.config_state
         .as_mut()
         .expect("config state should still exist")
-        .selected_field = Some(ConfigField::ProviderFimModel);
+        .selected_field = Some(ConfigField::ProviderName);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save"));
@@ -53,7 +75,7 @@ fn config_down_to_footer_focuses_actions() -> Result<()> {
     assert_eq!(app.config_selected_field_label(), Some("close"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_field_label(), Some("FIM model"));
+    assert_eq!(app.config_selected_field_label(), Some("Provider"));
     Ok(())
 }
 
@@ -849,7 +871,7 @@ fn config_footer_enter_saves_without_function_keys() -> Result<()> {
         .config_state
         .as_mut()
         .expect("config state should exist after opening /config");
-    state.selected_field = Some(ConfigField::ProviderFimModel);
+    state.selected_field = Some(ConfigField::ProviderName);
     state.draft.provider_api_key = "saved-from-footer".to_owned();
     state.dirty = true;
 
@@ -931,7 +953,7 @@ fn config_footer_save_and_close_works_without_function_keys() -> Result<()> {
         .config_state
         .as_mut()
         .expect("config state should exist after opening /config");
-    state.selected_field = Some(ConfigField::ProviderFimModel);
+    state.selected_field = Some(ConfigField::ProviderName);
     state.draft.provider_api_key = "saved-from-footer-close".to_owned();
     state.dirty = true;
 
@@ -1586,7 +1608,7 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Provider);
-        state.selected_field = Some(ConfigField::ProviderFimModel);
+        state.selected_field = Some(ConfigField::ProviderName);
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save"));
