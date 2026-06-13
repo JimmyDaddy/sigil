@@ -84,6 +84,10 @@ impl ConfigSection {
     pub(crate) fn flow_index(self) -> Option<usize> {
         Self::FLOW.iter().position(|section| *section == self)
     }
+
+    pub(crate) fn from_flow_index(index: usize) -> Option<Self> {
+        Self::FLOW.get(index).copied()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +153,10 @@ impl ConfigField {
             ConfigSection::CodeIntelligence => &Self::CODE_INTELLIGENCE_FIELDS,
             ConfigSection::Mcp => &Self::MCP_FIELDS,
         }
+    }
+
+    pub(crate) fn field_for_section_index(section: ConfigSection, index: usize) -> Option<Self> {
+        Self::fields_for_section(section).get(index).copied()
     }
 
     pub(crate) fn label(self) -> &'static str {
@@ -318,6 +326,10 @@ impl ConfigFooterAction {
             | ConfigSection::Compaction
             | ConfigSection::CodeIntelligence => &Self::DEFAULT_ORDER,
         }
+    }
+
+    pub(crate) fn action_for_section_index(section: ConfigSection, index: usize) -> Option<Self> {
+        Self::actions_for_section(section).get(index).copied()
     }
 
     pub(crate) fn button_label(self) -> &'static str {
@@ -758,6 +770,18 @@ impl ConfigState {
     pub(crate) fn focus_footer(&mut self, action: ConfigFooterAction) {
         self.footer_selected = true;
         self.selected_footer_action = action;
+    }
+
+    pub(crate) fn focus_field(&mut self, field: ConfigField) -> bool {
+        if self.selected_section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
+            return false;
+        }
+        if !ConfigField::fields_for_section(self.selected_section).contains(&field) {
+            return false;
+        }
+        self.selected_field = Some(field);
+        self.footer_selected = false;
+        true
     }
 
     pub(crate) fn focus_last_field(&mut self) -> bool {

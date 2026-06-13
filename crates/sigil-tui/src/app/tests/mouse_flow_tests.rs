@@ -53,6 +53,54 @@ fn tool_card_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
     (hit_area.area.x, hit_area.area.y)
 }
 
+fn setup_field_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .setup_hit_areas
+        .as_ref()
+        .expect("expected setup hit areas")
+        .fields
+        .iter()
+        .find(|area| area.index == index)
+        .expect("expected setup field hit area");
+    point_in(hit_area.area)
+}
+
+fn config_section_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .config_hit_areas
+        .as_ref()
+        .expect("expected config hit areas")
+        .sections
+        .iter()
+        .find(|area| area.index == index)
+        .expect("expected config section hit area");
+    point_in(hit_area.area)
+}
+
+fn config_field_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .config_hit_areas
+        .as_ref()
+        .expect("expected config hit areas")
+        .fields
+        .iter()
+        .find(|area| area.index == index)
+        .expect("expected config field hit area");
+    point_in(hit_area.area)
+}
+
+fn config_footer_action_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .config_hit_areas
+        .as_ref()
+        .expect("expected config hit areas")
+        .footer_actions
+        .iter()
+        .find(|area| area.index == index)
+        .expect("expected config footer action hit area");
+    point_in(hit_area.area)
+}
+
 fn live_text_point_containing(
     app: &AppState,
     layout: &LayoutSnapshot,
@@ -117,6 +165,303 @@ fn layout_snapshot_hits_main_regions() {
 
     let (rail_x, rail_y) = point_in(layout.info_rail);
     assert_eq!(layout.hit_target(rail_x, rail_y), HitTarget::InfoRail);
+}
+
+#[test]
+fn mouse_click_setup_field_selects_then_activates() -> Result<()> {
+    let temp = tempdir()?;
+    let mut app = AppState::from_setup(
+        temp.path().join("sigil.toml"),
+        temp.path().to_path_buf(),
+        None,
+    );
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let model_index = 1;
+    let (column, row) = setup_field_point(&layout, model_index);
+
+    let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(first, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.setup_state
+            .as_ref()
+            .expect("expected setup state")
+            .selected_field,
+        SetupField::Model
+    );
+    assert!(!app.has_modal());
+
+    let second = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(second, AppMouseOutcome::Redraw));
+    assert!(app.has_modal());
+    Ok(())
+}
+
+#[test]
+fn mouse_click_setup_save_runs_validation() -> Result<()> {
+    let temp = tempdir()?;
+    let mut app = AppState::from_setup(
+        temp.path().join("sigil.toml"),
+        temp.path().to_path_buf(),
+        None,
+    );
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let save_index = 3;
+    let (column, row) = setup_field_point(&layout, save_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.last_notice(),
+        Some("trust the current folder before starting sigil")
+    );
+    assert_eq!(
+        app.setup_state
+            .as_ref()
+            .expect("expected setup state")
+            .selected_field,
+        SetupField::Save
+    );
+    Ok(())
+}
+
+#[test]
+fn mouse_click_config_section_selects_step() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let memory_index = ConfigSection::Memory
+        .flow_index()
+        .expect("memory section should have index");
+    let (column, row) = config_section_point(&layout, memory_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("expected config state")
+            .selected_section,
+        ConfigSection::Memory
+    );
+    Ok(())
+}
+
+#[test]
+fn mouse_click_config_field_selects_then_activates() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let provider_index = ConfigField::fields_for_section(ConfigSection::Provider)
+        .iter()
+        .position(|field| *field == ConfigField::ProviderName)
+        .expect("expected provider field index");
+    let (column, row) = config_field_point(&layout, provider_index);
+
+    let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(first, AppMouseOutcome::Redraw));
+    let state = app.config_state.as_ref().expect("expected config state");
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
+    assert!(!state.dirty);
+
+    let second = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(second, AppMouseOutcome::Redraw));
+    let state = app.config_state.as_ref().expect("expected config state");
+    assert_eq!(state.draft.provider_name, "openai_compat");
+    assert!(state.dirty);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_config_footer_action_executes() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let close_index = ConfigFooterAction::actions_for_section(ConfigSection::Provider)
+        .iter()
+        .position(|action| *action == ConfigFooterAction::Close)
+        .expect("expected close footer action");
+    let (column, row) = config_footer_action_point(&layout, close_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert!(!app.is_config_mode());
+    assert_eq!(app.last_notice(), Some("closed config"));
+    Ok(())
+}
+
+#[test]
+fn mouse_click_setup_and_config_invalid_targets_are_noops() -> Result<()> {
+    let temp = tempdir()?;
+    let mut setup_app = AppState::from_setup(
+        temp.path().join("sigil.toml"),
+        temp.path().to_path_buf(),
+        None,
+    );
+    let mut setup_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &setup_app);
+    let setup_field = setup_layout
+        .setup_hit_areas
+        .as_mut()
+        .expect("expected setup hit areas")
+        .fields
+        .first_mut()
+        .expect("expected setup field area");
+    setup_field.index = 99;
+    let (column, row) = point_in(setup_field.area);
+
+    let setup_outcome = setup_app
+        .handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &setup_layout)?;
+
+    assert!(matches!(setup_outcome, AppMouseOutcome::Noop));
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = config_section_point(&layout, 0);
+    let same_section =
+        app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(same_section, AppMouseOutcome::Noop));
+
+    let mut invalid_section_layout = layout.clone();
+    invalid_section_layout
+        .config_hit_areas
+        .as_mut()
+        .expect("expected config hit areas")
+        .sections[0]
+        .index = 99;
+    let (column, row) = point_in(
+        invalid_section_layout
+            .config_hit_areas
+            .as_ref()
+            .expect("expected config hit areas")
+            .sections[0]
+            .area,
+    );
+    let invalid_section = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, column, row),
+        &invalid_section_layout,
+    )?;
+    assert!(matches!(invalid_section, AppMouseOutcome::Noop));
+
+    let mut invalid_field_layout = layout.clone();
+    invalid_field_layout
+        .config_hit_areas
+        .as_mut()
+        .expect("expected config hit areas")
+        .fields[0]
+        .index = 99;
+    let (column, row) = point_in(
+        invalid_field_layout
+            .config_hit_areas
+            .as_ref()
+            .expect("expected config hit areas")
+            .fields[0]
+            .area,
+    );
+    let invalid_field = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, column, row),
+        &invalid_field_layout,
+    )?;
+    assert!(matches!(invalid_field, AppMouseOutcome::Noop));
+
+    let mut invalid_footer_layout = layout.clone();
+    invalid_footer_layout
+        .config_hit_areas
+        .as_mut()
+        .expect("expected config hit areas")
+        .footer_actions[0]
+        .index = 99;
+    let (column, row) = point_in(
+        invalid_footer_layout
+            .config_hit_areas
+            .as_ref()
+            .expect("expected config hit areas")
+            .footer_actions[0]
+            .area,
+    );
+    let invalid_footer = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, column, row),
+        &invalid_footer_layout,
+    )?;
+    assert!(matches!(invalid_footer, AppMouseOutcome::Noop));
+    Ok(())
+}
+
+#[test]
+fn mouse_click_config_field_is_noop_when_mcp_has_no_servers() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = config_field_point(&layout, 0);
+
+    app.config_state
+        .as_mut()
+        .expect("expected config state")
+        .set_section(ConfigSection::Mcp);
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("expected config state")
+            .selected_field,
+        None
+    );
+    Ok(())
+}
+
+#[test]
+fn mouse_click_resume_session_selector_switches_session() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = temp.path().join(".sigil/sessions");
+    std::fs::create_dir_all(&session_dir)?;
+    let restored_path = session_dir.join("session-restored.jsonl");
+    let restored = restored_entries("restored-provider", "restored-model");
+    write_session_log(&restored_path, &restored)?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.set_terminal_size(120, 20);
+    app.input = "/resume".to_owned();
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = slash_candidate_point(&layout, 0);
+
+    let first = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(first, AppMouseOutcome::Redraw));
+    assert!(app.input.starts_with("/resume "));
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = slash_candidate_point(&layout, 0);
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(
+        outcome,
+        AppMouseOutcome::Action(AppAction::SwitchSession { session_log_path })
+            if session_log_path == restored_path
+    ));
+    Ok(())
 }
 
 #[test]
@@ -608,6 +953,8 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
         slash_overlay: None,
         approval_modal: Some(Rect::new(10, 2, 20, 6)),
         approval_modal_hit_areas: None,
+        setup_hit_areas: None,
+        config_hit_areas: None,
     };
     let (column, row) = point_in(layout.approval_modal.expect("expected approval area"));
 
@@ -634,6 +981,8 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
         slash_overlay: None,
         approval_modal: None,
         approval_modal_hit_areas: None,
+        setup_hit_areas: None,
+        config_hit_areas: None,
     };
     let (column, row) = point_in(layout.composer);
 

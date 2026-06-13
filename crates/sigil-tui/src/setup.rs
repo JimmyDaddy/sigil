@@ -37,6 +37,19 @@ impl SetupField {
             Self::ORDER[index - 1]
         }
     }
+
+    pub(crate) fn from_index(index: usize) -> Option<Self> {
+        Self::ORDER.get(index).copied()
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::TrustCurrentFolder => "trust_current_folder",
+            Self::Model => "model",
+            Self::ApiKey => "api_key",
+            Self::Save => "save",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

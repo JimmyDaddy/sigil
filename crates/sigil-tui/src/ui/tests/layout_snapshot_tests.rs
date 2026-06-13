@@ -67,6 +67,21 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
     assert_eq!(setup.mode, LayoutMode::Setup);
     assert_eq!(setup.live_panel, Rect::default());
     assert_eq!(setup.hit_target(1, 1), HitTarget::Background);
+    let setup_fields = &setup
+        .setup_hit_areas
+        .as_ref()
+        .expect("setup hit areas should render")
+        .fields;
+    assert_eq!(setup_fields.len(), 4);
+    let trust_area = setup_fields
+        .iter()
+        .find(|area| area.index == 0)
+        .expect("trust field should be clickable")
+        .area;
+    assert_eq!(
+        setup.hit_target(trust_area.x, trust_area.y),
+        HitTarget::SetupField { index: 0 }
+    );
 
     let mut config_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     config_app.input = "/config".to_owned();
@@ -74,6 +89,43 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
     let config = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &config_app);
     assert_eq!(config.mode, LayoutMode::Config);
     assert_eq!(config.composer, Rect::default());
+    let config_hits = config
+        .config_hit_areas
+        .as_ref()
+        .expect("config hit areas should render");
+    assert_eq!(config_hits.sections.len(), 6);
+    assert!(!config_hits.fields.is_empty());
+    assert_eq!(config_hits.footer_actions.len(), 3);
+    let provider_section = config_hits
+        .sections
+        .iter()
+        .find(|area| area.index == 0)
+        .expect("provider section should be clickable")
+        .area;
+    assert_eq!(
+        config.hit_target(provider_section.x, provider_section.y),
+        HitTarget::ConfigSection { index: 0 }
+    );
+    let first_field = config_hits
+        .fields
+        .first()
+        .expect("config field should be clickable");
+    assert_eq!(
+        config.hit_target(first_field.area.x, first_field.area.y),
+        HitTarget::ConfigField {
+            index: first_field.index
+        }
+    );
+    let close_action = config_hits
+        .footer_actions
+        .iter()
+        .find(|area| area.index == 2)
+        .expect("close action should be clickable")
+        .area;
+    assert_eq!(
+        config.hit_target(close_action.x, close_action.y),
+        HitTarget::ConfigFooterAction { index: 2 }
+    );
 
     let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     approval_app.pending_approval = Some(PendingApproval {
@@ -301,6 +353,83 @@ fn live_text_row_hit_areas_cover_empty_and_tiny_regions() {
         None,
     );
     assert!(live_text_row_hit_areas(Rect::new(0, 0, 1, 10), &empty_app).is_empty());
+}
+
+#[test]
+fn setup_and_config_hit_areas_cover_empty_and_wide_layouts() -> anyhow::Result<()> {
+    let setup_app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+    assert!(setup_hit_areas(Rect::new(0, 0, 0, 0), &setup_app).is_none());
+
+    let mut config_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    config_app.input = "/config".to_owned();
+    let _ = config_app.submit_input()?;
+    assert!(config_hit_areas(Rect::new(0, 0, 0, 0), &config_app).is_none());
+
+    let wide = LayoutSnapshot::from_app(Rect::new(0, 0, 180, 28), &config_app);
+    let hits = wide
+        .config_hit_areas
+        .expect("wide config layout should expose hit areas");
+    assert_eq!(hits.sections.len(), 6);
+    assert!(!hits.fields.is_empty());
+    assert_eq!(hits.footer_actions.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+
+    assert!(config_section_hit_areas(&[], Rect::new(0, 0, 12, 2), 0).is_empty());
+    assert!(
+        config_section_hit_areas(
+            &["title".to_owned(), "provider".to_owned()],
+            Rect::new(0, 0, 12, 1),
+            2,
+        )
+        .is_empty()
+    );
+    assert!(
+        config_section_hit_areas(
+            &["title".to_owned(), "            provider".to_owned()],
+            Rect::new(0, 0, 4, 2),
+            0,
+        )
+        .is_empty()
+    );
+
+    assert!(
+        config_field_hit_areas(
+            &app,
+            &["Provider: deepseek".to_owned()],
+            Rect::new(0, 0, 24, 3),
+            1,
+        )
+        .is_empty()
+    );
+    assert!(
+        config_field_hit_areas(
+            &app,
+            &[
+                "title".to_owned(),
+                "provider".to_owned(),
+                "Provider: deepseek".to_owned(),
+            ],
+            Rect::new(0, 0, 24, 1),
+            0,
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        config_footer_action_hit_areas(Rect::new(0, 0, 1, 1), &app).len(),
+        1
+    );
+    Ok(())
 }
 
 #[test]

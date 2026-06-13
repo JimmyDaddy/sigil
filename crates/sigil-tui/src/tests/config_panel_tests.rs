@@ -307,8 +307,12 @@ fn config_state_moves_fields_and_footer_boundaries() {
 
     assert_eq!(state.selected_field, Some(ConfigField::ProviderModel));
     assert_eq!(state.move_field(false), ConfigFieldMove::Boundary);
-    assert_eq!(state.move_field(true), ConfigFieldMove::Moved);
+    assert!(state.focus_field(ConfigField::ProviderApiKey));
     assert_eq!(state.selected_field, Some(ConfigField::ProviderApiKey));
+    assert!(!state.focus_field(ConfigField::McpName));
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderApiKey));
+    assert_eq!(state.move_field(true), ConfigFieldMove::Moved);
+    assert_eq!(state.selected_field, Some(ConfigField::ProviderBaseUrl));
     state.focus_footer(ConfigFooterAction::Close);
     assert!(state.footer_selected);
     state.move_footer_action(false);
@@ -319,6 +323,9 @@ fn config_state_moves_fields_and_footer_boundaries() {
     assert!(state.focus_last_field());
     assert_eq!(state.selected_field, Some(ConfigField::ProviderName));
     assert!(!state.footer_selected);
+
+    state.set_section(ConfigSection::Mcp);
+    assert!(!state.focus_field(ConfigField::McpName));
 }
 
 #[test]

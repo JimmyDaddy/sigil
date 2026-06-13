@@ -11,15 +11,15 @@ use crate::config_panel::CONFIG_HEADER_NOTICE;
 
 use super::{modal::render_modal, shell::render_status, theme};
 
-const CONFIG_DETAIL_SPLIT_MIN_WIDTH: u16 = 128;
-const CONFIG_DETAIL_PANEL_WIDTH: u16 = 52;
+pub(super) const CONFIG_DETAIL_SPLIT_MIN_WIDTH: u16 = 128;
+pub(super) const CONFIG_DETAIL_PANEL_WIDTH: u16 = 52;
 const CONFIG_CONTENT_MIN_WIDTH: u16 = 72;
 const CONFIG_CONTENT_MAX_WIDTH: u16 = 152;
 const CONFIG_SIDE_MARGIN_PERCENT: u16 = 8;
 const CONFIG_FORM_LABEL_WIDTH: usize = 16;
 const CONFIG_FORM_ACTION_CHIP_WIDTH: usize = 14;
 const CONFIG_FOOTER_BUTTON_WIDTH: usize = 14;
-const CONFIG_FOOTER_COMPACT_WIDTH: u16 = 76;
+pub(super) const CONFIG_FOOTER_COMPACT_WIDTH: u16 = 76;
 const CONFIG_SCROLL_MARKER_WIDTH: u16 = 8;
 
 pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
@@ -126,7 +126,7 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
     render_modal(frame, app);
 }
 
-fn centered_config_area(area: Rect) -> Rect {
+pub(super) fn centered_config_area(area: Rect) -> Rect {
     let min_width = CONFIG_CONTENT_MIN_WIDTH.min(area.width);
     let max_width = CONFIG_CONTENT_MAX_WIDTH.min(area.width);
     let side_margin = area.width.saturating_mul(CONFIG_SIDE_MARGIN_PERCENT) / 100;
@@ -289,13 +289,17 @@ fn push_config_header_span(
     true
 }
 
-fn config_panel_height(main_lines: &[String], context_lines: &[String], max_height: u16) -> u16 {
+pub(super) fn config_panel_height(
+    main_lines: &[String],
+    context_lines: &[String],
+    max_height: u16,
+) -> u16 {
     let content_rows = main_lines.len().max(context_lines.len()).max(8) as u16;
     let minimum = 10.min(max_height);
     content_rows.saturating_add(2).min(max_height).max(minimum)
 }
 
-fn top_aligned_config_area(area: Rect, height: u16) -> Rect {
+pub(super) fn top_aligned_config_area(area: Rect, height: u16) -> Rect {
     Rect {
         height: height.min(area.height),
         ..area
@@ -418,7 +422,11 @@ fn render_config_context_panel(
     frame.render_widget(widget, content_area);
 }
 
-fn config_scroll_offset(line_count: usize, viewport_height: u16, focus_indexes: &[usize]) -> usize {
+pub(super) fn config_scroll_offset(
+    line_count: usize,
+    viewport_height: u16,
+    focus_indexes: &[usize],
+) -> usize {
     let viewport_height = viewport_height as usize;
     if viewport_height == 0 || line_count <= viewport_height {
         return 0;
@@ -499,7 +507,7 @@ fn config_block(title: &'static str, accent: Color, panel_bg: Color) -> Block<'s
         .style(Style::default().bg(panel_bg))
 }
 
-fn split_config_context_lines(lines: Vec<String>) -> (Vec<String>, Vec<String>) {
+pub(super) fn split_config_context_lines(lines: Vec<String>) -> (Vec<String>, Vec<String>) {
     let Some(details_index) = lines.iter().position(|line| line == "[details]") else {
         return (lines, Vec::new());
     };
@@ -605,7 +613,7 @@ fn footer_action_span(
     Span::styled(text, style)
 }
 
-fn footer_action_width(label: &'static str, selected: bool, compact: bool) -> usize {
+pub(super) fn footer_action_width(label: &'static str, selected: bool, compact: bool) -> usize {
     footer_action_text(label, selected, compact).chars().count()
 }
 

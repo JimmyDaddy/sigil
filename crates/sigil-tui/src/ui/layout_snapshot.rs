@@ -2,12 +2,18 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 use crate::{
     app::{AppState, ApprovalAction, ApprovalModalView},
+    config_panel::{ConfigField, ConfigSection},
     mouse::HitTarget,
 };
 
 use super::{
     geometry::{centered_rect, inset_rect, sidebar_width_for_terminal},
     live_panel::{LIVE_PANEL_BOTTOM_PADDING, LIVE_PROGRESS_ROWS},
+    setup_config::{
+        CONFIG_DETAIL_PANEL_WIDTH, CONFIG_DETAIL_SPLIT_MIN_WIDTH, CONFIG_FOOTER_COMPACT_WIDTH,
+        centered_config_area, config_panel_height, config_scroll_offset, footer_action_width,
+        split_config_context_lines, top_aligned_config_area,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +36,8 @@ pub struct LayoutSnapshot {
     pub slash_overlay: Option<SlashOverlayHitAreas>,
     pub approval_modal: Option<Rect>,
     pub approval_modal_hit_areas: Option<ApprovalModalHitAreas>,
+    pub setup_hit_areas: Option<SetupHitAreas>,
+    pub config_hit_areas: Option<ConfigHitAreas>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +80,42 @@ pub struct ApprovalFileRowHitArea {
     pub area: Rect,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupHitAreas {
+    pub fields: Vec<SetupFieldHitArea>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetupFieldHitArea {
+    pub index: usize,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigHitAreas {
+    pub sections: Vec<ConfigSectionHitArea>,
+    pub fields: Vec<ConfigFieldHitArea>,
+    pub footer_actions: Vec<ConfigFooterActionHitArea>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigSectionHitArea {
+    pub index: usize,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigFieldHitArea {
+    pub index: usize,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigFooterActionHitArea {
+    pub index: usize,
+    pub area: Rect,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ShellLayout {
     pub live_panel: Rect,
@@ -83,10 +127,14 @@ pub(super) struct ShellLayout {
 impl LayoutSnapshot {
     pub fn from_app(screen: Rect, app: &AppState) -> Self {
         if app.is_setup_mode() {
-            return Self::single(screen, LayoutMode::Setup);
+            let mut snapshot = Self::single(screen, LayoutMode::Setup);
+            snapshot.setup_hit_areas = setup_hit_areas(screen, app);
+            return snapshot;
         }
         if app.is_config_mode() {
-            return Self::single(screen, LayoutMode::Config);
+            let mut snapshot = Self::single(screen, LayoutMode::Config);
+            snapshot.config_hit_areas = config_hit_areas(screen, app);
+            return snapshot;
         }
 
         let shell = shell_layout(screen, app.footer_strip_height());
@@ -106,6 +154,8 @@ impl LayoutSnapshot {
             approval_modal_hit_areas: app
                 .approval_modal_view()
                 .and_then(|view| approval_modal_hit_areas(screen, &view)),
+            setup_hit_areas: None,
+            config_hit_areas: None,
         }
     }
 
@@ -122,6 +172,8 @@ impl LayoutSnapshot {
             slash_overlay: None,
             approval_modal: None,
             approval_modal_hit_areas: None,
+            setup_hit_areas: None,
+            config_hit_areas: None,
         }
     }
 
@@ -154,6 +206,36 @@ impl LayoutSnapshot {
             }
             if contains(areas.diff_area, column, row) {
                 return HitTarget::ApprovalDiffArea;
+            }
+        }
+
+        if let Some(areas) = &self.setup_hit_areas {
+            for field in &areas.fields {
+                if contains(field.area, column, row) {
+                    return HitTarget::SetupField { index: field.index };
+                }
+            }
+        }
+
+        if let Some(areas) = &self.config_hit_areas {
+            for action in &areas.footer_actions {
+                if contains(action.area, column, row) {
+                    return HitTarget::ConfigFooterAction {
+                        index: action.index,
+                    };
+                }
+            }
+            for field in &areas.fields {
+                if contains(field.area, column, row) {
+                    return HitTarget::ConfigField { index: field.index };
+                }
+            }
+            for section in &areas.sections {
+                if contains(section.area, column, row) {
+                    return HitTarget::ConfigSection {
+                        index: section.index,
+                    };
+                }
             }
         }
 
@@ -199,6 +281,243 @@ impl LayoutSnapshot {
             .iter()
             .find_map(|hit| contains(hit.area, column, row).then_some(hit.line_index))
     }
+}
+
+fn setup_hit_areas(screen: Rect, app: &AppState) -> Option<SetupHitAreas> {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(12)])
+        .split(screen);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(10),
+            Constraint::Min(68),
+            Constraint::Percentage(10),
+        ])
+        .split(outer[1]);
+    let content = inset_rect(body[1], 1, 1);
+    if content.width == 0 || content.height == 0 {
+        return None;
+    }
+
+    let field_rows = [2usize, 5, 6, 7];
+    let fields = field_rows
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, line_index)| {
+            (line_index < app.setup_lines().len() && (line_index as u16) < content.height)
+                .then_some(SetupFieldHitArea {
+                    index,
+                    area: Rect::new(
+                        content.x,
+                        content.y.saturating_add(line_index as u16),
+                        content.width,
+                        1,
+                    ),
+                })
+        })
+        .collect::<Vec<_>>();
+
+    (!fields.is_empty()).then_some(SetupHitAreas { fields })
+}
+
+fn config_hit_areas(screen: Rect, app: &AppState) -> Option<ConfigHitAreas> {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(screen);
+    let content_area = centered_config_area(outer[1]);
+    if content_area.width == 0 || content_area.height == 0 {
+        return None;
+    }
+
+    let (main_lines, panel_area, footer_area) = config_layout_parts(content_area, app);
+    let main_panel_area = if content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(72),
+                Constraint::Length(2),
+                Constraint::Length(CONFIG_DETAIL_PANEL_WIDTH),
+            ])
+            .split(panel_area)[0]
+    } else {
+        panel_area
+    };
+    let panel_content = inset_rect(main_panel_area, 1, 1);
+    let mut sections = Vec::new();
+    let mut fields = Vec::new();
+    if panel_content.width > 0 && panel_content.height > 0 {
+        let selected_line_indexes = config_selected_line_indexes(&main_lines);
+        let scroll_offset = config_scroll_offset(
+            main_lines.len(),
+            panel_content.height,
+            &selected_line_indexes,
+        );
+        sections = config_section_hit_areas(&main_lines, panel_content, scroll_offset);
+        fields = config_field_hit_areas(app, &main_lines, panel_content, scroll_offset);
+    }
+    let footer_actions = footer_area
+        .filter(|area| area.width > 0 && area.height > 0)
+        .map(|area| config_footer_action_hit_areas(area, app))
+        .unwrap_or_default();
+
+    (!sections.is_empty() || !fields.is_empty() || !footer_actions.is_empty()).then_some(
+        ConfigHitAreas {
+            sections,
+            fields,
+            footer_actions,
+        },
+    )
+}
+
+fn config_layout_parts(content_area: Rect, app: &AppState) -> (Vec<String>, Rect, Option<Rect>) {
+    let (mut main_lines, context_lines) = split_config_context_lines(app.config_detail_lines());
+    let show_context_panel = content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH;
+    if !show_context_panel && !context_lines.is_empty() {
+        main_lines.push(String::new());
+        main_lines.push("[details]".to_owned());
+        main_lines.extend(context_lines.iter().cloned());
+    }
+    let footer_height = u16::from(content_area.height > 0);
+    let footer_gap = u16::from(content_area.height > footer_height + 1);
+    let panel_max_height = content_area
+        .height
+        .saturating_sub(footer_height)
+        .saturating_sub(footer_gap);
+    let panel_height = if show_context_panel {
+        config_panel_height(&main_lines, &context_lines, panel_max_height)
+    } else {
+        config_panel_height(&main_lines, &[], panel_max_height)
+    };
+    let panel_area = top_aligned_config_area(content_area, panel_height);
+    let footer_area = (footer_height > 0).then_some(Rect {
+        y: panel_area.y + panel_area.height + footer_gap,
+        height: footer_height,
+        ..content_area
+    });
+    (main_lines, panel_area, footer_area)
+}
+
+fn config_selected_line_indexes(lines: &[String]) -> Vec<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            (line.starts_with("> ") || line.starts_with("selected:")).then_some(index)
+        })
+        .collect()
+}
+
+fn config_section_hit_areas(
+    lines: &[String],
+    panel_content: Rect,
+    scroll_offset: usize,
+) -> Vec<ConfigSectionHitArea> {
+    let Some(step_line) = lines.get(1) else {
+        return Vec::new();
+    };
+    if scroll_offset > 1 || 1usize.saturating_sub(scroll_offset) >= panel_content.height as usize {
+        return Vec::new();
+    }
+    let y = panel_content
+        .y
+        .saturating_add(1usize.saturating_sub(scroll_offset) as u16);
+    ConfigSection::FLOW
+        .iter()
+        .enumerate()
+        .filter_map(|(index, section)| {
+            let token = config_section_token(*section);
+            let start = step_line.find(&token)?;
+            let width = token.chars().count() as u16;
+            let x = panel_content.x.saturating_add(start as u16);
+            (x < panel_content.x.saturating_add(panel_content.width)).then_some(
+                ConfigSectionHitArea {
+                    index,
+                    area: Rect::new(
+                        x,
+                        y,
+                        width.min(
+                            panel_content
+                                .x
+                                .saturating_add(panel_content.width)
+                                .saturating_sub(x),
+                        ),
+                        1,
+                    ),
+                },
+            )
+        })
+        .collect()
+}
+
+fn config_section_token(section: ConfigSection) -> String {
+    section.title().to_lowercase()
+}
+
+fn config_field_hit_areas(
+    app: &AppState,
+    lines: &[String],
+    panel_content: Rect,
+    scroll_offset: usize,
+) -> Vec<ConfigFieldHitArea> {
+    let Some(section) = app.config_selected_section() else {
+        return Vec::new();
+    };
+    ConfigField::fields_for_section(section)
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let line_index = lines.iter().position(|line| {
+                let trimmed = line.trim_start_matches([' ', '>']);
+                trimmed.starts_with(field.display_label())
+                    && trimmed
+                        .get(field.display_label().len()..)
+                        .is_some_and(|suffix| suffix.starts_with(':'))
+            })?;
+            if line_index < scroll_offset {
+                return None;
+            }
+            let row_offset = line_index - scroll_offset;
+            if row_offset >= panel_content.height as usize {
+                return None;
+            }
+            Some(ConfigFieldHitArea {
+                index,
+                area: Rect::new(
+                    panel_content.x,
+                    panel_content.y.saturating_add(row_offset as u16),
+                    panel_content.width,
+                    1,
+                ),
+            })
+        })
+        .collect()
+}
+
+fn config_footer_action_hit_areas(area: Rect, app: &AppState) -> Vec<ConfigFooterActionHitArea> {
+    let selected = app.config_selected_footer_action_label();
+    let compact = area.width < CONFIG_FOOTER_COMPACT_WIDTH;
+    let mut cursor = area.x;
+    let end = area.x.saturating_add(area.width);
+    app.config_footer_action_labels()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, label)| {
+            if index > 0 {
+                cursor = cursor.saturating_add(1);
+            }
+            if cursor >= end {
+                return None;
+            }
+            let is_selected = selected == Some(label);
+            let width = footer_action_width(label, is_selected, compact) as u16;
+            let area = Rect::new(cursor, area.y, width.min(end.saturating_sub(cursor)), 1);
+            cursor = cursor.saturating_add(width);
+            Some(ConfigFooterActionHitArea { index, area })
+        })
+        .collect()
 }
 
 impl SlashOverlayHitAreas {

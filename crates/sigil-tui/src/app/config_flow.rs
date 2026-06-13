@@ -28,6 +28,12 @@ impl AppState {
             .map(|state| state.selected_section.title())
     }
 
+    pub(crate) fn config_selected_section(&self) -> Option<ConfigSection> {
+        self.config_state
+            .as_ref()
+            .map(|state| state.selected_section)
+    }
+
     pub fn config_selected_field_label(&self) -> Option<&'static str> {
         self.config_state.as_ref().and_then(|state| {
             if state.footer_selected {

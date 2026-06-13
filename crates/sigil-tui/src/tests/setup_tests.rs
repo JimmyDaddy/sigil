@@ -8,6 +8,26 @@ fn setup_field_navigation_wraps() {
 }
 
 #[test]
+fn setup_field_index_and_labels_cover_all_values() {
+    assert_eq!(
+        SetupField::from_index(0),
+        Some(SetupField::TrustCurrentFolder)
+    );
+    assert_eq!(SetupField::from_index(1), Some(SetupField::Model));
+    assert_eq!(SetupField::from_index(2), Some(SetupField::ApiKey));
+    assert_eq!(SetupField::from_index(3), Some(SetupField::Save));
+    assert_eq!(SetupField::from_index(4), None);
+
+    assert_eq!(
+        SetupField::TrustCurrentFolder.label(),
+        "trust_current_folder"
+    );
+    assert_eq!(SetupField::Model.label(), "model");
+    assert_eq!(SetupField::ApiKey.label(), "api_key");
+    assert_eq!(SetupField::Save.label(), "save");
+}
+
+#[test]
 fn setup_state_masks_api_key() {
     let mut state = SetupState::new(PathBuf::from("/tmp/sigil.toml"), None);
 
