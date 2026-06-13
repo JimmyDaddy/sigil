@@ -17,7 +17,7 @@
 - `sigil-provider-deepseek`：DeepSeek 主链路、reasoning replay、strict tools、prefix / FIM 专项入口、usage / cache token 统计。
 - `sigil-tools-builtin`：`read_file`、`write_file`、`edit_file`、`delete_file`、`ls`、`glob`、`grep`、`bash`。
 - `sigil-code-intel`：可选 Code Intelligence / LSP 能力，包含常见语言 LSP 自动发现、Rust `rust-analyzer` client、Tree-sitter Rust fallback、符号/定义/引用/诊断工具和 TUI code tool card。
-- `sigil-mcp`：stdio MCP server 启动、`tools/list` / `tools/call` 适配、`roots/list` 响应、progress notification 安全忽略。
+- `sigil-mcp`：stdio MCP server 启动、`tools/list` / `tools/call` 适配、read-only `resources/list` / `resources/read` 适配、`roots/list` 响应、progress notification 安全忽略。
 - `sigil-tui`：chat-first transcript、composer、slash selector、Quick Setup、`/config`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮。
 - `sigil-cli`：公开 `run` 自动化入口；`prefix` / `fim` 作为隐藏调试入口保留。
 
@@ -37,7 +37,7 @@
 | 优先级 | 能力 | 当前状态 | 推荐目标 |
 | --- | --- | --- | --- |
 | P0 | Code intelligence / LSP | Rust MVP、多语言自动发现、TUI trust/readiness/remediation 已落地；默认关闭，支持 LSP + Tree-sitter fallback | 后续补 code action/rename 审批闭环 |
-| P0 | MCP 完整闭环 | tools 可用；trust enforcement、TUI 手动 lazy activation、模型按需 activation、lifecycle status、elicitation modal 与 elicitation decision audit 已落地 | 补 prompt/resource surface 与更细粒度 progress 展示 |
+| P0 | MCP 完整闭环 | tools 可用；read-only resources、trust enforcement、TUI 手动 lazy activation、模型按需 activation、lifecycle status、elicitation modal 与 elicitation decision audit 已落地 | 补 prompt surface 与更细粒度 progress 展示 |
 | P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key，UI 与 doctor 均明确 plaintext 语义 | 评估 session-only 或可选安全存储 backend |
 | P0 | Diagnostics / doctor | CLI `doctor` 与 TUI `/doctor` 已复用同一份 `DoctorReport` 检查 config、workspace、provider/auth、MCP、LSP 和 terminal 基线，并输出 remediation | 后续如需要再升级为 dedicated diagnostics panel |
 | P1 | 多 provider | runtime 只支持 `deepseek` | 增加 OpenAI-compatible provider，再扩 Anthropic / Gemini |
@@ -232,16 +232,16 @@ cargo test -p sigil-kernel permission agent
 - `permission_subjects` 已包含 `mcp_trust_class:<class>`，permission rules 可以按 trust class 匹配 MCP 调用。
 - `approval_default` 已作为 MCP server 工具的默认审批模式参与逐调用 permission decision。
 - `egress_logging = true` 已在 MCP tools/call 审批通过后、执行前写入安全出境摘要到 append-only control state。
-- `allow_secrets = false` 已阻断 MCP tool args 和 `roots/list` payload 中的已解析 secret，并对 MCP 结果做本地脱敏。
+- `allow_secrets = false` 已阻断 MCP tool args、resource args 和 `roots/list` payload 中的已解析 secret，并对 MCP tool/resource 结果做本地脱敏。
 - `pin_version = true` 已校验 `trust.pinned` 中的 command fingerprint、protocol version、server name 和 server version；缺少 pinned identity 时会失败并输出 observed pin。
-- prompts / resources 级别的 secret gate 仍不是完整安全保证；当前还没有 prompts/resources 协议入口。
+- resources 已通过 provider-visible read-only tools 暴露 `resources/list` / `resources/read`；prompts 级别的 secret gate 仍不是完整安全保证，当前还没有 prompts 协议入口。
 
 交付物：
 
 1. MCP tool wrapper 在 `permission_subjects` 中带上 server trust class。（已落地）
 2. `approval_default` 参与逐调用审批决策。（已落地）
 3. `egress_logging = true` 时记录安全的出境摘要到 control state。（已落地）
-4. `allow_secrets = false` 时对 tool args、roots、prompts/resources 做 secret egress gate。（tool args 与 roots 已落地）
+4. `allow_secrets = false` 时对 tool args、roots、prompts/resources 做 secret egress gate。（tool args、roots 与 resources 已落地；prompts 未落地）
 5. `pin_version = true` 时记录并校验 server identity / command fingerprint / protocol version。（已落地）
 
 验收标准：
@@ -587,7 +587,7 @@ cargo test -p sigil-tui approval timeline
 
 推荐按下面顺序推进，而不是按实现趣味挑选：
 
-1. **MCP prompt/resource surface**：在 tool/roots/elicitation 已治理的基础上扩展 protocol surface。
+1. **MCP prompt surface**：在 tool/roots/resources/elicitation 已治理的基础上扩展 protocol surface。
 2. **OpenAI-compatible provider**：验证 provider-neutral runtime 边界。
 3. **Secret 可选 backend 评估**：只在确有价值时推进 session-only UI、Keychain 或 encrypted file backend。
 4. **Code action / rename 审批闭环**：在只读 code intelligence 稳定后再补写入型 LSP 能力。

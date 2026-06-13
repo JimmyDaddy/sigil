@@ -68,7 +68,7 @@ pin_version = false
 - `trust_class`：server 信任等级，可选 `official`、`self_hosted`、`third_party`。
 - `approval_default`：该 server 工具的默认审批模式，仍可被显式 tool/rule override 覆盖。
 - `egress_logging`：审批通过后、执行前，把 server、trust class、remote tool 和参数形状写入 append-only control state。
-- `allow_secrets`：为 `false` 时，MCP tool 参数、`roots/list` payload 或 elicitation response 中包含已解析 secret 或 secret-like 字段会被阻断。
+- `allow_secrets`：为 `false` 时，MCP tool/resource 参数、`roots/list` payload 或 elicitation response 中包含已解析 secret 或 secret-like 字段会被阻断。
 - `pin_version`：为 `true` 时，启动会校验 pinned identity。
 
 MCP tool 的 permission subjects 会包含 `mcp_trust_class:<class>`，可以被 permission rule 匹配。
@@ -105,6 +105,29 @@ server_version = "1.0.0"
 Sigil 只把已解析的 workspace root 暴露给 MCP server 的 `roots/list`。不要依赖配置文件所在目录推断 workspace。
 
 如果 `allow_secrets = false`，`roots/list` payload 中包含已解析 secret 或 secret-like 内容时会被阻断。
+
+## Resources
+
+当 server 在 `initialize` 中声明 MCP `resources` capability 时，Sigil 会注册两个只读 provider-visible tools：
+
+```text
+mcp__<server>__resources_list
+mcp__<server>__resources_read
+```
+
+`resources_list` 调用 MCP `resources/list`，可选参数是用于分页的 `cursor` 字符串。
+
+`resources_read` 调用 MCP `resources/read`，必填参数是 `resources_list` 返回的 `uri` 字符串。
+
+Resource tools 复用同一套 MCP trust policy：
+
+- permission subjects 包含 `mcp_trust_class:<class>`；
+- `approval_default` 参与逐调用审批；
+- `egress_logging = true` 时只记录安全的参数形状摘要；
+- `allow_secrets = false` 时，secret-like resource 参数离开 Sigil 前会被阻断；
+- 返回的 resource content 会先在本地脱敏，再展示给模型。
+
+Sigil 不会把 MCP resources 自动注入 system prompt。模型必须通过这些工具显式 list/read resources。
 
 ## Elicitation
 

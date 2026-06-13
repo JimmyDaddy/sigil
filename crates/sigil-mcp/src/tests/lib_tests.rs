@@ -291,6 +291,8 @@ while True:
     assert_eq!(spec.category, ToolCategory::Mcp);
     assert_eq!(spec.access, ToolAccess::Network);
     assert!(registry.spec_for("echo").is_none());
+    assert!(registry.spec_for("mcp__fake__resources_list").is_none());
+    assert!(registry.spec_for("mcp__fake__resources_read").is_none());
 
     let subjects = registry.permission_subjects(
         &ToolContext {
@@ -389,6 +391,417 @@ while True:
         )
         .await?;
     assert_eq!(result.content, "hello from mcp");
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_resources_register_and_execute_when_server_declares_capability() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("resource_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2025-06-18","capabilities":{"resources":{"subscribe":False,"listChanged":True}},"serverInfo":{"name":"resource-test","version":"1.0.0"}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+    elif method == "resources/list":
+        cursor = (message.get("params") or {}).get("cursor")
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"resources":[{"uri":"file:///workspace/notes.md","name":"notes","description":"Project notes","mimeType":"text/markdown"}],"nextCursor":"page-2","cursorSeen":cursor}})
+    elif method == "resources/read":
+        uri = message["params"]["uri"]
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"contents":[{"uri":uri,"mimeType":"text/markdown","text":"hello resource"}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "docs".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                trust_class: McpTrustClass::SelfHosted,
+                approval_default: ApprovalMode::Allow,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let list_spec = registry
+        .spec_for("mcp__docs__resources_list")
+        .expect("expected MCP resources/list tool");
+    assert_eq!(list_spec.category, ToolCategory::Mcp);
+    assert_eq!(list_spec.access, ToolAccess::Read);
+    let read_spec = registry
+        .spec_for("mcp__docs__resources_read")
+        .expect("expected MCP resources/read tool");
+    assert_eq!(read_spec.category, ToolCategory::Mcp);
+    assert_eq!(read_spec.access, ToolAccess::Read);
+
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let subjects = registry.permission_subjects(
+        &ctx,
+        &sigil_kernel::ToolCall {
+            id: "call-resource-subjects".to_owned(),
+            name: "mcp__docs__resources_read".to_owned(),
+            args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
+        },
+    )?;
+    assert_eq!(subjects.len(), 2);
+    assert_eq!(subjects[0].kind, ToolSubjectKind::McpTool);
+    assert_eq!(subjects[0].normalized, "mcp__docs__resources_read");
+    assert_eq!(subjects[1].kind, ToolSubjectKind::McpTrustClass);
+    assert_eq!(subjects[1].original, "docs:self_hosted");
+    assert_eq!(subjects[1].normalized, "mcp_trust_class:self_hosted");
+
+    let default_mode = registry.permission_default_mode(
+        &ctx,
+        &sigil_kernel::ToolCall {
+            id: "call-resource-default".to_owned(),
+            name: "mcp__docs__resources_read".to_owned(),
+            args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
+        },
+    )?;
+    assert_eq!(default_mode, Some(ApprovalMode::Allow));
+
+    let egress = registry
+        .egress_audit(
+            &ctx,
+            &sigil_kernel::ToolCall {
+                id: "call-resource-egress".to_owned(),
+                name: "mcp__docs__resources_list".to_owned(),
+                args_json: r#"{"cursor":"page-1"}"#.to_owned(),
+            },
+        )?
+        .expect("resource tools should produce MCP egress audit summaries");
+    assert_eq!(egress.destination, "mcp:docs");
+    assert_eq!(egress.operation, "resources/list");
+    assert!(!egress.redacted);
+    let payload = serde_json::to_string(&egress.payload)?;
+    assert!(payload.contains(r#""resource_operation":"resources_list""#));
+    assert!(payload.contains(r#""top_level_keys":["cursor"]"#));
+    assert!(!payload.contains("page-1"));
+
+    let list_result = registry
+        .execute(
+            ctx.clone(),
+            sigil_kernel::ToolCall {
+                id: "call-list".to_owned(),
+                name: "mcp__docs__resources_list".to_owned(),
+                args_json: r#"{"cursor":"page-1"}"#.to_owned(),
+            },
+        )
+        .await?;
+    assert!(matches!(list_result.status, ToolResultStatus::Ok));
+    assert!(list_result.content.contains("file:///workspace/notes.md"));
+    assert!(list_result.content.contains(r#""cursorSeen": "page-1""#));
+
+    let read_result = registry
+        .execute(
+            ctx.clone(),
+            sigil_kernel::ToolCall {
+                id: "call-read".to_owned(),
+                name: "mcp__docs__resources_read".to_owned(),
+                args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
+            },
+        )
+        .await?;
+    assert!(matches!(read_result.status, ToolResultStatus::Ok));
+    assert!(read_result.content.contains("hello resource"));
+
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "quiet-docs".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                egress_logging: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+    let quiet_egress = registry.egress_audit(
+        &ctx,
+        &sigil_kernel::ToolCall {
+            id: "call-quiet-resource-egress".to_owned(),
+            name: "mcp__quiet_docs__resources_read".to_owned(),
+            args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
+        },
+    )?;
+    assert!(quiet_egress.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_resource_tools_validate_arguments_and_missing_results() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("invalid_resource_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"resources":{}}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+    elif method == "resources/list":
+        write_message({"jsonrpc":"2.0","id":message["id"]})
+    elif method == "resources/read":
+        write_message({"jsonrpc":"2.0","id":message["id"]})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools(
+        &mut registry,
+        &[McpServerConfig {
+            name: "invalid-docs".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+    )
+    .await?;
+
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    for (tool_name, args_json, expected_message) in [
+        (
+            "mcp__invalid_docs__resources_list",
+            r#""not-object""#,
+            "MCP resources/list arguments must be an object",
+        ),
+        (
+            "mcp__invalid_docs__resources_list",
+            r#"{"cursor":1}"#,
+            "MCP resources/list cursor must be a string",
+        ),
+        (
+            "mcp__invalid_docs__resources_read",
+            r#""not-object""#,
+            "MCP resources/read arguments must be an object",
+        ),
+        (
+            "mcp__invalid_docs__resources_read",
+            r#"{}"#,
+            "MCP resources/read requires a uri string",
+        ),
+        (
+            "mcp__invalid_docs__resources_read",
+            r#"{"uri":"  "}"#,
+            "MCP resources/read uri must not be empty",
+        ),
+    ] {
+        let result = registry
+            .execute(
+                ctx.clone(),
+                sigil_kernel::ToolCall {
+                    id: format!("call-{tool_name}"),
+                    name: tool_name.to_owned(),
+                    args_json: args_json.to_owned(),
+                },
+            )
+            .await?;
+        match result.status {
+            ToolResultStatus::Error(error) => {
+                assert_eq!(error.kind, ToolErrorKind::InvalidInput);
+                assert_eq!(error.message, expected_message);
+            }
+            ToolResultStatus::Ok => panic!("invalid resource arguments should fail"),
+        }
+    }
+
+    let missing_result = registry
+        .execute(
+            ctx,
+            sigil_kernel::ToolCall {
+                id: "call-missing-resource-result".to_owned(),
+                name: "mcp__invalid_docs__resources_read".to_owned(),
+                args_json: r#"{"uri":"file:///workspace/notes.md"}"#.to_owned(),
+            },
+        )
+        .await
+        .expect_err("missing resource result should bubble up");
+    assert!(missing_result.to_string().contains("missing result"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_resource_read_blocks_secret_uri_when_trust_disallows_secrets() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("secret_resource_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{"resources":{}}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[]}})
+    elif method == "resources/read":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"contents":[{"uri":message["params"]["uri"],"text":"should not run"}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_capabilities_roots_and_secrets(
+        &mut registry,
+        &[McpServerConfig {
+            name: "docs".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                allow_secrets: false,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        &test_provider_capabilities(),
+        vec![temp.path().to_path_buf()],
+        SecretRedactor::from_values(["sk-secret"]),
+    )
+    .await?;
+
+    let egress = registry
+        .egress_audit(
+            &ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            &sigil_kernel::ToolCall {
+                id: "call-secret-resource-egress".to_owned(),
+                name: "mcp__docs__resources_read".to_owned(),
+                args_json: r#"{"uri":"sigil://secret/sk-secret"}"#.to_owned(),
+            },
+        )?
+        .expect("resource egress audit should summarize blocked attempts");
+    assert_eq!(egress.operation, "resources/read");
+    assert!(egress.redacted);
+    let payload = serde_json::to_string(&egress.payload)?;
+    assert!(payload.contains(r#""secret_detected":true"#));
+    assert!(!payload.contains("sk-secret"));
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            sigil_kernel::ToolCall {
+                id: "call-secret-resource".to_owned(),
+                name: "mcp__docs__resources_read".to_owned(),
+                args_json: r#"{"uri":"sigil://secret/sk-secret"}"#.to_owned(),
+            },
+        )
+        .await?;
+    match result.status {
+        ToolResultStatus::Error(error) => {
+            assert_eq!(error.kind, ToolErrorKind::PermissionDenied);
+        }
+        ToolResultStatus::Ok => panic!("secret resource URI egress should be blocked"),
+    }
+    assert!(!result.content.contains("sk-secret"));
     Ok(())
 }
 

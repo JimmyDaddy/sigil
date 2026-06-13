@@ -68,7 +68,7 @@ Fields:
 - `trust_class`: server trust class, one of `official`, `self_hosted`, or `third_party`.
 - `approval_default`: default approval mode for tools from this server; explicit tool/rule overrides still win.
 - `egress_logging`: after approval and before execution, append a safe summary of server, trust class, remote tool, and argument shape to control state.
-- `allow_secrets`: when `false`, blocks MCP tool arguments, `roots/list` payloads, or elicitation responses that contain resolved secrets or secret-like fields.
+- `allow_secrets`: when `false`, blocks MCP tool/resource arguments, `roots/list` payloads, or elicitation responses that contain resolved secrets or secret-like fields.
 - `pin_version`: when `true`, validates the pinned server identity at startup.
 
 MCP tool permission subjects include `mcp_trust_class:<class>`, so permission rules can match trust class.
@@ -105,6 +105,29 @@ If pinned identity is missing, startup fails and prints the observed pin so you 
 Sigil exposes only the resolved workspace root through MCP `roots/list`. Do not infer workspace from the config file path.
 
 If `allow_secrets = false`, secret-like content in the `roots/list` payload is blocked.
+
+## Resources
+
+When a server declares the MCP `resources` capability during `initialize`, Sigil registers two read-only provider-visible tools:
+
+```text
+mcp__<server>__resources_list
+mcp__<server>__resources_read
+```
+
+`resources_list` calls MCP `resources/list`. It accepts an optional `cursor` string for pagination.
+
+`resources_read` calls MCP `resources/read`. It requires a `uri` string returned by `resources_list`.
+
+Resource tools use the same MCP trust policy as remote tools:
+
+- permission subjects include `mcp_trust_class:<class>`;
+- `approval_default` is applied per call;
+- `egress_logging = true` records only a safe argument-shape summary;
+- `allow_secrets = false` blocks secret-like resource arguments before they leave Sigil;
+- returned resource content is redacted locally before it is shown to the model.
+
+Sigil does not inject MCP resources into the system prompt. The model must explicitly list and read resources through these tools.
 
 ## Elicitation
 

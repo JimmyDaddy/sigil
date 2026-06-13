@@ -30,7 +30,7 @@ sigil/
 - `sigil-provider-deepseek` 支持 DeepSeek 流式对话、工具调用、reasoning replay、usage、pricing、Beta endpoint、prefix 和 FIM 专项入口。
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、搜索、目录枚举和 shell 执行。
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用和诊断只读工具。
-- `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、`roots/list`、elicitation handler、lazy activation 和 trust enforcement。
+- `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、`roots/list`、elicitation handler、lazy activation 和 trust enforcement。
 - `sigil-cli` 当前公开 `run` 自动化入口和 `doctor` 本地诊断入口；`prefix` / `fim` 保留为调试或 provider 专项入口，不作为普通用户主心智。
 - `sigil-tui` 是第一用户入口，承载 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
 
@@ -144,6 +144,8 @@ MCP server 通过 `[[mcp_servers]]` 配置接入。当前支持：
 - `initialize`
 - `tools/list`
 - `tools/call`
+- `resources/list`
+- `resources/read`
 - provider-visible 名称清洗、截断和 hash 去重
 - `roots/list`
 - `elicitation/create`
@@ -154,6 +156,8 @@ MCP server 通过 `[[mcp_servers]]` 配置接入。当前支持：
 - egress logging
 - secret egress 阻断
 - pinned identity 校验
+
+`resources/list` 和 `resources/read` 只在 server initialize capabilities 声明 `resources` 时注册为 provider-visible 只读工具。它们复用 MCP trust policy、permission subjects、egress logging 和 secret egress 阻断，不会自动注入 system prompt。
 
 `roots/list` 只暴露入口已解析的 workspace root。`notifications/progress` 当前安全忽略，不写 timeline。
 
