@@ -12,6 +12,12 @@ cargo run -p sigil-cli -- doctor
 
 Inside the TUI, run `/doctor` to see the same terminal checks in the transcript. The report reads `[terminal].mouse_capture`, `[terminal].osc52_clipboard`, `[terminal].scroll_sensitivity`, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk.
 
+For a repeatable local run that captures `/doctor`, launches the real TUI, prompts for pass/fail/skip results, and writes a Markdown report, use:
+
+```bash
+scripts/tui-mouse-smoke.sh
+```
+
 ## Baseline
 
 1. Confirm `/doctor` reports `terminal`, `terminal:config`, `terminal:mouse`, and `terminal:clipboard`.

@@ -44,7 +44,9 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 
 When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input.
 
-Mouse mode supports transcript scrolling, approval controls, slash candidates, setup/config rows, session selection, and activity selection when your terminal supports mouse capture. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
+Mouse mode supports transcript scrolling, composer cursor placement, approval controls, slash candidates, setup/config rows, session selection, activity selection, and tool card header expand/collapse when your terminal supports mouse capture. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
+
+Use the `Terminal` section in `/config` to adjust mouse capture, OSC52 copy, and scroll sensitivity.
 
 For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatibility.md](terminal-compatibility.md).
 

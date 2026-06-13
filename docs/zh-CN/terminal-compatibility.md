@@ -12,6 +12,12 @@ cargo run -p sigil-cli -- doctor
 
 在 TUI 里可以运行 `/doctor`，同一份 terminal 检查会渲染到 transcript。报告会读取 `[terminal].mouse_capture`、`[terminal].osc52_clipboard`、`[terminal].scroll_sensitivity`、`TERM`、常见终端 profile 变量、tmux/screen、SSH、WSL 和剪贴板桥接风险。
 
+如果要复用一套本地流程来采集 `/doctor`、启动真实 TUI、逐项记录 pass/fail/skip，并生成 Markdown 报告，可以运行：
+
+```bash
+scripts/tui-mouse-smoke.sh
+```
+
 ## 基线
 
 1. 确认 `/doctor` 输出 `terminal`、`terminal:config`、`terminal:mouse` 和 `terminal:clipboard`。

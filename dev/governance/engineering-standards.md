@@ -94,7 +94,7 @@ cargo clippy --all-targets -- -D warnings
 git config core.hooksPath .githooks
 ```
 
-hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行覆盖率是否 `>= 96%`。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
+hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行覆盖率是否 `>= 96%`。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；也不把 staged source 里可识别的 `enum` / `struct` / `union` 声明行当作可执行业务行。如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
 
 `scripts/check-staged-coverage.py` 必须继续复用 `scripts/coverage.sh --lcov` 生成的覆盖率数据，不另起一套覆盖率管线。调整 staged diff 分类、LCov 解析或覆盖率计算时，必须同步更新 `scripts/test_check_staged_coverage.py` 的纯函数测试。
 

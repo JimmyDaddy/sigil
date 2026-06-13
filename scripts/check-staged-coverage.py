@@ -21,6 +21,9 @@ COVERAGE_IGNORE_FILENAME_REGEX = os.environ.get(
 COVERAGE_IGNORE_RE = (
     re.compile(COVERAGE_IGNORE_FILENAME_REGEX) if COVERAGE_IGNORE_FILENAME_REGEX else None
 )
+RUST_ITEM_DECL_RE = re.compile(
+    r"^(?:pub(?:\([^)]+\))?\s+)?(?:struct|enum|union)\s+[A-Z][A-Za-z0-9_]*"
+)
 
 
 @dataclass(frozen=True)
@@ -67,7 +70,7 @@ def is_business_rust_file(path: str) -> bool:
     )
 
 
-def is_non_executable_added_line(line: str) -> bool:
+def is_trivially_non_executable_added_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return True
@@ -77,10 +80,14 @@ def is_non_executable_added_line(line: str) -> bool:
         return True
     if stripped.startswith(("use ", "pub use ", "mod ", "pub mod ", "type ", "pub type ")):
         return True
-    if re.match(
-        r"^(?:pub(?:\([^)]+\))?\s+)?(?:struct|enum)\s+[A-Z][A-Za-z0-9_]*(?:<[^>]+>)?\s*\{?$",
-        stripped,
-    ):
+    if RUST_ITEM_DECL_RE.match(stripped):
+        return True
+    return False
+
+
+def is_non_executable_added_line(line: str) -> bool:
+    stripped = line.strip()
+    if is_trivially_non_executable_added_line(line):
         return True
     if re.match(r"^(?:pub(?:\([^)]+\))?\s+)?[A-Z][A-Za-z0-9_]*(?:\s*\{)?[,]?$", stripped):
         return True
@@ -105,6 +112,58 @@ def is_non_executable_added_line(line: str) -> bool:
     ):
         return True
     return False
+
+
+def non_executable_declaration_lines(source_text: str) -> set[int]:
+    non_executable: set[int] = set()
+    in_item_decl = False
+    saw_body_brace = False
+    brace_depth = 0
+
+    for line_no, line in enumerate(source_text.splitlines(), start=1):
+        stripped = line.strip()
+
+        if in_item_decl:
+            non_executable.add(line_no)
+            if "{" in stripped or saw_body_brace:
+                saw_body_brace = True
+                brace_depth += stripped.count("{") - stripped.count("}")
+                if brace_depth <= 0:
+                    in_item_decl = False
+                    saw_body_brace = False
+                    brace_depth = 0
+            elif ";" in stripped:
+                in_item_decl = False
+            continue
+
+        if RUST_ITEM_DECL_RE.match(stripped):
+            non_executable.add(line_no)
+            if "{" in stripped:
+                saw_body_brace = True
+                brace_depth = stripped.count("{") - stripped.count("}")
+                in_item_decl = brace_depth > 0
+            elif ";" not in stripped:
+                in_item_decl = True
+                saw_body_brace = False
+                brace_depth = 0
+
+    return non_executable
+
+
+def is_non_executable_for_coverage(
+    path: str,
+    line_no: int,
+    line: str,
+    declaration_lines_by_path: dict[str, set[int]] | None,
+) -> bool:
+    if declaration_lines_by_path is None:
+        return is_non_executable_added_line(line)
+    declaration_lines = declaration_lines_by_path.get(path)
+    return (
+        line_no in declaration_lines
+        if declaration_lines is not None
+        else is_non_executable_added_line(line)
+    ) or is_trivially_non_executable_added_line(line)
 
 
 def parse_staged_added_lines(diff_text: str) -> dict[str, dict[int, str]]:
@@ -179,23 +238,37 @@ def compute_staged_coverage(
     added_lines: dict[str, dict[int, str]],
     coverage: dict[str, dict[int, int]],
     min_coverage: float = MIN_COVERAGE,
+    staged_sources: dict[str, str] | None = None,
 ) -> StagedCoverageResult:
     failures: list[str] = []
     checked_files = 0
     checked_lines = 0
+    declaration_lines_by_path = (
+        {
+            path: non_executable_declaration_lines(source_text)
+            for path, source_text in staged_sources.items()
+        }
+        if staged_sources is not None
+        else None
+    )
 
     for path in staged_files:
         file_counts = coverage.get(path, {})
         if not file_counts:
             if all(
-                is_non_executable_added_line(line)
-                for line in added_lines.get(path, {}).values()
+                is_non_executable_for_coverage(path, line_no, line, declaration_lines_by_path)
+                for line_no, line in added_lines.get(path, {}).items()
             ):
                 continue
             failures.append(f"{path}: no coverage data for staged business-code additions")
             continue
         instrumented = sorted(
-            line_no for line_no in added_lines.get(path, {}) if line_no in file_counts
+            line_no
+            for line_no, line in added_lines.get(path, {}).items()
+            if line_no in file_counts
+            and not is_non_executable_for_coverage(
+                path, line_no, line, declaration_lines_by_path
+            )
         )
         if not instrumented:
             continue
@@ -244,6 +317,7 @@ def main() -> int:
     if not added_lines:
         print("staged coverage: no added Rust business-code lines")
         return 0
+    staged_sources = {path: git_output("show", f":{path}") for path in staged_files}
 
     with tempfile.TemporaryDirectory(prefix="sigil-staged-coverage-") as temp_dir:
         lcov_path = Path(temp_dir) / "coverage.lcov"
@@ -257,7 +331,12 @@ def main() -> int:
         )
         coverage = parse_lcov(lcov_path, repo_root)
 
-    result = compute_staged_coverage(staged_files, added_lines, coverage)
+    result = compute_staged_coverage(
+        staged_files,
+        added_lines,
+        coverage,
+        staged_sources=staged_sources,
+    )
 
     if result.failures:
         print(f"staged coverage: added business-code line coverage must be >= {MIN_COVERAGE:.2f}%")

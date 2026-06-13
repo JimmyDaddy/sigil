@@ -44,7 +44,9 @@ Sigil 的主界面围绕这几个区域组织：
 
 Composer 聚焦时，`Up/Down` 会优先处理输入历史或多行输入里的光标移动。
 
-终端支持 mouse capture 时，TUI 支持鼠标滚动 transcript、操作审批控件、点击 slash 候选、setup/config 行、session 选择和 activity。拖选 transcript 文本时按显示列建立选区，然后按 `Ctrl-C` 通过 OSC52 复制。
+终端支持 mouse capture 时，TUI 支持鼠标滚动 transcript、点击 composer 定位光标、操作审批控件、点击 slash 候选、setup/config 行、session 选择、activity 选择，以及点击 tool card header 展开或收起。拖选 transcript 文本时按显示列建立选区，然后按 `Ctrl-C` 通过 OSC52 复制。
+
+可以在 `/config` 的 `Terminal` 区块调整 mouse capture、OSC52 复制和滚轮灵敏度。
 
 终端专项 smoke 检查和 tmux/SSH 建议见 [terminal-compatibility.md](terminal-compatibility.md)。
 

@@ -218,6 +218,8 @@ Run staged coverage check directly:
 ./scripts/check-staged-coverage.py
 ```
 
+The staged gate reads the staged source snapshot before calculating added-line coverage. Recognized `enum`, `struct`, and `union` declaration lines are excluded from the executable-line denominator even when LCOV reports zero-count line records for them.
+
 The staged coverage script has focused Python unit tests for diff classification, LCov parsing, and added-line coverage calculation:
 
 ```bash

@@ -60,6 +60,24 @@ class StagedCoverageHelpersTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertFalse(check_staged_coverage.is_non_executable_added_line(line))
 
+    def test_declaration_line_map_marks_enum_body_only(self) -> None:
+        source = """\
+pub enum ProviderMode {
+    Fast,
+    Slow(String),
+    Stale { capability: String },
+}
+
+pub fn render(value: Result<(), Error>) -> Result<(), Error> {
+    Ok(value?)
+}
+"""
+
+        lines = check_staged_coverage.non_executable_declaration_lines(source)
+
+        self.assertEqual(lines, {1, 2, 3, 4, 5})
+        self.assertNotIn(8, lines)
+
     def test_parse_staged_added_lines_tracks_new_line_numbers(self) -> None:
         diff = """\
 diff --git a/crates/example/src/lib.rs b/crates/example/src/lib.rs
@@ -97,6 +115,55 @@ diff --git a/crates/example/src/lib.rs b/crates/example/src/lib.rs
         self.assertEqual(len(result.failures), 1)
         self.assertIn("50.00%", result.failures[0])
         self.assertIn("11", result.failures[0])
+
+    def test_compute_staged_coverage_ignores_instrumented_enum_declarations(self) -> None:
+        source = """\
+pub enum ProviderMode {
+    Fast,
+    Slow(String),
+}
+
+pub fn run() {
+    let value = load();
+    value
+}
+"""
+        result = check_staged_coverage.compute_staged_coverage(
+            ["crates/example/src/lib.rs"],
+            {
+                "crates/example/src/lib.rs": {
+                    2: "    Fast,",
+                    3: "    Slow(String),",
+                    7: "    let value = load();",
+                }
+            },
+            {"crates/example/src/lib.rs": {2: 0, 3: 0, 7: 1}},
+            min_coverage=96.0,
+            staged_sources={"crates/example/src/lib.rs": source},
+        )
+
+        self.assertEqual(result.checked_files, 1)
+        self.assertEqual(result.checked_lines, 1)
+        self.assertEqual(result.failures, [])
+
+    def test_compute_staged_coverage_keeps_executable_enum_constructor_calls(self) -> None:
+        source = """\
+pub fn render(value: Result<(), Error>) -> Result<(), Error> {
+    Ok(value?)
+}
+"""
+        result = check_staged_coverage.compute_staged_coverage(
+            ["crates/example/src/lib.rs"],
+            {"crates/example/src/lib.rs": {2: "    Ok(value?)"}},
+            {"crates/example/src/lib.rs": {2: 0}},
+            min_coverage=96.0,
+            staged_sources={"crates/example/src/lib.rs": source},
+        )
+
+        self.assertEqual(result.checked_files, 1)
+        self.assertEqual(result.checked_lines, 1)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("0.00%", result.failures[0])
 
     def test_compute_staged_coverage_ignores_non_executable_no_data_files(self) -> None:
         result = check_staged_coverage.compute_staged_coverage(

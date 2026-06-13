@@ -218,6 +218,8 @@ git config core.hooksPath .githooks
 ./scripts/check-staged-coverage.py
 ```
 
+staged gate 会先读取 staged source snapshot，再计算新增行覆盖率。可识别的 `enum`、`struct` 和 `union` 声明行不会进入可执行行分母，即使 LCOV 为这些行生成了 zero-count 记录。
+
 staged coverage 脚本的 diff 分类、LCov 解析和新增行覆盖率计算有独立 Python 单测：
 
 ```bash

@@ -63,6 +63,16 @@ Common controls:
 
 See [docs/en/user-guide.md](docs/en/user-guide.md) for the full TUI guide.
 
+## Mouse And Terminal Support
+
+Mouse support is optional and terminal-dependent. Keyboard controls remain the complete fallback path.
+
+When your terminal supports mouse capture, you can click the composer to focus it and place the cursor, click slash candidates, select setup/config/session rows, use approval modal controls, focus tool activities, and click tool card headers to expand or collapse activity content. The mouse wheel scrolls the transcript and approval diff views.
+
+Transcript text selection uses the displayed terminal columns, so mixed-width text such as CJK content can be dragged and copied predictably. Press `Ctrl-C` to copy the current transcript selection through OSC52 when clipboard integration is enabled.
+
+Use `/config` to adjust the `Terminal` settings: `mouse_capture`, `osc52_clipboard`, and `scroll_sensitivity`. Use `/doctor` to inspect terminal, multiplexer, remote-shell, and clipboard bridge signals. See [docs/en/terminal-compatibility.md](docs/en/terminal-compatibility.md) for the real-terminal smoke checklist.
+
 ## Configuration
 
 Sigil resolves configuration in this order:
@@ -95,6 +105,7 @@ User documentation:
 
 - [TUI user guide](docs/en/user-guide.md) / [中文](docs/zh-CN/user-guide.md)
 - [Configuration guide](docs/en/configuration.md) / [中文](docs/zh-CN/configuration.md)
+- [Terminal compatibility checklist](docs/en/terminal-compatibility.md) / [中文](docs/zh-CN/terminal-compatibility.md)
 - [MCP guide](docs/en/mcp.md) / [中文](docs/zh-CN/mcp.md)
 
 Developer documentation:
