@@ -261,7 +261,7 @@ cargo test -p sigil-tui timeline_flow_tests
 交付物：
 
 1. 启动时记录 lazy server 配置状态，但不暴露伪工具给模型。（crate activation API 和 TUI lifecycle metadata 已落地）
-2. 用户或模型需要某 MCP capability 时触发 activation。（TUI 手动触发已落地；模型触发待设计）
+2. 用户或模型需要某 MCP capability 时触发 activation。（TUI 手动触发与模型 `mcp_activate_server` 触发均已落地，运行态 info rail 会同步展示 lifecycle）
 3. activation 成功后工具进入 registry；失败按 required / optional 策略处理。（已落地）
 4. TUI 显示 MCP server lifecycle。（配置页 summary 和运行态 status 已落地）
 
