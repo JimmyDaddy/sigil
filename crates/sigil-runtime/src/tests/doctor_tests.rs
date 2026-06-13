@@ -38,6 +38,7 @@ fn doctor_report_overall_status_prioritizes_errors_then_warnings() {
             status: DoctorStatus::Warn,
             name: "terminal".to_owned(),
             message: "TERM is not set".to_owned(),
+            remediation: Some("set TERM in the shell".to_owned()),
         }],
     };
     assert!(!warning_report.has_errors());
@@ -49,11 +50,13 @@ fn doctor_report_overall_status_prioritizes_errors_then_warnings() {
                 status: DoctorStatus::Warn,
                 name: "terminal".to_owned(),
                 message: "TERM is not set".to_owned(),
+                remediation: Some("set TERM in the shell".to_owned()),
             },
             DoctorCheck {
                 status: DoctorStatus::Error,
                 name: "config:load".to_owned(),
                 message: "invalid config".to_owned(),
+                remediation: Some("fix sigil.toml syntax".to_owned()),
             },
         ],
     };
@@ -138,8 +141,17 @@ allow_secrets = false
         .join("\n");
 
     assert!(!report.has_errors(), "{report:#?}");
+    assert_eq!(report.overall_status(), DoctorStatus::Warn);
     assert!(!rendered.contains("test-secret-key"));
-    assert!(rendered.contains("resolved from"));
+    assert!(rendered.contains("resolved from config plaintext"));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:auth"
+            && check.status == DoctorStatus::Warn
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("SIGIL_API_KEY"))
+    }));
     assert_eq!(
         secret_source_label(SecretSource::ConfigPlaintext),
         "config plaintext"
@@ -403,6 +415,64 @@ base_url = 123
                 && check.status == DoctorStatus::Error
                 && check.message.contains("invalid deepseek provider config"))
     );
+    Ok(())
+}
+
+#[test]
+fn provider_auth_check_reports_missing_api_key_remediation() {
+    let mut report = DoctorReport::default();
+
+    push_provider_auth_check(&mut report, None);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:auth"
+            && check.status == DoctorStatus::Error
+            && check.message.contains("missing api key")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("plaintext"))
+    }));
+}
+
+#[test]
+fn doctor_reports_code_intelligence_empty_plan_remediation() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+api_key = "test-secret-key"
+
+[code_intelligence]
+enabled = true
+
+[code_intelligence.discovery]
+enabled = true
+report_missing = false
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "code_intelligence"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("no language server plan")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("code_intelligence.servers"))
+    }));
     Ok(())
 }
 

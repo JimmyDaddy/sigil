@@ -28,7 +28,7 @@ TUI 和 CLI 按这个顺序找配置：
 cargo run -p sigil-tui
 ```
 
-如果你更喜欢环境变量，可以在启动前提供认证：
+临时使用或 CI 场景，可以在启动前通过环境变量提供认证：
 
 ```bash
 export SIGIL_API_KEY="sk-..."
@@ -53,7 +53,7 @@ cargo run -p sigil-cli -- doctor
 cargo run -p sigil-cli -- --config ./sigil.toml doctor
 ```
 
-报告会检查配置加载、workspace 解析、session log 位置、DeepSeek provider 设置、API key 来源、MCP command 与 trust 设置、code intelligence language server 可用性，以及当前 `TERM`。它只展示 API key 的来源，不会打印密钥值。
+报告会检查配置加载、workspace 解析、session log 位置、DeepSeek provider 设置、API key 来源、MCP command 与 trust 设置、code intelligence language server 可用性，以及当前 `TERM`。它只展示 API key 的来源，不会打印密钥值。warning 和 error 会附带 `fix:` 修复建议；如果 key 只来自明文配置，doctor 会给出 warning，提示你改用 `SIGIL_API_KEY` 或确认本地配置不会被提交。
 
 ## 最小配置示例
 
@@ -78,7 +78,7 @@ fim_model = "deepseek-v4-pro"
 # api_key = "sk-..."
 ```
 
-`SIGIL_API_KEY` 优先级高于配置文件里的 `api_key`。旧环境变量 `DEEPSEEK_API_KEY` 仍作为 DeepSeek provider 的备用来源读取。
+`SIGIL_API_KEY` 优先级高于配置文件里的 `api_key`。旧环境变量 `DEEPSEEK_API_KEY` 仍作为 DeepSeek provider 的备用来源读取。`doctor` 会对仅来自明文配置的认证给 warning，但不会阻止运行。
 
 ## Workspace
 
@@ -121,7 +121,7 @@ strict_tools_mode = "auto"
 request_timeout_secs = 120
 ```
 
-TUI 的 `/config` 只暴露高频项，例如 `model`、`api_key`、`base_url` 和 `fim_model`。`beta_base_url`、`anthropic_base_url`、`user_id_strategy`、`request_timeout_secs` 和 `strict_tools_mode` 属于低频或 provider 专项项，保留给配置文件和环境变量。
+TUI 的 `/config` 只暴露高频项，例如 `model`、`api_key`、`base_url` 和 `fim_model`。通过 `/config` 保存 `api_key` 会把它以明文写入 `sigil.toml`；临时或 CI 场景优先用 `SIGIL_API_KEY`。`beta_base_url`、`anthropic_base_url`、`user_id_strategy`、`request_timeout_secs` 和 `strict_tools_mode` 属于低频或 provider 专项项，保留给配置文件和环境变量。
 
 ## Permission
 
@@ -217,7 +217,7 @@ trust_required = true
 - `SIGIL_REQUEST_TIMEOUT_SECS`
 - `SIGIL_STRICT_TOOLS_MODE`
 
-`SIGIL_API_KEY` 优先级最高。`DEEPSEEK_API_KEY` 作为 DeepSeek provider 的备用来源继续兼容读取。
+`SIGIL_API_KEY` 优先级最高。`DEEPSEEK_API_KEY` 作为 DeepSeek provider 的备用来源继续兼容读取。如果只配置了 `[providers.deepseek].api_key`，Sigil 会把它视为明文配置认证，`doctor` 会输出 warning 和修复建议。
 
 ## MCP
 

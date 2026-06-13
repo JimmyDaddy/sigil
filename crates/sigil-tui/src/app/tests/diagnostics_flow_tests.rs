@@ -40,6 +40,7 @@ fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Resul
         .clone();
     assert!(rendered.contains("[ok] config:load - config parsed"));
     assert!(rendered.contains("provider:auth"));
+    assert!(rendered.contains("fix: prefer SIGIL_API_KEY"));
     assert!(!rendered.contains("super-secret-test-key"));
     Ok(())
 }
@@ -51,10 +52,14 @@ fn render_doctor_report_includes_summary_and_check_lines() {
             status: DoctorStatus::Warn,
             name: "terminal".to_owned(),
             message: "TERM is not set".to_owned(),
+            remediation: Some("set TERM in the shell before launching the TUI".to_owned()),
         }],
     };
 
     let rendered = render_doctor_report(&report);
 
-    assert_eq!(rendered, "doctor: warn\n[warn] terminal - TERM is not set");
+    assert_eq!(
+        rendered,
+        "doctor: warn\n[warn] terminal - TERM is not set\n    fix: set TERM in the shell before launching the TUI"
+    );
 }

@@ -14,14 +14,17 @@ impl AppState {
 
 fn render_doctor_report(report: &DoctorReport) -> String {
     let mut lines = vec![format!("doctor: {}", report.overall_status().as_str())];
-    lines.extend(report.checks.iter().map(|check| {
-        format!(
+    for check in &report.checks {
+        lines.push(format!(
             "[{}] {} - {}",
             check.status.as_str(),
             check.name,
             check.message
-        )
-    }));
+        ));
+        if let Some(remediation) = check.remediation.as_deref() {
+            lines.push(format!("    fix: {remediation}"));
+        }
+    }
     lines.join("\n")
 }
 

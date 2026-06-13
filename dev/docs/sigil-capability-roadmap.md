@@ -38,8 +38,8 @@
 | --- | --- | --- | --- |
 | P0 | Code intelligence / LSP | Rust MVP 和多语言自动发现已落地；默认关闭，支持 LSP + Tree-sitter fallback | 扩展 workspace trust UI、code action/rename 审批闭环 |
 | P0 | MCP 完整闭环 | tools 可用；trust enforcement、TUI 手动 lazy activation、模型按需 activation、lifecycle status、elicitation modal 与 elicitation decision audit 已落地 | 补 prompt/resource surface 与更细粒度 progress 展示 |
-| P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key | 增加 secret 存储、迁移与 redaction 审计 |
-| P0 | Diagnostics / doctor | CLI `doctor` 与 TUI `/doctor` 已复用同一份 `DoctorReport` 检查 config、workspace、provider/auth、MCP、LSP 和 terminal 基线 | 增加可执行 remediation 文案与更丰富 diagnostics panel |
+| P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key，UI 与 doctor 均明确 plaintext 语义 | 评估 session-only 或可选安全存储 backend |
+| P0 | Diagnostics / doctor | CLI `doctor` 与 TUI `/doctor` 已复用同一份 `DoctorReport` 检查 config、workspace、provider/auth、MCP、LSP 和 terminal 基线，并输出 remediation | 后续如需要再升级为 dedicated diagnostics panel |
 | P1 | 多 provider | runtime 只支持 `deepseek` | 增加 OpenAI-compatible provider，再扩 Anthropic / Gemini |
 | P1 | 鼠标交互 | 只有滚轮 | 实现区域命中、低风险点击、approval 安全点击 |
 | P1 | Planner / executor / subagent | 单 agent loop | 分 session 双模型协作与任务型 subagent |
@@ -60,21 +60,28 @@
 - TUI secret modal 会遮罩 `api_key`。
 - `sigil.toml` 被 `.gitignore` 忽略，并继续支持把 `api_key` 明文写入本地配置；这与 Codex / Claude Code / opencode 的本地配置体验一致。
 - 环境变量继续优先于本地明文配置，便于 CI、临时 session 或用户不希望落盘的场景。
+- `/config` 与 Quick Setup 的 key 输入明确提示保存结果是 plaintext；`doctor` 会把仅来自明文配置的认证报告为 warning，并给出迁移到 `SIGIL_API_KEY` 或保持本地私有的 remediation。
 - MCP trust policy 有 `allow_secrets` 字段，需要逐调用 enforcement。
 
-交付物：
+已完成：
 
 1. 增加 runtime secret resolver，优先支持环境变量、本地明文配置与 session-only 值的兼容读取。
 2. 把本地明文配置作为 P0 默认支持路径；Keychain 或 file-backed encrypted store 不作为 P0 默认路径，只作为后续可选 backend 评估。
-3. `/config` 保存 api key 时明确标注本地配置为 plaintext，并保留环境变量覆盖路径；后续再补“仅本进程使用”的 UI 入口。
+3. `/config` 保存 api key 时明确标注本地配置为 plaintext，并保留环境变量覆盖路径。
 4. 所有 TUI activity、session control、tool meta、error chain 默认 redaction secret-like 字段。
 5. MCP `allow_secrets = false` 时，模型或 MCP server 不应收到已识别 secret。
+
+后续可选：
+
+1. 评估 “仅本进程使用” UI 入口，决定是否值得引入额外交互复杂度。
+2. 评估 Keychain 或 file-backed encrypted store 作为 opt-in backend，不作为默认 P0 路径。
 
 验收标准：
 
 - 旧配置仍能加载。
 - `SIGIL_API_KEY` 继续优先于配置文件里的 `api_key`。
 - 本地 TOML 保存 api key 是受支持行为，但必须在文档和 UI 文案中明确它是 plaintext。
+- `doctor` 会对 config plaintext auth 给 warning 和 remediation，但不打印 secret 值。
 - session log、tool result、notice、debug output 不包含明文 secret。
 - MCP server trust policy 能阻止 secret egress。
 
@@ -109,12 +116,13 @@ cargo clippy --all-targets -- -D warnings
 - 诊断逻辑位于 `sigil-runtime::doctor`，CLI 和 TUI 只负责渲染。
 - 当前检查覆盖 config path/load、workspace root、session log dir、DeepSeek provider/auth 来源、MCP command/trust、code intelligence LSP plan 和 terminal `TERM`。
 - 诊断只报告 secret 来源，不打印 secret 值。
+- warning 和 error check 会携带同一份结构化 remediation，CLI 与 TUI renderer 都只负责展示。
+- config plaintext auth 会被标为 warning，并提示优先使用 `SIGIL_API_KEY` 或确认本地配置不会被提交。
 
 后续交付物：
 
-1. 为每类 warning/error 增加可执行 remediation 文案。
-2. 后续如需要更强交互，再把 `/doctor` report 扩展成 dedicated diagnostics panel。
-3. 如后续出现 release binary，把 `doctor` 作为安装后第一排障命令写入 release 文档。
+1. 后续如需要更强交互，再把 `/doctor` report 扩展成 dedicated diagnostics panel。
+2. 如后续出现 release binary，把 `doctor` 作为安装后第一排障命令写入 release 文档。
 
 验收标准：
 
@@ -578,17 +586,16 @@ cargo test -p sigil-tui approval timeline
 
 推荐按下面顺序推进，而不是按实现趣味挑选：
 
-1. **Secret 与安全产品化后半段**：在已完成 secret resolution / redaction / MCP egress enforcement 基础上，评估 session-only 或可选安全存储。
-2. **Diagnostics remediation 文案**：为 `doctor` 的 warning/error 增加明确下一步，避免用户只看到状态。
-3. **Code intelligence trust UI**：在已有 LSP 工具和状态展示基础上补 workspace trust / remediation。
-4. **MCP prompt/resource surface**：在 tool/roots/elicitation 已治理的基础上扩展 protocol surface。
-5. **OpenAI-compatible provider**：验证 provider-neutral runtime 边界。
-6. **鼠标交互 Phase 1/2**：改善 TUI 手感，但不碰高风险审批点击。
-7. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
-8. **PTY / background tasks**：解决长命令和交互式命令。
-9. **Editing Tools 2.0**：提高多文件变更可靠性。
-10. **CLI JSON / HTTP adapter**：扩展自动化表面。
-11. **Packaging / Memory 2.0**：产品化和长期智能。
+1. **Code intelligence trust UI**：在已有 LSP 工具和状态展示基础上补 workspace trust / remediation。
+2. **MCP prompt/resource surface**：在 tool/roots/elicitation 已治理的基础上扩展 protocol surface。
+3. **OpenAI-compatible provider**：验证 provider-neutral runtime 边界。
+4. **Secret 可选 backend 评估**：只在确有价值时推进 session-only UI、Keychain 或 encrypted file backend。
+5. **鼠标交互 Phase 1/2**：改善 TUI 手感，但不碰高风险审批点击。
+6. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
+7. **PTY / background tasks**：解决长命令和交互式命令。
+8. **Editing Tools 2.0**：提高多文件变更可靠性。
+9. **CLI JSON / HTTP adapter**：扩展自动化表面。
+10. **Packaging / Memory 2.0**：产品化和长期智能。
 
 ## 16. 每阶段通用完成定义
 

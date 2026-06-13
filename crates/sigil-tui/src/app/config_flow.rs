@@ -902,6 +902,7 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
 
     if matches!(field, ConfigField::ProviderApiKey) {
         lines.push(format!("override: {SIGIL_API_KEY_ENV}"));
+        lines.push("storage: saved api_key is plaintext in sigil.toml".to_owned());
     }
     if matches!(field, ConfigField::ProviderFimModel) {
         lines.push("advanced: provider-specific fields remain in config file or env".to_owned());

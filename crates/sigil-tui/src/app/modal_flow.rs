@@ -75,8 +75,12 @@ impl SecretInputTarget {
 
     fn summary(self) -> &'static str {
         match self {
-            Self::SetupApiKey => "Saved with setup. SIGIL_API_KEY can override at runtime.",
-            Self::ConfigProviderApiKey => "Saved on Ctrl-S. SIGIL_API_KEY can override at runtime.",
+            Self::SetupApiKey => {
+                "Saved as plaintext with setup. SIGIL_API_KEY can override at runtime."
+            }
+            Self::ConfigProviderApiKey => {
+                "Saved as plaintext on Ctrl-S. SIGIL_API_KEY can override at runtime."
+            }
         }
     }
 }

@@ -98,6 +98,9 @@ fn render_doctor_report(report: &DoctorReport) -> String {
             check.name,
             check.message
         ));
+        if let Some(remediation) = check.remediation.as_deref() {
+            output.push_str(&format!("    fix: {remediation}\n"));
+        }
     }
     output.push_str(&format!("summary: {}\n", report.overall_status().as_str()));
     output

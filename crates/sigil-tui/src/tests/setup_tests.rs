@@ -35,10 +35,10 @@ fn setup_state_starts_on_trust_field_and_keeps_startup_error() {
 }
 
 #[test]
-fn setup_auth_summary_prefers_pending_inline_key() {
+fn setup_auth_summary_prefers_pending_plaintext_key() {
     let mut state = SetupState::new(PathBuf::from("/tmp/sigil.toml"), None);
 
     state.api_key = "  secret  ".to_owned();
 
-    assert_eq!(state.auth_summary(), "inline api_key pending save");
+    assert_eq!(state.auth_summary(), "plaintext api_key pending save");
 }

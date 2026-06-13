@@ -28,7 +28,7 @@ For normal use, start the TUI and complete Quick Setup:
 cargo run -p sigil-tui
 ```
 
-If you prefer environment variables, provide authentication before launch:
+For temporary use or CI, provide authentication through an environment variable before launch:
 
 ```bash
 export SIGIL_API_KEY="sk-..."
@@ -53,7 +53,7 @@ Use the same config override if you launch Sigil with a non-default config:
 cargo run -p sigil-cli -- --config ./sigil.toml doctor
 ```
 
-The report checks config loading, workspace resolution, session log location, DeepSeek provider settings, API key source, configured MCP commands and trust settings, code intelligence language-server availability, and the current `TERM`. It reports where the API key was resolved from, but never prints the secret value.
+The report checks config loading, workspace resolution, session log location, DeepSeek provider settings, API key source, configured MCP commands and trust settings, code intelligence language-server availability, and the current `TERM`. It reports where the API key was resolved from, but never prints the secret value. Warning and error checks include `fix:` remediation lines; a key resolved only from plaintext config is a warning so users can move it to `SIGIL_API_KEY` or keep the local config private intentionally.
 
 ## Minimal Config Example
 
@@ -78,7 +78,7 @@ fim_model = "deepseek-v4-pro"
 # api_key = "sk-..."
 ```
 
-`SIGIL_API_KEY` has higher priority than `api_key` in the config file. The legacy `DEEPSEEK_API_KEY` environment variable is still read as a fallback for the DeepSeek provider.
+`SIGIL_API_KEY` has higher priority than `api_key` in the config file. The legacy `DEEPSEEK_API_KEY` environment variable is still read as a fallback for the DeepSeek provider. `doctor` warns when auth only comes from plaintext config, but it does not block the run.
 
 ## Workspace
 
@@ -121,7 +121,7 @@ strict_tools_mode = "auto"
 request_timeout_secs = 120
 ```
 
-The TUI `/config` surface exposes only high-frequency fields such as `model`, `api_key`, `base_url`, and `fim_model`. Lower-frequency provider-specific fields, including `beta_base_url`, `anthropic_base_url`, `user_id_strategy`, `request_timeout_secs`, and `strict_tools_mode`, remain file/env configuration.
+The TUI `/config` surface exposes only high-frequency fields such as `model`, `api_key`, `base_url`, and `fim_model`. Saving `api_key` through `/config` writes plaintext to `sigil.toml`; prefer `SIGIL_API_KEY` for temporary or CI use. Lower-frequency provider-specific fields, including `beta_base_url`, `anthropic_base_url`, `user_id_strategy`, `request_timeout_secs`, and `strict_tools_mode`, remain file/env configuration.
 
 ## Permission
 
@@ -217,7 +217,7 @@ Supported variables:
 - `SIGIL_REQUEST_TIMEOUT_SECS`
 - `SIGIL_STRICT_TOOLS_MODE`
 
-`SIGIL_API_KEY` has the highest priority. `DEEPSEEK_API_KEY` remains a fallback source for the DeepSeek provider.
+`SIGIL_API_KEY` has the highest priority. `DEEPSEEK_API_KEY` remains a fallback source for the DeepSeek provider. If only `[providers.deepseek].api_key` is present, Sigil treats it as plaintext config auth and `doctor` reports a warning with remediation.
 
 ## MCP
 

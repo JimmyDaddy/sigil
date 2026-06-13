@@ -4,8 +4,9 @@ use std::{
 };
 
 use sigil_kernel::{McpServerConfig, McpServerStartup, RootConfig, resolve_workspace_root};
+use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
 
-use crate::{SecretSource, load_deepseek_config, resolve_deepseek_api_key};
+use crate::{SecretResolution, SecretSource, load_deepseek_config, resolve_deepseek_api_key};
 
 /// Severity for one local diagnostics check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,7 @@ pub struct DoctorCheck {
     pub status: DoctorStatus,
     pub name: String,
     pub message: String,
+    pub remediation: Option<String>,
 }
 
 /// Aggregated local diagnostics for config, provider, tools, and terminal readiness.
@@ -64,10 +66,21 @@ impl DoctorReport {
     }
 
     fn push(&mut self, status: DoctorStatus, name: impl Into<String>, message: impl Into<String>) {
+        self.push_with_remediation(status, name, message, None::<String>);
+    }
+
+    fn push_with_remediation(
+        &mut self,
+        status: DoctorStatus,
+        name: impl Into<String>,
+        message: impl Into<String>,
+        remediation: Option<impl Into<String>>,
+    ) {
         self.checks.push(DoctorCheck {
             status,
             name: name.into(),
             message: message.into(),
+            remediation: remediation.map(Into::into),
         });
     }
 }
@@ -83,10 +96,11 @@ pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
     );
 
     if !config_path.exists() {
-        report.push(
+        report.push_with_remediation(
             DoctorStatus::Error,
             "config:load",
             format!("missing config at {}", config_path.display()),
+            Some("start `sigil-tui` to complete Quick Setup, or create sigil.toml at this path"),
         );
         check_terminal(&mut report);
         return report;
@@ -98,7 +112,12 @@ pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
             config
         }
         Err(error) => {
-            report.push(DoctorStatus::Error, "config:load", error.to_string());
+            report.push_with_remediation(
+                DoctorStatus::Error,
+                "config:load",
+                error.to_string(),
+                Some("fix sigil.toml syntax, or rerun Quick Setup to regenerate the config"),
+            );
             check_terminal(&mut report);
             return report;
         }
@@ -130,20 +149,26 @@ fn check_workspace(report: &mut DoctorReport, workspace_root: &Path) -> Option<P
             Some(canonical)
         }
         Ok(canonical) => {
-            report.push(
+            report.push_with_remediation(
                 DoctorStatus::Error,
                 "workspace",
                 format!("workspace root is not a directory: {}", canonical.display()),
+                Some(
+                    "set [workspace].root to an existing directory, or launch Sigil from the intended workspace",
+                ),
             );
             None
         }
         Err(error) => {
-            report.push(
+            report.push_with_remediation(
                 DoctorStatus::Error,
                 "workspace",
                 format!(
                     "failed to resolve workspace root {}: {error}",
                     workspace_root.display()
+                ),
+                Some(
+                    "create the workspace directory, update [workspace].root, or launch Sigil from the intended repository",
                 ),
             );
             None
@@ -171,10 +196,11 @@ fn check_session_log_dir(
         return;
     }
     let Some(parent) = session_dir.parent() else {
-        report.push(
+        report.push_with_remediation(
             DoctorStatus::Warn,
             "session:log_dir",
             format!("cannot determine parent for {}", session_dir.display()),
+            Some("set [session].log_dir to a normal directory path"),
         );
         return;
     };
@@ -185,10 +211,11 @@ fn check_session_log_dir(
             format!("will create {}", session_dir.display()),
         );
     } else {
-        report.push(
+        report.push_with_remediation(
             DoctorStatus::Warn,
             "session:log_dir",
             format!("parent does not exist for {}", session_dir.display()),
+            Some("create the parent directory, or set [session].log_dir under the workspace"),
         );
     }
 }
@@ -196,10 +223,11 @@ fn check_session_log_dir(
 fn check_provider(report: &mut DoctorReport, root_config: &RootConfig) {
     match root_config.agent.provider.as_str() {
         "deepseek" => check_deepseek_provider(report, root_config),
-        other => report.push(
+        other => report.push_with_remediation(
             DoctorStatus::Error,
             "provider",
             format!("unsupported provider {other}"),
+            Some("set [agent].provider = \"deepseek\" until another provider is implemented"),
         ),
     }
 }
@@ -208,7 +236,12 @@ fn check_deepseek_provider(report: &mut DoctorReport, root_config: &RootConfig) 
     let config = match load_deepseek_config(root_config).and_then(|config| config.resolved()) {
         Ok(config) => config,
         Err(error) => {
-            report.push(DoctorStatus::Error, "provider:deepseek", error.to_string());
+            report.push_with_remediation(
+                DoctorStatus::Error,
+                "provider:deepseek",
+                error.to_string(),
+                Some("add a valid [providers.deepseek] block, or rerun Quick Setup"),
+            );
             return;
         }
     };
@@ -218,16 +251,33 @@ fn check_deepseek_provider(report: &mut DoctorReport, root_config: &RootConfig) 
         format!("model={} base_url={}", config.model, config.base_url),
     );
 
-    match resolve_deepseek_api_key(&config) {
+    push_provider_auth_check(report, resolve_deepseek_api_key(&config));
+}
+
+fn push_provider_auth_check(report: &mut DoctorReport, secret: Option<SecretResolution>) {
+    match secret {
+        Some(secret) if secret.source == SecretSource::ConfigPlaintext => report.push_with_remediation(
+            DoctorStatus::Warn,
+            "provider:auth",
+            "resolved from config plaintext",
+            Some(format!(
+                "prefer {SIGIL_API_KEY_ENV} for temporary use; if api_key stays in sigil.toml, keep the file private and never commit it",
+            )),
+        ),
         Some(secret) => report.push(
             DoctorStatus::Ok,
             "provider:auth",
             format!("resolved from {}", secret_source_label(secret.source)),
         ),
-        None => report.push(
+        None => report.push_with_remediation(
             DoctorStatus::Error,
             "provider:auth",
-            "missing api key; set SIGIL_API_KEY or [providers.deepseek].api_key",
+            format!(
+                "missing api key; set {SIGIL_API_KEY_ENV} or [providers.deepseek].api_key",
+            ),
+            Some(format!(
+                "for temporary use, export {SIGIL_API_KEY_ENV}; if you save api_key in sigil.toml, it is plaintext",
+            )),
         ),
     }
 }
@@ -262,7 +312,8 @@ fn check_mcp_servers(
             }
             CommandStatus::Missing => DoctorStatus::Warn,
         };
-        report.push(
+        let remediation = mcp_remediation(server, command_status);
+        report.push_with_remediation(
             status,
             format!("mcp:{}", server.name),
             format!(
@@ -283,6 +334,7 @@ fn check_mcp_servers(
                     "off"
                 },
             ),
+            remediation,
         );
     }
 }
@@ -302,10 +354,11 @@ fn check_code_intelligence(
         workspace_root,
     );
     if plan.statuses.is_empty() {
-        report.push(
+        report.push_with_remediation(
             DoctorStatus::Warn,
             "code_intelligence",
             "enabled but no language server plan was produced",
+            Some("add code_intelligence.servers entries, or disable [code_intelligence].enabled"),
         );
         return;
     }
@@ -327,7 +380,8 @@ fn check_code_intelligence(
             value if value.starts_with("degraded") => DoctorStatus::Warn,
             _ => DoctorStatus::Warn,
         };
-        report.push(
+        let remediation = lsp_remediation(status.status.as_str(), command_status, &status.server);
+        report.push_with_remediation(
             status_level,
             format!("lsp:{}", status.server),
             format!(
@@ -336,6 +390,7 @@ fn check_code_intelligence(
                 status.languages.join(","),
                 command_status.as_str()
             ),
+            remediation,
         );
     }
 }
@@ -345,14 +400,53 @@ fn check_terminal(report: &mut DoctorReport) {
         .ok()
         .filter(|value| !value.trim().is_empty())
     {
-        Some(term) if term == "dumb" => report.push(
+        Some(term) if term == "dumb" => report.push_with_remediation(
             DoctorStatus::Warn,
             "terminal",
             "TERM=dumb; TUI rendering may be limited",
+            Some("launch Sigil from a terminal that sets TERM, such as xterm-256color"),
         ),
         Some(term) => report.push(DoctorStatus::Ok, "terminal", format!("TERM={term}")),
-        None => report.push(DoctorStatus::Warn, "terminal", "TERM is not set"),
+        None => report.push_with_remediation(
+            DoctorStatus::Warn,
+            "terminal",
+            "TERM is not set",
+            Some("set TERM in the shell before launching the TUI"),
+        ),
     }
+}
+
+fn mcp_remediation(
+    server: &McpServerConfig,
+    command_status: CommandStatus,
+) -> Option<&'static str> {
+    match command_status {
+        CommandStatus::Empty => {
+            Some("set command to the stdio server executable, or remove this MCP server")
+        }
+        CommandStatus::Missing if server.required && server.startup == McpServerStartup::Eager => {
+            Some(
+                "install the command, use a valid absolute or workspace-relative path, switch startup to lazy, or set required = false",
+            )
+        }
+        CommandStatus::Missing => Some(
+            "install the command, use a valid path, or remove this MCP server until it is available",
+        ),
+        CommandStatus::Available => None,
+    }
+}
+
+fn lsp_remediation(
+    status: &str,
+    command_status: CommandStatus,
+    server_name: &str,
+) -> Option<String> {
+    if command_status == CommandStatus::Available && matches!(status, "installed" | "configured") {
+        return None;
+    }
+    Some(format!(
+        "install or configure the {server_name} language server command, or disable code intelligence for this workspace",
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

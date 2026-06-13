@@ -71,7 +71,7 @@ impl SetupState {
 
     pub(crate) fn auth_summary(&self) -> String {
         if !self.api_key.trim().is_empty() {
-            return "inline api_key pending save".to_owned();
+            return "plaintext api_key pending save".to_owned();
         }
         if env::var(SIGIL_API_KEY_ENV).is_ok() {
             return format!("env {SIGIL_API_KEY_ENV}");

@@ -28,7 +28,7 @@ cargo run -p sigil-cli -- run "总结一下当前仓库"
 cargo run -p sigil-cli -- doctor
 ```
 
-在 TUI 内也可以用 `/doctor`，它会把同一份本地诊断报告渲染到 transcript。
+在 TUI 内也可以用 `/doctor`，它会把同一份本地诊断报告渲染到 transcript。Doctor 会附带可执行的 `fix:` 建议；如果 API key 只明文保存在配置里，也会给出安全提示。
 
 CLI 不是主要产品表面，默认只承担自动化和调试入口。
 
@@ -39,7 +39,7 @@ CLI 不是主要产品表面，默认只承担自动化和调试入口。
 - 运行后继续查看 tool activity、命令输出、文件变更和诊断摘要
 - 重启后恢复最近 session，继续基于已有上下文工作
 - 用 `/config` 调整常用配置，用 `/resume` 选择历史 session
-- 用 `/doctor` 诊断配置、认证、MCP、LSP 和 terminal 就绪状态
+- 用 `/doctor` 诊断配置、认证、MCP、LSP 和 terminal 就绪状态，并查看修复建议
 - 用 `/model` 和 `/effort` 调整下一轮模型与 reasoning effort
 - 用 `/compact` 压缩长会话上下文
 - 可选开启 code intelligence，让 agent 使用符号、定义、引用和诊断工具

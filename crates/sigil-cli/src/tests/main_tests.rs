@@ -337,11 +337,13 @@ fn render_doctor_report_formats_checks_and_summary() {
                 status: DoctorStatus::Ok,
                 name: "config:load".to_owned(),
                 message: "config parsed".to_owned(),
+                remediation: None,
             },
             DoctorCheck {
                 status: DoctorStatus::Warn,
                 name: "terminal".to_owned(),
                 message: "TERM is not set".to_owned(),
+                remediation: Some("set TERM in the shell before launching the TUI".to_owned()),
             },
         ],
     };
@@ -351,6 +353,7 @@ fn render_doctor_report_formats_checks_and_summary() {
     assert!(rendered.contains("Sigil doctor"));
     assert!(rendered.contains("[ok] config:load - config parsed"));
     assert!(rendered.contains("[warn] terminal - TERM is not set"));
+    assert!(rendered.contains("fix: set TERM in the shell before launching the TUI"));
     assert!(rendered.contains("summary: warn"));
 }
 

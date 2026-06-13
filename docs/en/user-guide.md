@@ -123,7 +123,7 @@ No usable config was found, or the config failed to load. Complete Quick Setup t
 
 ### Should I write the API key into the config file?
 
-For temporary use or CI, prefer an environment variable such as `SIGIL_API_KEY`. If you save the key through Quick Setup or `/config`, it is stored as plaintext in the local config file. Do not commit a real `sigil.toml`.
+For temporary use or CI, prefer an environment variable such as `SIGIL_API_KEY`. If you save the key through Quick Setup or `/config`, it is stored as plaintext in the local config file. `doctor` reports that state as a warning with a remediation hint. Do not commit a real `sigil.toml`.
 
 ### Why is the CLI small?
 

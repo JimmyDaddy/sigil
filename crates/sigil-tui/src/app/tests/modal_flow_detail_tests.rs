@@ -214,7 +214,7 @@ fn text_input_targets_and_submit_modal_cover_edge_cases() {
     assert_eq!(ModelPickerTarget::ProviderFim.title(), "FIM Model");
     assert_eq!(
         SecretInputTarget::SetupApiKey.summary(),
-        "Saved with setup. SIGIL_API_KEY can override at runtime."
+        "Saved as plaintext with setup. SIGIL_API_KEY can override at runtime."
     );
     assert_eq!(
         TextInputTarget::ConfigField(ConfigField::ProviderBaseUrl).config_key(),
@@ -482,7 +482,7 @@ fn modal_helper_edge_cases_cover_refresh_defaults_and_empty_values() {
 
     assert_eq!(
         SecretInputTarget::ConfigProviderApiKey.summary(),
-        "Saved on Ctrl-S. SIGIL_API_KEY can override at runtime."
+        "Saved as plaintext on Ctrl-S. SIGIL_API_KEY can override at runtime."
     );
 
     app.open_model_picker(ModelPickerTarget::Provider, "current-model");

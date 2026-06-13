@@ -28,7 +28,7 @@ Use `doctor` when setup or local tooling looks wrong:
 cargo run -p sigil-cli -- doctor
 ```
 
-Inside the TUI, use `/doctor` to render the same local diagnostics report in the transcript.
+Inside the TUI, use `/doctor` to render the same local diagnostics report in the transcript. Doctor includes actionable `fix:` lines and warns when the API key is only stored as plaintext in config.
 
 The CLI is not the primary product surface. It is intentionally kept as an automation and debugging entrypoint.
 
@@ -39,7 +39,7 @@ The CLI is not the primary product surface. It is intentionally kept as an autom
 - Inspect tool activities, command output, file changes, and diagnostics after a run.
 - Restore the latest session after restarting the TUI.
 - Use `/config` for common settings and `/resume` for session selection.
-- Use `/doctor` to diagnose config, authentication, MCP, LSP, and terminal readiness.
+- Use `/doctor` to diagnose config, authentication, MCP, LSP, and terminal readiness with suggested fixes.
 - Use `/model` and `/effort` to adjust the next model run.
 - Use `/compact` to compact long-session context.
 - Optionally enable code intelligence for symbols, definitions, references, and diagnostics.
