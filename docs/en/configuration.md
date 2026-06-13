@@ -186,7 +186,7 @@ enabled = true
 report_missing = true
 ```
 
-When enabled, the runtime registers read-only code intelligence tools and the TUI can use `Alt-D` to run diagnostics over git changed source files.
+When enabled, the runtime registers read-only code intelligence tools plus LSP edit tools for code actions and symbol rename. Edit tools are `Write` tools and require a diff approval before files are changed. The TUI can use `Alt-D` to run diagnostics over git changed source files.
 
 With `discovery.enabled = true`, Sigil discovers common languages and safe LSP servers available on `PATH`. Explicit `code_intelligence.servers` entries are advanced overrides or additions.
 

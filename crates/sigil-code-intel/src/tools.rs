@@ -6,12 +6,13 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, Tool, ToolAccess, ToolCategory, ToolContext,
-    ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectScope,
+    ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
 };
 
 use crate::{
-    service::{CodeIntelResponse, CodeIntelligenceService},
+    edit::CodeEditApplyOutcome,
+    service::{CodeEditPlan, CodeIntelResponse, CodeIntelligenceService},
     workspace::{canonical_workspace_root, workspace_relative_path},
 };
 
@@ -37,6 +38,15 @@ pub fn register_code_intelligence_tools(
     registry.register(Arc::new(CodeReferencesTool {
         service: Arc::clone(&service),
     }));
+    registry.register(Arc::new(CodeActionsTool {
+        service: Arc::clone(&service),
+    }));
+    registry.register(Arc::new(CodeActionTool {
+        service: Arc::clone(&service),
+    }));
+    registry.register(Arc::new(CodeRenameTool {
+        service: Arc::clone(&service),
+    }));
     registry.register(Arc::new(CodeDiagnosticsTool {
         service: Arc::clone(&service),
     }));
@@ -56,6 +66,18 @@ struct CodeDefinitionTool {
 }
 
 struct CodeReferencesTool {
+    service: Arc<CodeIntelligenceService>,
+}
+
+struct CodeActionsTool {
+    service: Arc<CodeIntelligenceService>,
+}
+
+struct CodeActionTool {
+    service: Arc<CodeIntelligenceService>,
+}
+
+struct CodeRenameTool {
     service: Arc<CodeIntelligenceService>,
 }
 
@@ -253,6 +275,170 @@ impl Tool for CodeReferencesTool {
 }
 
 #[async_trait]
+impl Tool for CodeActionsTool {
+    fn spec(&self) -> ToolSpec {
+        let mut schema = position_schema();
+        if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+            properties.insert(
+                "end_line".to_owned(),
+                json!({ "type": "integer", "description": "optional 1-based end line" }),
+            );
+            properties.insert(
+                "end_character".to_owned(),
+                json!({ "type": "integer", "description": "optional 0-based UTF-16 end offset" }),
+            );
+            properties.insert("only".to_owned(), json!({ "type": "string" }));
+        }
+        ToolSpec {
+            name: "code_actions".to_owned(),
+            description: "List LSP code actions at a source range without applying them."
+                .to_owned(),
+            input_schema: schema,
+            category: ToolCategory::Custom,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+        Ok(vec![self.path_subject(required_string(args, "path")?)?])
+    }
+
+    async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let path = required_string(&args, "path")?;
+        let line = required_u64(&args, "line")?;
+        let character = required_u64(&args, "character")?;
+        let end_line = optional_u64(&args, "end_line");
+        let end_character = optional_u64(&args, "end_character");
+        let only = optional_string(&args, "only");
+        let max_results = optional_usize(&args, "max_results").unwrap_or(0);
+        let response = self
+            .service
+            .code_actions(
+                path,
+                line,
+                character,
+                end_line,
+                end_character,
+                only.as_deref(),
+                max_results,
+            )
+            .await;
+        result_from_response(
+            self.service.config().max_payload_bytes,
+            call_id,
+            "code_actions",
+            "code_actions",
+            json!({
+                "path": path,
+                "line": line,
+                "character": character,
+                "end_line": end_line,
+                "end_character": end_character,
+                "only": only
+            }),
+            response,
+            format!("path={path} line={line} character={character}"),
+        )
+    }
+}
+
+#[async_trait]
+impl Tool for CodeActionTool {
+    fn spec(&self) -> ToolSpec {
+        let mut schema = position_schema();
+        if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+            properties.insert(
+                "end_line".to_owned(),
+                json!({ "type": "integer", "description": "optional 1-based end line" }),
+            );
+            properties.insert(
+                "end_character".to_owned(),
+                json!({ "type": "integer", "description": "optional 0-based UTF-16 end offset" }),
+            );
+            properties.insert("title".to_owned(), json!({ "type": "string" }));
+            properties.insert("kind".to_owned(), json!({ "type": "string" }));
+        }
+        ToolSpec {
+            name: "code_action".to_owned(),
+            description: "Apply one LSP code action with a workspace diff approval preview."
+                .to_owned(),
+            input_schema: schema,
+            category: ToolCategory::Custom,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        }
+    }
+
+    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
+        Ok(vec![workspace_subject(self.service.workspace_root())?])
+    }
+
+    async fn preview(&self, ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
+        Ok(Some(preview_for_plan(
+            self.code_action_plan(&args).await?,
+            &ctx.workspace_root,
+            "Apply code action",
+        )?))
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let plan = self.code_action_plan(&args).await?;
+        let outcome = plan.edit.apply(&ctx.workspace_root)?;
+        Ok(edit_result(
+            call_id,
+            "code_action",
+            "applied code action",
+            plan,
+            outcome,
+        )?)
+    }
+}
+
+#[async_trait]
+impl Tool for CodeRenameTool {
+    fn spec(&self) -> ToolSpec {
+        let mut schema = position_schema();
+        if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+            properties.insert("new_name".to_owned(), json!({ "type": "string" }));
+        }
+        ToolSpec {
+            name: "code_rename".to_owned(),
+            description: "Rename one symbol through LSP with a workspace diff approval preview."
+                .to_owned(),
+            input_schema: schema,
+            category: ToolCategory::Custom,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        }
+    }
+
+    fn permission_subjects(&self, _ctx: &ToolContext, _args: &Value) -> Result<Vec<ToolSubject>> {
+        Ok(vec![workspace_subject(self.service.workspace_root())?])
+    }
+
+    async fn preview(&self, ctx: ToolContext, args: Value) -> Result<Option<ToolPreview>> {
+        Ok(Some(preview_for_plan(
+            self.rename_plan(&args).await?,
+            &ctx.workspace_root,
+            "Rename symbol",
+        )?))
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let plan = self.rename_plan(&args).await?;
+        let outcome = plan.edit.apply(&ctx.workspace_root)?;
+        Ok(edit_result(
+            call_id,
+            "code_rename",
+            "applied symbol rename",
+            plan,
+            outcome,
+        )?)
+    }
+}
+
+#[async_trait]
 impl Tool for CodeDiagnosticsTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
@@ -324,10 +510,125 @@ impl CodeReferencesTool {
     }
 }
 
+impl CodeActionsTool {
+    fn path_subject(&self, requested: &str) -> Result<ToolSubject> {
+        path_subject(&self.service, requested)
+    }
+}
+
+impl CodeActionTool {
+    async fn code_action_plan(&self, args: &Value) -> Result<CodeEditPlan> {
+        let path = required_string(args, "path")?;
+        let line = required_u64(args, "line")?;
+        let character = required_u64(args, "character")?;
+        let end_line = optional_u64(args, "end_line");
+        let end_character = optional_u64(args, "end_character");
+        let title = optional_string(args, "title");
+        let kind = optional_string(args, "kind");
+        self.service
+            .code_action_edit_plan(
+                path,
+                line,
+                character,
+                end_line,
+                end_character,
+                title.as_deref(),
+                kind.as_deref(),
+            )
+            .await
+    }
+}
+
+impl CodeRenameTool {
+    async fn rename_plan(&self, args: &Value) -> Result<CodeEditPlan> {
+        let path = required_string(args, "path")?;
+        let line = required_u64(args, "line")?;
+        let character = required_u64(args, "character")?;
+        let new_name = required_string(args, "new_name")?;
+        self.service
+            .rename_edit_plan(path, line, character, new_name)
+            .await
+    }
+}
+
 impl CodeDiagnosticsTool {
     fn path_subject(&self, requested: &str) -> Result<ToolSubject> {
         path_subject(&self.service, requested)
     }
+}
+
+fn preview_for_plan(
+    plan: CodeEditPlan,
+    workspace_root: &std::path::Path,
+    title: &str,
+) -> Result<ToolPreview> {
+    let previews = plan.edit.previews(workspace_root)?;
+    let changed_files = plan.edit.changed_files();
+    let summary = format!(
+        "{} edits across {} file(s) via {}",
+        plan.edit.total_edits(),
+        changed_files.len(),
+        plan.capability
+    );
+    let file_diffs = previews
+        .iter()
+        .map(|file| ToolPreviewFile {
+            path: file.path.clone(),
+            diff: file.diff.clone(),
+        })
+        .collect::<Vec<_>>();
+    let body = file_diffs
+        .iter()
+        .map(|file| file.diff.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(ToolPreview {
+        title: format!("{title} ({})", plan.server),
+        summary,
+        body,
+        changed_files,
+        file_diffs,
+    })
+}
+
+fn edit_result(
+    call_id: String,
+    tool_name: &str,
+    message: &str,
+    plan: CodeEditPlan,
+    outcome: CodeEditApplyOutcome,
+) -> Result<ToolResult> {
+    let content = json!({
+        "tool": tool_name,
+        "status": "ok",
+        "message": message,
+        "server": plan.server,
+        "capability": plan.capability,
+        "changed_files": outcome.changed_files,
+        "applied_edits": outcome.applied_edits,
+        "external_changes_filtered": plan.edit.external_changes_filtered,
+        "unsupported_changes_filtered": plan.edit.unsupported_changes_filtered
+    });
+    Ok(ToolResult::ok(
+        call_id,
+        tool_name,
+        serde_json::to_string(&content)?,
+        ToolResultMeta {
+            duration_ms: Some(plan.metadata.elapsed_ms),
+            returned_entries: Some(outcome.applied_edits as u64),
+            total_entries: Some(plan.edit.total_edits() as u64),
+            changed_files: outcome.changed_files,
+            details: json!({
+                "code_intelligence": {
+                    "server": plan.server,
+                    "capability": plan.capability,
+                    "external_results_filtered": plan.edit.external_changes_filtered,
+                    "unsupported_changes_filtered": plan.edit.unsupported_changes_filtered
+                }
+            }),
+            ..ToolResultMeta::default()
+        },
+    ))
 }
 
 fn result_from_response<T>(
@@ -509,6 +810,10 @@ fn required_u64(args: &Value, key: &str) -> Result<u64> {
     args.get(key)
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow!("missing required integer argument {key}"))
+}
+
+fn optional_u64(args: &Value, key: &str) -> Option<u64> {
+    args.get(key).and_then(Value::as_u64)
 }
 
 fn optional_usize(args: &Value, key: &str) -> Option<usize> {

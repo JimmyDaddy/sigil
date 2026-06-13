@@ -650,6 +650,232 @@ fn pull_diagnostics_from_response_reads_items_array() {
 }
 
 #[test]
+fn code_action_selection_helpers_cover_filters_and_errors() {
+    let summary = parse_code_action_summary(&serde_json::json!({
+        "title": "Fix it",
+        "kind": "quickfix",
+        "isPreferred": true,
+        "diagnostics": [{ "message": "broken" }],
+        "edit": {},
+        "command": { "command": "do" }
+    }))
+    .expect("summary should parse");
+    let selected = select_code_action(
+        vec![
+            serde_json::json!({ "title": "Command only", "kind": "quickfix" }),
+            serde_json::json!({ "title": "Editable", "kind": "quickfix", "edit": {} }),
+        ],
+        None,
+        None,
+    )
+    .expect("single editable action should be selected");
+    let kind_selected = select_code_action(
+        vec![serde_json::json!({
+            "title": "Rename",
+            "kind": "refactor.rename",
+            "edit": {}
+        })],
+        None,
+        Some("refactor"),
+    )
+    .expect("kind prefix should match");
+
+    assert_eq!(summary.title, "Fix it");
+    assert_eq!(summary.kind.as_deref(), Some("quickfix"));
+    assert!(summary.is_preferred);
+    assert_eq!(summary.diagnostics, 1);
+    assert!(summary.has_edit);
+    assert!(summary.has_command);
+    assert!(parse_code_action_summary(&serde_json::json!({ "kind": "quickfix" })).is_none());
+    assert_eq!(selected["title"], "Editable");
+    assert_eq!(kind_selected["title"], "Rename");
+    assert!(
+        select_code_action(Vec::new(), None, None)
+            .expect_err("empty actions should fail")
+            .to_string()
+            .contains("no code action")
+    );
+    assert!(
+        select_code_action(
+            vec![
+                serde_json::json!({ "title": "One", "kind": "quickfix", "edit": {} }),
+                serde_json::json!({ "title": "Two", "kind": "quickfix", "edit": {} }),
+            ],
+            None,
+            None,
+        )
+        .expect_err("ambiguous actions should fail")
+        .to_string()
+        .contains("multiple")
+    );
+}
+
+#[tokio::test]
+async fn code_actions_filter_malformed_and_only_kind_results() {
+    if !python3_available() {
+        return;
+    }
+    let _guard = fake_lsp_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").expect("cargo file");
+    fs::write(
+        temp.path().join("src").join("lib.rs"),
+        "pub fn hello() {}\n",
+    )
+    .expect("source should write");
+    let script = temp.path().join("fake_lsp.py");
+    let scenario = temp.path().join("code-actions.json");
+    write_fake_lsp_server(&script);
+    write_fake_lsp_scenario(
+        &scenario,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "codeActionProvider": true } }
+                },
+                "textDocument/codeAction": {
+                    "result": [
+                        { "title": "Rename", "kind": "refactor.rename", "edit": { "changes": {} } },
+                        { "title": "Quick fix", "kind": "quickfix" },
+                        { "kind": "broken" }
+                    ]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let service = CodeIntelligenceService::new(
+        temp.path().to_path_buf(),
+        fake_lsp_server_config(&script, &scenario),
+    );
+
+    let result = service
+        .code_actions("src/lib.rs", 1, 7, Some(1), Some(12), Some("refactor"), 10)
+        .await
+        .expect("code actions should return");
+
+    assert_eq!(result.results.len(), 1);
+    assert_eq!(result.results[0].title, "Rename");
+    assert_eq!(result.metadata.external_results_filtered, 1);
+    service.shutdown().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn code_action_edit_plan_resolves_actions_and_unsupported_capabilities() {
+    if !python3_available() {
+        return;
+    }
+    let _guard = fake_lsp_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").expect("cargo file");
+    let source = temp.path().join("src").join("lib.rs");
+    fs::write(&source, "pub fn hello() {}\n").expect("source should write");
+    let uri = crate::workspace::file_uri_from_path(&source);
+    let script = temp.path().join("fake_lsp.py");
+    let scenario = temp.path().join("resolve-action.json");
+    write_fake_lsp_server(&script);
+    write_fake_lsp_scenario(
+        &scenario,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": {
+                        "capabilities": {
+                            "codeActionProvider": { "resolveProvider": true },
+                            "renameProvider": false
+                        }
+                    }
+                },
+                "textDocument/codeAction": {
+                    "result": [{
+                        "title": "Resolve me",
+                        "kind": "quickfix",
+                        "data": { "id": 1 }
+                    }]
+                },
+                "codeAction/resolve": {
+                    "result": {
+                        "title": "Resolve me",
+                        "kind": "quickfix",
+                        "edit": {
+                            "changes": {
+                                uri: [{
+                                    "range": {
+                                        "start": { "line": 0, "character": 7 },
+                                        "end": { "line": 0, "character": 12 }
+                                    },
+                                    "newText": "greet"
+                                }]
+                            }
+                        }
+                    }
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let service = CodeIntelligenceService::new(
+        temp.path().to_path_buf(),
+        fake_lsp_server_config(&script, &scenario),
+    );
+
+    let plan = service
+        .code_action_edit_plan("src/lib.rs", 1, 7, None, None, Some("Resolve me"), None)
+        .await
+        .expect("resolved action should produce edit plan");
+    let rename_error = service
+        .rename_edit_plan("src/lib.rs", 1, 7, "greet")
+        .await
+        .expect_err("rename should be unsupported");
+
+    assert_eq!(plan.edit.files[0].edits[0].new_text, "greet");
+    assert!(rename_error.to_string().contains("textDocument/rename"));
+    service.shutdown().await.expect("shutdown should succeed");
+}
+
+#[tokio::test]
+async fn code_actions_report_unsupported_capability() {
+    if !python3_available() {
+        return;
+    }
+    let _guard = fake_lsp_test_guard().await;
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").expect("cargo file");
+    fs::write(
+        temp.path().join("src").join("lib.rs"),
+        "pub fn hello() {}\n",
+    )
+    .expect("source should write");
+    let script = temp.path().join("fake_lsp.py");
+    let scenario = temp.path().join("unsupported-actions.json");
+    write_fake_lsp_server(&script);
+    write_fake_lsp_scenario(
+        &scenario,
+        &serde_json::json!({
+            "methods": {
+                "initialize": { "result": { "capabilities": {} } },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let service = CodeIntelligenceService::new(
+        temp.path().to_path_buf(),
+        fake_lsp_server_config(&script, &scenario),
+    );
+
+    let error = service
+        .code_actions("src/lib.rs", 1, 7, None, None, None, 10)
+        .await
+        .expect_err("code actions should be unsupported");
+
+    assert!(error.to_string().contains("textDocument/codeAction"));
+    service.shutdown().await.expect("shutdown should succeed");
+}
+
+#[test]
 fn code_intel_status_line_formats_all_variants() {
     assert_eq!(CodeIntelStatus::Off.line(), "off");
     assert_eq!(

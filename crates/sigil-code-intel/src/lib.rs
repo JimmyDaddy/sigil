@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod discovery;
+pub mod edit;
 pub mod error;
 pub mod language;
 pub mod lsp;
@@ -8,8 +9,8 @@ pub mod tools;
 pub mod workspace;
 
 pub use service::{
-    CodeDiagnostic, CodeIntelResponse, CodeIntelServerStatus, CodeIntelStatus,
-    CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol, QueryMetadata,
+    CodeActionSummary, CodeDiagnostic, CodeEditPlan, CodeIntelResponse, CodeIntelServerStatus,
+    CodeIntelStatus, CodeIntelligenceService, CodeLocation, CodeRange, CodeSymbol, QueryMetadata,
 };
 pub use tools::register_code_intelligence_tools;
 

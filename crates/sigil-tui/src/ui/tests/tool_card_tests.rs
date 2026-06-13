@@ -477,6 +477,7 @@ fn tool_card_code_intelligence_helpers_cover_remaining_labels_and_fallbacks() {
     let definition = base_summary("code_definition");
     let references = base_summary("code_references");
     let diagnostics = base_summary("code_diagnostics");
+    let actions = base_summary("code_actions");
     let empty_servers = code_intelligence_servers_line(&json!({
         "servers": [{"status": "ready"}]
     }));
@@ -485,6 +486,21 @@ fn tool_card_code_intelligence_helpers_cover_remaining_labels_and_fallbacks() {
         preview_value: Some(json!({"server": "custom", "capability": "custom/run"})),
         preview_kind: ToolPreviewKind::Json,
         ..base_summary("code_references")
+    };
+    let actions_preview = ToolCardRender {
+        preview_value: Some(json!({
+            "server": "rust-analyzer",
+            "capability": "textDocument/codeAction",
+            "code_actions": [{
+                "title": "Replace symbol",
+                "kind": "quickfix",
+                "has_edit": true,
+                "has_command": false
+            }],
+            "metadata": {"returned": 1, "total": 1}
+        })),
+        preview_kind: ToolPreviewKind::Json,
+        ..base_summary("code_actions")
     };
     let definition_row = code_intelligence_row(
         &definition,
@@ -504,11 +520,41 @@ fn tool_card_code_intelligence_helpers_cover_remaining_labels_and_fallbacks() {
         }),
     )
     .expect("reference rows should render");
+    let action_row = code_intelligence_row(
+        &actions,
+        &json!({
+            "title": "Replace symbol",
+            "kind": "quickfix",
+            "has_edit": true,
+            "has_command": false
+        }),
+    )
+    .expect("action rows should render");
+    let command_action_row = code_intelligence_row(
+        &actions,
+        &json!({
+            "title": "Run command",
+            "has_edit": false,
+            "has_command": true
+        }),
+    )
+    .expect("command action rows should render");
+    let inspect_action_row = code_intelligence_row(
+        &actions,
+        &json!({
+            "title": "Inspect only",
+            "has_edit": false,
+            "has_command": false
+        }),
+    )
+    .expect("inspect action rows should render");
     let fallback_lines = render_code_intelligence_preview(&fallback_generic, accent_rose(), 72);
+    let actions_lines = render_code_intelligence_preview(&actions_preview, accent_rose(), 72);
 
     assert_eq!(code_intelligence_section(&definition), "definition");
     assert_eq!(code_intelligence_section(&references), "references");
     assert_eq!(code_intelligence_section(&diagnostics), "diagnostics");
+    assert_eq!(code_intelligence_section(&actions), "actions");
     assert_eq!(
         code_intelligence_source_label("tree-sitter-rust", "workspace/symbol"),
         "Tree-sitter"
@@ -578,7 +624,29 @@ fn tool_card_code_intelligence_helpers_cover_remaining_labels_and_fallbacks() {
             .collect::<String>()
             .contains("ref")
     );
+    let action_text = action_row
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(action_text.contains("quickfix"));
+    assert!(action_text.contains("edit"));
+    assert!(action_text.contains("Replace symbol"));
+    assert!(
+        command_action_row
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .contains("command")
+    );
+    assert!(
+        inspect_action_row
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+            .contains("inspect")
+    );
     assert!(plain_text(&fallback_lines).contains("structured payload"));
+    assert!(plain_text(&actions_lines).contains("Replace symbol"));
 }
 
 #[test]
@@ -832,6 +900,27 @@ fn tool_card_action_title_helpers_cover_remaining_builtin_and_fallback_paths() {
     let code_diagnostics = ToolCardRender {
         ..base_summary("code_diagnostics")
     };
+    let code_actions = ToolCardRender {
+        metadata: ToolCardMetadata {
+            call_summary: Some("path=src/lib.rs line=1 character=7".to_owned()),
+            ..ToolCardMetadata::default()
+        },
+        ..base_summary("code_actions")
+    };
+    let code_action = ToolCardRender {
+        metadata: ToolCardMetadata {
+            changed_files: vec!["src/lib.rs".to_owned()],
+            ..ToolCardMetadata::default()
+        },
+        ..base_summary("code_action")
+    };
+    let code_rename = ToolCardRender {
+        metadata: ToolCardMetadata {
+            changed_files: vec!["src/lib.rs".to_owned()],
+            ..ToolCardMetadata::default()
+        },
+        ..base_summary("code_rename")
+    };
     let fallback = ToolCardRender {
         tool_name: "custom_tool".to_owned(),
         metadata: ToolCardMetadata {
@@ -861,6 +950,21 @@ fn tool_card_action_title_helpers_cover_remaining_builtin_and_fallback_paths() {
         tool_action_title(&code_diagnostics).plain(),
         "Checked workspace diagnostics"
     );
+    assert_eq!(
+        tool_action_title(&code_actions).plain(),
+        "Inspected src/lib.rs actions"
+    );
+    assert_eq!(
+        tool_action_title(&code_action).plain(),
+        "Applied src/lib.rs code action"
+    );
+    assert_eq!(
+        tool_action_title(&code_rename).plain(),
+        "Renamed src/lib.rs symbol"
+    );
+    assert!(file_change_tool(&code_action));
+    assert!(file_change_tool(&code_rename));
+    assert!(code_intelligence_tool(&code_actions));
     assert_eq!(
         tool_action_title(&fallback).plain(),
         "Called custom_tool mode=fast target=src"

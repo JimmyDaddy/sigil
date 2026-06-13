@@ -217,9 +217,7 @@ fn render_tool_preview_body(
     if tool_name_matches(&summary.tool_name, "bash") {
         return render_bash_preview(summary, accent);
     }
-    if (tool_name_matches(&summary.tool_name, "write_file")
-        || tool_name_matches(&summary.tool_name, "edit_file")
-        || tool_name_matches(&summary.tool_name, "delete_file"))
+    if file_change_tool(summary)
         && let Some(lines) = render_file_change_preview(summary, accent)
     {
         return lines;
@@ -227,12 +225,7 @@ fn render_tool_preview_body(
     if tool_name_matches(&summary.tool_name, "read_file") {
         return render_read_file_preview(summary, accent, max_content_width);
     }
-    if tool_name_matches(&summary.tool_name, "code_symbols")
-        || tool_name_matches(&summary.tool_name, "code_workspace_symbols")
-        || tool_name_matches(&summary.tool_name, "code_definition")
-        || tool_name_matches(&summary.tool_name, "code_references")
-        || tool_name_matches(&summary.tool_name, "code_diagnostics")
-    {
+    if code_intelligence_tool(summary) {
         return render_code_intelligence_preview(summary, accent, max_content_width);
     }
     render_generic_tool_preview(summary, accent, max_content_width)
@@ -554,6 +547,8 @@ fn code_intelligence_section(summary: &ToolCardRender) -> &'static str {
         "definition"
     } else if tool_name_matches(&summary.tool_name, "code_references") {
         "references"
+    } else if tool_name_matches(&summary.tool_name, "code_actions") {
+        "actions"
     } else {
         "symbols"
     }
@@ -569,6 +564,8 @@ fn code_intelligence_items(
         "definition"
     } else if tool_name_matches(&summary.tool_name, "code_references") {
         "references"
+    } else if tool_name_matches(&summary.tool_name, "code_actions") {
+        "code_actions"
     } else if tool_name_matches(&summary.tool_name, "code_workspace_symbols") {
         "workspace_symbols"
     } else {
@@ -614,6 +611,31 @@ fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<
             Style::default().fg(ink()),
         ));
         return Some(spans);
+    }
+    if tool_name_matches(&summary.tool_name, "code_actions") {
+        let title = entry.get("title")?.as_str()?.to_owned();
+        let label = entry
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("action")
+            .to_owned();
+        let capability = if entry.get("has_edit").and_then(Value::as_bool) == Some(true) {
+            "edit"
+        } else if entry.get("has_command").and_then(Value::as_bool) == Some(true) {
+            "command"
+        } else {
+            "inspect"
+        };
+        return Some(vec![
+            section_badge(&label, accent_teal()),
+            Span::raw(" "),
+            Span::styled(capability, Style::default().fg(accent_blue())),
+            Span::raw(" "),
+            Span::styled(
+                truncate_inline_text(&title, 120),
+                Style::default().fg(ink()),
+            ),
+        ]);
     }
     let path = entry.get("path")?.as_str()?.to_owned();
     let label = entry
@@ -758,6 +780,23 @@ fn diagnostic_severity_color(severity: &str) -> Color {
         "warning" => accent_gold(),
         _ => accent_teal(),
     }
+}
+
+fn file_change_tool(summary: &ToolCardRender) -> bool {
+    tool_name_matches(&summary.tool_name, "write_file")
+        || tool_name_matches(&summary.tool_name, "edit_file")
+        || tool_name_matches(&summary.tool_name, "delete_file")
+        || tool_name_matches(&summary.tool_name, "code_action")
+        || tool_name_matches(&summary.tool_name, "code_rename")
+}
+
+fn code_intelligence_tool(summary: &ToolCardRender) -> bool {
+    tool_name_matches(&summary.tool_name, "code_symbols")
+        || tool_name_matches(&summary.tool_name, "code_workspace_symbols")
+        || tool_name_matches(&summary.tool_name, "code_definition")
+        || tool_name_matches(&summary.tool_name, "code_references")
+        || tool_name_matches(&summary.tool_name, "code_diagnostics")
+        || tool_name_matches(&summary.tool_name, "code_actions")
 }
 
 fn file_change_count_label(summary: &ToolCardRender) -> &'static str {
@@ -1337,6 +1376,16 @@ fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
     if tool_name_matches(&summary.tool_name, "delete_file") {
         return ToolCardTitle::new("Deleted", primary_path(summary), None);
     }
+    if tool_name_matches(&summary.tool_name, "code_action") {
+        return ToolCardTitle::new(
+            "Applied",
+            primary_path(summary),
+            Some("code action".to_owned()),
+        );
+    }
+    if tool_name_matches(&summary.tool_name, "code_rename") {
+        return ToolCardTitle::new("Renamed", primary_path(summary), Some("symbol".to_owned()));
+    }
     if tool_name_matches(&summary.tool_name, "grep") {
         let pattern = call_argument(summary, "pattern").unwrap_or_else(|| "pattern".to_owned());
         let path = call_argument(summary, "path").unwrap_or_else(|| "workspace".to_owned());
@@ -1378,6 +1427,13 @@ fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
             "Searched",
             primary_path(summary),
             Some("references".to_owned()),
+        );
+    }
+    if tool_name_matches(&summary.tool_name, "code_actions") {
+        return ToolCardTitle::new(
+            "Inspected",
+            primary_path(summary),
+            Some("actions".to_owned()),
         );
     }
     if tool_name_matches(&summary.tool_name, "code_diagnostics") {

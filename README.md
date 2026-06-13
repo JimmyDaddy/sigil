@@ -42,7 +42,7 @@ The CLI is not the primary product surface. It is intentionally kept as an autom
 - Use `/doctor` to diagnose config, authentication, MCP, LSP, and terminal readiness with suggested fixes.
 - Use `/model` and `/effort` to adjust the next model run.
 - Use `/compact` to compact long-session context.
-- Optionally enable code intelligence for symbols, definitions, references, diagnostics, and `/config` readiness checks.
+- Optionally enable code intelligence for symbols, definitions, references, diagnostics, code actions, rename previews, and `/config` readiness checks.
 - Optionally connect stdio MCP servers under explicit trust and approval policies.
 
 ## TUI Model

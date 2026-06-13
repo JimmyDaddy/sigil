@@ -29,7 +29,7 @@ sigil/
 - `sigil-runtime` 统一装配 provider、内置工具、MCP 工具和 run options。
 - `sigil-provider-deepseek` 支持 DeepSeek 流式对话、工具调用、reasoning replay、usage、pricing、Beta endpoint、prefix 和 FIM 专项入口。
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、搜索、目录枚举和 shell 执行。
-- `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用和诊断只读工具。
+- `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用、诊断、code action 查询，以及需要审批 diff 的 code action / rename edit 工具。
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
 - `sigil-cli` 当前公开 `run` 自动化入口和 `doctor` 本地诊断入口；`prefix` / `fim` 保留为调试或 provider 专项入口，不作为普通用户主心智。
 - `sigil-tui` 是第一用户入口，承载 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
@@ -178,6 +178,12 @@ Code intelligence 默认关闭。开启后 runtime 注册只读工具：
 - `code_definition`
 - `code_references`
 - `code_diagnostics`
+- `code_actions`
+
+同时注册需要审批 diff 的写工具：
+
+- `code_action`
+- `code_rename`
 
 `code_intelligence.discovery.enabled = true` 时，会按 workspace marker / 文件扩展名自动发现 Rust、TypeScript/JavaScript、Python、Go，并只把 PATH 上可用的内置 allowlist server 纳入启动计划。Rust 项目默认使用 `rust-analyzer`，没有可用 LSP server 时回退到 Tree-sitter Rust outline / syntax diagnostics。
 

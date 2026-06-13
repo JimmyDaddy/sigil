@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -18,11 +18,13 @@ use tokio::{
 
 use crate::{
     cache::TimedCache,
+    edit::{CodeWorkspaceEdit, workspace_edit_from_lsp},
     error::CodeIntelError,
     language::{rust_document_symbols, rust_syntax_diagnostics},
     lsp::{
-        LspClient, definition_supported, diagnostics_supported, document_symbol_supported,
-        lsp_error_to_reason, lsp_uri_to_workspace_path, position_params, references_supported,
+        LspClient, code_action_resolve_supported, code_action_supported, definition_supported,
+        diagnostics_supported, document_symbol_supported, lsp_error_to_reason,
+        lsp_uri_to_workspace_path, position_params, references_supported, rename_supported,
         response_array, text_document_identifier, workspace_symbol_supported,
     },
     workspace::{
@@ -108,6 +110,27 @@ pub struct CodeDiagnostic {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct CodeActionSummary {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub is_preferred: bool,
+    pub diagnostics: usize,
+    pub has_edit: bool,
+    pub has_command: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct CodeEditPlan {
+    pub server: String,
+    pub capability: String,
+    pub edit: CodeWorkspaceEdit,
+    pub metadata: QueryMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -590,6 +613,184 @@ impl CodeIntelligenceService {
             started,
             filtered,
         )))
+    }
+
+    pub async fn code_actions(
+        &self,
+        requested: &str,
+        line: u64,
+        character: u64,
+        end_line: Option<u64>,
+        end_character: Option<u64>,
+        only: Option<&str>,
+        max_results: usize,
+    ) -> Result<CodeIntelResponse<CodeActionSummary>> {
+        let started = Instant::now();
+        let limit = self.limit(max_results);
+        let path = self.resolve_file(requested)?;
+        self.ensure_server_plan().await;
+        let server_handle = self.ensure_client(&path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "textDocument/codeAction")?;
+        if !code_action_supported(&server.capabilities) {
+            return Err(CodeIntelError::UnsupportedCapability {
+                server: server.config.name.clone(),
+                capability: "textDocument/codeAction",
+            }
+            .into());
+        }
+        server.sync_document(&path).await?;
+        let value = server
+            .client
+            .request(
+                "textDocument/codeAction",
+                code_action_params(&path, line, character, end_line, end_character, only),
+                self.request_timeout(),
+            )
+            .await?;
+        let server_name = server.config.name.clone();
+        let languages = server.config.languages.clone();
+        let mut filtered = 0usize;
+        let mut actions = response_array(value)
+            .into_iter()
+            .filter_map(|value| {
+                parse_code_action_summary(&value).or_else(|| {
+                    filtered += 1;
+                    None
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(only) = only {
+            actions.retain(|action| {
+                action
+                    .kind
+                    .as_deref()
+                    .is_some_and(|kind| kind == only || kind.starts_with(&format!("{only}.")))
+            });
+        }
+        Ok(self.with_discovery_statuses(response_with_filtered(
+            server_name,
+            languages,
+            "textDocument/codeAction".to_owned(),
+            actions,
+            limit,
+            started,
+            filtered,
+        )))
+    }
+
+    pub async fn code_action_edit_plan(
+        &self,
+        requested: &str,
+        line: u64,
+        character: u64,
+        end_line: Option<u64>,
+        end_character: Option<u64>,
+        title: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<CodeEditPlan> {
+        let started = Instant::now();
+        let path = self.resolve_file(requested)?;
+        self.ensure_server_plan().await;
+        let server_handle = self.ensure_client(&path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "textDocument/codeAction")?;
+        if !code_action_supported(&server.capabilities) {
+            return Err(CodeIntelError::UnsupportedCapability {
+                server: server.config.name.clone(),
+                capability: "textDocument/codeAction",
+            }
+            .into());
+        }
+        server.sync_document(&path).await?;
+        let value = server
+            .client
+            .request(
+                "textDocument/codeAction",
+                code_action_params(&path, line, character, end_line, end_character, kind),
+                self.request_timeout(),
+            )
+            .await?;
+        let actions = response_array(value);
+        let mut selected = select_code_action(actions, title, kind)?;
+        if selected.get("edit").is_none() && code_action_resolve_supported(&server.capabilities) {
+            selected = server
+                .client
+                .request(
+                    "codeAction/resolve",
+                    selected.clone(),
+                    self.request_timeout(),
+                )
+                .await?;
+        }
+        let edit_value =
+            selected
+                .get("edit")
+                .ok_or_else(|| CodeIntelError::UnsupportedCapability {
+                    server: server.config.name.clone(),
+                    capability: "codeAction/edit",
+                })?;
+        let edit = workspace_edit_from_lsp(&self.inner.workspace_root, edit_value)?;
+        if edit.files.is_empty() {
+            return Err(anyhow!("selected code action produced no workspace edits"));
+        }
+        Ok(CodeEditPlan {
+            server: server.config.name.clone(),
+            capability: "textDocument/codeAction".to_owned(),
+            metadata: QueryMetadata {
+                returned: edit.files.len(),
+                total: edit.files.len(),
+                truncated: false,
+                elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                external_results_filtered: edit.external_changes_filtered,
+            },
+            edit,
+        })
+    }
+
+    pub async fn rename_edit_plan(
+        &self,
+        requested: &str,
+        line: u64,
+        character: u64,
+        new_name: &str,
+    ) -> Result<CodeEditPlan> {
+        let started = Instant::now();
+        let path = self.resolve_file(requested)?;
+        self.ensure_server_plan().await;
+        let server_handle = self.ensure_client(&path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "textDocument/rename")?;
+        if !rename_supported(&server.capabilities) {
+            return Err(CodeIntelError::UnsupportedCapability {
+                server: server.config.name.clone(),
+                capability: "textDocument/rename",
+            }
+            .into());
+        }
+        server.sync_document(&path).await?;
+        let mut params = position_params(&path, line, character);
+        params["newName"] = json!(new_name);
+        let value = server
+            .client
+            .request("textDocument/rename", params, self.request_timeout())
+            .await?;
+        let edit = workspace_edit_from_lsp(&self.inner.workspace_root, &value)?;
+        if edit.files.is_empty() {
+            return Err(anyhow!("rename produced no workspace edits"));
+        }
+        Ok(CodeEditPlan {
+            server: server.config.name.clone(),
+            capability: "textDocument/rename".to_owned(),
+            metadata: QueryMetadata {
+                returned: edit.files.len(),
+                total: edit.files.len(),
+                truncated: false,
+                elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                external_results_filtered: edit.external_changes_filtered,
+            },
+            edit,
+        })
     }
 
     pub async fn diagnostics(
@@ -1325,6 +1526,92 @@ fn parse_diagnostic_value(
     })
 }
 
+fn code_action_params(
+    path: &Path,
+    line: u64,
+    character: u64,
+    end_line: Option<u64>,
+    end_character: Option<u64>,
+    only: Option<&str>,
+) -> Value {
+    let end_line = end_line.unwrap_or(line);
+    let end_character = end_character.unwrap_or(character);
+    let mut context = json!({ "diagnostics": [] });
+    if let Some(only) = only.filter(|value| !value.trim().is_empty()) {
+        context["only"] = json!([only]);
+    }
+    json!({
+        "textDocument": text_document_identifier(path),
+        "range": {
+            "start": {
+                "line": line.saturating_sub(1),
+                "character": character
+            },
+            "end": {
+                "line": end_line.saturating_sub(1),
+                "character": end_character
+            }
+        },
+        "context": context
+    })
+}
+
+fn parse_code_action_summary(value: &Value) -> Option<CodeActionSummary> {
+    let title = value.get("title")?.as_str()?.to_owned();
+    Some(CodeActionSummary {
+        title,
+        kind: value.get("kind").and_then(Value::as_str).map(str::to_owned),
+        is_preferred: value
+            .get("isPreferred")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        diagnostics: value
+            .get("diagnostics")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+        has_edit: value.get("edit").is_some(),
+        has_command: value.get("command").is_some(),
+    })
+}
+
+fn select_code_action(
+    actions: Vec<Value>,
+    title: Option<&str>,
+    kind: Option<&str>,
+) -> Result<Value> {
+    let mut candidates = actions
+        .into_iter()
+        .filter(|action| {
+            let title_matches = title.is_none_or(|expected| {
+                action.get("title").and_then(Value::as_str) == Some(expected)
+            });
+            let kind_matches = kind.is_none_or(|expected| {
+                action
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|actual| {
+                        actual == expected || actual.starts_with(&format!("{expected}."))
+                    })
+            });
+            title_matches && kind_matches
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        bail!("no code action matched the provided selector");
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+    let editable = candidates
+        .iter()
+        .filter(|action| action.get("edit").is_some())
+        .collect::<Vec<_>>();
+    if title.is_none() && kind.is_none() && editable.len() == 1 {
+        return Ok(editable[0].clone());
+    }
+    bail!("multiple code actions matched; provide an exact title or narrower kind")
+}
+
 fn pull_diagnostics_from_response(value: Value) -> Vec<Value> {
     if let Some(items) = value.get("items").and_then(Value::as_array) {
         return items.clone();
@@ -1338,7 +1625,7 @@ fn is_rust_source_path(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
 }
 
-fn parse_range(value: &Value) -> Option<CodeRange> {
+pub(crate) fn parse_range(value: &Value) -> Option<CodeRange> {
     let start = value.get("start")?;
     let end = value.get("end")?;
     Some(CodeRange {

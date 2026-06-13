@@ -221,6 +221,15 @@ fn client_capabilities() -> Value {
             "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
             "definition": { "linkSupport": true },
             "references": {},
+            "codeAction": {
+                "codeActionLiteralSupport": {
+                    "codeActionKind": {
+                        "valueSet": ["quickfix", "refactor", "refactor.rename", "source"]
+                    }
+                },
+                "resolveSupport": { "properties": ["edit"] }
+            },
+            "rename": { "prepareSupport": false },
             "diagnostic": { "dynamicRegistration": false },
             "hover": { "contentFormat": ["markdown", "plaintext"] }
         }
@@ -237,6 +246,22 @@ pub fn definition_supported(capabilities: &Value) -> bool {
 
 pub fn references_supported(capabilities: &Value) -> bool {
     capability_supported(capabilities, "referencesProvider")
+}
+
+pub fn code_action_supported(capabilities: &Value) -> bool {
+    capability_supported(capabilities, "codeActionProvider")
+}
+
+pub fn code_action_resolve_supported(capabilities: &Value) -> bool {
+    capabilities
+        .get("codeActionProvider")
+        .and_then(|provider| provider.get("resolveProvider"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+pub fn rename_supported(capabilities: &Value) -> bool {
+    capability_supported(capabilities, "renameProvider")
 }
 
 pub fn workspace_symbol_supported(capabilities: &Value) -> bool {

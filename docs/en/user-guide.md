@@ -108,6 +108,12 @@ Code intelligence is disabled by default. When enabled, Sigil registers read-onl
 - `code_definition`
 - `code_references`
 - `code_diagnostics`
+- `code_actions`
+
+It also registers LSP edit tools that require an approval diff before writing:
+
+- `code_action`
+- `code_rename`
 
 In the TUI, `Alt-D` can run diagnostics over git changed source files. Results appear as a normal activity and the LSP section of the info rail keeps a summary.
 

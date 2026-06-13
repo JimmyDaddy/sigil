@@ -317,6 +317,14 @@ fn lsp_helpers_cover_capabilities_paths_and_defaults() {
         &json!({ "definitionProvider": false })
     ));
     assert!(references_supported(&json!({ "referencesProvider": true })));
+    assert!(code_action_supported(&json!({ "codeActionProvider": {} })));
+    assert!(code_action_resolve_supported(
+        &json!({ "codeActionProvider": { "resolveProvider": true } })
+    ));
+    assert!(!code_action_resolve_supported(
+        &json!({ "codeActionProvider": true })
+    ));
+    assert!(rename_supported(&json!({ "renameProvider": {} })));
     assert!(workspace_symbol_supported(
         &json!({ "workspaceSymbolProvider": {} })
     ));

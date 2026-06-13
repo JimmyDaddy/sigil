@@ -186,7 +186,7 @@ enabled = true
 report_missing = true
 ```
 
-开启后，runtime 会注册只读 code intelligence 工具，并允许 TUI 用 `Alt-D` 对 git changed source files 触发 diagnostics 检查。
+开启后，runtime 会注册只读 code intelligence 工具，以及用于 code action 和 symbol rename 的 LSP edit 工具。edit 工具属于 `Write` 工具，必须先展示 diff 审批，获批后才会改文件。TUI 可以用 `Alt-D` 对 git changed source files 触发 diagnostics 检查。
 
 `discovery.enabled = true` 时，Sigil 会按 workspace 自动发现常见语言和 PATH 上可用的安全 LSP server。手写 `code_intelligence.servers` 只作为高级覆盖或补充。
 

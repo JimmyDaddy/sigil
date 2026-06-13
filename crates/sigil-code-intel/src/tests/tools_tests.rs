@@ -712,6 +712,314 @@ fn code_workspace_symbols_permission_subject_targets_workspace_root() {
     );
 }
 
+#[test]
+fn code_action_and_rename_tools_are_registered_as_previewed_write_tools() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+
+    for name in ["code_action", "code_rename"] {
+        let spec = registry.spec_for(name).expect("tool should be registered");
+        assert_eq!(spec.access, sigil_kernel::ToolAccess::Write);
+        assert_eq!(spec.preview, ToolPreviewCapability::Required);
+    }
+
+    let actions = registry
+        .spec_for("code_actions")
+        .expect("list tool should be registered");
+    assert_eq!(actions.access, sigil_kernel::ToolAccess::Read);
+    assert_eq!(actions.preview, ToolPreviewCapability::None);
+}
+
+#[test]
+fn code_action_and_rename_permission_subjects_use_expected_scopes() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 1,
+    };
+    let actions = registry
+        .permission_subjects(
+            &ctx,
+            &ToolCall {
+                id: "actions".to_owned(),
+                name: "code_actions".to_owned(),
+                args_json: json!({ "path": "lib.rs", "line": 1, "character": 7 }).to_string(),
+            },
+        )
+        .expect("code actions subject should resolve");
+
+    assert_eq!(actions[0].normalized, "lib.rs");
+
+    for name in ["code_action", "code_rename"] {
+        let subjects = registry
+            .permission_subjects(
+                &ctx,
+                &ToolCall {
+                    id: name.to_owned(),
+                    name: name.to_owned(),
+                    args_json: json!({ "path": "lib.rs", "line": 1, "character": 7 }).to_string(),
+                },
+            )
+            .expect("write code-intel subject should resolve");
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].normalized, ".");
+        assert_eq!(subjects[0].scope, ToolSubjectScope::Workspace);
+    }
+}
+
+#[tokio::test]
+async fn code_actions_tool_returns_lsp_action_summaries() {
+    if !python3_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").expect("cargo file");
+    fs::write(
+        temp.path().join("src").join("lib.rs"),
+        "pub fn hello() {}\n",
+    )
+    .expect("source should write");
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("actions.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": {
+                        "capabilities": {
+                            "codeActionProvider": { "resolveProvider": true }
+                        }
+                    }
+                },
+                "textDocument/codeAction": {
+                    "result": [{
+                        "title": "Replace hello",
+                        "kind": "quickfix",
+                        "isPreferred": true,
+                        "edit": { "changes": {} }
+                    }]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        temp.path().to_path_buf(),
+    );
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: temp.path().to_path_buf(),
+                timeout_secs: 1,
+            },
+            ToolCall {
+                id: "actions".to_owned(),
+                name: "code_actions".to_owned(),
+                args_json: json!({ "path": "src/lib.rs", "line": 1, "character": 7 }).to_string(),
+            },
+        )
+        .await
+        .expect("code actions should execute");
+
+    assert!(!result.is_error());
+    let content: serde_json::Value =
+        serde_json::from_str(&result.content).expect("content should be json");
+    assert_eq!(content["code_actions"][0]["title"], "Replace hello");
+    assert_eq!(content["code_actions"][0]["has_edit"], true);
+}
+
+#[tokio::test]
+async fn code_rename_tool_previews_and_applies_workspace_edit() {
+    if !python3_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").expect("cargo file");
+    let source_path = temp.path().join("src").join("lib.rs");
+    fs::write(
+        &source_path,
+        "pub fn hello() {}\npub fn call() { hello(); }\n",
+    )
+    .expect("source should write");
+    let source_uri = file_uri_from_path(&source_path);
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("rename.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": { "capabilities": { "renameProvider": true } }
+                },
+                "textDocument/rename": {
+                    "result": {
+                        "changes": {
+                            source_uri: [
+                                {
+                                    "range": {
+                                        "start": { "line": 0, "character": 7 },
+                                        "end": { "line": 0, "character": 12 }
+                                    },
+                                    "newText": "greet"
+                                },
+                                {
+                                    "range": {
+                                        "start": { "line": 1, "character": 16 },
+                                        "end": { "line": 1, "character": 21 }
+                                    },
+                                    "newText": "greet"
+                                }
+                            ]
+                        }
+                    }
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        temp.path().to_path_buf(),
+    );
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 1,
+    };
+    let call = ToolCall {
+        id: "rename".to_owned(),
+        name: "code_rename".to_owned(),
+        args_json: json!({
+            "path": "src/lib.rs",
+            "line": 1,
+            "character": 7,
+            "new_name": "greet"
+        })
+        .to_string(),
+    };
+
+    let preview = registry
+        .preview(ctx.clone(), call.clone())
+        .await
+        .expect("preview should build")
+        .expect("rename should have preview");
+    assert_eq!(preview.changed_files, vec!["src/lib.rs"]);
+    assert!(preview.file_diffs[0].diff.contains("+pub fn greet()"));
+
+    let result = registry
+        .execute(ctx, call)
+        .await
+        .expect("rename should execute");
+
+    assert!(!result.is_error());
+    assert_eq!(
+        fs::read_to_string(&source_path).expect("source should read"),
+        "pub fn greet() {}\npub fn call() { greet(); }\n"
+    );
+    assert_eq!(result.metadata.changed_files, vec!["src/lib.rs"]);
+}
+
+#[tokio::test]
+async fn code_action_tool_previews_and_applies_selected_edit() {
+    if !python3_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    fs::create_dir(temp.path().join("src")).expect("src dir should build");
+    fs::write(temp.path().join("Cargo.toml"), "[package]\nname='x'\n").expect("cargo file");
+    let source_path = temp.path().join("src").join("lib.rs");
+    fs::write(&source_path, "pub fn hello() {}\n").expect("source should write");
+    let source_uri = file_uri_from_path(&source_path);
+    let server_script = temp.path().join("fake_lsp.py");
+    let scenario_path = temp.path().join("code-action.json");
+    write_fake_lsp_server(&server_script);
+    write_fake_lsp_scenario(
+        &scenario_path,
+        &serde_json::json!({
+            "methods": {
+                "initialize": {
+                    "result": {
+                        "capabilities": {
+                            "codeActionProvider": { "resolveProvider": false }
+                        }
+                    }
+                },
+                "textDocument/codeAction": {
+                    "result": [{
+                        "title": "Make public greeting explicit",
+                        "kind": "quickfix",
+                        "edit": {
+                            "changes": {
+                                source_uri: [{
+                                    "range": {
+                                        "start": { "line": 0, "character": 7 },
+                                        "end": { "line": 0, "character": 12 }
+                                    },
+                                    "newText": "greet"
+                                }]
+                            }
+                        }
+                    }]
+                },
+                "shutdown": { "result": null }
+            }
+        }),
+    );
+    let mut registry = ToolRegistry::new();
+    register_code_intelligence_tools(
+        &mut registry,
+        &fake_tool_lsp_config(&server_script, &scenario_path, 250),
+        temp.path().to_path_buf(),
+    );
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 1,
+    };
+    let call = ToolCall {
+        id: "action".to_owned(),
+        name: "code_action".to_owned(),
+        args_json: json!({
+            "path": "src/lib.rs",
+            "line": 1,
+            "character": 7,
+            "title": "Make public greeting explicit"
+        })
+        .to_string(),
+    };
+
+    let preview = registry
+        .preview(ctx.clone(), call.clone())
+        .await
+        .expect("preview should build")
+        .expect("action should have preview");
+    assert!(preview.file_diffs[0].diff.contains("+pub fn greet()"));
+
+    let result = registry
+        .execute(ctx, call)
+        .await
+        .expect("action should execute");
+
+    assert!(!result.is_error());
+    assert_eq!(
+        fs::read_to_string(&source_path).expect("source should read"),
+        "pub fn greet() {}\n"
+    );
+}
+
 #[tokio::test]
 async fn code_workspace_symbols_tool_returns_lsp_results() {
     if !python3_available() {
