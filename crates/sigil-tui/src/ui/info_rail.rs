@@ -61,6 +61,15 @@ pub(crate) fn render_info_rail(frame: &mut Frame, area: Rect, view_model: &InfoR
         view_model.agent_lines.iter().cloned(),
         inner.width as usize,
     );
+    if !view_model.mcp_lines.is_empty() {
+        push_info_section(
+            &mut lines,
+            "MCP",
+            accent_gold(),
+            view_model.mcp_lines.iter().cloned(),
+            inner.width as usize,
+        );
+    }
     push_info_section(
         &mut lines,
         "LSP",

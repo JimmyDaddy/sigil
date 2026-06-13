@@ -786,6 +786,25 @@ impl AppState {
             .map(McpServerRuntimeStatus::label)
     }
 
+    pub(crate) fn mcp_sidebar_lines(&self) -> Vec<String> {
+        let Some(root_config) = self.config_snapshot.as_ref() else {
+            return Vec::new();
+        };
+
+        root_config
+            .mcp_servers
+            .iter()
+            .map(|server| {
+                let status = self
+                    .mcp_server_statuses
+                    .get(&server.name)
+                    .cloned()
+                    .unwrap_or_else(|| initial_mcp_server_status(server));
+                format!("{}: {}", server.name, status.label())
+            })
+            .collect()
+    }
+
     fn selected_mcp_runtime_status_label(&self, config_state: &ConfigState) -> String {
         let Some(config) = config_state
             .draft

@@ -27,6 +27,23 @@ fn from_root_config_initializes_mcp_statuses_from_startup_mode() {
         app.mcp_server_runtime_status_label("lazy").as_deref(),
         Some("deferred")
     );
+    assert_eq!(
+        app.mcp_sidebar_lines(),
+        vec!["eager: ready".to_owned(), "lazy: deferred".to_owned()]
+    );
+}
+
+#[test]
+fn mcp_sidebar_lines_are_empty_before_runtime_config_loads() -> Result<()> {
+    let temp = tempdir()?;
+    let app = AppState::from_setup(
+        temp.path().join("sigil.toml"),
+        temp.path().to_path_buf(),
+        Some("missing config".to_owned()),
+    );
+
+    assert!(app.mcp_sidebar_lines().is_empty());
+    Ok(())
 }
 
 #[test]

@@ -16,6 +16,7 @@ fn sample_view_model() -> InfoRailViewModel {
         session_lines: vec!["mode: ready".to_owned()],
         permission_lines: vec!["approval: ask".to_owned()],
         agent_lines: vec!["> main: active".to_owned(), "- helper: idle".to_owned()],
+        mcp_lines: vec!["filesystem: deferred".to_owned()],
         code_lines: vec!["server: rust-analyzer".to_owned()],
         usage_lines: vec!["tokens: 10/100".to_owned()],
         controls: vec!["Enter send".to_owned()],
@@ -34,11 +35,11 @@ fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
 
 #[test]
 fn render_info_rail_renders_sections_and_content() -> anyhow::Result<()> {
-    let backend = TestBackend::new(54, 24);
+    let backend = TestBackend::new(54, 28);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| {
-        render_info_rail(frame, Rect::new(0, 0, 54, 24), &sample_view_model());
+        render_info_rail(frame, Rect::new(0, 0, 54, 28), &sample_view_model());
     })?;
 
     let rendered = rendered_text(&terminal);
@@ -46,6 +47,8 @@ fn render_info_rail_renders_sections_and_content() -> anyhow::Result<()> {
     assert!(rendered.contains("session"));
     assert!(rendered.contains("permissions"));
     assert!(rendered.contains("agents"));
+    assert!(rendered.contains("MCP"));
+    assert!(rendered.contains("filesystem"));
     assert!(rendered.contains("LSP"));
     assert!(rendered.contains("usage"));
     assert!(rendered.contains("controls"));
