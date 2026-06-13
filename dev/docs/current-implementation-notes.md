@@ -209,6 +209,12 @@ git config core.hooksPath .githooks
 ./scripts/check-staged-coverage.py
 ```
 
+staged coverage 脚本的 diff 分类、LCov 解析和新增行覆盖率计算有独立 Python 单测：
+
+```bash
+python3 -m unittest scripts/test_check_staged_coverage.py
+```
+
 ## 文档分工
 
 - `README.md`：英文用户第一入口。

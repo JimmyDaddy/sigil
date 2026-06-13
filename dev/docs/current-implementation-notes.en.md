@@ -209,6 +209,12 @@ Run staged coverage check directly:
 ./scripts/check-staged-coverage.py
 ```
 
+The staged coverage script has focused Python unit tests for diff classification, LCov parsing, and added-line coverage calculation:
+
+```bash
+python3 -m unittest scripts/test_check_staged_coverage.py
+```
+
 ## Documentation Split
 
 - `README.md`: English user entrypoint.

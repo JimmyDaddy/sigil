@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -20,6 +21,15 @@ COVERAGE_IGNORE_FILENAME_REGEX = os.environ.get(
 COVERAGE_IGNORE_RE = (
     re.compile(COVERAGE_IGNORE_FILENAME_REGEX) if COVERAGE_IGNORE_FILENAME_REGEX else None
 )
+
+
+@dataclass(frozen=True)
+class StagedCoverageResult:
+    """Coverage result for staged business-code additions."""
+
+    checked_files: int = 0
+    checked_lines: int = 0
+    failures: list[str] = field(default_factory=list)
 
 
 def run(
@@ -159,6 +169,49 @@ def format_lines(lines: list[int]) -> str:
     return f"{head}, ... (+{len(lines) - 12} more)"
 
 
+def compute_staged_coverage(
+    staged_files: list[str],
+    added_lines: dict[str, dict[int, str]],
+    coverage: dict[str, dict[int, int]],
+    min_coverage: float = MIN_COVERAGE,
+) -> StagedCoverageResult:
+    failures: list[str] = []
+    checked_files = 0
+    checked_lines = 0
+
+    for path in staged_files:
+        file_counts = coverage.get(path, {})
+        if not file_counts:
+            if all(
+                is_non_executable_added_line(line)
+                for line in added_lines.get(path, {}).values()
+            ):
+                continue
+            failures.append(f"{path}: no coverage data for staged business-code additions")
+            continue
+        instrumented = sorted(
+            line_no for line_no in added_lines.get(path, {}) if line_no in file_counts
+        )
+        if not instrumented:
+            continue
+        checked_files += 1
+        checked_lines += len(instrumented)
+        covered = [line_no for line_no in instrumented if file_counts[line_no] > 0]
+        percent = 100.0 * len(covered) / len(instrumented)
+        if percent + 1e-9 < min_coverage:
+            uncovered = [line_no for line_no in instrumented if file_counts[line_no] == 0]
+            failures.append(
+                f"{path}: {percent:.2f}% ({len(covered)}/{len(instrumented)}) "
+                f"covered; uncovered added lines: {format_lines(uncovered)}"
+            )
+
+    return StagedCoverageResult(
+        checked_files=checked_files,
+        checked_lines=checked_lines,
+        failures=failures,
+    )
+
+
 def main() -> int:
     repo_root = Path(git_output("rev-parse", "--show-toplevel").strip())
     os.chdir(repo_root)
@@ -199,44 +252,21 @@ def main() -> int:
         )
         coverage = parse_lcov(lcov_path, repo_root)
 
-    failures: list[str] = []
-    checked_files = 0
-    checked_lines = 0
+    result = compute_staged_coverage(staged_files, added_lines, coverage)
 
-    for path in staged_files:
-        file_counts = coverage.get(path, {})
-        if not file_counts:
-            if all(is_non_executable_added_line(line) for line in added_lines.get(path, {}).values()):
-                continue
-            failures.append(f"{path}: no coverage data for staged business-code additions")
-            continue
-        instrumented = sorted(line_no for line_no in added_lines.get(path, {}) if line_no in file_counts)
-        if not instrumented:
-            continue
-        checked_files += 1
-        checked_lines += len(instrumented)
-        covered = [line_no for line_no in instrumented if file_counts[line_no] > 0]
-        percent = 100.0 * len(covered) / len(instrumented)
-        if percent + 1e-9 < MIN_COVERAGE:
-            uncovered = [line_no for line_no in instrumented if file_counts[line_no] == 0]
-            failures.append(
-                f"{path}: {percent:.2f}% ({len(covered)}/{len(instrumented)}) "
-                f"covered; uncovered added lines: {format_lines(uncovered)}"
-            )
-
-    if checked_lines == 0:
-        print("staged coverage: staged business-code additions had no instrumented lines")
-        return 0
-
-    if failures:
+    if result.failures:
         print(f"staged coverage: added business-code line coverage must be >= {MIN_COVERAGE:.2f}%")
-        for failure in failures:
+        for failure in result.failures:
             print(f"  - {failure}")
         return 1
 
+    if result.checked_lines == 0:
+        print("staged coverage: staged business-code additions had no instrumented lines")
+        return 0
+
     print(
-        f"staged coverage: ok, {checked_lines} added executable lines across "
-        f"{checked_files} file(s) meet >= {MIN_COVERAGE:.2f}%"
+        f"staged coverage: ok, {result.checked_lines} added executable lines across "
+        f"{result.checked_files} file(s) meet >= {MIN_COVERAGE:.2f}%"
     )
     return 0
 
