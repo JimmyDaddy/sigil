@@ -477,6 +477,53 @@ report_missing = false
 }
 
 #[test]
+fn code_intelligence_checks_are_scoped_to_code_intelligence() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[code_intelligence]
+enabled = true
+
+[[code_intelligence.servers]]
+name = "missing-lsp"
+languages = ["rust"]
+command = "./missing-lsp"
+file_extensions = ["rs"]
+root_markers = ["Cargo.toml"]
+"#,
+    )?;
+    let root_config = RootConfig::load(&config_path)?;
+
+    let checks = build_code_intelligence_checks(&root_config, &workspace);
+
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].name, "lsp:missing-lsp");
+    assert_eq!(checks[0].status, DoctorStatus::Warn);
+    assert!(checks[0].message.contains("command=missing"));
+    assert!(
+        checks[0]
+            .remediation
+            .as_deref()
+            .is_some_and(|remediation| remediation.contains("missing-lsp"))
+    );
+    assert!(
+        checks
+            .iter()
+            .all(|check| !check.name.starts_with("provider"))
+    );
+    Ok(())
+}
+
+#[test]
 fn secret_source_labels_cover_environment_and_session_sources() {
     assert_eq!(
         secret_source_label(SecretSource::Environment("SIGIL_API_KEY")),

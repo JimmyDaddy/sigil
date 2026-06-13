@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow, bail};
-use sigil_kernel::{ApprovalMode, McpServerConfig, RootConfig};
+use sigil_kernel::{
+    ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, RootConfig,
+};
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
 
 pub(crate) const CONFIG_SECTION_NAV_HINT: &str = "Tab section";
@@ -17,15 +19,17 @@ pub(crate) enum ConfigSection {
     Permissions,
     Memory,
     Compaction,
+    CodeIntelligence,
     Mcp,
 }
 
 impl ConfigSection {
-    pub(crate) const FLOW: [Self; 5] = [
+    pub(crate) const FLOW: [Self; 6] = [
         Self::Provider,
         Self::Permissions,
         Self::Memory,
         Self::Compaction,
+        Self::CodeIntelligence,
         Self::Mcp,
     ];
 
@@ -35,6 +39,7 @@ impl ConfigSection {
             Self::Permissions => "Permissions",
             Self::Memory => "Memory",
             Self::Compaction => "Compaction",
+            Self::CodeIntelligence => "Code Intel",
             Self::Mcp => "MCP",
         }
     }
@@ -45,6 +50,7 @@ impl ConfigSection {
             Self::Permissions => "approval rules",
             Self::Memory => "memory status",
             Self::Compaction => "context and thresholds",
+            Self::CodeIntelligence => "LSP readiness",
             Self::Mcp => "MCP servers",
         }
     }
@@ -89,6 +95,10 @@ pub(crate) enum ConfigField {
     CompactionHardThresholdRatio,
     CompactionContextWindowTokens,
     CompactionTailMessages,
+    CodeIntelEnabled,
+    CodeIntelStartup,
+    CodeIntelDiscoveryEnabled,
+    CodeIntelDiscoveryReportMissing,
     McpName,
     McpCommand,
     McpArgsCsv,
@@ -111,6 +121,12 @@ impl ConfigField {
         Self::CompactionHardThresholdRatio,
         Self::CompactionTailMessages,
     ];
+    const CODE_INTELLIGENCE_FIELDS: [Self; 4] = [
+        Self::CodeIntelEnabled,
+        Self::CodeIntelStartup,
+        Self::CodeIntelDiscoveryEnabled,
+        Self::CodeIntelDiscoveryReportMissing,
+    ];
     const MCP_FIELDS: [Self; 4] = [
         Self::McpName,
         Self::McpCommand,
@@ -124,6 +140,7 @@ impl ConfigField {
             ConfigSection::Permissions => &Self::PERMISSION_FIELDS,
             ConfigSection::Memory => &Self::MEMORY_FIELDS,
             ConfigSection::Compaction => &Self::COMPACTION_FIELDS,
+            ConfigSection::CodeIntelligence => &Self::CODE_INTELLIGENCE_FIELDS,
             ConfigSection::Mcp => &Self::MCP_FIELDS,
         }
     }
@@ -141,6 +158,10 @@ impl ConfigField {
             Self::CompactionHardThresholdRatio => "hard_threshold",
             Self::CompactionContextWindowTokens => "fallback_window",
             Self::CompactionTailMessages => "tail_messages",
+            Self::CodeIntelEnabled => "enabled",
+            Self::CodeIntelStartup => "startup",
+            Self::CodeIntelDiscoveryEnabled => "discovery",
+            Self::CodeIntelDiscoveryReportMissing => "report_missing",
             Self::McpName => "name",
             Self::McpCommand => "command",
             Self::McpArgsCsv => "args_csv",
@@ -161,6 +182,10 @@ impl ConfigField {
             Self::CompactionHardThresholdRatio => "Hard threshold",
             Self::CompactionContextWindowTokens => "Fallback window",
             Self::CompactionTailMessages => "Tail messages",
+            Self::CodeIntelEnabled => "Code intelligence",
+            Self::CodeIntelStartup => "Startup",
+            Self::CodeIntelDiscoveryEnabled => "Discovery",
+            Self::CodeIntelDiscoveryReportMissing => "Missing reports",
             Self::McpName => "Name",
             Self::McpCommand => "Command",
             Self::McpArgsCsv => "Arguments",
@@ -203,6 +228,18 @@ impl ConfigField {
             Self::CompactionTailMessages => {
                 "Recent messages retained verbatim after older history is folded into a summary."
             }
+            Self::CodeIntelEnabled => {
+                "Registers read-only workspace symbol, definition, reference, and diagnostics tools."
+            }
+            Self::CodeIntelStartup => {
+                "Controls whether code intelligence is off, lazily started, or prepared eagerly."
+            }
+            Self::CodeIntelDiscoveryEnabled => {
+                "Uses safe built-in discovery to add common language servers found on PATH."
+            }
+            Self::CodeIntelDiscoveryReportMissing => {
+                "Shows missing discovered language servers as readiness warnings."
+            }
             Self::McpName => "Stable local name for this MCP server.",
             Self::McpCommand => "Executable used to start the MCP server process.",
             Self::McpArgsCsv => "Comma-separated startup arguments for the MCP server.",
@@ -231,8 +268,12 @@ impl ConfigField {
         match self {
             Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
             Self::ProviderApiKey => "Enter input",
-            Self::PermissionsDefaultMode => "Enter cycle",
-            Self::MemoryEnabled | Self::CompactionEnabled => "Enter toggle",
+            Self::PermissionsDefaultMode | Self::CodeIntelStartup => "Enter cycle",
+            Self::MemoryEnabled
+            | Self::CompactionEnabled
+            | Self::CodeIntelEnabled
+            | Self::CodeIntelDiscoveryEnabled
+            | Self::CodeIntelDiscoveryReportMissing => "Enter toggle",
             _ if self.accepts_text_input() => "Enter input",
             _ => "",
         }
@@ -262,7 +303,8 @@ impl ConfigFooterAction {
             ConfigSection::Provider
             | ConfigSection::Permissions
             | ConfigSection::Memory
-            | ConfigSection::Compaction => &Self::DEFAULT_ORDER,
+            | ConfigSection::Compaction
+            | ConfigSection::CodeIntelligence => &Self::DEFAULT_ORDER,
         }
     }
 
@@ -393,6 +435,10 @@ pub(crate) struct ConfigDraft {
     pub(crate) compaction_hard_threshold_ratio: String,
     pub(crate) compaction_context_window_tokens: String,
     pub(crate) compaction_tail_messages: String,
+    pub(crate) code_intelligence_enabled: bool,
+    pub(crate) code_intelligence_startup: CodeIntelStartup,
+    pub(crate) code_intelligence_discovery_enabled: bool,
+    pub(crate) code_intelligence_discovery_report_missing: bool,
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
 
@@ -428,6 +474,13 @@ impl ConfigDraft {
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
             compaction_tail_messages: root_config.compaction.tail_messages.to_string(),
+            code_intelligence_enabled: root_config.code_intelligence.enabled,
+            code_intelligence_startup: root_config.code_intelligence.startup,
+            code_intelligence_discovery_enabled: root_config.code_intelligence.discovery.enabled,
+            code_intelligence_discovery_report_missing: root_config
+                .code_intelligence
+                .discovery
+                .report_missing,
             mcp_servers: root_config
                 .mcp_servers
                 .iter()
@@ -522,6 +575,7 @@ impl ConfigDraft {
         root_config.compaction.hard_threshold_ratio = hard_threshold_ratio;
         root_config.compaction.context_window_tokens = context_window_tokens;
         root_config.compaction.tail_messages = tail_messages;
+        root_config.code_intelligence = self.code_intelligence_config();
         root_config.mcp_servers = self
             .mcp_servers
             .iter()
@@ -547,6 +601,21 @@ impl ConfigDraft {
             .providers
             .insert("deepseek".to_owned(), provider_value);
         Ok(root_config)
+    }
+
+    pub(crate) fn code_intelligence_config(&self) -> CodeIntelligenceConfig {
+        let mut config = self.base_root_config.code_intelligence.clone();
+        config.enabled = self.code_intelligence_enabled;
+        config.startup = self.code_intelligence_startup;
+        config.discovery.enabled = self.code_intelligence_discovery_enabled;
+        config.discovery.report_missing = self.code_intelligence_discovery_report_missing;
+        config
+    }
+
+    pub(crate) fn code_intelligence_preview_root_config(&self) -> RootConfig {
+        let mut root_config = self.base_root_config.clone();
+        root_config.code_intelligence = self.code_intelligence_config();
+        root_config
     }
 }
 
@@ -761,7 +830,11 @@ impl ConfigState {
                 .map(|server| server.startup_timeout_secs.as_str()),
             ConfigField::PermissionsDefaultMode
             | ConfigField::MemoryEnabled
-            | ConfigField::CompactionEnabled => None,
+            | ConfigField::CompactionEnabled
+            | ConfigField::CodeIntelEnabled
+            | ConfigField::CodeIntelStartup
+            | ConfigField::CodeIntelDiscoveryEnabled
+            | ConfigField::CodeIntelDiscoveryReportMissing => None,
         }
     }
 
@@ -795,7 +868,11 @@ impl ConfigState {
                 .map(|server| &mut server.startup_timeout_secs),
             ConfigField::PermissionsDefaultMode
             | ConfigField::MemoryEnabled
-            | ConfigField::CompactionEnabled => None,
+            | ConfigField::CompactionEnabled
+            | ConfigField::CodeIntelEnabled
+            | ConfigField::CodeIntelStartup
+            | ConfigField::CodeIntelDiscoveryEnabled
+            | ConfigField::CodeIntelDiscoveryReportMissing => None,
         }
     }
 
@@ -810,6 +887,19 @@ impl ConfigState {
             }
             ConfigField::CompactionEnabled => {
                 return bool_label(self.draft.compaction_enabled).to_owned();
+            }
+            ConfigField::CodeIntelEnabled => {
+                return bool_label(self.draft.code_intelligence_enabled).to_owned();
+            }
+            ConfigField::CodeIntelStartup => {
+                return self.draft.code_intelligence_startup.as_str().to_owned();
+            }
+            ConfigField::CodeIntelDiscoveryEnabled => {
+                return bool_label(self.draft.code_intelligence_discovery_enabled).to_owned();
+            }
+            ConfigField::CodeIntelDiscoveryReportMissing => {
+                return bool_label(self.draft.code_intelligence_discovery_report_missing)
+                    .to_owned();
             }
             _ => self.field_text_value(field).unwrap_or_default(),
         };
@@ -900,7 +990,11 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         ConfigField::ProviderApiKey
         | ConfigField::PermissionsDefaultMode
         | ConfigField::MemoryEnabled
-        | ConfigField::CompactionEnabled => false,
+        | ConfigField::CompactionEnabled
+        | ConfigField::CodeIntelEnabled
+        | ConfigField::CodeIntelStartup
+        | ConfigField::CodeIntelDiscoveryEnabled
+        | ConfigField::CodeIntelDiscoveryReportMissing => false,
     }
 }
 

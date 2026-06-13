@@ -25,6 +25,14 @@ fn config_section_flow_wraps() {
         ConfigSection::Provider.next_flow(),
         ConfigSection::Permissions
     );
+    assert_eq!(
+        ConfigSection::Compaction.next_flow(),
+        ConfigSection::CodeIntelligence
+    );
+    assert_eq!(
+        ConfigSection::CodeIntelligence.next_flow(),
+        ConfigSection::Mcp
+    );
     assert_eq!(ConfigSection::Mcp.next_flow(), ConfigSection::Provider);
     assert_eq!(ConfigSection::Provider.previous_flow(), ConfigSection::Mcp);
 }
@@ -170,7 +178,17 @@ fn api_key_display_uses_status_without_secret_length() {
 fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Permissions.summary(), "approval rules");
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));
-    assert_eq!(ConfigSection::Mcp.flow_index(), Some(4));
+    assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(4));
+    assert_eq!(ConfigSection::Mcp.flow_index(), Some(5));
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
+        &[
+            ConfigField::CodeIntelEnabled,
+            ConfigField::CodeIntelStartup,
+            ConfigField::CodeIntelDiscoveryEnabled,
+            ConfigField::CodeIntelDiscoveryReportMissing,
+        ]
+    );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Mcp),
         &[
@@ -183,7 +201,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
 
     assert_eq!(ConfigField::McpCommand.label(), "command");
     assert_eq!(ConfigField::McpArgsCsv.label(), "args_csv");
+    assert_eq!(ConfigField::CodeIntelStartup.label(), "startup");
     assert_eq!(ConfigField::ProviderApiKey.action_label(), "Enter input");
+    assert_eq!(ConfigField::CodeIntelStartup.action_label(), "Enter cycle");
+    assert_eq!(ConfigField::CodeIntelEnabled.action_label(), "Enter toggle");
     assert_eq!(ConfigField::McpCommand.action_label(), "Enter input");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
     assert_eq!(
@@ -204,6 +225,21 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::McpArgsCsv
             .help_text()
             .contains("Comma-separated")
+    );
+    assert!(
+        ConfigField::CodeIntelDiscoveryEnabled
+            .help_text()
+            .contains("language servers")
+    );
+    assert!(
+        ConfigField::CodeIntelStartup
+            .help_text()
+            .contains("lazily started")
+    );
+    assert!(
+        ConfigField::CodeIntelDiscoveryReportMissing
+            .help_text()
+            .contains("readiness warnings")
     );
 }
 
@@ -240,6 +276,15 @@ fn config_state_handles_mcp_collection_navigation_and_mutation() {
     assert_eq!(
         state.field_text_value(ConfigField::McpCommand),
         Some("node")
+    );
+    assert_eq!(
+        state.field_text_value(ConfigField::CodeIntelDiscoveryReportMissing),
+        None
+    );
+    assert!(
+        state
+            .field_text_value_mut(ConfigField::CodeIntelDiscoveryReportMissing)
+            .is_none()
     );
     assert_eq!(
         state.display_value(ConfigField::McpStartupTimeoutSecs),

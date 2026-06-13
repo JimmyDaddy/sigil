@@ -42,7 +42,7 @@ CLI 不是主要产品表面，默认只承担自动化和调试入口。
 - 用 `/doctor` 诊断配置、认证、MCP、LSP 和 terminal 就绪状态，并查看修复建议
 - 用 `/model` 和 `/effort` 调整下一轮模型与 reasoning effort
 - 用 `/compact` 压缩长会话上下文
-- 可选开启 code intelligence，让 agent 使用符号、定义、引用和诊断工具
+- 可选开启 code intelligence，让 agent 使用符号、定义、引用和诊断工具，并在 `/config` 查看就绪状态
 - 可选接入 stdio MCP server，按信任策略暴露外部工具
 
 ## TUI 心智

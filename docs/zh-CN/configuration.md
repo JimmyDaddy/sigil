@@ -190,6 +190,8 @@ report_missing = true
 
 `discovery.enabled = true` 时，Sigil 会按 workspace 自动发现常见语言和 PATH 上可用的安全 LSP server。手写 `code_intelligence.servers` 只作为高级覆盖或补充。
 
+TUI `/config` 面板里有 `Code Intel` 区块，可以调整 `enabled`、`startup` 和 discovery 设置，并查看只读 trust 边界与 readiness 检查。readiness 行复用同一份本地 doctor 事实，所以缺 LSP command 时会在启动 language server 前先给出修复建议。
+
 语言服务器示例：
 
 ```toml

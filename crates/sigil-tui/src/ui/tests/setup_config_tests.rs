@@ -244,16 +244,16 @@ fn config_scroll_offset_handles_padding_empty_focus_and_short_viewports() {
 #[test]
 fn split_config_context_lines_trims_trailing_blank_lines_before_details() {
     let (main, context) = split_config_context_lines(vec![
-        "Provider 1/5".to_owned(),
+        "Provider 1/6".to_owned(),
         String::new(),
         "[details]".to_owned(),
         "selected: Model".to_owned(),
     ]);
-    let (plain, no_context) = split_config_context_lines(vec!["Provider 1/5".to_owned()]);
+    let (plain, no_context) = split_config_context_lines(vec!["Provider 1/6".to_owned()]);
 
-    assert_eq!(main, vec!["Provider 1/5"]);
+    assert_eq!(main, vec!["Provider 1/6"]);
     assert_eq!(context, vec!["selected: Model"]);
-    assert_eq!(plain, vec!["Provider 1/5"]);
+    assert_eq!(plain, vec!["Provider 1/6"]);
     assert!(no_context.is_empty());
 }
 
@@ -469,7 +469,7 @@ fn finish_form_line_title_and_subsection_helpers_preserve_visual_structure() {
         Color::Black,
     );
     let title_only = render_config_title_line("Provider");
-    let title_summary = render_config_title_line("Provider 1/5 · saved");
+    let title_summary = render_config_title_line("Provider 1/6 · saved");
     let subsection = render_subsection_line("[provider]", Color::Yellow);
     let config_subsection =
         render_config_subsection_line("[provider]", theme::config_primary(), 12);
@@ -477,7 +477,7 @@ fn finish_form_line_title_and_subsection_helpers_preserve_visual_structure() {
     assert_eq!(selected.style.bg, Some(theme::config_selected_bg()));
     assert_eq!(plain.style.bg, None);
     assert_eq!(line_text(&title_only), "Provider");
-    assert!(line_text(&title_summary).contains("1/5"));
+    assert!(line_text(&title_summary).contains("1/6"));
     assert!(line_text(&subsection).contains(" provider "));
     assert!(line_text(&config_subsection).contains(" provider "));
 }

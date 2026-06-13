@@ -44,6 +44,68 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     assert_eq!(bool_summary(true), "yes");
     assert_eq!(bool_summary(false), "no");
     assert_eq!(render_config_hint_row("Missing"), "i Missing");
+    assert_eq!(
+        cycle_code_intel_startup(sigil_kernel::CodeIntelStartup::Off),
+        sigil_kernel::CodeIntelStartup::Lazy
+    );
+    assert_eq!(
+        cycle_code_intel_startup(sigil_kernel::CodeIntelStartup::Eager),
+        sigil_kernel::CodeIntelStartup::Off
+    );
+}
+
+#[test]
+fn code_intelligence_detail_helpers_cover_status_edges_and_overflow() {
+    let ok_check = sigil_runtime::doctor::DoctorCheck {
+        status: sigil_runtime::doctor::DoctorStatus::Ok,
+        name: "code_intelligence".to_owned(),
+        message: "disabled".to_owned(),
+        remediation: None,
+    };
+    let error_check = sigil_runtime::doctor::DoctorCheck {
+        status: sigil_runtime::doctor::DoctorStatus::Error,
+        name: "lsp:bad".to_owned(),
+        message: "command=empty".to_owned(),
+        remediation: Some("set command".to_owned()),
+    };
+
+    assert_eq!(code_intelligence_overall_label(&[ok_check]), "ok");
+    assert_eq!(
+        code_intelligence_overall_label(std::slice::from_ref(&error_check)),
+        "error"
+    );
+    assert_eq!(
+        render_code_intelligence_check_row(&error_check),
+        "- lsp:bad: error · command=empty"
+    );
+
+    let mut config = test_config();
+    config.code_intelligence.enabled = true;
+    config.code_intelligence.discovery.enabled = false;
+    config.code_intelligence.servers = (0..5)
+        .map(|index| sigil_kernel::LanguageServerConfig {
+            name: format!("missing-{index}"),
+            languages: vec!["rust".to_owned()],
+            command: format!("./missing-{index}"),
+            args: Vec::new(),
+            env: Default::default(),
+            root_markers: vec!["Cargo.toml".to_owned()],
+            file_extensions: vec!["rs".to_owned()],
+            initialization_options: Default::default(),
+            trust_required: true,
+            startup_timeout_ms: 5_000,
+        })
+        .collect();
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::CodeIntelligence);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("... 1 more checks"));
 }
 
 #[test]

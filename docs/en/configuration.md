@@ -190,6 +190,8 @@ When enabled, the runtime registers read-only code intelligence tools and the TU
 
 With `discovery.enabled = true`, Sigil discovers common languages and safe LSP servers available on `PATH`. Explicit `code_intelligence.servers` entries are advanced overrides or additions.
 
+The TUI `/config` panel includes a `Code Intel` section for `enabled`, `startup`, discovery, the read-only trust boundary, and readiness checks. The readiness rows reuse the same local doctor facts, so missing LSP commands show remediation before any language server is started.
+
 Language server example:
 
 ```toml

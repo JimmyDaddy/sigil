@@ -6,8 +6,9 @@ use crate::config_panel::{
 };
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sigil_kernel::{ApprovalMode, McpServerConfig, McpServerStartup, RootConfig};
+use sigil_kernel::{ApprovalMode, CodeIntelStartup, McpServerConfig, McpServerStartup, RootConfig};
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+use sigil_runtime::doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks};
 
 use super::{
     AppAction, AppState, McpServerRuntimeStatus, code_intelligence_config_status,
@@ -258,6 +259,32 @@ impl AppState {
                     ConfigField::CompactionTailMessages,
                 ));
                 lines.push(format!("status: {}", self.compaction_status));
+                lines.extend(render_config_selection_details(config_state));
+            }
+            ConfigSection::CodeIntelligence => {
+                lines.push("[controls]".to_owned());
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::CodeIntelEnabled,
+                ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::CodeIntelStartup,
+                ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::CodeIntelDiscoveryEnabled,
+                ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::CodeIntelDiscoveryReportMissing,
+                ));
+                lines.push(String::new());
+                lines.push("[trust]".to_owned());
+                lines.extend(render_code_intelligence_trust_summary());
+                lines.push(String::new());
+                lines.push("[readiness]".to_owned());
+                lines.extend(self.render_code_intelligence_readiness_summary(config_state));
                 lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Mcp => {
@@ -581,6 +608,37 @@ impl AppState {
                             self.last_notice = Some(format!("updated {}", field.label()));
                             return Ok(None);
                         }
+                        ConfigField::CodeIntelEnabled => {
+                            config_state.draft.code_intelligence_enabled =
+                                !config_state.draft.code_intelligence_enabled;
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::CodeIntelStartup => {
+                            config_state.draft.code_intelligence_startup = cycle_code_intel_startup(
+                                config_state.draft.code_intelligence_startup,
+                            );
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::CodeIntelDiscoveryEnabled => {
+                            config_state.draft.code_intelligence_discovery_enabled =
+                                !config_state.draft.code_intelligence_discovery_enabled;
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::CodeIntelDiscoveryReportMissing => {
+                            let report_missing = &mut config_state
+                                .draft
+                                .code_intelligence_discovery_report_missing;
+                            *report_missing = !*report_missing;
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
                         _ if field.accepts_text_input() => {
                             let current = config_state
                                 .field_text_value(field)
@@ -834,6 +892,33 @@ impl AppState {
             .unwrap_or_else(|| initial_mcp_server_status(config))
             .label()
     }
+
+    fn render_code_intelligence_readiness_summary(
+        &self,
+        config_state: &ConfigState,
+    ) -> Vec<String> {
+        let root_config = config_state.draft.code_intelligence_preview_root_config();
+        let checks = build_code_intelligence_checks(&root_config, &self.workspace_root);
+        let mut lines = vec![
+            render_config_readonly_row("Saved runtime", &self.code_intelligence_status),
+            render_config_readonly_row(
+                "Draft status",
+                &code_intelligence_config_status(&root_config.code_intelligence),
+            ),
+            render_config_readonly_row("Readiness", code_intelligence_overall_label(&checks)),
+        ];
+
+        for check in checks.iter().take(4) {
+            lines.push(render_code_intelligence_check_row(check));
+            if let Some(remediation) = &check.remediation {
+                lines.push(render_config_hint_row(remediation));
+            }
+        }
+        if checks.len() > 4 {
+            lines.push(format!("... {} more checks", checks.len() - 4));
+        }
+        lines
+    }
 }
 
 pub(super) fn cycle_approval_mode(mode: ApprovalMode) -> ApprovalMode {
@@ -841,6 +926,14 @@ pub(super) fn cycle_approval_mode(mode: ApprovalMode) -> ApprovalMode {
         ApprovalMode::Allow => ApprovalMode::Ask,
         ApprovalMode::Ask => ApprovalMode::Deny,
         ApprovalMode::Deny => ApprovalMode::Allow,
+    }
+}
+
+fn cycle_code_intel_startup(startup: CodeIntelStartup) -> CodeIntelStartup {
+    match startup {
+        CodeIntelStartup::Off => CodeIntelStartup::Lazy,
+        CodeIntelStartup::Lazy => CodeIntelStartup::Eager,
+        CodeIntelStartup::Eager => CodeIntelStartup::Off,
     }
 }
 
@@ -967,6 +1060,39 @@ fn render_mcp_lifecycle_summary(config_state: &ConfigState, runtime_status: &str
             },
         ),
     ]
+}
+
+fn render_code_intelligence_trust_summary() -> Vec<String> {
+    vec![
+        render_config_readonly_row("Tool access", "read-only"),
+        render_config_readonly_row("Server process", "local workspace LSP"),
+        render_config_readonly_row("Write actions", "unavailable"),
+    ]
+}
+
+fn code_intelligence_overall_label(checks: &[DoctorCheck]) -> &'static str {
+    if checks
+        .iter()
+        .any(|check| check.status == DoctorStatus::Error)
+    {
+        return DoctorStatus::Error.as_str();
+    }
+    if checks
+        .iter()
+        .any(|check| check.status == DoctorStatus::Warn)
+    {
+        return DoctorStatus::Warn.as_str();
+    }
+    DoctorStatus::Ok.as_str()
+}
+
+fn render_code_intelligence_check_row(check: &DoctorCheck) -> String {
+    format!(
+        "- {}: {} · {}",
+        check.name,
+        check.status.as_str(),
+        check.message
+    )
 }
 
 fn mcp_pin_summary(config: &McpServerConfig) -> &'static str {

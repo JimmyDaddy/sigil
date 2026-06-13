@@ -36,7 +36,7 @@
 
 | 优先级 | 能力 | 当前状态 | 推荐目标 |
 | --- | --- | --- | --- |
-| P0 | Code intelligence / LSP | Rust MVP 和多语言自动发现已落地；默认关闭，支持 LSP + Tree-sitter fallback | 扩展 workspace trust UI、code action/rename 审批闭环 |
+| P0 | Code intelligence / LSP | Rust MVP、多语言自动发现、TUI trust/readiness/remediation 已落地；默认关闭，支持 LSP + Tree-sitter fallback | 后续补 code action/rename 审批闭环 |
 | P0 | MCP 完整闭环 | tools 可用；trust enforcement、TUI 手动 lazy activation、模型按需 activation、lifecycle status、elicitation modal 与 elicitation decision audit 已落地 | 补 prompt/resource surface 与更细粒度 progress 展示 |
 | P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key，UI 与 doctor 均明确 plaintext 语义 | 评估 session-only 或可选安全存储 backend |
 | P0 | Diagnostics / doctor | CLI `doctor` 与 TUI `/doctor` 已复用同一份 `DoctorReport` 检查 config、workspace、provider/auth、MCP、LSP 和 terminal 基线，并输出 remediation | 后续如需要再升级为 dedicated diagnostics panel |
@@ -141,6 +141,7 @@ cargo clippy --all-targets -- -D warnings
 - `code_intelligence.discovery.enabled = true` 时会按 workspace marker / 文件扩展名自动发现 Rust、TypeScript/JavaScript、Python、Go，并只把 PATH 上可用的内置 allowlist server 纳入启动计划；手写 `code_intelligence.servers` 作为高级覆盖或补充。
 - Rust 项目优先走 `rust-analyzer`；LSP 不可用时，符号与语法诊断回退到 Tree-sitter Rust。
 - TUI info rail 的 `LSP` 区按 language/server 显示最近状态，包括 installed、missing、ready、degraded、fallback，并在 `code_diagnostics` 后投影错误/警告摘要和最近文件级 diagnostics 列表；code tool result 使用专门 renderer。
+- TUI `/config` 已新增 `Code Intel` 区块，可调整 enabled/startup/discovery，展示只读 trust 边界，并复用 doctor 检查输出 LSP readiness/remediation。
 - 默认配置仍为关闭，不影响普通 chat、内置工具和 MCP。
 
 ### 5.1 最小 code intelligence 服务
@@ -586,10 +587,10 @@ cargo test -p sigil-tui approval timeline
 
 推荐按下面顺序推进，而不是按实现趣味挑选：
 
-1. **Code intelligence trust UI**：在已有 LSP 工具和状态展示基础上补 workspace trust / remediation。
-2. **MCP prompt/resource surface**：在 tool/roots/elicitation 已治理的基础上扩展 protocol surface。
-3. **OpenAI-compatible provider**：验证 provider-neutral runtime 边界。
-4. **Secret 可选 backend 评估**：只在确有价值时推进 session-only UI、Keychain 或 encrypted file backend。
+1. **MCP prompt/resource surface**：在 tool/roots/elicitation 已治理的基础上扩展 protocol surface。
+2. **OpenAI-compatible provider**：验证 provider-neutral runtime 边界。
+3. **Secret 可选 backend 评估**：只在确有价值时推进 session-only UI、Keychain 或 encrypted file backend。
+4. **Code action / rename 审批闭环**：在只读 code intelligence 稳定后再补写入型 LSP 能力。
 5. **鼠标交互 Phase 1/2**：改善 TUI 手感，但不碰高风险审批点击。
 6. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
 7. **PTY / background tasks**：解决长命令和交互式命令。

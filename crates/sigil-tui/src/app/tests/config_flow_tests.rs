@@ -81,8 +81,8 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     assert_eq!(state.selected_field, None);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Compaction"));
-    assert_eq!(app.config_selected_field_label(), Some("Auto compact"));
+    assert_eq!(app.config_section_title(), Some("Code Intel"));
+    assert_eq!(app.config_selected_field_label(), Some("Code intelligence"));
 
     app.config_state
         .as_mut()
@@ -91,8 +91,8 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Compaction"));
-    assert_eq!(app.config_selected_field_label(), Some("Auto compact"));
+    assert_eq!(app.config_section_title(), Some("Code Intel"));
+    assert_eq!(app.config_selected_field_label(), Some("Code intelligence"));
 
     app.config_state
         .as_mut()
@@ -307,8 +307,11 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/5 · provider settings");
-    assert_eq!(lines[1], "[provider] permissions memory compaction mcp");
+    assert_eq!(lines[0], "Provider 1/6 · provider settings");
+    assert_eq!(
+        lines[1],
+        "[provider] permissions memory compaction code intel mcp"
+    );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
     assert!(detail.contains("[authentication]"));
@@ -440,6 +443,52 @@ fn config_compaction_step_uses_fallback_for_unknown_provider_window() {
 }
 
 #[test]
+fn config_code_intelligence_step_shows_trust_and_readiness() {
+    let mut config = test_config();
+    config.code_intelligence.enabled = true;
+    config.code_intelligence.discovery.enabled = false;
+    config.code_intelligence.servers = vec![sigil_kernel::LanguageServerConfig {
+        name: "missing-lsp".to_owned(),
+        languages: vec!["rust".to_owned()],
+        command: "./missing-lsp".to_owned(),
+        args: Vec::new(),
+        env: Default::default(),
+        root_markers: vec!["Cargo.toml".to_owned()],
+        file_extensions: vec!["rs".to_owned()],
+        initialization_options: Default::default(),
+        trust_required: true,
+        startup_timeout_ms: 5_000,
+    }];
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::CodeIntelligence);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Code Intel 5/6 · LSP readiness"));
+    assert!(detail.contains("[controls]"));
+    assert!(detail.contains("Code intelligence: yes"));
+    assert!(detail.contains("Startup: lazy"));
+    assert!(detail.contains("Discovery: no"));
+    assert!(detail.contains("Missing reports: yes"));
+    assert!(detail.contains("[trust]"));
+    assert!(detail.contains("- Tool access: read-only"));
+    assert!(detail.contains("- Server process: local workspace LSP"));
+    assert!(detail.contains("- Write actions: unavailable"));
+    assert!(detail.contains("[readiness]"));
+    assert!(detail.contains("- Saved runtime: lazy"));
+    assert!(detail.contains("- Draft status: lazy"));
+    assert!(detail.contains("- Readiness: warn"));
+    assert!(detail.contains("- lsp:missing-lsp: warn"));
+    assert!(detail.contains("command=missing"));
+    assert!(detail.contains("i install or configure the missing-lsp language server"));
+    assert!(detail.contains("selected: Code intelligence"));
+}
+
+#[test]
 fn config_mode_closes_on_escape() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
@@ -475,6 +524,10 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     state.draft.compaction_soft_threshold_ratio = "0.40".to_owned();
     state.draft.compaction_hard_threshold_ratio = "0.75".to_owned();
     state.draft.compaction_context_window_tokens = "64000".to_owned();
+    state.draft.code_intelligence_enabled = true;
+    state.draft.code_intelligence_startup = sigil_kernel::CodeIntelStartup::Eager;
+    state.draft.code_intelligence_discovery_enabled = false;
+    state.draft.code_intelligence_discovery_report_missing = true;
     state.dirty = true;
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
@@ -488,6 +541,13 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert_eq!(root_config.compaction.soft_threshold_ratio, 0.40);
     assert_eq!(root_config.compaction.hard_threshold_ratio, 0.75);
     assert_eq!(root_config.compaction.context_window_tokens, Some(64_000));
+    assert!(root_config.code_intelligence.enabled);
+    assert_eq!(
+        root_config.code_intelligence.startup,
+        sigil_kernel::CodeIntelStartup::Eager
+    );
+    assert!(!root_config.code_intelligence.discovery.enabled);
+    assert!(root_config.code_intelligence.discovery.report_missing);
     assert!(!app.config_is_dirty());
     assert_eq!(app.permission_default_mode, "allow");
     assert!(!app.memory_enabled);
@@ -499,6 +559,13 @@ fn config_save_persists_draft_and_returns_reload_action() -> Result<()> {
     assert_eq!(saved.compaction.soft_threshold_ratio, 0.40);
     assert_eq!(saved.compaction.hard_threshold_ratio, 0.75);
     assert_eq!(saved.compaction.context_window_tokens, Some(64_000));
+    assert!(saved.code_intelligence.enabled);
+    assert_eq!(
+        saved.code_intelligence.startup,
+        sigil_kernel::CodeIntelStartup::Eager
+    );
+    assert!(!saved.code_intelligence.discovery.enabled);
+    assert!(saved.code_intelligence.discovery.report_missing);
     let saved_raw = std::fs::read_to_string(&config_path)?;
     assert!(saved_raw.contains("fallback_context_window_tokens = 64000"));
     assert!(
@@ -1282,6 +1349,63 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .expect("config state should exist")
             .draft
             .compaction_enabled
+    );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::CodeIntelligence);
+        state.selected_field = Some(ConfigField::CodeIntelEnabled);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .code_intelligence_enabled
+    );
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::CodeIntelStartup);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .code_intelligence_startup,
+        sigil_kernel::CodeIntelStartup::Eager
+    );
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::CodeIntelDiscoveryEnabled);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .code_intelligence_discovery_enabled
+    );
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::CodeIntelDiscoveryReportMissing);
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(
+        !app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .draft
+            .code_intelligence_discovery_report_missing
     );
 
     {

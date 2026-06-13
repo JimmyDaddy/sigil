@@ -138,6 +138,17 @@ pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
     report
 }
 
+/// Builds only the code-intelligence diagnostics without starting language servers.
+#[must_use]
+pub fn build_code_intelligence_checks(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+) -> Vec<DoctorCheck> {
+    let mut report = DoctorReport::default();
+    check_code_intelligence(&mut report, root_config, workspace_root);
+    report.checks
+}
+
 fn check_workspace(report: &mut DoctorReport, workspace_root: &Path) -> Option<PathBuf> {
     match fs::canonicalize(workspace_root) {
         Ok(canonical) if canonical.is_dir() => {
