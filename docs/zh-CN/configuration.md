@@ -126,6 +126,48 @@ tool_timeout_secs = 30
 - `tool_timeout_secs`：工具执行超时。
 - `max_turns`：可选保险丝。默认不限制；如果显式设置，模型连续达到阈值仍只请求工具而没有最终回答时，本轮会可恢复地停止。
 
+## Task Planning
+
+```toml
+[task]
+enabled = true
+default_mode = "chat"
+max_plan_steps = 12
+max_replans = 2
+max_child_sessions = 8
+allow_parallel_readonly_subagents = false
+allow_write_subagents = true
+
+[task.planner]
+# provider = "deepseek"
+# model = "deepseek-v4-flash"
+# reasoning_effort = "high"
+
+[task.executor]
+# model = "deepseek-v4-pro"
+
+[task.subagent_read]
+# 默认只读。
+
+[task.subagent_write]
+# 只有 allow_write_subagents = true 时才使用完整工具面。
+```
+
+计划任务通过 TUI 里的 `/plan <任务>` 发起。`default_mode = "chat"` 会让普通 composer 提交继续走 chat-first；只有明确想把计划任务作为默认流程时才改成 `plan`。
+
+各 role 的 provider/model 未配置时继承 `[agent]`。Planner 和 subagent-read 默认只看到只读文件/搜索/code-intelligence 工具。Executor 可以看到完整 runtime registry。Subagent-write 只有在 `allow_write_subagents = true` 时才能看到完整 registry；否则回退到只读工具面。写工具仍然按正常审批策略执行。
+
+每个 role 都可以覆盖可见工具：
+
+```toml
+[task.planner.tools]
+names = ["read_file", "ls", "glob", "grep", "code_symbols"]
+prefixes = []
+allow_all = false
+```
+
+使用 name 和 prefix 时要保持克制。Scoped role registry 会同时限制 tool specs、preview、execute、permission hooks 和 egress hooks，因此隐藏工具不是只从 prompt 里省略，而是真的不能执行。
+
 ## DeepSeek Provider
 
 ```toml

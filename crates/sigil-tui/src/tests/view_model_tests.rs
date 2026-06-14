@@ -3,12 +3,16 @@ use std::{collections::BTreeMap, path::Path};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig, EventHandler,
-    MemoryConfig, PermissionConfig, RootConfig, RunEvent, SessionConfig, ToolAccess, ToolCall,
-    ToolCategory, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    AgentConfig, AgentRole, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
+    ControlEntry, EventHandler, MemoryConfig, PermissionConfig, RootConfig, RunEvent,
+    SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
+    ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolResult, ToolResultMeta,
+    ToolSpec, WorkspaceConfig,
 };
 
 use super::*;
+use crate::runner::WorkerMessage;
 
 fn test_config() -> RootConfig {
     RootConfig {
@@ -29,6 +33,7 @@ fn test_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     }
@@ -74,6 +79,84 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
             .iter()
             .any(|line| line == "Ctrl-C: quit")
     );
+}
+
+#[test]
+fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let task_id = TaskId::new("task_1")?;
+    let step_id = TaskStepId::new("step_1")?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "ship task".to_owned(),
+            status: TaskRunStatus::Started,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "implement".to_owned(),
+                detail: None,
+                role: AgentRole::Executor,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id,
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Running,
+            title: Some("implement".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "ship task".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+    ];
+
+    app.handle_worker_message(WorkerMessage::TaskRunFinished {
+        task_id: task_id.as_str().to_owned(),
+        status: TaskRunStatus::Running,
+        entries,
+    })?;
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(
+        view_model
+            .info_rail
+            .task_lines
+            .contains(&"task: task_1".to_owned())
+    );
+    assert!(
+        view_model
+            .info_rail
+            .task_lines
+            .contains(&"status: running".to_owned())
+    );
+    assert!(
+        view_model
+            .info_rail
+            .task_lines
+            .contains(&"plan: v1".to_owned())
+    );
+    assert!(
+        view_model
+            .info_rail
+            .task_lines
+            .contains(&"current: v1:step_1".to_owned())
+    );
+    Ok(())
 }
 
 #[test]

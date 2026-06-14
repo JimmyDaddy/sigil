@@ -18,6 +18,10 @@ use crate::{
         ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
         ToolSubjectAudit,
     },
+    task::{
+        TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanUpdateContext, task_plan_update_entry,
+        task_plan_update_result_content, task_plan_update_tool_spec,
+    },
     tool::{
         ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
         ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus,
@@ -44,6 +48,70 @@ pub struct AgentRunOptions {
 pub struct AgentRunResult {
     pub final_text: String,
     pub tool_calls: usize,
+}
+
+/// Input contract for one agent run.
+#[derive(Debug, Clone)]
+pub struct AgentRunInput {
+    pub persisted_user_message: Option<String>,
+    pub transient_context: Vec<ModelMessage>,
+    pub task_plan_update: Option<TaskPlanUpdateContext>,
+}
+
+impl AgentRunInput {
+    pub fn user(prompt: impl Into<String>) -> Self {
+        Self {
+            persisted_user_message: Some(prompt.into()),
+            transient_context: Vec::new(),
+            task_plan_update: None,
+        }
+    }
+
+    pub fn transient(prompt: impl Into<String>, transient_context: Vec<ModelMessage>) -> Self {
+        Self {
+            persisted_user_message: Some(prompt.into()),
+            transient_context,
+            task_plan_update: None,
+        }
+    }
+
+    pub fn without_persisted_user_message(transient_context: Vec<ModelMessage>) -> Self {
+        Self {
+            persisted_user_message: None,
+            transient_context,
+            task_plan_update: None,
+        }
+    }
+
+    pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
+        self.task_plan_update = Some(context);
+        self
+    }
+}
+
+/// Complete result and state summary for task orchestration callers.
+#[derive(Debug, Clone)]
+pub struct AgentRunOutput {
+    pub result: AgentRunResult,
+    pub outcome: AgentRunOutcome,
+}
+
+/// Outcome summary derived from provider chunks, approvals, and tool results.
+#[derive(Debug, Clone, Default)]
+pub struct AgentRunOutcome {
+    pub terminal_reason: AgentRunTerminalReason,
+    pub tool_calls: usize,
+    pub tool_errors: Vec<crate::tool::ToolError>,
+    pub approval_denials: usize,
+    pub changed_files: Vec<String>,
+    pub interrupted_tool_calls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AgentRunTerminalReason {
+    #[default]
+    FinalAnswer,
+    MaxTurns,
 }
 
 /// Provider-backed agent loop with a registered tool surface.
@@ -113,11 +181,64 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        session.append_user_message(ModelMessage::user(prompt.into()))?;
+        Ok(self
+            .run_with_approval_input(
+                session,
+                AgentRunInput::user(prompt),
+                options,
+                handler,
+                approval_handler,
+            )
+            .await?
+            .result)
+    }
+
+    /// Runs the agent from an explicit input contract with automatic approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying run fails.
+    pub async fn run_with_input<H>(
+        &self,
+        session: &mut Session,
+        input: AgentRunInput,
+        options: AgentRunOptions,
+        handler: &mut H,
+    ) -> Result<AgentRunOutput>
+    where
+        H: EventHandler + Send,
+    {
+        let mut approval_handler = AutoApproveHandler;
+        self.run_with_approval_input(session, input, options, handler, &mut approval_handler)
+            .await
+    }
+
+    /// Runs the agent from an explicit input contract with an explicit approval handler.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when session persistence fails, request building fails, the provider
+    /// stream errors, or the approval handler itself errors.
+    pub async fn run_with_approval_input<H, A>(
+        &self,
+        session: &mut Session,
+        input: AgentRunInput,
+        options: AgentRunOptions,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<AgentRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        if let Some(message) = input.persisted_user_message {
+            session.append_user_message(ModelMessage::user(message))?;
+        }
 
         let permission_policy = PermissionPolicy::new(&options.permission_config);
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
+        let mut outcome = AgentRunOutcome::default();
 
         let mut model_turns = 0usize;
         loop {
@@ -127,20 +248,30 @@ where
                 handler.handle(RunEvent::Notice(format!(
                     "Stopped after {model_turns} model turns: the model kept requesting tools and did not return a final answer. Send another message to continue from the recorded tool results."
                 )))?;
-                return Ok(AgentRunResult {
-                    final_text: String::new(),
-                    tool_calls: total_tool_calls,
+                outcome.terminal_reason = AgentRunTerminalReason::MaxTurns;
+                outcome.tool_calls = total_tool_calls;
+                return Ok(AgentRunOutput {
+                    result: AgentRunResult {
+                        final_text: String::new(),
+                        tool_calls: total_tool_calls,
+                    },
+                    outcome,
                 });
             }
             model_turns = model_turns.saturating_add(1);
 
-            let request = session.build_request(
+            let mut tool_specs = self.tools.specs();
+            if input.task_plan_update.is_some() {
+                tool_specs.push(task_plan_update_tool_spec());
+            }
+            let request = session.build_request_with_transient_messages(
                 &options.workspace_root,
                 &options.memory_config,
-                self.tools.specs(),
+                tool_specs,
                 options.reasoning_effort.clone(),
                 previous_response_handle.clone(),
                 options.traffic_partition_key.clone(),
+                &input.transient_context,
             )?;
 
             let mut stream = self.provider.stream(request).await?;
@@ -243,6 +374,37 @@ where
                     timeout_secs: options.tool_timeout_secs,
                 };
                 for call in completed_calls {
+                    if call.name == TASK_PLAN_UPDATE_TOOL_NAME {
+                        let Some(context) = input.task_plan_update.as_ref() else {
+                            let mut result = ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Unsupported,
+                                "task_plan_update is not available for this run",
+                            );
+                            attach_tool_call_context(&mut result, &call, &[]);
+                            append_tool_execution_audit(
+                                session,
+                                &call,
+                                &[],
+                                ToolExecutionStatus::Failed,
+                                None,
+                                Some(&result),
+                            )?;
+                            record_tool_run_outcome(&mut outcome, &result);
+                            session.append_tool_message(result.to_model_message())?;
+                            handler.handle(RunEvent::ToolResult(result))?;
+                            continue;
+                        };
+                        handle_task_plan_update_call(
+                            session,
+                            handler,
+                            &mut outcome,
+                            &call,
+                            context,
+                        )?;
+                        continue;
+                    }
                     let mut execution_subjects = Vec::new();
                     if let Some(spec) = self.tools.spec_for(&call.name) {
                         let subjects = match self.tools.permission_subjects(&tool_ctx, &call) {
@@ -263,6 +425,7 @@ where
                                     None,
                                     Some(&result),
                                 )?;
+                                record_tool_run_outcome(&mut outcome, &result);
                                 session.append_tool_message(result.to_model_message())?;
                                 handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
@@ -286,6 +449,7 @@ where
                                     None,
                                     Some(&result),
                                 )?;
+                                record_tool_run_outcome(&mut outcome, &result);
                                 session.append_tool_message(result.to_model_message())?;
                                 handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
@@ -312,6 +476,7 @@ where
                                     None,
                                     Some(&result),
                                 )?;
+                                record_tool_run_outcome(&mut outcome, &result);
                                 session.append_tool_message(result.to_model_message())?;
                                 handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
@@ -376,6 +541,7 @@ where
                                     reason,
                                 );
                                 attach_tool_call_context(&mut result, &call, &decision.subjects);
+                                record_tool_run_outcome(&mut outcome, &result);
                                 session.append_tool_message(result.to_model_message())?;
                                 handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
@@ -490,6 +656,7 @@ where
                                             &call,
                                             &decision.subjects,
                                         );
+                                        record_tool_run_outcome(&mut outcome, &result);
                                         session.append_tool_message(result.to_model_message())?;
                                         handler.handle(RunEvent::ToolResult(result))?;
                                         continue;
@@ -543,6 +710,7 @@ where
                                     reason,
                                 );
                                 attach_tool_call_context(&mut result, &call, &decision.subjects);
+                                record_tool_run_outcome(&mut outcome, &result);
                                 session.append_tool_message(result.to_model_message())?;
                                 handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
@@ -566,6 +734,7 @@ where
                                     None,
                                     Some(&result),
                                 )?;
+                                record_tool_run_outcome(&mut outcome, &result);
                                 session.append_tool_message(result.to_model_message())?;
                                 handler.handle(RunEvent::ToolResult(result))?;
                                 continue;
@@ -613,6 +782,7 @@ where
                         duration_ms,
                         Some(&result),
                     )?;
+                    record_tool_run_outcome(&mut outcome, &result);
                     session.append_tool_message(result.to_model_message())?;
                     handler.handle(RunEvent::ToolResult(result))?;
                 }
@@ -639,12 +809,92 @@ where
                 }
             }
 
-            return Ok(AgentRunResult {
-                final_text: assistant_text,
-                tool_calls: total_tool_calls,
+            outcome.tool_calls = total_tool_calls;
+            return Ok(AgentRunOutput {
+                result: AgentRunResult {
+                    final_text: assistant_text,
+                    tool_calls: total_tool_calls,
+                },
+                outcome,
             });
         }
     }
+}
+
+fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &ToolResult) {
+    if !result.metadata.changed_files.is_empty() {
+        for file in &result.metadata.changed_files {
+            if !outcome.changed_files.contains(file) {
+                outcome.changed_files.push(file.clone());
+            }
+        }
+    }
+    let ToolResultStatus::Error(error) = &result.status else {
+        return;
+    };
+    if error.kind == ToolErrorKind::ApprovalDenied {
+        outcome.approval_denials += 1;
+    }
+    if error.kind == ToolErrorKind::Interrupted {
+        outcome.interrupted_tool_calls.push(result.call_id.clone());
+    }
+    outcome.tool_errors.push(error.clone());
+}
+
+fn handle_task_plan_update_call<H>(
+    session: &mut Session,
+    handler: &mut H,
+    outcome: &mut AgentRunOutcome,
+    call: &ToolCall,
+    context: &TaskPlanUpdateContext,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    append_tool_execution_audit(session, call, &[], ToolExecutionStatus::Started, None, None)?;
+    let result = match task_plan_update_entry(context, call) {
+        Ok(entry) => {
+            let control = ControlEntry::TaskPlan(entry.clone());
+            session.append_control(control.clone())?;
+            handler.handle(RunEvent::Control(control))?;
+            let result = ToolResult::ok(
+                call.id.clone(),
+                call.name.clone(),
+                task_plan_update_result_content(&entry),
+                ToolResultMeta::default(),
+            );
+            append_tool_execution_audit(
+                session,
+                call,
+                &[],
+                ToolExecutionStatus::Completed,
+                None,
+                Some(&result),
+            )?;
+            result
+        }
+        Err(error) => {
+            let result = ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::InvalidInput,
+                error.to_string(),
+            );
+            append_tool_execution_audit(
+                session,
+                call,
+                &[],
+                ToolExecutionStatus::Failed,
+                None,
+                Some(&result),
+            )?;
+            result
+        }
+    };
+    record_tool_run_outcome(outcome, &result);
+    session.append_tool_message(result.to_model_message())?;
+    handler.handle(RunEvent::ToolResult(result))?;
+    Ok(())
 }
 
 fn has_external_subject(subjects: &[ToolSubject]) -> bool {

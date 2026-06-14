@@ -7,8 +7,8 @@ use serde_json::json;
 use crate::{
     ApprovalMode, MessageRole, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget,
     ToolDiffStats, ToolEgressAudit, ToolErrorKind, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubjectKind, ToolSubjectScope, provider::ToolCall,
+    ToolPreviewFile, ToolPreviewSnapshot, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope, provider::ToolCall,
 };
 
 #[test]
@@ -252,6 +252,31 @@ fn tool_registry_unregisters_tools_by_name_prefix() {
 }
 
 #[test]
+fn tool_registry_scope_empty_and_into_registry_are_stable() {
+    assert!(ToolRegistryScope::default().is_empty());
+    assert!(
+        !ToolRegistryScope::from_names_and_prefixes(["read_file"], std::iter::empty::<&str>())
+            .is_empty()
+    );
+
+    let allow_all = ToolRegistryScope {
+        allow_all: true,
+        ..ToolRegistryScope::default()
+    };
+    assert!(!allow_all.is_empty());
+
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NamedRegistryTool("read_file")));
+    let scoped = registry.scoped(ToolRegistryScope::from_names_and_prefixes(
+        ["read_file"],
+        std::iter::empty::<&str>(),
+    ));
+    let unwrapped = scoped.into_registry();
+
+    assert!(unwrapped.spec_for("read_file").is_some());
+}
+
+#[test]
 fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(NamedRegistryTool("mcp__poisoned__echo")));
@@ -271,6 +296,86 @@ fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
     assert_eq!(drained.len(), 1);
     assert!(registry.spec_for("mcp__poisoned__echo").is_none());
     assert!(registry.spec_for("read_file").is_some());
+}
+
+#[tokio::test]
+async fn scoped_tool_registry_gates_all_tool_paths() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(RegistryFixtureTool));
+    registry.register(Arc::new(NamedRegistryTool("read_file")));
+    registry.register(Arc::new(NamedRegistryTool("mcp__docs__lookup")));
+    let scoped = registry.scoped(ToolRegistryScope::from_names_and_prefixes(
+        ["read_file"],
+        ["mcp__docs__"],
+    ));
+    let ctx = ToolContext {
+        workspace_root: std::env::temp_dir(),
+        timeout_secs: 5,
+    };
+    let blocked_call = ToolCall {
+        id: "call-1".to_owned(),
+        name: "fixture".to_owned(),
+        args_json: r#"{"path":"file.txt"}"#.to_owned(),
+    };
+
+    let visible_names = scoped
+        .specs()
+        .into_iter()
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        visible_names,
+        vec!["mcp__docs__lookup".to_owned(), "read_file".to_owned()]
+    );
+    assert!(scoped.spec_for("fixture").is_none());
+    assert!(
+        scoped
+            .execute(ctx.clone(), blocked_call.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        scoped
+            .preview(ctx.clone(), blocked_call.clone())
+            .await
+            .is_err()
+    );
+    assert!(scoped.permission_access(&ctx, &blocked_call).is_err());
+    assert!(scoped.permission_subjects(&ctx, &blocked_call).is_err());
+    assert!(scoped.permission_default_mode(&ctx, &blocked_call).is_err());
+    assert!(scoped.egress_audit(&ctx, &blocked_call).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_tool_registry_prefix_allows_lazily_registered_tools() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    let scoped = registry.scoped(ToolRegistryScope::from_names_and_prefixes(
+        std::iter::empty::<&str>(),
+        ["mcp__lazy__"],
+    ));
+    registry.register(Arc::new(NamedRegistryTool("mcp__lazy__read")));
+    registry.register(Arc::new(NamedRegistryTool("mcp__other__read")));
+
+    assert!(scoped.spec_for("mcp__lazy__read").is_some());
+    assert!(scoped.spec_for("mcp__other__read").is_none());
+    let result = scoped
+        .execute(
+            ToolContext {
+                workspace_root: std::env::temp_dir(),
+                timeout_secs: 5,
+            },
+            ToolCall {
+                id: "call-1".to_owned(),
+                name: "mcp__lazy__read".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+
+    assert_eq!(result.content, "ok");
+    Ok(())
 }
 
 #[tokio::test]

@@ -136,6 +136,13 @@ impl AppState {
                 self.push_phase_marker(format!("thinking|{}", self.model_name));
                 self.push_event("run:start", prompt);
             }
+            WorkerMessage::TaskRunStarted { task_id, objective } => {
+                self.run_phase = RunPhase::Thinking;
+                self.mcp_progress = None;
+                self.last_notice = Some(format!("planning task {task_id}"));
+                self.push_phase_marker(format!("task|{}", self.model_name));
+                self.push_event("task:start", format!("{task_id} {objective}"));
+            }
             WorkerMessage::RunFinished { result, entries } => {
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
@@ -157,6 +164,30 @@ impl AppState {
                         result.tool_calls,
                         result.final_text.len()
                     ),
+                );
+            }
+            WorkerMessage::TaskRunFinished {
+                task_id,
+                status,
+                entries,
+            } => {
+                self.is_busy = false;
+                self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
+                self.pending_approval = None;
+                self.modal_state = None;
+                self.last_phase_marker = None;
+                self.finish_streaming_assistant_entry();
+                self.streaming_reasoning_index = None;
+                self.last_notice =
+                    Some(format!("task {task_id} {}", task_run_status_label(status)));
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.recompute_compaction_status(false);
+                self.schedule_balance_refresh();
+                self.push_event(
+                    "task:finish",
+                    format!("{task_id} status={}", task_run_status_label(status)),
                 );
             }
             WorkerMessage::RunCancelled {
@@ -371,6 +402,8 @@ impl AppState {
                 prompt,
                 reasoning_effort: self.reasoning_effort.clone(),
             },
+            AppAction::SubmitPlan(prompt) => WorkerCommand::SubmitTask { prompt },
+            AppAction::ContinuePlan { task_id } => WorkerCommand::ContinueTask { task_id },
             AppAction::ApprovalDecision { call_id, approved } => {
                 WorkerCommand::ApprovalDecision { call_id, approved }
             }
@@ -469,6 +502,18 @@ impl AppState {
             Some(server_name.to_owned()),
             McpActivationStatus::Ready { added_tools },
         );
+    }
+}
+
+fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskRunStatus::Started => "started",
+        sigil_kernel::TaskRunStatus::Running => "running",
+        sigil_kernel::TaskRunStatus::Paused => "paused",
+        sigil_kernel::TaskRunStatus::Completed => "completed",
+        sigil_kernel::TaskRunStatus::Failed => "failed",
+        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
     }
 }
 

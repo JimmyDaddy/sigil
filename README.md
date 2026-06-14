@@ -54,6 +54,7 @@ For update, PATH, release archive, and uninstall notes, see [docs/en/installatio
 - Inspect tool activities, command output, file changes, and diagnostics after a run.
 - Restore the latest session after restarting the TUI.
 - Use `/config` for common settings and `/resume` for session selection.
+- Use `/plan` for planned multi-step tasks and `/plan continue` to explicitly continue an unfinished task.
 - Use `/doctor` to diagnose config, authentication, MCP, LSP, and terminal readiness with suggested fixes.
 - Use `/model` and `/effort` to adjust the next model run.
 - Use `/compact` to compact long-session context.
@@ -64,6 +65,8 @@ For update, PATH, release archive, and uninstall notes, see [docs/en/installatio
 ## TUI Model
 
 The TUI is centered on chat and the composer. You type a task, and Sigil shows assistant responses, tool activity, approval requests, run status, and session information in the same interface.
+
+For larger tasks, `/plan <task>` asks a planner role to create a durable plan before execution. The right info rail shows the latest task status, plan version, and current step. Restoring a session rebuilds that visible task state from the append-only log, but it does not auto-run unfinished work; use `/plan continue` when you want Sigil to continue.
 
 Common controls:
 

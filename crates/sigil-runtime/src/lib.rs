@@ -5,10 +5,12 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentRunOptions, ApprovalMode, InteractionMode, McpServerConfig, McpServerStartup, Provider,
-    ProviderCapabilities, ReasoningEffort, RootConfig, SecretRedactor, Tool, ToolAccess,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    AgentRole, AgentRunOptions, ApprovalMode, InteractionMode, McpServerConfig, McpServerStartup,
+    Provider, ProviderCapabilities, ReasoningEffort, RoleModelConfig, RootConfig,
+    ScopedToolRegistry, SecretRedactor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory,
+    ToolContext, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolSubjectScope,
 };
 pub use sigil_mcp::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
@@ -41,6 +43,17 @@ pub fn build_provider(root_config: &RootConfig) -> Result<Box<dyn Provider>> {
         )?)),
         other => Err(anyhow!("unsupported provider {other}")),
     }
+}
+
+/// Builds the configured model provider for one task role.
+///
+/// # Errors
+///
+/// Returns an error when the resolved role provider is unsupported or malformed.
+pub fn build_role_provider(root_config: &RootConfig, role: AgentRole) -> Result<Box<dyn Provider>> {
+    let role_config = root_config.task.role_config(role);
+    let resolved = root_config_with_role_agent(root_config, role_config);
+    build_provider(&resolved)
 }
 
 /// Builds the complete runtime tool registry from built-ins and configured MCP servers.
@@ -533,6 +546,35 @@ pub fn build_run_options(
     }
 }
 
+/// Builds shared agent run options for one task role.
+pub fn build_role_run_options(
+    root_config: &RootConfig,
+    workspace_root: PathBuf,
+    interaction_mode: InteractionMode,
+    role: AgentRole,
+) -> AgentRunOptions {
+    let mut options = build_run_options(root_config, workspace_root, interaction_mode);
+    if let Some(reasoning_effort) = root_config.task.role_config(role).reasoning_effort.clone() {
+        options.reasoning_effort = Some(reasoning_effort);
+    }
+    options
+}
+
+/// Builds a role-scoped tool registry view over an existing runtime registry.
+pub fn build_role_tool_registry(
+    registry: &ToolRegistry,
+    root_config: &RootConfig,
+    role: AgentRole,
+) -> ScopedToolRegistry {
+    let configured = &root_config.task.role_config(role).tools;
+    let scope = if configured_allowlist_is_empty(configured) {
+        default_role_tool_scope(root_config, role)
+    } else {
+        tool_scope_from_allowlist(configured)
+    };
+    registry.scoped(scope)
+}
+
 /// Parses the DeepSeek provider block from the shared root config.
 ///
 /// # Errors
@@ -712,6 +754,70 @@ fn default_reasoning_effort(root_config: &RootConfig) -> ReasoningEffort {
         return config.profile().default_reasoning_effort;
     }
     ReasoningEffort::Max
+}
+
+fn root_config_with_role_agent(
+    root_config: &RootConfig,
+    role_config: &RoleModelConfig,
+) -> RootConfig {
+    let mut resolved = root_config.clone();
+    if let Some(provider) = role_config.provider.as_deref() {
+        resolved.agent.provider = provider.to_owned();
+    }
+    if let Some(model) = role_config.model.as_deref() {
+        resolved.agent.model = model.to_owned();
+        let provider_key = provider_config_key(&resolved.agent.provider).to_owned();
+        if let Some(provider_config) = resolved.providers.get_mut(&provider_key)
+            && let Some(object) = provider_config.as_object_mut()
+        {
+            object.insert("model".to_owned(), Value::String(model.to_owned()));
+        }
+    }
+    resolved
+}
+
+fn configured_allowlist_is_empty(config: &ToolAllowlistConfig) -> bool {
+    !config.allow_all && config.names.is_empty() && config.prefixes.is_empty()
+}
+
+fn tool_scope_from_allowlist(config: &ToolAllowlistConfig) -> ToolRegistryScope {
+    ToolRegistryScope {
+        allow_all: config.allow_all,
+        names: config.names.iter().cloned().collect(),
+        prefixes: config.prefixes.clone(),
+    }
+}
+
+fn default_role_tool_scope(root_config: &RootConfig, role: AgentRole) -> ToolRegistryScope {
+    match role {
+        AgentRole::Planner | AgentRole::SubagentRead => read_only_role_tool_scope(),
+        AgentRole::Executor => ToolRegistryScope {
+            allow_all: true,
+            ..ToolRegistryScope::default()
+        },
+        AgentRole::SubagentWrite if root_config.task.allow_write_subagents => ToolRegistryScope {
+            allow_all: true,
+            ..ToolRegistryScope::default()
+        },
+        AgentRole::SubagentWrite => read_only_role_tool_scope(),
+    }
+}
+
+fn read_only_role_tool_scope() -> ToolRegistryScope {
+    ToolRegistryScope::from_names_and_prefixes(
+        [
+            "read_file",
+            "ls",
+            "glob",
+            "grep",
+            "code_symbols",
+            "code_workspace_symbols",
+            "code_definition",
+            "code_references",
+            "code_diagnostics",
+        ],
+        std::iter::empty::<&str>(),
+    )
 }
 
 fn provider_config_key(provider: &str) -> &str {

@@ -40,6 +40,12 @@ class StagedCoverageHelpersTests(unittest.TestCase):
             "McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,",
             "notification: McpProgressNotification,",
             "pub type ProviderMap = BTreeMap<String, Value>;",
+            "pub use crate::{",
+            "impl TaskConfig {",
+            "pub fn as_str(self) -> &'static str {",
+            "pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[",
+            ")?;",
+            ")]);",
             "pub struct OpenAiStreamEnvelope {",
             "pub enum ProviderMode {",
             "#[derive(Debug)]",
@@ -75,8 +81,38 @@ pub fn render(value: Result<(), Error>) -> Result<(), Error> {
 
         lines = check_staged_coverage.non_executable_declaration_lines(source)
 
-        self.assertEqual(lines, {1, 2, 3, 4, 5})
+        self.assertEqual(lines, {1, 2, 3, 4, 5, 7})
         self.assertNotIn(8, lines)
+
+    def test_declaration_line_map_marks_use_const_and_function_signatures(self) -> None:
+        source = """\
+pub use crate::{
+    Agent,
+    TaskRunStatus,
+};
+
+pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
+    UiCommandSpec {
+        command: UiCommand::SubmitPlan,
+        label: "Plan",
+    },
+];
+
+impl TaskMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Plan => "plan",
+        }
+    }
+}
+"""
+
+        lines = check_staged_coverage.non_executable_declaration_lines(source)
+
+        self.assertTrue({1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 13, 14}.issubset(lines))
+        self.assertNotIn(15, lines)
+        self.assertNotIn(16, lines)
 
     def test_parse_staged_added_lines_tracks_new_line_numbers(self) -> None:
         diff = """\

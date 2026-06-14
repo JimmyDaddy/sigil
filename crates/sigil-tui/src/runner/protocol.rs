@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use sigil_kernel::{AgentRunResult, CompactionRecord, ReasoningEffort, RunEvent, SessionLogEntry};
+use sigil_kernel::{
+    AgentRunResult, CompactionRecord, ReasoningEffort, RunEvent, SessionLogEntry, TaskRunStatus,
+};
 use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::{
     McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
@@ -17,6 +19,12 @@ pub enum WorkerCommand {
     SubmitPrompt {
         prompt: String,
         reasoning_effort: ReasoningEffort,
+    },
+    SubmitTask {
+        prompt: String,
+    },
+    ContinueTask {
+        task_id: Option<String>,
     },
     ApprovalDecision {
         call_id: String,
@@ -52,8 +60,17 @@ pub enum WorkerMessage {
     RunStarted {
         prompt: String,
     },
+    TaskRunStarted {
+        task_id: String,
+        objective: String,
+    },
     RunFinished {
         result: AgentRunResult,
+        entries: Vec<SessionLogEntry>,
+    },
+    TaskRunFinished {
+        task_id: String,
+        status: TaskRunStatus,
         entries: Vec<SessionLogEntry>,
     },
     RunCancelled {

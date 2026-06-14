@@ -23,6 +23,62 @@ fn compact_command_prefix_is_resolved_to_exact_command() -> Result<()> {
 }
 
 #[test]
+fn plan_command_dispatches_task_action_when_idle() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/plan implement task mode".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitPlan(prompt)) if prompt == "implement task mode"
+    ));
+    assert!(app.is_busy);
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::User && entry.text == "/plan implement task mode"
+    }));
+    Ok(())
+}
+
+#[test]
+fn plan_continue_command_dispatches_continue_action() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/plan continue".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::ContinuePlan { task_id: None })
+    ));
+    assert!(app.is_busy);
+    Ok(())
+}
+
+#[test]
+fn plan_command_reports_busy_and_usage_without_dispatching() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.is_busy = true;
+    app.input = "/plan implement task mode".to_owned();
+
+    assert!(app.submit_input()?.is_none());
+    assert!(
+        app.timeline.iter().any(|entry| {
+            entry.role == TimelineRole::Notice && entry.text == "busy; plan later"
+        })
+    );
+
+    app.is_busy = false;
+    app.input = "/plan   ".to_owned();
+
+    assert!(app.submit_input()?.is_none());
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text == "usage: /plan <task>"
+    }));
+    Ok(())
+}
+
+#[test]
 fn effort_command_updates_runtime_effort_and_worker_submit_uses_it() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/effort high".to_owned();

@@ -24,6 +24,14 @@ COVERAGE_IGNORE_RE = (
 RUST_ITEM_DECL_RE = re.compile(
     r"^(?:pub(?:\([^)]+\))?\s+)?(?:struct|enum|union)\s+[A-Z][A-Za-z0-9_]*"
 )
+RUST_USE_DECL_RE = re.compile(r"^(?:pub(?:\([^)]+\))?\s+)?use\s+")
+RUST_CONST_DECL_RE = re.compile(
+    r"^(?:pub(?:\([^)]+\))?\s+)?(?:const|static)\s+[A-Z_][A-Z0-9_]*\s*[:=]"
+)
+RUST_IMPL_DECL_RE = re.compile(r"^impl(?:<[^>]+>)?\s+")
+RUST_FN_SIG_RE = re.compile(
+    r"^(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?fn\s+[A-Za-z_][A-Za-z0-9_]*"
+)
 
 
 @dataclass(frozen=True)
@@ -76,9 +84,19 @@ def is_trivially_non_executable_added_line(line: str) -> bool:
         return True
     if stripped.startswith(("//", "/*", "*", "*/", "#[")):
         return True
-    if stripped in {"{", "}", "};", ");", ")", "],", "[", "]", "},", ","}:
+    if stripped in {"{", "}", "};", ");", ")?;", ")]);", ")", "],", "[", "]", "},", ","}:
         return True
-    if stripped.startswith(("use ", "pub use ", "mod ", "pub mod ", "type ", "pub type ")):
+    if re.fullmatch(r"[\)\]\}]+(?:\?;|;|,)?", stripped):
+        return True
+    if stripped.startswith(("mod ", "pub mod ", "type ", "pub type ")):
+        return True
+    if RUST_USE_DECL_RE.match(stripped):
+        return True
+    if RUST_CONST_DECL_RE.match(stripped):
+        return True
+    if RUST_IMPL_DECL_RE.match(stripped):
+        return True
+    if RUST_FN_SIG_RE.match(stripped) and stripped.endswith("{"):
         return True
     if RUST_ITEM_DECL_RE.match(stripped):
         return True
@@ -117,11 +135,40 @@ def is_non_executable_added_line(line: str) -> bool:
 def non_executable_declaration_lines(source_text: str) -> set[int]:
     non_executable: set[int] = set()
     in_item_decl = False
+    in_use_decl = False
+    in_const_decl = False
+    in_fn_sig = False
     saw_body_brace = False
     brace_depth = 0
+    bracket_depth = 0
+    paren_depth = 0
 
     for line_no, line in enumerate(source_text.splitlines(), start=1):
         stripped = line.strip()
+
+        if in_use_decl:
+            non_executable.add(line_no)
+            if ";" in stripped:
+                in_use_decl = False
+            continue
+
+        if in_const_decl:
+            non_executable.add(line_no)
+            bracket_depth += stripped.count("[") - stripped.count("]")
+            brace_depth += stripped.count("{") - stripped.count("}")
+            paren_depth += stripped.count("(") - stripped.count(")")
+            if ";" in stripped and bracket_depth <= 0 and brace_depth <= 0 and paren_depth <= 0:
+                in_const_decl = False
+                bracket_depth = 0
+                brace_depth = 0
+                paren_depth = 0
+            continue
+
+        if in_fn_sig:
+            non_executable.add(line_no)
+            if "{" in stripped:
+                in_fn_sig = False
+            continue
 
         if in_item_decl:
             non_executable.add(line_no)
@@ -134,6 +181,34 @@ def non_executable_declaration_lines(source_text: str) -> set[int]:
                     brace_depth = 0
             elif ";" in stripped:
                 in_item_decl = False
+            continue
+
+        if RUST_USE_DECL_RE.match(stripped):
+            non_executable.add(line_no)
+            in_use_decl = ";" not in stripped
+            continue
+
+        if RUST_CONST_DECL_RE.match(stripped):
+            non_executable.add(line_no)
+            bracket_depth = stripped.count("[") - stripped.count("]")
+            brace_depth = stripped.count("{") - stripped.count("}")
+            paren_depth = stripped.count("(") - stripped.count(")")
+            in_const_decl = not (
+                ";" in stripped and bracket_depth <= 0 and brace_depth <= 0 and paren_depth <= 0
+            )
+            if not in_const_decl:
+                bracket_depth = 0
+                brace_depth = 0
+                paren_depth = 0
+            continue
+
+        if RUST_IMPL_DECL_RE.match(stripped):
+            non_executable.add(line_no)
+            continue
+
+        if RUST_FN_SIG_RE.match(stripped):
+            non_executable.add(line_no)
+            in_fn_sig = "{" not in stripped
             continue
 
         if RUST_ITEM_DECL_RE.match(stripped):

@@ -54,6 +54,7 @@ CLI 不是主要产品表面，默认只承担自动化和调试入口。
 - 运行后继续查看 tool activity、命令输出、文件变更和诊断摘要
 - 重启后恢复最近 session，继续基于已有上下文工作
 - 用 `/config` 调整常用配置，用 `/resume` 选择历史 session
+- 用 `/plan` 发起带计划的多步骤任务，用 `/plan continue` 显式继续未完成任务
 - 用 `/doctor` 诊断配置、认证、MCP、LSP 和 terminal 就绪状态，并查看修复建议
 - 用 `/model` 和 `/effort` 调整下一轮模型与 reasoning effort
 - 用 `/compact` 压缩长会话上下文
@@ -64,6 +65,8 @@ CLI 不是主要产品表面，默认只承担自动化和调试入口。
 ## TUI 心智
 
 Sigil 的主界面以 chat/composer 为中心。你输入任务，Sigil 在同一个界面里展示 assistant 回复、工具活动、审批请求、运行状态和 session 信息。
+
+复杂任务可以用 `/plan <任务>` 发起。Sigil 会先让 planner role 写入 durable plan，再按步骤执行；右侧 Info rail 会显示最新 task 状态、plan 版本和当前步骤。恢复历史 session 时，TUI 会从 append-only log 重建这些可见状态，但不会自动继续执行；需要继续时显式输入 `/plan continue`。
 
 几个常用操作：
 

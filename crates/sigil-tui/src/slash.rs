@@ -60,6 +60,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         completes_with_space: true,
     },
     SlashCommandSpec {
+        canonical: "/plan",
+        aliases: &[],
+        description: "plan and execute a task",
+        completes_with_space: true,
+    },
+    SlashCommandSpec {
         canonical: "/quit",
         aliases: &["/q", "/exit"],
         description: "quit TUI",

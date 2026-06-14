@@ -59,12 +59,28 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/config` | Open the TUI config panel |
 | `/doctor` | Run local setup diagnostics with a summary and remediation list |
 | `/resume` | Select and restore a previous session |
+| `/plan <task>` | Create a durable plan and execute the task step by step |
+| `/plan continue` | Explicitly continue the latest unfinished planned task |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
 | `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |
 | `/compact` | Manually compact the provider-visible context for the current session |
 | `/quit` | Quit the TUI |
 
 `/model`, `/effort`, and `/resume` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute.
+
+## Planned Tasks
+
+Normal composer input stays chat-first. Use `/plan <task>` when you want Sigil to break a larger request into durable steps before execution.
+
+Planned tasks use role-specific agents:
+
+- Planner: reads context and writes the task plan.
+- Executor: performs normal workspace changes for executor steps.
+- Subagent read/write: runs delegated steps in child sessions and links the child session back to the parent task.
+
+Task runs, plans, step status, child-session links, and subagent approval route summaries are stored as append-only control entries. The info rail shows the latest task status, plan version, and current step from that durable state.
+
+Session restore only rebuilds the visible task state. It does not automatically continue unfinished work. Use `/plan continue` to continue the latest unfinished task.
 
 ## Approvals and File Changes
 

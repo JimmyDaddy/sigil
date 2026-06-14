@@ -15,6 +15,7 @@ fn test_root_config() -> RootConfig {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
     }
@@ -88,6 +89,7 @@ fn compaction_context_field_uses_short_fallback_label() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
     });
@@ -114,6 +116,7 @@ fn config_rows_do_not_pre_pad_labels() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
     });
@@ -144,6 +147,7 @@ fn api_key_display_uses_status_without_secret_length() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
     };

@@ -5,7 +5,7 @@ use super::{
     McpServerStartup, McpTrustClass, RootConfig, default_user_config_dir, default_user_config_path,
     preferred_config_path, resolve_workspace_root,
 };
-use crate::{AgentConfig, ApprovalMode, WorkspaceConfig};
+use crate::{AgentConfig, AgentRole, ApprovalMode, TaskConfig, TaskMode, WorkspaceConfig};
 
 #[test]
 fn compaction_threshold_status_follows_configured_window() {
@@ -82,6 +82,7 @@ fn root_config_save_roundtrips() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     };
@@ -111,6 +112,7 @@ fn root_config_save_handles_paths_without_parent() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     };
@@ -140,6 +142,72 @@ model = "deepseek-v4-flash"
     assert_eq!(config.memory, Default::default());
     assert_eq!(config.compaction.tail_messages, 6);
     assert_eq!(config.terminal, Default::default());
+    assert_eq!(config.task.default_mode, TaskMode::Chat);
+}
+
+#[test]
+fn task_config_loads_role_overrides() {
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[task]
+default_mode = "plan"
+max_plan_steps = 8
+
+[task.planner]
+model = "deepseek-reasoner"
+reasoning_effort = "max"
+
+[task.planner.tools]
+names = ["read_file", "grep"]
+prefixes = ["code_intel_"]
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("task config should parse");
+
+    assert_eq!(TaskConfig::default().default_mode, TaskMode::Chat);
+    assert_eq!(config.task.default_mode, TaskMode::Plan);
+    assert_eq!(config.task.max_plan_steps, 8);
+    assert_eq!(
+        config.task.planner.model.as_deref(),
+        Some("deepseek-reasoner")
+    );
+    assert_eq!(config.task.planner.tools.names, vec!["read_file", "grep"]);
+    assert_eq!(config.task.planner.tools.prefixes, vec!["code_intel_"]);
+    assert_eq!(config.task.executor.provider, None);
+}
+
+#[test]
+fn task_config_role_config_and_mode_labels_are_stable() {
+    let mut config = TaskConfig::default();
+    config.planner.model = Some("planner-model".to_owned());
+    config.executor.model = Some("executor-model".to_owned());
+    config.subagent_read.model = Some("subagent-read-model".to_owned());
+    config.subagent_write.model = Some("subagent-write-model".to_owned());
+
+    assert_eq!(
+        config.role_config(AgentRole::Planner).model.as_deref(),
+        Some("planner-model")
+    );
+    assert_eq!(
+        config.role_config(AgentRole::Executor).model.as_deref(),
+        Some("executor-model")
+    );
+    assert_eq!(
+        config.role_config(AgentRole::SubagentRead).model.as_deref(),
+        Some("subagent-read-model")
+    );
+    assert_eq!(
+        config
+            .role_config(AgentRole::SubagentWrite)
+            .model
+            .as_deref(),
+        Some("subagent-write-model")
+    );
+    assert_eq!(TaskMode::Chat.as_str(), "chat");
+    assert_eq!(TaskMode::Plan.as_str(), "plan");
 }
 
 #[test]
@@ -524,6 +592,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
     };

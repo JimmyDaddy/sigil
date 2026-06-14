@@ -126,6 +126,48 @@ tool_timeout_secs = 30
 - `tool_timeout_secs`: tool execution timeout.
 - `max_turns`: optional guard. It is disabled by default; when set, a run stops recoverably if the model keeps requesting tools without producing a final answer.
 
+## Task Planning
+
+```toml
+[task]
+enabled = true
+default_mode = "chat"
+max_plan_steps = 12
+max_replans = 2
+max_child_sessions = 8
+allow_parallel_readonly_subagents = false
+allow_write_subagents = true
+
+[task.planner]
+# provider = "deepseek"
+# model = "deepseek-v4-flash"
+# reasoning_effort = "high"
+
+[task.executor]
+# model = "deepseek-v4-pro"
+
+[task.subagent_read]
+# Read-only by default.
+
+[task.subagent_write]
+# Uses the full tool surface only when allow_write_subagents = true.
+```
+
+Planned tasks are started from the TUI with `/plan <task>`. `default_mode = "chat"` keeps normal composer submits chat-first; switch it only when a build intentionally wants planned tasks as the default flow.
+
+Role-specific provider/model settings inherit `[agent]` when omitted. Planner and subagent-read default to read-only file/search/code-intelligence tools. Executor can see the full runtime registry. Subagent-write can see the full runtime registry only when `allow_write_subagents = true`; otherwise it falls back to the read-only scope. Mutating tools still go through the normal approval policy.
+
+Each role can override visible tools:
+
+```toml
+[task.planner.tools]
+names = ["read_file", "ls", "glob", "grep", "code_symbols"]
+prefixes = []
+allow_all = false
+```
+
+Use explicit names and stable prefixes carefully. A scoped role registry gates tool specs, previews, execution, permission hooks, and egress hooks, so hidden tools are not merely omitted from the prompt.
+
 ## DeepSeek Provider
 
 ```toml

@@ -61,6 +61,15 @@ pub(crate) fn render_info_rail(frame: &mut Frame, area: Rect, view_model: &InfoR
         view_model.agent_lines.iter().cloned(),
         inner.width as usize,
     );
+    if !view_model.task_lines.is_empty() {
+        push_info_section(
+            &mut lines,
+            "task",
+            accent_teal(),
+            view_model.task_lines.iter().cloned(),
+            inner.width as usize,
+        );
+    }
     if !view_model.mcp_lines.is_empty() {
         push_info_section(
             &mut lines,

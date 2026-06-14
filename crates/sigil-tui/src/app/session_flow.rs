@@ -723,6 +723,44 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 "[ctl] compacted={} tail={}",
                 record.compacted_message_count, record.retained_tail_message_count
             ),
+            ControlEntry::TaskRun(run) => format!(
+                "[ctl] task {} status={}",
+                run.task_id.as_str(),
+                task_run_status_label(run.status)
+            ),
+            ControlEntry::TaskPlan(plan) => format!(
+                "[ctl] plan {} v{} status={} steps={}",
+                plan.task_id.as_str(),
+                plan.plan_version,
+                task_plan_status_label(plan.status),
+                plan.steps.len()
+            ),
+            ControlEntry::TaskStep(step) => format!(
+                "[ctl] step {} v{}:{} status={}",
+                step.task_id.as_str(),
+                step.plan_version,
+                step.step_id.as_str(),
+                task_step_status_label(step.status)
+            ),
+            ControlEntry::TaskChildSession(child) => format!(
+                "[ctl] child {} v{}:{} status={}",
+                child.task_id.as_str(),
+                child.plan_version,
+                child.step_id.as_str(),
+                task_child_session_status_label(child.status)
+            ),
+            ControlEntry::TaskSubagentApprovalRoute(route) => format!(
+                "[ctl] subagent approval {} call={} status={}",
+                route.route_id.as_str(),
+                route.call_id,
+                task_route_status_label(route.status)
+            ),
+            ControlEntry::TaskSubagentElicitationRoute(route) => format!(
+                "[ctl] subagent elicitation {} server={} status={}",
+                route.route_id.as_str(),
+                route.server_name,
+                task_route_status_label(route.status)
+            ),
             ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
         },
     }
@@ -834,6 +872,61 @@ fn tool_execution_status_label(status: sigil_kernel::ToolExecutionStatus) -> &'s
         sigil_kernel::ToolExecutionStatus::Failed => "failed",
         sigil_kernel::ToolExecutionStatus::Cancelled => "cancelled",
         sigil_kernel::ToolExecutionStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskRunStatus::Started => "started",
+        sigil_kernel::TaskRunStatus::Running => "running",
+        sigil_kernel::TaskRunStatus::Paused => "paused",
+        sigil_kernel::TaskRunStatus::Completed => "completed",
+        sigil_kernel::TaskRunStatus::Failed => "failed",
+        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_plan_status_label(status: sigil_kernel::TaskPlanStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskPlanStatus::Proposed => "proposed",
+        sigil_kernel::TaskPlanStatus::Accepted => "accepted",
+        sigil_kernel::TaskPlanStatus::Superseded => "superseded",
+        sigil_kernel::TaskPlanStatus::Rejected => "rejected",
+    }
+}
+
+fn task_step_status_label(status: sigil_kernel::TaskStepStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskStepStatus::Pending => "pending",
+        sigil_kernel::TaskStepStatus::Running => "running",
+        sigil_kernel::TaskStepStatus::Completed => "completed",
+        sigil_kernel::TaskStepStatus::Failed => "failed",
+        sigil_kernel::TaskStepStatus::Blocked => "blocked",
+        sigil_kernel::TaskStepStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskStepStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_child_session_status_label(status: sigil_kernel::TaskChildSessionStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskChildSessionStatus::Started => "started",
+        sigil_kernel::TaskChildSessionStatus::Completed => "completed",
+        sigil_kernel::TaskChildSessionStatus::Failed => "failed",
+        sigil_kernel::TaskChildSessionStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskChildSessionStatus::Interrupted => "interrupted",
+        sigil_kernel::TaskChildSessionStatus::Unavailable => "unavailable",
+    }
+}
+
+fn task_route_status_label(status: sigil_kernel::TaskRouteStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskRouteStatus::Registered => "registered",
+        sigil_kernel::TaskRouteStatus::Requested => "requested",
+        sigil_kernel::TaskRouteStatus::Resolved => "resolved",
+        sigil_kernel::TaskRouteStatus::Rejected => "rejected",
+        sigil_kernel::TaskRouteStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskRouteStatus::Stale => "stale",
     }
 }
 

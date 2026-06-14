@@ -17,6 +17,10 @@ use crate::{
         CompletionRequest, ModelMessage, PrefixSnapshot, ProviderContinuationState, ResponseHandle,
         SessionStats, UsageStats,
     },
+    task::{
+        TaskChildSessionEntry, TaskPlanEntry, TaskRunEntry, TaskStateProjection, TaskStepEntry,
+        TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
+    },
     tool::{
         ToolAccess, ToolError, ToolErrorKind, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
         ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
@@ -95,6 +99,18 @@ pub enum ControlEntry {
     ToolPreviewCaptured(ToolPreviewSnapshot),
     #[serde(alias = "CompactionApplied")]
     CompactionApplied(CompactionRecord),
+    #[serde(alias = "TaskRun")]
+    TaskRun(TaskRunEntry),
+    #[serde(alias = "TaskPlan")]
+    TaskPlan(TaskPlanEntry),
+    #[serde(alias = "TaskStep")]
+    TaskStep(TaskStepEntry),
+    #[serde(alias = "TaskChildSession")]
+    TaskChildSession(TaskChildSessionEntry),
+    #[serde(alias = "TaskSubagentApprovalRoute")]
+    TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry),
+    #[serde(alias = "TaskSubagentElicitationRoute")]
+    TaskSubagentElicitationRoute(TaskSubagentElicitationRouteEntry),
     #[serde(alias = "Note")]
     Note {
         kind: String,
@@ -462,6 +478,11 @@ impl Session {
         latest_compaction_record(&self.entries)
     }
 
+    /// Returns a durable task projection reconstructed from append-only control entries.
+    pub fn task_state_projection(&self) -> TaskStateProjection {
+        TaskStateProjection::from_entries(&self.entries)
+    }
+
     /// Builds one provider request from stable system memory, projected session history, and tools.
     ///
     /// # Errors
@@ -476,10 +497,39 @@ impl Session {
         previous_response_handle: Option<crate::provider::ResponseHandle>,
         traffic_partition_key: Option<String>,
     ) -> Result<CompletionRequest> {
+        self.build_request_with_transient_messages(
+            workspace_root,
+            memory_config,
+            tools,
+            reasoning_effort,
+            previous_response_handle,
+            traffic_partition_key,
+            &[],
+        )
+    }
+
+    /// Builds one provider request with extra transient messages that are not appended as
+    /// provider-visible session history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when memory loading, prefix materialization, or durable control writes fail.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_request_with_transient_messages(
+        &mut self,
+        workspace_root: &Path,
+        memory_config: &MemoryConfig,
+        tools: Vec<ToolSpec>,
+        reasoning_effort: Option<crate::provider::ReasoningEffort>,
+        previous_response_handle: Option<crate::provider::ResponseHandle>,
+        traffic_partition_key: Option<String>,
+        transient_messages: &[ModelMessage],
+    ) -> Result<CompletionRequest> {
         let memory = self.memory_snapshot_for_request(workspace_root, memory_config)?;
         let projected_messages = self.projected_messages();
         let mut request_messages = memory.messages.clone();
         request_messages.extend(projected_messages);
+        request_messages.extend(transient_messages.iter().cloned());
 
         let materialized_messages =
             serde_json::to_string(&request_messages).context("failed to serialize messages")?;

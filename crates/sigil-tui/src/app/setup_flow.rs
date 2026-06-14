@@ -315,6 +315,7 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
         },
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        task: Default::default(),
         providers: std::collections::BTreeMap::from([("deepseek".to_owned(), provider_value)]),
         mcp_servers: Vec::new(),
     })

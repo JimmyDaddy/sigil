@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, RwLock},
 };
@@ -21,6 +21,41 @@ pub struct ToolSpec {
     pub category: ToolCategory,
     pub access: ToolAccess,
     pub preview: ToolPreviewCapability,
+}
+
+/// Role-specific tool visibility and execution scope.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolRegistryScope {
+    #[serde(default)]
+    pub allow_all: bool,
+    #[serde(default)]
+    pub names: BTreeSet<String>,
+    #[serde(default)]
+    pub prefixes: Vec<String>,
+}
+
+impl ToolRegistryScope {
+    pub fn from_names_and_prefixes(
+        names: impl IntoIterator<Item = impl Into<String>>,
+        prefixes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            allow_all: false,
+            names: names.into_iter().map(Into::into).collect(),
+            prefixes: prefixes.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    pub fn allows(&self, name: &str) -> bool {
+        self.allow_all
+            || self.names.contains(name)
+            || self.prefixes.iter().any(|prefix| name.starts_with(prefix))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.allow_all && self.names.is_empty() && self.prefixes.is_empty()
+    }
 }
 
 /// Coarse product category for one provider-neutral tool.
@@ -850,12 +885,20 @@ pub trait Tool: Send + Sync {
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: Arc<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
+    scope: Option<Arc<ToolRegistryScope>>,
+}
+
+/// Strong role-specific view over a shared tool registry.
+#[derive(Clone)]
+pub struct ScopedToolRegistry {
+    inner: ToolRegistry,
 }
 
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self {
             tools: Arc::new(RwLock::new(BTreeMap::new())),
+            scope: None,
         }
     }
 }
@@ -874,6 +917,16 @@ impl ToolRegistry {
             Err(poisoned) => poisoned.into_inner(),
         };
         tools.insert(name, tool);
+    }
+
+    /// Returns a role-scoped registry sharing the same underlying tool map.
+    pub fn scoped(&self, scope: ToolRegistryScope) -> ScopedToolRegistry {
+        ScopedToolRegistry {
+            inner: Self {
+                tools: Arc::clone(&self.tools),
+                scope: Some(Arc::new(scope)),
+            },
+        }
     }
 
     /// Removes registered tools whose names start with the provided prefix.
@@ -906,11 +959,20 @@ impl ToolRegistry {
             Ok(tools) => tools,
             Err(poisoned) => poisoned.into_inner(),
         };
-        tools.values().map(|tool| tool.spec()).collect()
+        tools
+            .values()
+            .filter_map(|tool| {
+                let spec = tool.spec();
+                self.allows(&spec.name).then_some(spec)
+            })
+            .collect()
     }
 
     /// Returns one registered spec by name.
     pub fn spec_for(&self, name: &str) -> Option<ToolSpec> {
+        if !self.allows(name) {
+            return None;
+        }
         let tools = match self.tools.read() {
             Ok(tools) => tools,
             Err(poisoned) => poisoned.into_inner(),
@@ -933,10 +995,7 @@ impl ToolRegistry {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tools
-                .get(&call.name)
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+            self.allowed_tool(&tools, &call.name)?
         };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -959,10 +1018,7 @@ impl ToolRegistry {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tools
-                .get(&call.name)
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+            self.allowed_tool(&tools, &call.name)?
         };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -984,10 +1040,7 @@ impl ToolRegistry {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tools
-                .get(&call.name)
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+            self.allowed_tool(&tools, &call.name)?
         };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -1010,10 +1063,7 @@ impl ToolRegistry {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tools
-                .get(&call.name)
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+            self.allowed_tool(&tools, &call.name)?
         };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -1035,10 +1085,7 @@ impl ToolRegistry {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tools
-                .get(&call.name)
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+            self.allowed_tool(&tools, &call.name)?
         };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
@@ -1060,14 +1107,102 @@ impl ToolRegistry {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tools
-                .get(&call.name)
-                .cloned()
-                .ok_or_else(|| anyhow!("unknown tool {}", call.name))?
+            self.allowed_tool(&tools, &call.name)?
         };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         tool.egress_audit(ctx, &args)
+    }
+
+    fn allows(&self, name: &str) -> bool {
+        self.scope.as_ref().is_none_or(|scope| scope.allows(name))
+    }
+
+    fn allowed_tool(
+        &self,
+        tools: &BTreeMap<String, Arc<dyn Tool>>,
+        name: &str,
+    ) -> Result<Arc<dyn Tool>> {
+        if !self.allows(name) {
+            return Err(anyhow!("tool {name} is not available in this role scope"));
+        }
+        tools
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown tool {name}"))
+    }
+}
+
+impl ScopedToolRegistry {
+    /// Returns this scoped registry as the standard registry type used by the agent loop.
+    pub fn into_registry(self) -> ToolRegistry {
+        self.inner
+    }
+
+    pub fn specs(&self) -> Vec<ToolSpec> {
+        self.inner.specs()
+    }
+
+    pub fn spec_for(&self, name: &str) -> Option<ToolSpec> {
+        self.inner.spec_for(name)
+    }
+
+    /// Executes a scoped tool call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is outside the role scope, unknown, or fails.
+    pub async fn execute(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+    ) -> Result<ToolResult> {
+        self.inner.execute(ctx, call).await
+    }
+
+    /// Builds a scoped approval preview.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is outside the role scope, unknown, or preview fails.
+    pub async fn preview(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+    ) -> Result<Option<ToolPreview>> {
+        self.inner.preview(ctx, call).await
+    }
+
+    pub fn permission_subjects(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Vec<ToolSubject>> {
+        self.inner.permission_subjects(ctx, call)
+    }
+
+    pub fn permission_access(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<ToolAccess> {
+        self.inner.permission_access(ctx, call)
+    }
+
+    pub fn permission_default_mode(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Option<ApprovalMode>> {
+        self.inner.permission_default_mode(ctx, call)
+    }
+
+    pub fn egress_audit(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Option<ToolEgressAudit>> {
+        self.inner.egress_audit(ctx, call)
     }
 }
 

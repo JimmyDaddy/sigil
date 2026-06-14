@@ -44,6 +44,7 @@ impl AppState {
             UiCommand::ToggleSelectedToolCard => self.toggle_selected_tool_card(),
             UiCommand::ClearToolCardFocus => self.clear_tool_card_focus(),
             UiCommand::SubmitPrompt
+            | UiCommand::SubmitPlan
             | UiCommand::CancelOrQuit
             | UiCommand::ToggleWriteMode
             | UiCommand::ToggleThinking

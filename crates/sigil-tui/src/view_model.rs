@@ -34,6 +34,7 @@ pub(crate) struct InfoRailViewModel {
     pub agent_lines: Vec<String>,
     pub mcp_lines: Vec<String>,
     pub code_lines: Vec<String>,
+    pub task_lines: Vec<String>,
     pub usage_lines: Vec<String>,
     pub controls: Vec<String>,
 }
@@ -82,6 +83,7 @@ impl InfoRailViewModel {
                 .collect(),
             mcp_lines: app.mcp_sidebar_lines(),
             code_lines: app.code_intelligence_sidebar_lines(),
+            task_lines: app.task_sidebar_lines(),
             usage_lines: app.usage_sidebar_lines().to_vec(),
             controls,
         }

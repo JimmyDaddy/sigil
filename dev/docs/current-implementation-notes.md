@@ -26,8 +26,8 @@ sigil/
 
 ## 当前能力基线
 
-- `sigil-kernel` 统一承载 provider、tool、session、approval、permission、event、memory 和 compaction 契约。
-- `sigil-runtime` 统一装配 provider、内置工具、MCP 工具和 run options。
+- `sigil-kernel` 统一承载 provider、tool、session、approval、permission、event、memory、compaction 和 task orchestration 契约。
+- `sigil-runtime` 统一装配 provider、内置工具、MCP 工具、run options 和 role-scoped task agents。
 - `sigil-provider-deepseek` 支持 DeepSeek 流式对话、工具调用、reasoning replay、usage、pricing、Beta endpoint、prefix 和 FIM 专项入口。
 - `sigil-provider-openai-compat` 支持 OpenAI-compatible Chat Completions 流式对话、工具调用、usage、base URL、organization/project header 和模型配置。
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、搜索、目录枚举和 shell 执行。
@@ -35,7 +35,7 @@ sigil/
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
 - `sigil` 提供 `sigil` binary：无子命令时直接启动 TUI；`run` 自动化入口和 `doctor` 本地诊断入口保留为显式子命令；`prefix` / `fim` 保留为隐藏调试或 provider 专项入口，不作为普通用户主心智。
 - `sigil --version` 输出 package version、git commit、target 和 profile，用于安装后 smoke、release archive 验证和问题定位。
-- `sigil-tui` 承载第一用户入口的 TUI 实现，包括 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
+- `sigil-tui` 承载第一用户入口的 TUI 实现，包括 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、`/plan`、审批 modal、tool activity、diff preview、session 恢复、task 状态展示、context compaction、markdown code block 高亮和 code intelligence 状态展示。
 
 ## TUI 模块边界
 
@@ -111,6 +111,7 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 - session identity 跟随 durable log 恢复，不盲目回退到当前配置里的 provider/model。
 - response handle、provider continuation state、prefix snapshot、compaction record 和 usage snapshot 都写入 append-only control log。
 - tool approval、execution lifecycle 和 reasoning delta 会追加到 control log。
+- task run、plan、step、child-session 和 subagent approval-route 摘要会追加到 control log，并通过 `Session::task_state_projection` 投影。
 - 已开始但没有终态的工具执行在恢复时标记为 `interrupted`。
 - 悬空 tool call 会投影为结构化 `interrupted` tool result。
 - 文件变更工具的历史结果卡片会随 session restore 恢复。
@@ -118,6 +119,16 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 - hard threshold 自动 compaction 只在 run 回到 idle 后触发，不抢占当前流式执行。
 
 恢复后下一轮 request 会恢复最新匹配 provider 的 response handle。当前会话身份不会因为 `/config` 保存默认 provider/model 而被静默改写。
+
+计划任务在恢复时不会自动重放。`/plan continue` 会从 durable task projection 显式继续最近一个未完成 task，并跳过已完成步骤。
+
+## Task Planning 当前实现
+
+计划任务通过 TUI `/plan <任务>` 进入。worker protocol 使用 `SubmitTask` / `ContinueTask` 命令和 `TaskRunStarted` / `TaskRunFinished` 消息。Info rail 从 durable task control entries 渲染 task 状态、最新 plan 版本和当前步骤。
+
+`sigil-kernel::SequentialTaskOrchestrator` 先运行 planner role，通过 internal `task_plan_update` tool 接收 plan update，再顺序执行 steps。Executor step 在 parent session 中运行，但 step context 作为 transient request context 注入，不会变成普通 user history。Subagent read/write step 在 child session 中运行，parent session 记录 child-session lifecycle link，并为 child tool approval 与 MCP elicitation 写 route 摘要。
+
+Role-specific provider 和 run options 由 `sigil-runtime` 装配。Planner 与 subagent-read 默认使用只读 scoped tool registry；executor 默认使用完整 registry；subagent-write 只有在 `[task].allow_write_subagents = true` 时使用完整 registry。`ScopedToolRegistry` 会同时限制 specs、preview、execute、permission hooks 和 egress hooks。
 
 ## 配置与 Provider
 
@@ -131,6 +142,7 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 - `[compaction]`
 - `[code_intelligence]`
 - `[terminal]`
+- `[task]`
 - `[providers.*]`
 - `[[mcp_servers]]`
 

@@ -26,8 +26,8 @@ sigil/
 
 ## Current Capability Baseline
 
-- `sigil-kernel` owns generic provider, tool, session, approval, permission, event, memory, and compaction contracts.
-- `sigil-runtime` assembles providers, built-in tools, MCP tools, and run options.
+- `sigil-kernel` owns generic provider, tool, session, approval, permission, event, memory, compaction, and task orchestration contracts.
+- `sigil-runtime` assembles providers, built-in tools, MCP tools, run options, and role-scoped task agents.
 - `sigil-provider-deepseek` supports DeepSeek streaming chat, tool calls, reasoning replay, usage, pricing, Beta endpoints, prefix completion, and FIM-specific entrypoints.
 - `sigil-provider-openai-compat` supports OpenAI-compatible Chat Completions streaming chat, tool calls, usage, base URL, organization/project headers, and model configuration.
 - `sigil-tools-builtin` provides file read/write/edit/delete, search, directory listing, and shell execution.
@@ -35,7 +35,7 @@ sigil/
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
 - `sigil` provides the `sigil` binary: no subcommand starts the TUI directly; `run` and `doctor` remain explicit automation and diagnostics subcommands; `prefix` and `fim` remain hidden debugging or provider-specific entrypoints rather than normal user concepts.
 - `sigil --version` prints the package version, git commit, target, and profile for install smoke checks, release archive validation, and issue triage.
-- `sigil-tui` owns the primary TUI implementation: chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/resume`, approval modal, tool activity, diff preview, session recovery, context compaction, markdown code block highlighting, and code intelligence status display.
+- `sigil-tui` owns the primary TUI implementation: chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/resume`, `/plan`, approval modal, tool activity, diff preview, session recovery, task status display, context compaction, markdown code block highlighting, and code intelligence status display.
 
 ## TUI Module Boundaries
 
@@ -111,6 +111,7 @@ The current implementation uses append-only JSONL:
 - Session identity is restored from the durable log instead of blindly falling back to the current config provider/model.
 - Response handles, provider continuation state, prefix snapshots, compaction records, and usage snapshots are written into append-only control logs.
 - Tool approval, execution lifecycle, and reasoning deltas append control records.
+- Task run, plan, step, child-session, and subagent approval-route summaries append control records and are projected through `Session::task_state_projection`.
 - Tool executions that started without a terminal record are marked `interrupted` on restore.
 - Dangling tool calls are projected as structured `interrupted` tool results.
 - Historical file-change result cards are restored with the session.
@@ -118,6 +119,16 @@ The current implementation uses append-only JSONL:
 - Hard-threshold automatic compaction runs only after a run returns to idle; it does not preempt streaming execution.
 
 After restore, the next request recovers the latest matching provider response handle. The current session identity is not silently rewritten when `/config` saves new default provider/model settings.
+
+Planned tasks are not auto-replayed on restore. `/plan continue` explicitly resumes the latest unfinished task from the durable task projection and skips completed steps.
+
+## Current Task Planning Implementation
+
+Planned tasks enter through TUI `/plan <task>`. The worker protocol uses `SubmitTask` / `ContinueTask` commands and `TaskRunStarted` / `TaskRunFinished` messages. The info rail renders task status, latest plan version, and current step from durable task control entries.
+
+`sigil-kernel::SequentialTaskOrchestrator` runs a planner role first, accepts plan updates through the internal `task_plan_update` tool, then executes steps sequentially. Executor steps run against the parent session with transient step context so plan prompts do not become ordinary user history. Subagent read/write steps run in child sessions, and the parent session records child-session lifecycle links plus approval and MCP elicitation route summaries for child interactions.
+
+Role-specific providers and run options are assembled in `sigil-runtime`. Planner and subagent-read default to a read-only scoped tool registry; executor defaults to the full registry; subagent-write uses the full registry only when `[task].allow_write_subagents = true`. `ScopedToolRegistry` gates specs, preview, execution, permission hooks, and egress hooks.
 
 ## Configuration and Provider
 
@@ -131,6 +142,7 @@ Root config is parsed by `sigil-kernel`:
 - `[compaction]`
 - `[code_intelligence]`
 - `[terminal]`
+- `[task]`
 - `[providers.*]`
 - `[[mcp_servers]]`
 

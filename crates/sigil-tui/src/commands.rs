@@ -3,6 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiCommand {
     SubmitPrompt,
+    SubmitPlan,
     CancelOrQuit,
     ToggleWriteMode,
     ToggleThinking,
@@ -103,6 +104,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: Some("/doctor"),
         label: "Doctor",
         help: "Run local setup diagnostics.",
+        surface: CommandSurface::Slash,
+    },
+    UiCommandSpec {
+        command: UiCommand::SubmitPlan,
+        keys: &[],
+        slash: Some("/plan"),
+        label: "Plan",
+        help: "Plan and execute a multi-step task.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {

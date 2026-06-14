@@ -53,6 +53,105 @@ fn terminal_capability_helpers_default_on_and_follow_config() {
 }
 
 #[test]
+fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    for (status, label) in [
+        (sigil_kernel::TaskRunStatus::Started, "started"),
+        (sigil_kernel::TaskRunStatus::Running, "running"),
+        (sigil_kernel::TaskRunStatus::Paused, "paused"),
+        (sigil_kernel::TaskRunStatus::Completed, "completed"),
+        (sigil_kernel::TaskRunStatus::Failed, "failed"),
+        (sigil_kernel::TaskRunStatus::Cancelled, "cancelled"),
+        (sigil_kernel::TaskRunStatus::Interrupted, "interrupted"),
+    ] {
+        app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
+            sigil_kernel::TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                objective: "ship task".to_owned(),
+                status,
+                reason: None,
+            },
+        ))]);
+        assert!(
+            app.task_sidebar_lines()
+                .contains(&format!("status: {label}"))
+        );
+    }
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "ship task".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Paused,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "inspect".to_owned(),
+                detail: None,
+                role: sigil_kernel::AgentRole::Executor,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Running,
+            title: Some("inspect".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskSubagentApprovalRoute(
+            sigil_kernel::TaskSubagentApprovalRouteEntry {
+                route_id: sigil_kernel::TaskRouteId::new("route_1")?,
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: step_id.clone(),
+                role: sigil_kernel::AgentRole::SubagentWrite,
+                child_session_ref: child_ref.clone(),
+                call_id: "call-1".to_owned(),
+                tool_name: "write_file".to_owned(),
+                status: sigil_kernel::TaskRouteStatus::Requested,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: child_ref,
+                role: sigil_kernel::AgentRole::SubagentWrite,
+                status: sigil_kernel::TaskChildSessionStatus::Unavailable,
+                summary_hash: None,
+            },
+        )),
+    ]);
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"task: task_1".to_owned()));
+    assert!(lines.contains(&"status: paused".to_owned()));
+    assert!(lines.contains(&"plan: v1".to_owned()));
+    assert!(lines.contains(&"current: v1:step_1".to_owned()));
+    assert!(lines.contains(&"routes: unverified".to_owned()));
+    assert!(lines.contains(&"child: unavailable".to_owned()));
+    Ok(())
+}
+
+#[test]
 fn mcp_sidebar_lines_are_empty_before_runtime_config_loads() -> Result<()> {
     let temp = tempdir()?;
     let app = AppState::from_setup(

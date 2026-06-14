@@ -8,7 +8,11 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::permission::{ApprovalMode, PermissionConfig};
+use crate::{
+    permission::{ApprovalMode, PermissionConfig},
+    provider::ReasoningEffort,
+    task::AgentRole,
+};
 
 /// Root runtime configuration shared by the TUI, CLI, kernel, and adapters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +33,8 @@ pub struct RootConfig {
     pub code_intelligence: CodeIntelligenceConfig,
     #[serde(default)]
     pub terminal: TerminalConfig,
+    #[serde(default)]
+    pub task: TaskConfig,
     #[serde(default)]
     pub providers: BTreeMap<String, Value>,
     #[serde(default)]
@@ -320,6 +326,108 @@ pub struct AgentConfig {
     pub tool_timeout_secs: u64,
 }
 
+/// Planner/executor task mode configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskConfig {
+    #[serde(default = "default_task_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub default_mode: TaskMode,
+    #[serde(default)]
+    pub planner: RoleModelConfig,
+    #[serde(default)]
+    pub executor: RoleModelConfig,
+    #[serde(default)]
+    pub subagent_read: RoleModelConfig,
+    #[serde(default)]
+    pub subagent_write: RoleModelConfig,
+    #[serde(default = "default_max_plan_steps")]
+    pub max_plan_steps: usize,
+    #[serde(default = "default_max_replans")]
+    pub max_replans: usize,
+    #[serde(default = "default_max_child_sessions")]
+    pub max_child_sessions: usize,
+    #[serde(default)]
+    pub allow_parallel_readonly_subagents: bool,
+    #[serde(default = "default_allow_write_subagents")]
+    pub allow_write_subagents: bool,
+}
+
+impl Default for TaskConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_task_enabled(),
+            default_mode: TaskMode::default(),
+            planner: RoleModelConfig::default(),
+            executor: RoleModelConfig::default(),
+            subagent_read: RoleModelConfig::default(),
+            subagent_write: RoleModelConfig::default(),
+            max_plan_steps: default_max_plan_steps(),
+            max_replans: default_max_replans(),
+            max_child_sessions: default_max_child_sessions(),
+            allow_parallel_readonly_subagents: false,
+            allow_write_subagents: default_allow_write_subagents(),
+        }
+    }
+}
+
+impl TaskConfig {
+    /// Returns the role-specific model and tool configuration.
+    pub fn role_config(&self, role: AgentRole) -> &RoleModelConfig {
+        match role {
+            AgentRole::Planner => &self.planner,
+            AgentRole::Executor => &self.executor,
+            AgentRole::SubagentRead => &self.subagent_read,
+            AgentRole::SubagentWrite => &self.subagent_write,
+        }
+    }
+}
+
+/// Default launch mode for user prompts.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskMode {
+    #[default]
+    Chat,
+    Plan,
+}
+
+impl TaskMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+/// Optional model/runtime overrides for one task role.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct RoleModelConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub tools: ToolAllowlistConfig,
+}
+
+/// Tool names and prefixes visible to one task role.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolAllowlistConfig {
+    #[serde(default)]
+    pub allow_all: bool,
+    #[serde(default)]
+    pub names: Vec<String>,
+    #[serde(default)]
+    pub prefixes: Vec<String>,
+}
+
 /// Workspace memory boot configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -538,6 +646,26 @@ fn default_log_dir() -> String {
 
 fn default_timeout_secs() -> u64 {
     30
+}
+
+fn default_task_enabled() -> bool {
+    true
+}
+
+fn default_max_plan_steps() -> usize {
+    12
+}
+
+fn default_max_replans() -> usize {
+    2
+}
+
+fn default_max_child_sessions() -> usize {
+    8
+}
+
+fn default_allow_write_subagents() -> bool {
+    true
 }
 
 fn default_startup_timeout_secs() -> u64 {

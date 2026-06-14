@@ -84,6 +84,225 @@ fn render_model_and_session_entries_cover_tool_and_control_variants() {
 }
 
 #[test]
+fn render_task_control_entries_and_status_labels() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let route_id = sigil_kernel::TaskRouteId::new("route_1")?;
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+
+    assert_eq!(
+        task_run_status_label(sigil_kernel::TaskRunStatus::Started),
+        "started"
+    );
+    assert_eq!(
+        task_run_status_label(sigil_kernel::TaskRunStatus::Running),
+        "running"
+    );
+    assert_eq!(
+        task_run_status_label(sigil_kernel::TaskRunStatus::Paused),
+        "paused"
+    );
+    assert_eq!(
+        task_run_status_label(sigil_kernel::TaskRunStatus::Completed),
+        "completed"
+    );
+    assert_eq!(
+        task_run_status_label(sigil_kernel::TaskRunStatus::Failed),
+        "failed"
+    );
+    assert_eq!(
+        task_run_status_label(sigil_kernel::TaskRunStatus::Cancelled),
+        "cancelled"
+    );
+    assert_eq!(
+        task_run_status_label(sigil_kernel::TaskRunStatus::Interrupted),
+        "interrupted"
+    );
+
+    assert_eq!(
+        task_plan_status_label(sigil_kernel::TaskPlanStatus::Proposed),
+        "proposed"
+    );
+    assert_eq!(
+        task_plan_status_label(sigil_kernel::TaskPlanStatus::Accepted),
+        "accepted"
+    );
+    assert_eq!(
+        task_plan_status_label(sigil_kernel::TaskPlanStatus::Superseded),
+        "superseded"
+    );
+    assert_eq!(
+        task_plan_status_label(sigil_kernel::TaskPlanStatus::Rejected),
+        "rejected"
+    );
+
+    assert_eq!(
+        task_step_status_label(sigil_kernel::TaskStepStatus::Pending),
+        "pending"
+    );
+    assert_eq!(
+        task_step_status_label(sigil_kernel::TaskStepStatus::Running),
+        "running"
+    );
+    assert_eq!(
+        task_step_status_label(sigil_kernel::TaskStepStatus::Completed),
+        "completed"
+    );
+    assert_eq!(
+        task_step_status_label(sigil_kernel::TaskStepStatus::Failed),
+        "failed"
+    );
+    assert_eq!(
+        task_step_status_label(sigil_kernel::TaskStepStatus::Blocked),
+        "blocked"
+    );
+    assert_eq!(
+        task_step_status_label(sigil_kernel::TaskStepStatus::Cancelled),
+        "cancelled"
+    );
+    assert_eq!(
+        task_step_status_label(sigil_kernel::TaskStepStatus::Interrupted),
+        "interrupted"
+    );
+
+    assert_eq!(
+        task_child_session_status_label(sigil_kernel::TaskChildSessionStatus::Started),
+        "started"
+    );
+    assert_eq!(
+        task_child_session_status_label(sigil_kernel::TaskChildSessionStatus::Completed),
+        "completed"
+    );
+    assert_eq!(
+        task_child_session_status_label(sigil_kernel::TaskChildSessionStatus::Failed),
+        "failed"
+    );
+    assert_eq!(
+        task_child_session_status_label(sigil_kernel::TaskChildSessionStatus::Cancelled),
+        "cancelled"
+    );
+    assert_eq!(
+        task_child_session_status_label(sigil_kernel::TaskChildSessionStatus::Interrupted),
+        "interrupted"
+    );
+    assert_eq!(
+        task_child_session_status_label(sigil_kernel::TaskChildSessionStatus::Unavailable),
+        "unavailable"
+    );
+
+    assert_eq!(
+        task_route_status_label(sigil_kernel::TaskRouteStatus::Registered),
+        "registered"
+    );
+    assert_eq!(
+        task_route_status_label(sigil_kernel::TaskRouteStatus::Requested),
+        "requested"
+    );
+    assert_eq!(
+        task_route_status_label(sigil_kernel::TaskRouteStatus::Resolved),
+        "resolved"
+    );
+    assert_eq!(
+        task_route_status_label(sigil_kernel::TaskRouteStatus::Rejected),
+        "rejected"
+    );
+    assert_eq!(
+        task_route_status_label(sigil_kernel::TaskRouteStatus::Cancelled),
+        "cancelled"
+    );
+    assert_eq!(
+        task_route_status_label(sigil_kernel::TaskRouteStatus::Stale),
+        "stale"
+    );
+
+    let rendered = [
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::TaskRun(
+            sigil_kernel::TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                objective: "ship task".to_owned(),
+                status: sigil_kernel::TaskRunStatus::Running,
+                reason: None,
+            },
+        ))),
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::TaskPlan(
+            sigil_kernel::TaskPlanEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                status: sigil_kernel::TaskPlanStatus::Accepted,
+                steps: vec![sigil_kernel::TaskStepSpec {
+                    step_id: step_id.clone(),
+                    title: "inspect".to_owned(),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::Executor,
+                }],
+                reason: None,
+            },
+        ))),
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::TaskStep(
+            sigil_kernel::TaskStepEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: step_id.clone(),
+                role: sigil_kernel::AgentRole::Executor,
+                status: sigil_kernel::TaskStepStatus::Running,
+                title: Some("inspect".to_owned()),
+                summary: None,
+                reason: None,
+            },
+        ))),
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: step_id.clone(),
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: child_ref.clone(),
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Started,
+                summary_hash: None,
+            },
+        ))),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::TaskSubagentApprovalRoute(sigil_kernel::TaskSubagentApprovalRouteEntry {
+                route_id: route_id.clone(),
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: step_id.clone(),
+                role: sigil_kernel::AgentRole::SubagentWrite,
+                child_session_ref: child_ref.clone(),
+                call_id: "call-1".to_owned(),
+                tool_name: "write_file".to_owned(),
+                status: sigil_kernel::TaskRouteStatus::Requested,
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::TaskSubagentElicitationRoute(
+                sigil_kernel::TaskSubagentElicitationRouteEntry {
+                    route_id,
+                    task_id,
+                    plan_version: 1,
+                    step_id,
+                    role: sigil_kernel::AgentRole::SubagentRead,
+                    child_session_ref: child_ref,
+                    server_name: "mcp".to_owned(),
+                    status: sigil_kernel::TaskRouteStatus::Resolved,
+                },
+            ),
+        )),
+    ]
+    .join("\n");
+
+    assert!(rendered.contains("[ctl] task task_1 status=running"));
+    assert!(rendered.contains("[ctl] plan task_1 v1 status=accepted steps=1"));
+    assert!(rendered.contains("[ctl] step task_1 v1:step_1 status=running"));
+    assert!(rendered.contains("[ctl] child task_1 v1:step_1 status=started"));
+    assert!(rendered.contains("[ctl] subagent approval route_1 call=call-1 status=requested"));
+    assert!(rendered.contains("[ctl] subagent elicitation route_1 server=mcp status=resolved"));
+    Ok(())
+}
+
+#[test]
 fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
     let preview = ToolPreviewSnapshot::from_preview(
         "call-1",

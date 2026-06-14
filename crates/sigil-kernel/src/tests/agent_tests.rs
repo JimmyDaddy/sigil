@@ -17,15 +17,16 @@ use crate::{
     ApprovalHandler, ApprovalMode, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
     CompactionConfig, CompletionRequest, ControlEntry, EventHandler, ExternalDirectoryConfig,
     ExternalDirectoryRule, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
-    PermissionConfig, PermissionDecision, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ResponseHandle, RunEvent,
-    Session, SessionLogEntry, Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction,
+    ModelMessage, PermissionConfig, PermissionDecision, Provider, ProviderCapabilities,
+    ProviderChunk, ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ResponseHandle,
+    RunEvent, Session, SessionLogEntry, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus,
+    TaskPlanUpdateContext, Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction,
     ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
     ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry,
     ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats,
 };
 
-use super::{Agent, AgentRunOptions};
+use super::{Agent, AgentRunInput, AgentRunOptions, AgentRunTerminalReason};
 
 struct MockProvider;
 
@@ -84,6 +85,49 @@ impl Provider for MockProvider {
                 Ok(ProviderChunk::Done),
             ])))
         }
+    }
+}
+
+struct CapturingTextProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl Provider for CapturingTextProvider {
+    fn name(&self) -> &str {
+        "mock-capturing"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            supports_reasoning_stream: true,
+            supports_tool_stream: true,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta("captured".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
     }
 }
 
@@ -1040,9 +1084,225 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn agent_run_input_transient_context_does_not_append_user_message() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                "transient step context",
+            )]),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(1),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "captured");
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::FinalAnswer
+    );
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].messages.iter().any(|message| {
+        message.role == MessageRole::User
+            && message.content.as_deref() == Some("transient step context")
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::User(message)
+                if message.content.as_deref() == Some("transient step context")
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_run_output_reports_approval_denials() -> Result<()> {
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = DenyWritesHandler;
+
+    let output = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("write"),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "done");
+    assert!(!executed.load(Ordering::SeqCst));
+    assert_eq!(output.outcome.tool_calls, 1);
+    assert_eq!(output.outcome.approval_denials, 1);
+    assert!(output.outcome.tool_errors.iter().any(|error| {
+        error.kind == ToolErrorKind::ApprovalDenied
+            && error.message.contains("tool execution denied by user")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
+    let agent = Agent::new(PlanUpdateProvider { valid: true }, ToolRegistry::new());
+    let mut session = Session::new("mock-plan", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("plan").with_task_plan_update(TaskPlanUpdateContext {
+                task_id: TaskId::new("task_1")?,
+                max_plan_steps: 4,
+            }),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "done");
+    assert_eq!(output.outcome.tool_errors.len(), 0);
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskPlan(plan))
+                if plan.task_id.as_str() == "task_1"
+                    && plan.plan_version == 1
+                    && plan.status == TaskPlanStatus::Accepted
+                    && plan.steps.len() == 1
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-plan-1"
+                    && execution.tool_name == TASK_PLAN_UPDATE_TOOL_NAME
+                    && execution.status == ToolExecutionStatus::Started
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-plan-1"
+                    && execution.tool_name == TASK_PLAN_UPDATE_TOOL_NAME
+                    && execution.status == ToolExecutionStatus::Completed
+                    && execution.model_content_hash.is_some()
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Result<()> {
+    let agent = Agent::new(PlanUpdateProvider { valid: false }, ToolRegistry::new());
+    let mut session = Session::new("mock-plan", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("plan").with_task_plan_update(TaskPlanUpdateContext {
+                task_id: TaskId::new("task_1")?,
+                max_plan_steps: 4,
+            }),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "done");
+    assert!(output.outcome.tool_errors.iter().any(|error| {
+        error.kind == ToolErrorKind::InvalidInput
+            && error
+                .message
+                .contains("task plan must contain at least one step")
+    }));
+    assert!(
+        !session
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::TaskPlan(_))))
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-plan-1"
+                    && execution.status == ToolExecutionStatus::Failed
+        )
+    }));
+    Ok(())
+}
+
 struct WriteMockProvider;
 struct InvalidWriteArgsProvider;
 struct LoopingToolProvider;
+struct PlanUpdateProvider {
+    valid: bool,
+}
 
 #[async_trait]
 impl Provider for WriteMockProvider {
@@ -1099,6 +1359,69 @@ impl Provider for WriteMockProvider {
                 Ok(ProviderChunk::Done),
             ])))
         }
+    }
+}
+
+#[async_trait]
+impl Provider for PlanUpdateProvider {
+    fn name(&self) -> &str {
+        "mock-plan"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            supports_reasoning_stream: true,
+            supports_tool_stream: true,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        if tool_used {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+
+        let args = if self.valid {
+            r#"{"plan_version":1,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","role":"executor"}]}"#
+        } else {
+            r#"{"plan_version":1,"status":"accepted","steps":[]}"#
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-plan-1".to_owned(),
+                name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-plan-1".to_owned(),
+                delta: args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-plan-1".to_owned(),
+                name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+                args_json: args.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
     }
 }
 

@@ -47,6 +47,27 @@ fn activate_lazy_mcp_action_maps_to_worker_command() {
 }
 
 #[test]
+fn plan_actions_map_to_worker_commands() {
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    let submit = app.into_worker_command(AppAction::SubmitPlan("ship task".to_owned()));
+    assert!(matches!(
+        submit,
+        WorkerCommand::SubmitTask { ref prompt } if prompt == "ship task"
+    ));
+
+    let continue_task = app.into_worker_command(AppAction::ContinuePlan {
+        task_id: Some("task_1".to_owned()),
+    });
+    assert!(matches!(
+        continue_task,
+        WorkerCommand::ContinueTask {
+            task_id: Some(ref task_id)
+        } if task_id == "task_1"
+    ));
+}
+
+#[test]
 fn run_failed_surfaces_root_cause_summary_in_notice() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -482,6 +503,50 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             .iter()
             .any(|entry| entry.text.contains("Session compacted."))
     );
+    Ok(())
+}
+
+#[test]
+fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle_worker_message(WorkerMessage::TaskRunStarted {
+        task_id: "task_1".to_owned(),
+        objective: "ship task".to_owned(),
+    })?;
+
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.last_notice(), Some("planning task task_1"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| { event.label == "task:start" && event.detail == "task_1 ship task" })
+    );
+
+    for (status, label) in [
+        (sigil_kernel::TaskRunStatus::Started, "started"),
+        (sigil_kernel::TaskRunStatus::Running, "running"),
+        (sigil_kernel::TaskRunStatus::Paused, "paused"),
+        (sigil_kernel::TaskRunStatus::Completed, "completed"),
+        (sigil_kernel::TaskRunStatus::Failed, "failed"),
+        (sigil_kernel::TaskRunStatus::Cancelled, "cancelled"),
+        (sigil_kernel::TaskRunStatus::Interrupted, "interrupted"),
+    ] {
+        app.is_busy = true;
+        app.handle_worker_message(WorkerMessage::TaskRunFinished {
+            task_id: "task_1".to_owned(),
+            status,
+            entries: Vec::new(),
+        })?;
+
+        assert!(!app.is_busy);
+        assert_eq!(app.run_phase(), RunPhase::Idle);
+        let expected_notice = format!("task task_1 {label}");
+        assert_eq!(app.last_notice(), Some(expected_notice.as_str()));
+        assert!(app.events.iter().any(|event| {
+            event.label == "task:finish" && event.detail == format!("task_1 status={label}")
+        }));
+    }
     Ok(())
 }
 

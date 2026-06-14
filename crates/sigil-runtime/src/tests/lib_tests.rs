@@ -11,18 +11,19 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, InteractionMode,
-    LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig,
-    ReasoningEffort, RootConfig, SessionConfig, Tool, ToolAccess, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    WorkspaceConfig,
+    AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig,
+    InteractionMode, LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig,
+    PermissionConfig, ReasoningEffort, RoleModelConfig, RootConfig, SessionConfig, TaskConfig,
+    Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
 use sigil_provider_openai_compat::{OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV};
 
 use super::{
     SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
-    build_run_options, build_tool_registry, load_deepseek_config, load_openai_compat_config,
+    build_role_provider, build_role_run_options, build_role_tool_registry, build_run_options,
+    build_tool_registry, load_deepseek_config, load_openai_compat_config,
     refresh_mcp_server_tools_with_mcp_handlers, register_lazy_mcp_activation_tool,
     resolve_deepseek_api_key, resolve_deepseek_api_key_with_session, resolve_openai_compat_api_key,
     resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
@@ -49,6 +50,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         compaction: sigil_kernel::CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
         terminal: Default::default(),
+        task: TaskConfig::default(),
         providers: BTreeMap::from([
             (
                 "deepseek".to_owned(),
@@ -325,6 +327,72 @@ fn build_run_options_uses_max_reasoning_for_non_deepseek() {
     );
 
     assert_eq!(options.reasoning_effort, Some(ReasoningEffort::Max));
+}
+
+#[test]
+fn build_role_run_options_applies_reasoning_override() {
+    let mut config = test_root_config("deepseek");
+    config.task.planner.reasoning_effort = Some(ReasoningEffort::Low);
+
+    let options = build_role_run_options(
+        &config,
+        Path::new("/tmp/sigil-runtime-test").to_path_buf(),
+        InteractionMode::Interactive,
+        AgentRole::Planner,
+    );
+
+    assert_eq!(options.reasoning_effort, Some(ReasoningEffort::Low));
+    assert_eq!(options.max_turns, Some(12));
+}
+
+#[test]
+fn build_role_provider_uses_role_provider_override() -> Result<()> {
+    let mut config = test_root_config("deepseek");
+    config.task.planner = RoleModelConfig {
+        provider: Some("openai_compat".to_owned()),
+        model: Some("gpt-role".to_owned()),
+        ..RoleModelConfig::default()
+    };
+
+    let provider = build_role_provider(&config, AgentRole::Planner)?;
+
+    assert_eq!(provider.name(), "openai_compat");
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_role_tool_registry_applies_default_and_configured_scopes() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    sigil_tools_builtin::register_builtin_tools(&mut registry);
+
+    let config = test_root_config("deepseek");
+    let planner = build_role_tool_registry(&registry, &config, AgentRole::Planner);
+    assert!(planner.spec_for("read_file").is_some());
+    assert!(planner.spec_for("write_file").is_none());
+
+    let executor = build_role_tool_registry(&registry, &config, AgentRole::Executor);
+    assert!(executor.spec_for("write_file").is_some());
+
+    let subagent_write = build_role_tool_registry(&registry, &config, AgentRole::SubagentWrite);
+    assert!(subagent_write.spec_for("write_file").is_some());
+
+    let mut write_disabled = config.clone();
+    write_disabled.task.allow_write_subagents = false;
+    let subagent_write =
+        build_role_tool_registry(&registry, &write_disabled, AgentRole::SubagentWrite);
+    assert!(subagent_write.spec_for("read_file").is_some());
+    assert!(subagent_write.spec_for("write_file").is_none());
+
+    let mut configured = config.clone();
+    configured.task.planner.tools = ToolAllowlistConfig {
+        allow_all: false,
+        names: vec!["write_file".to_owned()],
+        prefixes: Vec::new(),
+    };
+    let planner = build_role_tool_registry(&registry, &configured, AgentRole::Planner);
+    assert!(planner.spec_for("write_file").is_some());
+    assert!(planner.spec_for("read_file").is_none());
+    Ok(())
 }
 
 #[test]

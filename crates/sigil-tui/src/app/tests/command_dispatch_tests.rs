@@ -74,3 +74,10 @@ fn alt_d_does_not_request_diagnostics_with_pending_approval() -> Result<()> {
     assert!(!app.events.iter().any(|event| event.label == "code:check"));
     Ok(())
 }
+
+#[test]
+fn submit_plan_ui_command_is_not_handled_by_global_dispatch() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    assert!(!app.handle_ui_command(crate::commands::UiCommand::SubmitPlan));
+}

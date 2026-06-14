@@ -311,6 +311,10 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub enum AppAction {
     SubmitPrompt(String),
+    SubmitPlan(String),
+    ContinuePlan {
+        task_id: Option<String>,
+    },
     ApprovalDecision {
         call_id: String,
         approved: bool,
@@ -1096,6 +1100,44 @@ impl AppState {
             }
             "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
             "/model" => self.set_runtime_model_from_command(&command.arg),
+            "/plan" => {
+                if self.is_busy {
+                    self.push_timeline(TimelineRole::Notice, "busy; plan later");
+                    return Ok(None);
+                }
+                let arg = command.arg.trim();
+                if arg.is_empty() {
+                    self.push_timeline(TimelineRole::Notice, "usage: /plan <task>");
+                    return Ok(None);
+                }
+                if arg == "continue" {
+                    self.is_busy = true;
+                    self.run_phase = RunPhase::Thinking;
+                    self.last_notice = Some("continuing task".to_owned());
+                    self.last_phase_marker = None;
+                    self.push_phase_marker(format!("task|{}", self.model_name));
+                    self.streaming_assistant_index = None;
+                    self.streaming_reasoning_index = None;
+                    self.refresh_usage_sidebar_cache();
+                    return Ok(Some(AppAction::ContinuePlan { task_id: None }));
+                }
+
+                let objective = arg.to_owned();
+                self.timeline_scroll_back = 0;
+                self.push_timeline(TimelineRole::User, format!("/plan {objective}"));
+                self.push_event("input", format!("submitted plan {objective}"));
+                self.active_pane = PaneFocus::Composer;
+                self.push_event("focus", current_focus_label(self));
+                self.is_busy = true;
+                self.run_phase = RunPhase::Thinking;
+                self.last_notice = Some("planning".to_owned());
+                self.last_phase_marker = None;
+                self.push_phase_marker(format!("task|{}", self.model_name));
+                self.streaming_assistant_index = None;
+                self.streaming_reasoning_index = None;
+                self.refresh_usage_sidebar_cache();
+                Ok(Some(AppAction::SubmitPlan(objective)))
+            }
             "/quit" => {
                 self.should_quit = true;
                 self.push_timeline(TimelineRole::Notice, "quitting");
@@ -1191,6 +1233,31 @@ impl AppState {
             format!("phase: {}", self.run_phase_label()),
             format!("session: {}", short_session_token(&self.session_id)),
         ]
+    }
+
+    pub(crate) fn task_sidebar_lines(&self) -> Vec<String> {
+        let projection =
+            sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries);
+        let Some(task) = projection.latest_task() else {
+            return Vec::new();
+        };
+        let mut lines = vec![
+            format!("task: {}", task.task_id.as_str()),
+            format!("status: {}", task_run_status_label(task.status)),
+        ];
+        if let Some(plan_version) = task.latest_plan_version {
+            lines.push(format!("plan: v{plan_version}"));
+        }
+        if let Some((plan_version, step_id)) = &task.current_step {
+            lines.push(format!("current: v{plan_version}:{}", step_id.as_str()));
+        }
+        if task.route_unverified {
+            lines.push("routes: unverified".to_owned());
+        }
+        if task.child_unavailable {
+            lines.push("child: unavailable".to_owned());
+        }
+        lines
     }
 
     pub(crate) fn reasoning_effort_label(&self) -> &'static str {
@@ -1571,6 +1638,18 @@ impl AppState {
         Ok(Some(AppAction::RuntimeConfigUpdated {
             root_config: Box::new(next_config),
         }))
+    }
+}
+
+fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskRunStatus::Started => "started",
+        sigil_kernel::TaskRunStatus::Running => "running",
+        sigil_kernel::TaskRunStatus::Paused => "paused",
+        sigil_kernel::TaskRunStatus::Completed => "completed",
+        sigil_kernel::TaskRunStatus::Failed => "failed",
+        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
     }
 }
 

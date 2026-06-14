@@ -1,12 +1,16 @@
 use std::{
     collections::BTreeSet,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::Duration,
 };
 
 use sigil_kernel::{
-    Agent, AgentRunOptions, AgentRunResult, ProviderCapabilities, RootConfig, Session, ToolApproval,
+    Agent, AgentRole, AgentRunOptions, AgentRunResult, ControlEntry, ProviderCapabilities,
+    RootConfig, SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry,
+    SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskRouteId,
+    TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepStatus,
+    TaskSubagentElicitationRouteEntry, ToolApproval,
 };
 
 use crate::{
@@ -154,8 +158,8 @@ pub(super) fn run_worker_loop<P>(
                 }
                 None => None,
             };
-            match task_result.result {
-                Ok(run_result) => {
+            match task_result.payload {
+                RunTaskPayload::Chat(Ok(run_result)) => {
                     let entries = current_session
                         .as_ref()
                         .map(|session| session.entries().to_vec())
@@ -165,7 +169,27 @@ pub(super) fn run_worker_loop<P>(
                         entries,
                     });
                 }
-                Err(error) => {
+                RunTaskPayload::Chat(Err(error)) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                }
+                RunTaskPayload::Task {
+                    task_id,
+                    result: Ok(status),
+                } => {
+                    let entries = current_session
+                        .as_ref()
+                        .map(|session| session.entries().to_vec())
+                        .unwrap_or_default();
+                    let _ = message_tx.send(WorkerMessage::TaskRunFinished {
+                        task_id,
+                        status,
+                        entries,
+                    });
+                }
+                RunTaskPayload::Task {
+                    task_id: _,
+                    result: Err(error),
+                } => {
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                 }
             }
@@ -240,7 +264,354 @@ pub(super) fn run_worker_loop<P>(
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
-                        result,
+                        payload: RunTaskPayload::Chat(result),
+                    });
+                });
+
+                active_run = Some(ActiveRun {
+                    run_id,
+                    handle,
+                    approval_tx,
+                    elicitation_audit_buffer,
+                });
+            }
+            Ok(WorkerCommand::SubmitTask { prompt }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "agent is already running".to_owned(),
+                    ));
+                    continue;
+                }
+                if !root_config.task.enabled {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "task planning is disabled in config".to_owned(),
+                    ));
+                    continue;
+                }
+
+                let Some(run_session) = current_session.take() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+
+                let task_id = match next_task_id(&run_session) {
+                    Ok(task_id) => task_id,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                let task_id_value = task_id.as_str().to_owned();
+                let parent_session_ref = match session_ref_for_log_path(&current_session_log_path) {
+                    Ok(reference) => reference,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                    task_id: task_id_value.clone(),
+                    objective: prompt.clone(),
+                });
+
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
+                let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                let base_registry = agent.tool_registry().clone();
+                let root_config_for_task = root_config.clone();
+                let planner_options = sigil_runtime::build_role_run_options(
+                    &root_config_for_task,
+                    options.workspace_root.clone(),
+                    options.interaction_mode,
+                    AgentRole::Planner,
+                );
+                let executor_options = sigil_runtime::build_role_run_options(
+                    &root_config_for_task,
+                    options.workspace_root.clone(),
+                    options.interaction_mode,
+                    AgentRole::Executor,
+                );
+                let subagent_read_options = sigil_runtime::build_role_run_options(
+                    &root_config_for_task,
+                    options.workspace_root.clone(),
+                    options.interaction_mode,
+                    AgentRole::SubagentRead,
+                );
+                let subagent_write_options = sigil_runtime::build_role_run_options(
+                    &root_config_for_task,
+                    options.workspace_root.clone(),
+                    options.interaction_mode,
+                    AgentRole::SubagentWrite,
+                );
+                let task_result_tx = task_result_tx.clone();
+                let run_id = next_run_id;
+                next_run_id += 1;
+
+                let handle = runtime.spawn(async move {
+                    let mut run_session = run_session;
+                    let result = async {
+                        let planner_provider = sigil_runtime::build_role_provider(
+                            &root_config_for_task,
+                            AgentRole::Planner,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        let executor_provider = sigil_runtime::build_role_provider(
+                            &root_config_for_task,
+                            AgentRole::Executor,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        let subagent_read_provider = sigil_runtime::build_role_provider(
+                            &root_config_for_task,
+                            AgentRole::SubagentRead,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        let subagent_write_provider = sigil_runtime::build_role_provider(
+                            &root_config_for_task,
+                            AgentRole::SubagentWrite,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        let planner_registry = sigil_runtime::build_role_tool_registry(
+                            &base_registry,
+                            &root_config_for_task,
+                            AgentRole::Planner,
+                        )
+                        .into_registry();
+                        let executor_registry = sigil_runtime::build_role_tool_registry(
+                            &base_registry,
+                            &root_config_for_task,
+                            AgentRole::Executor,
+                        )
+                        .into_registry();
+                        let subagent_read_registry = sigil_runtime::build_role_tool_registry(
+                            &base_registry,
+                            &root_config_for_task,
+                            AgentRole::SubagentRead,
+                        )
+                        .into_registry();
+                        let subagent_write_registry = sigil_runtime::build_role_tool_registry(
+                            &base_registry,
+                            &root_config_for_task,
+                            AgentRole::SubagentWrite,
+                        )
+                        .into_registry();
+                        let orchestrator = SequentialTaskOrchestrator::new(
+                            Agent::new(planner_provider, planner_registry),
+                            Agent::new(executor_provider, executor_registry),
+                            Agent::new(subagent_read_provider, subagent_read_registry),
+                            Agent::new(subagent_write_provider, subagent_write_registry),
+                        );
+                        let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+                        orchestrator
+                            .run(
+                                &mut run_session,
+                                SequentialTaskRequest {
+                                    task_id,
+                                    parent_session_ref,
+                                    objective: prompt,
+                                },
+                                planner_options,
+                                executor_options,
+                                subagent_read_options,
+                                subagent_write_options,
+                                root_config_for_task.task.max_plan_steps,
+                                &mut handler,
+                                &mut approval_handler,
+                            )
+                            .await
+                            .map(|output| output.status)
+                            .map_err(|error| format!("{error:#}"))
+                    }
+                    .await;
+                    let result = match append_mcp_elicitation_audits(
+                        &mut run_session,
+                        &run_elicitation_audit_buffer,
+                    ) {
+                        Ok(()) => result,
+                        Err(error) => Err(error),
+                    };
+                    let _ = task_result_tx.send(RunTaskResult {
+                        run_id,
+                        session: run_session,
+                        payload: RunTaskPayload::Task {
+                            task_id: task_id_value,
+                            result,
+                        },
+                    });
+                });
+
+                active_run = Some(ActiveRun {
+                    run_id,
+                    handle,
+                    approval_tx,
+                    elicitation_audit_buffer,
+                });
+            }
+            Ok(WorkerCommand::ContinueTask { task_id }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "agent is already running".to_owned(),
+                    ));
+                    continue;
+                }
+                if !root_config.task.enabled {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "task planning is disabled in config".to_owned(),
+                    ));
+                    continue;
+                }
+
+                let Some(run_session) = current_session.take() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+                let (task_id, task_id_value, objective) =
+                    match resolve_continue_task(&run_session, task_id) {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            current_session = Some(run_session);
+                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                            continue;
+                        }
+                    };
+                let parent_session_ref = match session_ref_for_log_path(&current_session_log_path) {
+                    Ok(reference) => reference,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                    task_id: task_id_value.clone(),
+                    objective: objective.clone(),
+                });
+
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
+                let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                let base_registry = agent.tool_registry().clone();
+                let root_config_for_task = root_config.clone();
+                let executor_options = sigil_runtime::build_role_run_options(
+                    &root_config_for_task,
+                    options.workspace_root.clone(),
+                    options.interaction_mode,
+                    AgentRole::Executor,
+                );
+                let subagent_read_options = sigil_runtime::build_role_run_options(
+                    &root_config_for_task,
+                    options.workspace_root.clone(),
+                    options.interaction_mode,
+                    AgentRole::SubagentRead,
+                );
+                let subagent_write_options = sigil_runtime::build_role_run_options(
+                    &root_config_for_task,
+                    options.workspace_root.clone(),
+                    options.interaction_mode,
+                    AgentRole::SubagentWrite,
+                );
+                let task_result_tx = task_result_tx.clone();
+                let run_id = next_run_id;
+                next_run_id += 1;
+
+                let handle = runtime.spawn(async move {
+                    let mut run_session = run_session;
+                    let result = async {
+                        let planner_provider = sigil_runtime::build_role_provider(
+                            &root_config_for_task,
+                            AgentRole::Planner,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        let executor_provider = sigil_runtime::build_role_provider(
+                            &root_config_for_task,
+                            AgentRole::Executor,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        let subagent_read_provider = sigil_runtime::build_role_provider(
+                            &root_config_for_task,
+                            AgentRole::SubagentRead,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        let subagent_write_provider = sigil_runtime::build_role_provider(
+                            &root_config_for_task,
+                            AgentRole::SubagentWrite,
+                        )
+                        .map_err(|error| format!("{error:#}"))?;
+                        let planner_registry = sigil_runtime::build_role_tool_registry(
+                            &base_registry,
+                            &root_config_for_task,
+                            AgentRole::Planner,
+                        )
+                        .into_registry();
+                        let executor_registry = sigil_runtime::build_role_tool_registry(
+                            &base_registry,
+                            &root_config_for_task,
+                            AgentRole::Executor,
+                        )
+                        .into_registry();
+                        let subagent_read_registry = sigil_runtime::build_role_tool_registry(
+                            &base_registry,
+                            &root_config_for_task,
+                            AgentRole::SubagentRead,
+                        )
+                        .into_registry();
+                        let subagent_write_registry = sigil_runtime::build_role_tool_registry(
+                            &base_registry,
+                            &root_config_for_task,
+                            AgentRole::SubagentWrite,
+                        )
+                        .into_registry();
+                        let orchestrator = SequentialTaskOrchestrator::new(
+                            Agent::new(planner_provider, planner_registry),
+                            Agent::new(executor_provider, executor_registry),
+                            Agent::new(subagent_read_provider, subagent_read_registry),
+                            Agent::new(subagent_write_provider, subagent_write_registry),
+                        );
+                        let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+                        orchestrator
+                            .continue_run(
+                                &mut run_session,
+                                SequentialTaskRequest {
+                                    task_id,
+                                    parent_session_ref,
+                                    objective,
+                                },
+                                executor_options,
+                                subagent_read_options,
+                                subagent_write_options,
+                                &mut handler,
+                                &mut approval_handler,
+                            )
+                            .await
+                            .map(|output| output.status)
+                            .map_err(|error| format!("{error:#}"))
+                    }
+                    .await;
+                    let result = match append_mcp_elicitation_audits(
+                        &mut run_session,
+                        &run_elicitation_audit_buffer,
+                    ) {
+                        Ok(()) => result,
+                        Err(error) => Err(error),
+                    };
+                    let _ = task_result_tx.send(RunTaskResult {
+                        run_id,
+                        session: run_session,
+                        payload: RunTaskPayload::Task {
+                            task_id: task_id_value,
+                            result,
+                        },
                     });
                 });
 
@@ -286,6 +657,11 @@ pub(super) fn run_worker_loop<P>(
                                 &mut session,
                                 &active_run.elicitation_audit_buffer,
                             ) {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                current_session = Some(session);
+                                continue;
+                            }
+                            if let Err(error) = append_cancelled_task_state(&mut session) {
                                 let _ = message_tx.send(WorkerMessage::RunFailed(error));
                                 current_session = Some(session);
                                 continue;
@@ -674,7 +1050,15 @@ fn refresh_pending_mcp_servers<P>(
 struct RunTaskResult {
     run_id: u64,
     session: Session,
-    result: std::result::Result<AgentRunResult, String>,
+    payload: RunTaskPayload,
+}
+
+enum RunTaskPayload {
+    Chat(std::result::Result<AgentRunResult, String>),
+    Task {
+        task_id: String,
+        result: std::result::Result<TaskRunStatus, String>,
+    },
 }
 
 struct ActiveProviderStatusTask {
@@ -694,7 +1078,7 @@ enum ProviderStatusTaskResult {
     },
 }
 
-fn append_mcp_elicitation_audits(
+pub(super) fn append_mcp_elicitation_audits(
     session: &mut Session,
     audit_buffer: &McpElicitationAuditBuffer,
 ) -> std::result::Result<(), String> {
@@ -705,9 +1089,230 @@ fn append_mcp_elicitation_audits(
         std::mem::take(&mut *buffer)
     };
     for control in controls {
+        if let Some(route) = subagent_elicitation_route_for_control(session, &control) {
+            session
+                .append_control(route)
+                .map_err(|error| format!("failed to append MCP elicitation route: {error:#}"))?;
+        }
         session
             .append_control(control)
             .map_err(|error| format!("failed to append MCP elicitation audit: {error:#}"))?;
     }
     Ok(())
+}
+
+fn subagent_elicitation_route_for_control(
+    session: &Session,
+    control: &ControlEntry,
+) -> Option<ControlEntry> {
+    let ControlEntry::McpElicitation(elicitation) = control else {
+        return None;
+    };
+    let projection = session.task_state_projection();
+    let task = projection.latest_task()?;
+    let child = current_subagent_child(task)
+        .or_else(|| latest_subagent_child_from_entries(session, task))?;
+    let status = match elicitation.action {
+        sigil_kernel::McpElicitationDecision::Accepted => TaskRouteStatus::Resolved,
+        sigil_kernel::McpElicitationDecision::Declined => TaskRouteStatus::Rejected,
+        sigil_kernel::McpElicitationDecision::Cancelled => TaskRouteStatus::Cancelled,
+    };
+    let route_id = TaskRouteId::new(format!(
+        "route_mcp_{}",
+        stable_route_suffix(&elicitation.message_hash)
+    ))
+    .ok()?;
+    Some(ControlEntry::TaskSubagentElicitationRoute(
+        TaskSubagentElicitationRouteEntry {
+            route_id,
+            task_id: task.task_id.clone(),
+            plan_version: child.plan_version,
+            step_id: child.step_id.clone(),
+            role: child.role,
+            child_session_ref: child.child_session_ref.clone(),
+            server_name: elicitation.server_name.clone(),
+            status,
+        },
+    ))
+}
+
+fn current_subagent_child(task: &TaskRunProjection) -> Option<TaskChildSessionEntry> {
+    let (plan_version, step_id) = task.current_step.as_ref()?;
+    task.child_sessions
+        .values()
+        .find(|child| {
+            child.plan_version == *plan_version
+                && child.step_id == *step_id
+                && is_routable_subagent_child(child)
+        })
+        .cloned()
+}
+
+fn latest_subagent_child_from_entries(
+    session: &Session,
+    task: &TaskRunProjection,
+) -> Option<TaskChildSessionEntry> {
+    session.entries().iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(ControlEntry::TaskChildSession(child)) = entry else {
+            return None;
+        };
+        if child.task_id == task.task_id && is_routable_subagent_child(child) {
+            Some(child.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn is_routable_subagent_child(child: &TaskChildSessionEntry) -> bool {
+    matches!(
+        child.role,
+        AgentRole::SubagentRead | AgentRole::SubagentWrite
+    ) && child.status != TaskChildSessionStatus::Unavailable
+}
+
+fn stable_route_suffix(value: &str) -> String {
+    let suffix = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .take(16)
+        .collect::<String>();
+    if suffix.is_empty() {
+        "unknown".to_owned()
+    } else {
+        suffix
+    }
+}
+
+pub(super) fn append_cancelled_task_state(
+    session: &mut Session,
+) -> std::result::Result<(), String> {
+    let projection = session.task_state_projection();
+    let Some(task) = projection.latest_task() else {
+        return Ok(());
+    };
+    if !matches!(task.status, TaskRunStatus::Started | TaskRunStatus::Running) {
+        return Ok(());
+    }
+    let task_id = task.task_id.clone();
+    let parent_session_ref = task.parent_session_ref.clone();
+    let objective = task.objective.clone();
+    let current_step = task.current_step.clone().and_then(|key| {
+        task.steps.get(&key).and_then(|step| {
+            if step.status.is_terminal() {
+                None
+            } else {
+                Some(step.clone())
+            }
+        })
+    });
+    let child_cancellations = task
+        .child_sessions
+        .values()
+        .filter(|child| child.status == TaskChildSessionStatus::Started)
+        .cloned()
+        .collect::<Vec<_>>();
+    let _ = task;
+
+    if let Some(step) = current_step {
+        session
+            .append_control(ControlEntry::TaskStep(TaskStepEntry {
+                task_id: task_id.clone(),
+                plan_version: step.plan_version,
+                step_id: step.step_id,
+                role: step.role,
+                status: TaskStepStatus::Cancelled,
+                title: step.title,
+                summary: None,
+                reason: Some("run cancelled from TUI".to_owned()),
+            }))
+            .map_err(|error| format!("failed to append cancelled task step: {error:#}"))?;
+    }
+    for mut child in child_cancellations {
+        child.status = TaskChildSessionStatus::Cancelled;
+        session
+            .append_control(ControlEntry::TaskChildSession(child))
+            .map_err(|error| format!("failed to append cancelled child session: {error:#}"))?;
+    }
+    session
+        .append_control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id,
+            parent_session_ref,
+            objective,
+            status: TaskRunStatus::Cancelled,
+            reason: Some("run cancelled from TUI".to_owned()),
+        }))
+        .map_err(|error| format!("failed to append cancelled task run: {error:#}"))?;
+    Ok(())
+}
+
+fn session_ref_for_log_path(path: &Path) -> std::result::Result<SessionRef, String> {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("session.jsonl");
+    SessionRef::new_relative(file_name)
+        .map_err(|error| format!("failed to build parent session ref: {error:#}"))
+}
+
+pub(super) fn next_task_id(session: &Session) -> std::result::Result<TaskId, String> {
+    let projection = session.task_state_projection();
+    let mut counter = 1usize;
+    loop {
+        let value = format!("task_{counter}");
+        let task_id = TaskId::new(value.clone())
+            .map_err(|error| format!("failed to build next task id: {error:#}"))?;
+        if !projection.tasks.contains_key(&task_id) {
+            return Ok(task_id);
+        }
+        counter = counter.saturating_add(1);
+    }
+}
+
+pub(super) fn resolve_continue_task(
+    session: &Session,
+    requested_task_id: Option<String>,
+) -> std::result::Result<(TaskId, String, String), String> {
+    let projection = session.task_state_projection();
+    let task = match requested_task_id {
+        Some(value) => {
+            let task_id = TaskId::new(value.clone())
+                .map_err(|error| format!("invalid task id for continue: {error:#}"))?;
+            projection
+                .tasks
+                .get(&task_id)
+                .ok_or_else(|| format!("task {value} is not present in this session"))?
+        }
+        None => projection
+            .latest_unfinished_task()
+            .ok_or_else(|| "no unfinished task is available to continue".to_owned())?,
+    };
+    match task.status {
+        TaskRunStatus::Completed => {
+            return Err(format!(
+                "task {} is already completed",
+                task.task_id.as_str()
+            ));
+        }
+        TaskRunStatus::Cancelled => {
+            return Err(format!("task {} is cancelled", task.task_id.as_str()));
+        }
+        TaskRunStatus::Started
+        | TaskRunStatus::Running
+        | TaskRunStatus::Paused
+        | TaskRunStatus::Failed
+        | TaskRunStatus::Interrupted => {}
+    }
+    if task.latest_plan_version.is_none() {
+        return Err(format!(
+            "task {} has no plan to continue",
+            task.task_id.as_str()
+        ));
+    }
+    Ok((
+        task.task_id.clone(),
+        task.task_id.as_str().to_owned(),
+        task.objective.clone(),
+    ))
 }
