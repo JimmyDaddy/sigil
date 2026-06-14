@@ -20,6 +20,13 @@ cargo install --path crates/sigil --locked
 sigil
 ```
 
+检查已安装 binary：
+
+```bash
+sigil --version
+sigil doctor
+```
+
 如果没有可用配置，Sigil 会进入 Quick Setup。你只需要确认当前工作区、选择模型并填写认证信息。如果你更喜欢环境变量或手写配置文件，见 [docs/zh-CN/configuration.md](docs/zh-CN/configuration.md)。
 
 自动化或脚本场景可以使用 CLI：
@@ -38,7 +45,7 @@ sigil doctor
 
 CLI 不是主要产品表面，默认只承担自动化和调试入口。
 
-更新、PATH 和卸载说明见 [docs/zh-CN/installation.md](docs/zh-CN/installation.md)。在 checkout 内做开发验证时，也可以继续使用 `cargo run -p sigil` 或 `cargo run -p sigil -- doctor`。
+更新、PATH、release archive 和卸载说明见 [docs/zh-CN/installation.md](docs/zh-CN/installation.md)。在 checkout 内做开发验证时，也可以继续使用 `cargo run -p sigil` 或 `cargo run -p sigil -- doctor`。
 
 ## 能做什么
 
@@ -139,3 +146,9 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 只改文档时可以不跑全量 Rust gate，但需要确认链接、路径和示例命令仍然成立。
+
+验证分发产物时，可以构建本地 release archive：
+
+```bash
+scripts/build-release-archive.sh
+```

@@ -16,7 +16,7 @@ sigil/
     sigil-code-intel/          # LSP client, Tree-sitter fallback, and code intelligence tools
     sigil-mcp/                 # stdio MCP client and tool adapter
     sigil-runtime/             # Shared provider / tool / run option assembly for entrypoints
-    sigil/                 # `sigil` binary: starts the TUI by default; subcommands are for automation/debugging
+    sigil/                     # `sigil` binary: starts the TUI by default; subcommands are for automation/debugging
     sigil-tui/                 # TUI state, rendering, and runner for the primary user entrypoint
   docs/                        # User documentation
   dev/governance/              # Development constraints, code standards, engineering standards
@@ -34,6 +34,7 @@ sigil/
 - `sigil-code-intel` provides optional LSP / Tree-sitter code intelligence, including read-only symbol, definition, reference, diagnostic, and code action query tools, plus code action / rename edit tools with approval diff previews.
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
 - `sigil` provides the `sigil` binary: no subcommand starts the TUI directly; `run` and `doctor` remain explicit automation and diagnostics subcommands; `prefix` and `fim` remain hidden debugging or provider-specific entrypoints rather than normal user concepts.
+- `sigil --version` prints the package version, git commit, target, and profile for install smoke checks, release archive validation, and issue triage.
 - `sigil-tui` owns the primary TUI implementation: chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/resume`, approval modal, tool activity, diff preview, session recovery, context compaction, markdown code block highlighting, and code intelligence status display.
 
 ## TUI Module Boundaries
@@ -138,6 +139,15 @@ DeepSeek provider configuration lives under `[providers.deepseek]`. OpenAI-compa
 TUI `/config` exposes only high-frequency provider fields, permissions, memory, compaction, code intelligence controls, terminal mouse/OSC52/scroll sensitivity compatibility settings, and common MCP server fields. It can switch between `deepseek` and `openai_compat`; DeepSeek FIM is shown as a provider-specific advanced field, while OpenAI-compatible marks it unsupported. Lower-frequency provider-specific fields remain available through config files and environment variables.
 
 `sigil doctor` and TUI `/doctor` reuse runtime diagnostics to check config loading, workspace resolution, session log location, provider/auth source, MCP command/trust state, code intelligence LSP plan, terminal `TERM`, terminal profile/layers, and mouse/OSC52/scroll sensitivity compatibility settings. Diagnostics report only the secret source, not secret values.
+
+## Current Packaging Implementation
+
+Two local distribution-validation paths are supported:
+
+- Source install: `cargo install --path crates/sigil --locked`
+- Local release archive: `scripts/build-release-archive.sh`
+
+The release archive script builds `sigil` in release mode, injects git commit, target, and profile build metadata, runs `sigil --version` and `sigil doctor` smoke checks against the built binary, then writes `dist/sigil-<version>-<target>.tar.gz` and a matching `.sha256` file. Homebrew formula, release CI, signing/provenance, and self-update remain future work.
 
 ## Current MCP Implementation
 

@@ -20,6 +20,13 @@ Start the TUI:
 sigil
 ```
 
+Check the installed binary:
+
+```bash
+sigil --version
+sigil doctor
+```
+
 If no usable config exists, Sigil opens Quick Setup. You confirm the workspace, choose a model, and provide authentication there. If you prefer environment variables or a hand-written config file, see [docs/en/configuration.md](docs/en/configuration.md).
 
 Use the CLI for automation or scripts:
@@ -38,7 +45,7 @@ Inside the TUI, use `/doctor` to render the same local diagnostics report in the
 
 The CLI is not the primary product surface. It is intentionally kept as an automation and debugging entrypoint.
 
-For update, PATH, and uninstall notes, see [docs/en/installation.md](docs/en/installation.md). For development-only runs inside the checkout, use `cargo run -p sigil` or `cargo run -p sigil -- doctor`.
+For update, PATH, release archive, and uninstall notes, see [docs/en/installation.md](docs/en/installation.md). For development-only runs inside the checkout, use `cargo run -p sigil` or `cargo run -p sigil -- doctor`.
 
 ## What It Does
 
@@ -139,3 +146,9 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Docs-only changes do not need the full Rust gate, but links, paths, and example commands should still be checked.
+
+Build a local release archive when validating distribution artifacts:
+
+```bash
+scripts/build-release-archive.sh
+```

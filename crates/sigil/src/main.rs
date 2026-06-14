@@ -17,10 +17,32 @@ use sigil_provider_deepseek::{
 };
 use sigil_runtime::doctor::{DoctorReport, build_doctor_report};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BuildInfo {
+    version: &'static str,
+    git_hash: &'static str,
+    target: &'static str,
+    profile: &'static str,
+}
+
+impl BuildInfo {
+    fn current() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION"),
+            git_hash: env!("SIGIL_BUILD_GIT_HASH"),
+            target: env!("SIGIL_BUILD_TARGET"),
+            profile: env!("SIGIL_BUILD_PROFILE"),
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "sigil")]
 #[command(about = "TUI-first shell for Sigil")]
+#[command(disable_version_flag = true)]
 struct Cli {
+    #[arg(long = "version", action = clap::ArgAction::SetTrue)]
+    show_version: bool,
     #[arg(long)]
     config: Option<PathBuf>,
     #[command(subcommand)]
@@ -62,6 +84,10 @@ enum Commands {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    if cli.show_version {
+        print!("{}", render_version(BuildInfo::current()));
+        return Ok(());
+    }
     let Some(command) = cli.command else {
         return sigil_tui::launcher::run_tui(cli.config);
     };
@@ -84,6 +110,13 @@ async fn main() -> Result<()> {
             max_tokens,
         } => fim_command(&config_path, prompt, suffix, stop, model, max_tokens).await,
     }
+}
+
+fn render_version(info: BuildInfo) -> String {
+    format!(
+        "sigil {}\ncommit: {}\ntarget: {}\nprofile: {}\n",
+        info.version, info.git_hash, info.target, info.profile
+    )
 }
 
 fn doctor_command(config_path: &Path, launch_cwd: &Path) -> Result<()> {

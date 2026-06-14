@@ -16,7 +16,7 @@ sigil/
     sigil-code-intel/          # LSP client、Tree-sitter fallback 与 code intelligence tools
     sigil-mcp/                 # stdio MCP client 与工具适配
     sigil-runtime/             # 入口共享的 provider / tool / run options 装配
-    sigil/                 # `sigil` binary：默认启动 TUI，子命令用于自动化与调试
+    sigil/                     # `sigil` binary：默认启动 TUI，子命令用于自动化与调试
     sigil-tui/                 # 第一用户入口的 TUI 状态、渲染和 runner
   docs/                        # 用户文档
   dev/governance/              # 开发约束、代码规范、工程规范
@@ -34,6 +34,7 @@ sigil/
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用、诊断、code action 查询，以及需要审批 diff 的 code action / rename edit 工具。
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
 - `sigil` 提供 `sigil` binary：无子命令时直接启动 TUI；`run` 自动化入口和 `doctor` 本地诊断入口保留为显式子命令；`prefix` / `fim` 保留为隐藏调试或 provider 专项入口，不作为普通用户主心智。
+- `sigil --version` 输出 package version、git commit、target 和 profile，用于安装后 smoke、release archive 验证和问题定位。
 - `sigil-tui` 承载第一用户入口的 TUI 实现，包括 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
 
 ## TUI 模块边界
@@ -138,6 +139,15 @@ DeepSeek provider 配置位于 `[providers.deepseek]`。OpenAI-compatible provid
 TUI `/config` 只暴露 provider 高频项、permissions、memory、compaction、code intelligence 控制项、terminal mouse/OSC52/scroll sensitivity 兼容性设置和 MCP server 常用字段。它可以在 `deepseek` 与 `openai_compat` 间切换；DeepSeek FIM 显示为 provider 专项高级项，OpenAI-compatible 下标记为不支持。低频 provider 专项字段继续保留给配置文件和环境变量。
 
 `sigil doctor` 与 TUI `/doctor` 复用 runtime 诊断逻辑，检查配置加载、workspace、session log、provider/auth 来源、MCP command/trust、code intelligence LSP plan、terminal `TERM`、终端 profile/layers，以及 mouse/OSC52/scroll sensitivity 兼容性设置。诊断只展示 secret 来源，不输出 secret 值。
+
+## Packaging 当前实现
+
+当前支持两条本地分发验证路径：
+
+- 源码安装：`cargo install --path crates/sigil --locked`
+- 本地 release archive：`scripts/build-release-archive.sh`
+
+release archive 脚本会用 release mode 构建 `sigil`，注入 git commit、target 和 profile 构建元数据，对 built binary 运行 `sigil --version` 与 `sigil doctor` smoke，然后输出 `dist/sigil-<version>-<target>.tar.gz` 和对应 `.sha256`。Homebrew formula、发布 CI、签名/provenance 和自更新仍是后续工作。
 
 ## MCP 当前实现
 

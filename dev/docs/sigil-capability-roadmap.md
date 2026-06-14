@@ -1,8 +1,8 @@
 # Sigil Capability Roadmap
 
-状态：规划草案
+状态：实现路线图
 
-更新日期：2026-06-13
+更新日期：2026-06-14
 
 本文基于当前仓库实现、`README.md`、`dev/governance/*` 和
 [`sigil-rust-agent-core-technical-solution.md`](sigil-rust-agent-core-technical-solution.md)
@@ -15,11 +15,13 @@
 - `sigil-kernel`：provider、tool、session、approval、permission、event、memory 和 compaction 的通用契约。
 - `sigil-runtime`：TUI / CLI 共享 provider、内置工具、MCP tool registry 和 run options 装配。
 - `sigil-provider-deepseek`：DeepSeek 主链路、reasoning replay、strict tools、prefix / FIM 专项入口、usage / cache token 统计。
+- `sigil-provider-openai-compat`：OpenAI-compatible Chat Completions 主链路、tool call、usage、base URL 和 header 配置。
 - `sigil-tools-builtin`：`read_file`、`write_file`、`edit_file`、`delete_file`、`ls`、`glob`、`grep`、`bash`。
-- `sigil-code-intel`：可选 Code Intelligence / LSP 能力，包含常见语言 LSP 自动发现、Rust `rust-analyzer` client、Tree-sitter Rust fallback、符号/定义/引用/诊断工具和 TUI code tool card。
-- `sigil-mcp`：stdio MCP server 启动、`tools/list` / `tools/call` 适配、read-only `resources/list` / `resources/read` 适配、read-only `prompts/list` / `prompts/get` 适配、`roots/list` 响应、progress/listChanged runtime events。
-- `sigil`：无子命令时启动 TUI，TUI 提供 chat-first transcript、composer、slash selector、Quick Setup、`/config`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮。
+- `sigil-code-intel`：可选 Code Intelligence / LSP 能力，包含常见语言 LSP 自动发现、Rust `rust-analyzer` client、Tree-sitter Rust fallback、符号/定义/引用/诊断/code action 查询工具、需要审批 diff 的 code action / rename 写工具和 TUI code tool card。
+- `sigil-mcp`：stdio MCP server 启动、`tools/list` / `tools/call` 适配、read-only `resources/list` / `resources/read` 适配、read-only `prompts/list` / `prompts/get` 适配、`roots/list` 响应、elicitation、progress/listChanged runtime events、lazy activation 和 trust enforcement。
+- `sigil`：无子命令时启动 TUI，TUI 提供 chat-first transcript、composer、slash selector、Quick Setup、`/config`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和鼠标辅助交互；`sigil --version` 输出版本与构建元数据。
 - `sigil run`：公开自动化入口；`prefix` / `fim` 作为隐藏调试入口保留。
+- `scripts/build-release-archive.sh`：构建本地 release archive，执行 built binary smoke，并输出 sha256 checksum。
 
 当前产品已经能完成真实 coding task；后续重点不应是继续堆命令，而是补齐长期使用所需的代码智能、插件信任、多 provider、交互完整性和自动化接口。
 
@@ -36,17 +38,17 @@
 
 | 优先级 | 能力 | 当前状态 | 推荐目标 |
 | --- | --- | --- | --- |
-| P0 | Code intelligence / LSP | Rust MVP、多语言自动发现、TUI trust/readiness/remediation 已落地；默认关闭，支持 LSP + Tree-sitter fallback | 后续补 code action/rename 审批闭环 |
+| P0 | Code intelligence / LSP | Rust MVP、多语言自动发现、TUI trust/readiness/remediation、只读查询和 code action/rename 审批闭环已落地；默认关闭，支持 LSP + Tree-sitter fallback | 后续扩展更多语言细节和 capability UX |
 | P0 | MCP 完整闭环 | tools 可用；read-only resources/prompts、trust enforcement、TUI 手动 lazy activation、模型按需 activation、lifecycle status、elicitation modal 与 elicitation decision audit、progress live panel、listChanged stale/refresh 已落地 | 后续如需要再补 sampling、completion、非 stdio transport |
 | P0 | Secret 与安全产品化 | TUI 遮罩输入；配置仍支持明文 api_key，UI 与 doctor 均明确 plaintext 语义 | 评估 session-only 或可选安全存储 backend |
 | P0 | Diagnostics / doctor | CLI `doctor` 与 TUI `/doctor` 已复用同一份 `DoctorReport` 检查 config、workspace、provider/auth、MCP、LSP 和 terminal 基线，并输出 remediation | 后续如需要再升级为 dedicated diagnostics panel |
-| P1 | 多 provider | runtime 只支持 `deepseek` | 增加 OpenAI-compatible provider，再扩 Anthropic / Gemini |
-| P1 | 鼠标交互 | 只有滚轮 | 实现区域命中、低风险点击、approval 安全点击 |
+| P1 | 多 provider | runtime 支持 `deepseek` 和 `openai_compat` | 后续扩 Anthropic / Gemini，并打磨 provider capability UX |
+| P1 | 鼠标交互 | Phase 1-4 已落地：区域滚动、低风险点击、approval/setup/config/session、文本选择、OSC52、兼容性配置 | 后续只做真实终端 smoke 与明确产品需求驱动的小扩展 |
 | P1 | Planner / executor / subagent | 单 agent loop | 分 session 双模型协作与任务型 subagent |
 | P2 | PTY / background tasks | `bash` 是一次性命令 | 交互式 shell、后台任务、恢复与进程控制 |
 | P2 | 更强编辑工具 | exact snippet replace | patch plan、多文件变更集、冲突检测、可回滚 |
 | P2 | CLI / HTTP automation | CLI 公开 `run` | JSON 输出、headless 审批策略、HTTP streaming adapter |
-| P3 | Packaging / distribution | 本地 cargo 运行 | cargo install / Homebrew / release archive / doctor |
+| P3 | Packaging / distribution | source `cargo install` 文档、`sigil --version` 构建元数据、本地 release archive 和 doctor smoke 已落地 | 后续补发布 CI、签名、Homebrew formula |
 | P3 | Auto memory / indexed facts | 文档型 memory boot | 可审计自动记忆和 fact index |
 
 ## 4. Phase 0：安全与路线固化
@@ -138,6 +140,7 @@ cargo clippy --all-targets -- -D warnings
 
 - 已新增 `crates/sigil-code-intel`。
 - 已支持 `code_symbols`、`code_workspace_symbols`、`code_definition`、`code_references`、`code_diagnostics` 只读工具；`code_workspace_symbols` 会对已配置或自动发现的 language server 做 fan-out 并合并结果。
+- 已支持 `code_actions` 只读查询，以及需要审批 diff preview 的 `code_action` / `code_rename` 写工具。
 - `code_intelligence.discovery.enabled = true` 时会按 workspace marker / 文件扩展名自动发现 Rust、TypeScript/JavaScript、Python、Go，并只把 PATH 上可用的内置 allowlist server 纳入启动计划；手写 `code_intelligence.servers` 作为高级覆盖或补充。
 - Rust 项目优先走 `rust-analyzer`；LSP 不可用时，符号与语法诊断回退到 Tree-sitter Rust。
 - TUI info rail 的 `LSP` 区按 language/server 显示最近状态，包括 installed、missing、ready、degraded、fallback，并在 `code_diagnostics` 后投影错误/警告摘要和最近文件级 diagnostics 列表；code tool result 使用专门 renderer。
@@ -357,13 +360,22 @@ cargo test -p sigil-tui config slash session
 
 目标：补齐现代 TUI 产品的鼠标辅助体验，同时不破坏键盘主路径和审批安全。
 
+当前实现状态：
+
+- 已抽出 layout snapshot 与 hit target，鼠标滚轮按区域作用于 transcript、approval、slash、info rail、setup/config/session 等表面。
+- 已支持 composer 点击定位光标、slash candidate 点击选择、tool activity 聚焦、tool card header 展开/折叠和 hover visual state。
+- Approval modal 已支持 file row、hunk、diff mode、metadata、allow/deny 明确 hit area；审批仍走现有 `AppAction::ApprovalDecision` 和 worker command 路径。
+- Setup/config/session selector 支持鼠标选择与确认。
+- Transcript 支持按显示列拖选、OSC52 复制、复制状态提示和 terminal capability 配置开关。
+- `Terminal` 配置区支持 `mouse_capture`、`osc52_clipboard` 与 `scroll_sensitivity`。
+
 已有设计：
 
 - [`sigil-tui-mouse-interaction-design.md`](sigil-tui-mouse-interaction-design.md)
 
 ### 8.1 Area-aware scroll
 
-交付物：
+交付物（已落地）：
 
 1. 抽 `LayoutSnapshot`、`HitTarget`、`MouseInput`、`MouseInputKind`。
 2. 滚轮根据区域命中作用于 timeline、approval diff、slash overlay、info rail、setup/config list。
@@ -376,11 +388,11 @@ cargo test -p sigil-tui config slash session
 
 ### 8.2 Low-risk clicks
 
-交付物：
+交付物（已落地）：
 
 1. 点击 composer 聚焦 composer。
 2. 点击 slash candidate 只选中，不执行。
-3. 点击 tool card 只聚焦，不展开。
+3. 点击 tool activity body 聚焦，点击 tool card header 展开/折叠。
 4. 点击 info rail card 切换活动区域。
 
 验收标准：
@@ -390,7 +402,7 @@ cargo test -p sigil-tui config slash session
 
 ### 8.3 Approval modal mouse actions
 
-交付物：
+交付物（已落地）：
 
 1. 只有明确点击 `allow` / `deny` action 区域才触发审批结果。
 2. 点击文件列表切换文件。
@@ -546,19 +558,26 @@ cargo test -p sigil-tui approval timeline
 
 目标：让 Sigil 可以被稳定安装、诊断和升级。
 
-交付物：
+当前实现状态：
 
-1. release binary archive。
+1. release binary archive 脚本已落地：`scripts/build-release-archive.sh`。
 2. `cargo install` 文档（已落地为 `docs/en/installation.md` 和 `docs/zh-CN/installation.md`，主推安装 `sigil` 一个入口）。
-3. Homebrew formula。
-4. `sigil doctor` 或 TUI diagnostics panel：
+3. `sigil --version` 输出 package version、git commit、target 和 profile。
+4. `sigil doctor` 与 TUI `/doctor` 已落地：
    - config path
    - provider auth
    - workspace root
    - MCP server status
    - LSP availability
    - terminal capability
-5. 版本信息和 build metadata。
+5. release archive 脚本会对 built binary 运行 `--version` 与 `doctor` smoke，并输出 `.sha256`。
+
+后续交付物：
+
+1. 发布 CI 产物矩阵。
+2. 签名或 provenance。
+3. Homebrew formula。
+4. release notes 生成规则。
 
 验收标准：
 
@@ -587,16 +606,15 @@ cargo test -p sigil-tui approval timeline
 
 推荐按下面顺序推进，而不是按实现趣味挑选：
 
-1. **OpenAI-compatible provider**：验证 provider-neutral runtime 边界。
+1. **Packaging 发布闭环**：在本地 archive 脚本后补发布 CI、签名/provenance 和 Homebrew formula。
 2. **Secret 可选 backend 评估**：只在确有价值时推进 session-only UI、Keychain 或 encrypted file backend。
-3. **Code action / rename 审批闭环**：在只读 code intelligence 稳定后再补写入型 LSP 能力。
-4. **鼠标交互 Phase 1/2**：改善 TUI 手感，但不碰高风险审批点击。
-5. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
-6. **PTY / background tasks**：解决长命令和交互式命令。
-7. **Editing Tools 2.0**：提高多文件变更可靠性。
-8. **CLI JSON / HTTP adapter**：扩展自动化表面。
-9. **MCP sampling / completion 评估**：只在有清晰产品入口时推进，不要把 server-initiated LLM 调用隐式接入默认路径。
-10. **Packaging / Memory 2.0**：产品化和长期智能。
+3. **Provider capability UX**：为 DeepSeek / OpenAI-compatible 能力差异补更清晰的 TUI 降级说明。
+4. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
+5. **PTY / background tasks**：解决长命令和交互式命令。
+6. **Editing Tools 2.0**：提高多文件变更可靠性。
+7. **CLI JSON / HTTP adapter**：扩展自动化表面。
+8. **MCP sampling / completion 评估**：只在有清晰产品入口时推进，不要把 server-initiated LLM 调用隐式接入默认路径。
+9. **Memory 2.0**：产品化长期记忆。
 
 ## 16. 每阶段通用完成定义
 

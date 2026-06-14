@@ -2,7 +2,7 @@
 
 [简体中文](../zh-CN/installation.md)
 
-This guide covers the current supported install path from a local repository checkout. Release archives, package managers, and self-update are intentionally not part of this path yet.
+This guide covers the current supported install path from a local repository checkout. Release archives can be built locally for validation, but package managers and self-update are not part of this path yet.
 
 ## Requirements
 
@@ -19,6 +19,13 @@ cargo install --path crates/sigil --locked
 ```
 
 This installs the `sigil` binary. Running `sigil` without a subcommand opens the TUI. Automation and diagnostics live behind explicit subcommands.
+
+Confirm the installed binary:
+
+```bash
+sigil --version
+sigil doctor
+```
 
 ## Start
 
@@ -39,6 +46,29 @@ sigil run "summarize this repository"
 ```
 
 Inside the TUI, `/doctor` renders the same diagnostics report in the transcript.
+
+## Build A Release Archive
+
+Maintainers can build a local release archive from the checkout:
+
+```bash
+scripts/build-release-archive.sh
+```
+
+The script builds `sigil` in release mode, injects build metadata, runs `sigil --version` and `sigil doctor` against the built binary, then writes:
+
+```text
+dist/sigil-<version>-<target>.tar.gz
+dist/sigil-<version>-<target>.tar.gz.sha256
+```
+
+Build for an explicit Rust target triple when needed:
+
+```bash
+scripts/build-release-archive.sh --target aarch64-apple-darwin
+```
+
+The archive contains the `sigil` binary plus the README and installation docs. Published package-manager installs are still future work.
 
 ## Update
 

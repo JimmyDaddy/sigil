@@ -21,8 +21,9 @@ use tokio::{
 };
 
 use super::{
-    Cli, Commands, StdoutEventHandler, default_session_path, drain_provider_stream,
-    render_doctor_report, render_provider_chunk, render_run_event, resolve_workspace_root,
+    BuildInfo, Cli, Commands, StdoutEventHandler, default_session_path, drain_provider_stream,
+    render_doctor_report, render_provider_chunk, render_run_event, render_version,
+    resolve_workspace_root,
 };
 
 fn boxed_chunk_stream(
@@ -330,11 +331,46 @@ fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
 }
 
 #[test]
+fn cli_parses_version_flag_without_subcommand() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "--version"])?;
+
+    assert!(cli.show_version);
+    assert!(cli.command.is_none());
+    Ok(())
+}
+
+#[test]
 fn cli_without_subcommand_defaults_to_tui() -> Result<()> {
     let cli = Cli::try_parse_from(["sigil"])?;
 
+    assert!(!cli.show_version);
     assert!(cli.command.is_none());
     Ok(())
+}
+
+#[test]
+fn render_version_includes_build_metadata() {
+    let rendered = render_version(BuildInfo {
+        version: "1.2.3",
+        git_hash: "abc123def456",
+        target: "test-target",
+        profile: "release",
+    });
+
+    assert!(rendered.contains("sigil 1.2.3"));
+    assert!(rendered.contains("commit: abc123def456"));
+    assert!(rendered.contains("target: test-target"));
+    assert!(rendered.contains("profile: release"));
+}
+
+#[test]
+fn build_info_current_uses_compile_time_metadata() {
+    let info = BuildInfo::current();
+
+    assert!(!info.version.is_empty());
+    assert!(!info.git_hash.is_empty());
+    assert!(!info.target.is_empty());
+    assert!(!info.profile.is_empty());
 }
 
 #[test]

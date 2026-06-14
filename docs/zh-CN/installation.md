@@ -2,7 +2,7 @@
 
 [English](../en/installation.md)
 
-本文说明当前支持的源码 checkout 安装路径。Release archive、包管理器和自更新还不属于这条路径。
+本文说明当前支持的源码 checkout 安装路径。Release archive 可以在本地构建用于验证；包管理器和自更新还不属于这条路径。
 
 ## 前置条件
 
@@ -19,6 +19,13 @@ cargo install --path crates/sigil --locked
 ```
 
 这会安装 `sigil` binary。直接运行 `sigil` 会打开 TUI；自动化和诊断能力放在显式子命令后面。
+
+确认已安装 binary：
+
+```bash
+sigil --version
+sigil doctor
+```
 
 ## 启动
 
@@ -39,6 +46,29 @@ sigil run "总结一下当前仓库"
 ```
 
 在 TUI 内也可以用 `/doctor`，同一份诊断报告会渲染到 transcript。
+
+## 构建 Release Archive
+
+维护者可以从 checkout 构建本地 release archive：
+
+```bash
+scripts/build-release-archive.sh
+```
+
+脚本会用 release mode 构建 `sigil`、注入构建元数据、对构建出的 binary 运行 `sigil --version` 和 `sigil doctor`，然后写出：
+
+```text
+dist/sigil-<version>-<target>.tar.gz
+dist/sigil-<version>-<target>.tar.gz.sha256
+```
+
+需要指定 Rust target triple 时：
+
+```bash
+scripts/build-release-archive.sh --target aarch64-apple-darwin
+```
+
+archive 内包含 `sigil` binary、README 和安装文档。发布到包管理器仍是后续工作。
 
 ## 更新
 
