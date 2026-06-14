@@ -25,14 +25,14 @@ Do not commit a real repository-local `sigil.toml`; it may contain secrets.
 For normal use, start the TUI and complete Quick Setup:
 
 ```bash
-cargo run -p sigil-tui
+sigil
 ```
 
 For temporary use or CI, provide authentication through an environment variable before launch:
 
 ```bash
 export SIGIL_API_KEY="sk-..."
-cargo run -p sigil-tui
+sigil
 ```
 
 Quick Setup creates a usable config when no config file exists. Later, use `/config` for common settings.
@@ -42,7 +42,7 @@ Quick Setup creates a usable config when no config file exists. Later, use `/con
 Run `doctor` when setup, authentication, MCP, or local LSP tooling looks wrong:
 
 ```bash
-cargo run -p sigil-cli -- doctor
+sigil doctor
 ```
 
 Inside the TUI, use `/doctor` to render the same report in the transcript. The TUI version starts with a status summary and a `needs attention` remediation list before the full check list.
@@ -50,7 +50,7 @@ Inside the TUI, use `/doctor` to render the same report in the transcript. The T
 Use the same config override if you launch Sigil with a non-default config:
 
 ```bash
-cargo run -p sigil-cli -- --config ./sigil.toml doctor
+sigil --config ./sigil.toml doctor
 ```
 
 The report checks config loading, workspace resolution, session log location, provider settings, API key source, configured MCP commands and trust settings, code intelligence language-server availability, and the current `TERM`. It reports where the API key was resolved from, but never prints the secret value. Warning and error checks include `fix:` remediation lines; a key resolved only from plaintext config is a warning so users can move it to an environment variable or keep the local config private intentionally.
@@ -107,7 +107,7 @@ model = "gpt-4.1"
 root = "."
 ```
 
-`workspace.root = "."` is special: it resolves to the directory where you launched `sigil-tui` or `sigil-cli`. This allows one user-level config to follow the repository you opened.
+`workspace.root = "."` is special: it resolves to the directory where you launched `sigil`. This allows one user-level config to follow the repository you opened.
 
 File tools are confined to the workspace root. They reject `..`, absolute paths, and symlinks that point outside the workspace. `bash` does not provide a full process sandbox.
 

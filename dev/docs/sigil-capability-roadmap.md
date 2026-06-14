@@ -18,8 +18,8 @@
 - `sigil-tools-builtin`：`read_file`、`write_file`、`edit_file`、`delete_file`、`ls`、`glob`、`grep`、`bash`。
 - `sigil-code-intel`：可选 Code Intelligence / LSP 能力，包含常见语言 LSP 自动发现、Rust `rust-analyzer` client、Tree-sitter Rust fallback、符号/定义/引用/诊断工具和 TUI code tool card。
 - `sigil-mcp`：stdio MCP server 启动、`tools/list` / `tools/call` 适配、read-only `resources/list` / `resources/read` 适配、read-only `prompts/list` / `prompts/get` 适配、`roots/list` 响应、progress/listChanged runtime events。
-- `sigil-tui`：chat-first transcript、composer、slash selector、Quick Setup、`/config`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮。
-- `sigil-cli`：公开 `run` 自动化入口；`prefix` / `fim` 作为隐藏调试入口保留。
+- `sigil`：无子命令时启动 TUI，TUI 提供 chat-first transcript、composer、slash selector、Quick Setup、`/config`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮。
+- `sigil run`：公开自动化入口；`prefix` / `fim` 作为隐藏调试入口保留。
 
 当前产品已经能完成真实 coding task；后续重点不应是继续堆命令，而是补齐长期使用所需的代码智能、插件信任、多 provider、交互完整性和自动化接口。
 
@@ -549,7 +549,7 @@ cargo test -p sigil-tui approval timeline
 交付物：
 
 1. release binary archive。
-2. `cargo install` 文档。
+2. `cargo install` 文档（已落地为 `docs/en/installation.md` 和 `docs/zh-CN/installation.md`，主推安装 `sigil` 一个入口）。
 3. Homebrew formula。
 4. `sigil doctor` 或 TUI diagnostics panel：
    - config path

@@ -1,12 +1,8 @@
 [package]
-name = "sigil-cli"
+name = "sigil"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-
-[[bin]]
-name = "sigil"
-path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -19,6 +15,7 @@ uuid.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
 sigil-runtime = { path = "../sigil-runtime" }
+sigil-tui = { path = "../sigil-tui" }
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -16,8 +16,8 @@ sigil/
     sigil-code-intel/          # LSP client、Tree-sitter fallback 与 code intelligence tools
     sigil-mcp/                 # stdio MCP client 与工具适配
     sigil-runtime/             # 入口共享的 provider / tool / run options 装配
-    sigil-cli/                 # 薄 CLI 启动器与调试入口
-    sigil-tui/                 # 第一用户入口
+    sigil/                 # `sigil` binary：默认启动 TUI，子命令用于自动化与调试
+    sigil-tui/                 # 第一用户入口的 TUI 状态、渲染和 runner
   docs/                        # 用户文档
   dev/governance/              # 开发约束、代码规范、工程规范
   dev/docs/                    # 架构、路线图与实现快照
@@ -33,8 +33,8 @@ sigil/
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、搜索、目录枚举和 shell 执行。
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用、诊断、code action 查询，以及需要审批 diff 的 code action / rename edit 工具。
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
-- `sigil-cli` 当前公开 `run` 自动化入口和 `doctor` 本地诊断入口；`prefix` / `fim` 保留为调试或 provider 专项入口，不作为普通用户主心智。
-- `sigil-tui` 是第一用户入口，承载 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
+- `sigil` 提供 `sigil` binary：无子命令时直接启动 TUI；`run` 自动化入口和 `doctor` 本地诊断入口保留为显式子命令；`prefix` / `fim` 保留为隐藏调试或 provider 专项入口，不作为普通用户主心智。
+- `sigil-tui` 承载第一用户入口的 TUI 实现，包括 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/resume`、审批 modal、tool activity、diff preview、session 恢复、context compaction、markdown code block 高亮和 code intelligence 状态展示。
 
 ## TUI 模块边界
 

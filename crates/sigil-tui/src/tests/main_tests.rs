@@ -1,5 +1,9 @@
 use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::mpsc, time::Duration};
 
+use crate::{
+    app::{AppAction, AppState},
+    runner::{WorkerCommand, WorkerMessage},
+};
 use anyhow::{Result, anyhow};
 use ratatui::{
     buffer::Buffer,
@@ -11,10 +15,6 @@ use serde_json::json;
 use sigil_kernel::{
     AgentConfig, CompactionConfig, MemoryConfig, ModelMessage, PermissionConfig, RootConfig,
     SessionConfig, SessionLogEntry, WorkspaceConfig,
-};
-use sigil_tui::{
-    app::{AppAction, AppState},
-    runner::{WorkerCommand, WorkerMessage},
 };
 
 use super::{
@@ -528,10 +528,7 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
     Ok(())
 }
 
-fn fake_worker_runtime() -> (
-    WorkerRuntime,
-    mpsc::Receiver<sigil_tui::runner::WorkerCommand>,
-) {
+fn fake_worker_runtime() -> (WorkerRuntime, mpsc::Receiver<WorkerCommand>) {
     let (worker_tx, worker_rx) = mpsc::channel();
     let (_message_tx, message_rx) = mpsc::channel::<WorkerMessage>();
     (
@@ -807,10 +804,7 @@ fn process_app_action_restarts_worker_for_config_save() -> Result<()> {
     )?;
 
     let shutdown = old_commands.recv()?;
-    assert!(matches!(
-        shutdown,
-        sigil_tui::runner::WorkerCommand::Shutdown
-    ));
+    assert!(matches!(shutdown, WorkerCommand::Shutdown));
     assert!(worker.is_some());
     Ok(())
 }
@@ -830,10 +824,7 @@ fn process_app_action_restarts_worker_for_runtime_config_update() -> Result<()> 
         |_root_config, _app| Ok(fake_worker_runtime().0),
     )?;
 
-    assert!(matches!(
-        old_commands.recv()?,
-        sigil_tui::runner::WorkerCommand::Shutdown
-    ));
+    assert!(matches!(old_commands.recv()?, WorkerCommand::Shutdown));
     assert!(worker.is_some());
     Ok(())
 }
@@ -871,7 +862,7 @@ fn process_app_action_forwards_runtime_commands_to_worker() -> Result<()> {
     let command = commands.recv()?;
     assert!(matches!(
         command,
-        sigil_tui::runner::WorkerCommand::SubmitPrompt { ref prompt, reasoning_effort: _ }
+        WorkerCommand::SubmitPrompt { ref prompt, reasoning_effort: _ }
             if prompt == "hello"
     ));
     Ok(())
@@ -956,7 +947,7 @@ fn apply_mouse_outcome_handles_noop_redraw_and_actions() -> Result<()> {
     let command = commands.recv()?;
     assert!(matches!(
         command,
-        sigil_tui::runner::WorkerCommand::CheckChangedFilesDiagnostics
+        WorkerCommand::CheckChangedFilesDiagnostics
     ));
     Ok(())
 }
@@ -981,9 +972,6 @@ fn apply_key_action_always_requests_render_and_forwards_actions() -> Result<()> 
     )?);
 
     let command = commands.recv()?;
-    assert!(matches!(
-        command,
-        sigil_tui::runner::WorkerCommand::CancelRun
-    ));
+    assert!(matches!(command, WorkerCommand::CancelRun));
     Ok(())
 }

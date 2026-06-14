@@ -4,14 +4,20 @@ English | [简体中文](README.zh-CN.md)
 
 `sigil` is a TUI-first Rust AI coding agent. It brings chat, tool calls, approvals, diff review, run status, and session recovery into one terminal interface instead of asking users to learn an expanding command surface.
 
-The project is still primarily run from source and validated through local development workflows. The main user-facing entrypoint is `sigil-tui`.
+The project is still validated through local development workflows. For day-to-day use from a checkout, install the source package locally and start from the `sigil` binary.
 
 ## Quick Start
+
+Install from the repository root:
+
+```bash
+cargo install --path crates/sigil --locked
+```
 
 Start the TUI:
 
 ```bash
-cargo run -p sigil-tui
+sigil
 ```
 
 If no usable config exists, Sigil opens Quick Setup. You confirm the workspace, choose a model, and provide authentication there. If you prefer environment variables or a hand-written config file, see [docs/en/configuration.md](docs/en/configuration.md).
@@ -19,18 +25,20 @@ If no usable config exists, Sigil opens Quick Setup. You confirm the workspace, 
 Use the CLI for automation or scripts:
 
 ```bash
-cargo run -p sigil-cli -- run "summarize this repository"
+sigil run "summarize this repository"
 ```
 
 Use `doctor` when setup or local tooling looks wrong:
 
 ```bash
-cargo run -p sigil-cli -- doctor
+sigil doctor
 ```
 
 Inside the TUI, use `/doctor` to render the same local diagnostics report in the transcript. The TUI report starts with a status summary and a `needs attention` remediation list, then keeps the full check list. Doctor warns when the API key is only stored as plaintext in config.
 
 The CLI is not the primary product surface. It is intentionally kept as an automation and debugging entrypoint.
+
+For update, PATH, and uninstall notes, see [docs/en/installation.md](docs/en/installation.md). For development-only runs inside the checkout, use `cargo run -p sigil` or `cargo run -p sigil -- doctor`.
 
 ## What It Does
 
@@ -103,6 +111,7 @@ See [docs/en/mcp.md](docs/en/mcp.md) for configuration and safety notes.
 
 User documentation:
 
+- [Installation from source](docs/en/installation.md) / [中文](docs/zh-CN/installation.md)
 - [TUI user guide](docs/en/user-guide.md) / [中文](docs/zh-CN/user-guide.md)
 - [Configuration guide](docs/en/configuration.md) / [中文](docs/zh-CN/configuration.md)
 - [Terminal compatibility checklist](docs/en/terminal-compatibility.md) / [中文](docs/zh-CN/terminal-compatibility.md)

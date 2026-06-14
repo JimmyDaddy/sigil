@@ -34,9 +34,9 @@ fn boxed_chunk_stream(
 #[test]
 fn resolve_workspace_root_uses_config_parent() -> Result<()> {
     let config_path = std::env::temp_dir()
-        .join("sigil-cli-config-parent")
+        .join("sigil-config-parent")
         .join("sigil.toml");
-    let launch_cwd = std::env::temp_dir().join("sigil-cli-launch");
+    let launch_cwd = std::env::temp_dir().join("sigil-launch");
     let resolved = resolve_workspace_root(&config_path, &launch_cwd, "workspace/project");
 
     assert_eq!(
@@ -52,9 +52,9 @@ fn resolve_workspace_root_uses_config_parent() -> Result<()> {
 #[test]
 fn resolve_workspace_root_uses_launch_cwd_for_default_dot() {
     let config_path = std::env::temp_dir()
-        .join("sigil-cli-config-parent")
+        .join("sigil-config-parent")
         .join("sigil.toml");
-    let launch_cwd = std::env::temp_dir().join("sigil-cli-launch");
+    let launch_cwd = std::env::temp_dir().join("sigil-launch");
 
     let resolved = resolve_workspace_root(&config_path, &launch_cwd, ".");
 
@@ -63,7 +63,7 @@ fn resolve_workspace_root_uses_launch_cwd_for_default_dot() {
 
 #[test]
 fn default_session_path_uses_configured_log_dir_and_jsonl_suffix() {
-    let workspace_root = std::env::temp_dir().join("sigil-cli-workspace");
+    let workspace_root = std::env::temp_dir().join("sigil-workspace");
     let session_path = default_session_path(&workspace_root, ".sigil/sessions");
 
     assert!(session_path.starts_with(workspace_root.join(".sigil/sessions")));
@@ -258,13 +258,13 @@ fn cli_parses_hidden_fim_command_options() -> Result<()> {
 
     assert!(matches!(
         cli.command,
-        Commands::Fim {
+        Some(Commands::Fim {
             ref prompt,
             ref suffix,
             ref stop,
             ref model,
             max_tokens,
-        } if prompt == "prefix"
+        }) if prompt == "prefix"
             && suffix == "tail"
             && stop == &vec!["<eof>".to_owned()]
             && model.as_deref() == Some("deepseek-test")
@@ -289,12 +289,12 @@ fn cli_parses_hidden_prefix_command_options() -> Result<()> {
 
     assert!(matches!(
         cli.command,
-        Commands::Prefix {
+        Some(Commands::Prefix {
             ref prompt,
             ref assistant_prefix,
             ref stop,
             ref model,
-        } if prompt == "prompt"
+        }) if prompt == "prompt"
             && assistant_prefix == "seed"
             && stop == &vec!["\n\n".to_owned()]
             && model.as_deref() == Some("deepseek-test")
@@ -312,7 +312,7 @@ fn cli_parses_run_command_with_explicit_config() -> Result<()> {
     );
     assert!(matches!(
         cli.command,
-        Commands::Run { ref prompt } if prompt == "hello"
+        Some(Commands::Run { ref prompt }) if prompt == "hello"
     ));
     Ok(())
 }
@@ -325,7 +325,15 @@ fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
         cli.config.as_deref(),
         Some(std::path::Path::new("custom.toml"))
     );
-    assert!(matches!(cli.command, Commands::Doctor));
+    assert!(matches!(cli.command, Some(Commands::Doctor)));
+    Ok(())
+}
+
+#[test]
+fn cli_without_subcommand_defaults_to_tui() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil"])?;
+
+    assert!(cli.command.is_none());
     Ok(())
 }
 
@@ -580,8 +588,7 @@ async fn run_command_creates_session_log_in_workspace() -> Result<()> {
 }
 
 fn create_test_workspace(name: &str) -> PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("sigil-cli-tests-{name}-{}", uuid::Uuid::new_v4()));
+    let path = std::env::temp_dir().join(format!("sigil-tests-{name}-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&path).expect("test workspace should create");
     path
 }

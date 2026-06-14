@@ -7,7 +7,7 @@ This checklist helps verify Sigil mouse capture and OSC52 clipboard behavior in 
 Start with diagnostics:
 
 ```bash
-cargo run -p sigil-cli -- doctor
+sigil doctor
 ```
 
 Inside the TUI, run `/doctor` to see the same terminal checks in the transcript. The report reads `[terminal].mouse_capture`, `[terminal].osc52_clipboard`, `[terminal].scroll_sensitivity`, `TERM`, common terminal profile variables, tmux/screen, SSH, WSL, and clipboard bridge risk.

@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::Result;
-use clap::Parser;
 #[cfg(not(test))]
 use crossterm::{
     event::{
@@ -28,9 +27,10 @@ use ratatui::{
 use sigil_kernel::RootConfig;
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
+
 #[cfg(not(test))]
-use sigil_tui::ui::{self, LayoutSnapshot};
-use sigil_tui::{
+use crate::ui::{self, LayoutSnapshot};
+use crate::{
     app::{AppAction, AppState},
     mouse::AppMouseOutcome,
     runner::{self, WorkerMessage},
@@ -48,19 +48,10 @@ const MAX_SCROLLBACK_INSERT_ROWS: usize = u16::MAX as usize;
 #[cfg(not(test))]
 const SPINNER_FRAME_MILLIS: u128 = 120;
 
-#[derive(Parser)]
-#[command(name = "sigil-tui")]
-#[command(about = "TUI-first shell for Sigil")]
-struct Cli {
-    #[arg(long)]
-    config: Option<PathBuf>,
-}
-
 #[cfg(not(test))]
-fn main() -> Result<()> {
-    let cli = Cli::parse();
+pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     let cwd = env::current_dir()?;
-    let config_path = preferred_config_path(cli.config.as_deref(), &cwd)?;
+    let config_path = preferred_config_path(config.as_deref(), &cwd)?;
     let (mut app, mut worker) = build_initial_app(
         cwd,
         config_path.clone(),

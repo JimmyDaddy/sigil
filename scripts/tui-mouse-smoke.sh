@@ -7,13 +7,13 @@ Usage: scripts/tui-mouse-smoke.sh [--no-launch] [--skip-doctor] [--log-dir <dir>
 
 Run a real-terminal Sigil TUI mouse smoke session.
 
-The script captures terminal diagnostics, optionally launches sigil-tui, then
+The script captures terminal diagnostics, optionally launches `sigil`, then
 prompts for pass/fail/skip results and writes a Markdown report. It is intended
 for local terminal profiles, tmux/screen, SSH, and clipboard bridge checks.
 
 Options:
-  --no-launch     Do not start sigil-tui; only capture diagnostics and prompt.
-  --skip-doctor   Do not run cargo run -p sigil-cli -- doctor.
+  --no-launch     Do not start sigil; only capture diagnostics and prompt.
+  --skip-doctor   Do not run cargo run -p sigil -- doctor.
   --log-dir DIR   Directory for generated logs and reports.
   --report PATH   Markdown report path.
   -h, --help      Show this help.
@@ -135,7 +135,7 @@ markdown_escape() {
 if [[ "${run_doctor}" -eq 1 ]]; then
   echo "running doctor; raw log: ${doctor_log}"
   set +e
-  cargo run -p sigil-cli -- doctor 2>&1 | tee "${doctor_log}"
+  cargo run -p sigil -- doctor 2>&1 | tee "${doctor_log}"
   doctor_status="${PIPESTATUS[0]}"
   set -e
 fi
@@ -163,7 +163,7 @@ INSTRUCTIONS
 
 if [[ "${launch_tui}" -eq 1 ]]; then
   set +e
-  cargo run -p sigil-tui
+  cargo run -p sigil
   tui_exit="$?"
   set -e
   tui_status="exit ${tui_exit}"

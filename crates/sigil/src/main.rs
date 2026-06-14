@@ -19,12 +19,12 @@ use sigil_runtime::doctor::{DoctorReport, build_doctor_report};
 
 #[derive(Parser)]
 #[command(name = "sigil")]
-#[command(about = "Automation entry for Sigil")]
+#[command(about = "TUI-first shell for Sigil")]
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -62,9 +62,12 @@ enum Commands {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    let Some(command) = cli.command else {
+        return sigil_tui::launcher::run_tui(cli.config);
+    };
     let cwd = env::current_dir()?;
     let config_path = preferred_config_path(cli.config.as_deref(), &cwd)?;
-    match cli.command {
+    match command {
         Commands::Run { prompt } => run_command(&config_path, &cwd, prompt).await,
         Commands::Doctor => doctor_command(&config_path, &cwd),
         Commands::Prefix {

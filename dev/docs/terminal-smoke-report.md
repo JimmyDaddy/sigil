@@ -2,11 +2,11 @@
 
 Date: 2026-06-13
 Workspace: `/Users/jimmydaddy/study/turbods`
-Command: `cargo run -p sigil-cli -- doctor`
+Command: `sigil doctor`
 
 ## Repeatable Script
 
-Use `scripts/tui-mouse-smoke.sh` for follow-up real TUI mouse smoke runs. The script captures terminal environment data, runs `/doctor` through `sigil-cli`, optionally launches `sigil-tui`, prompts for pass/fail/skip results, and writes a Markdown report under `.repo-local-dev/terminal-smoke/`.
+Use `scripts/tui-mouse-smoke.sh` for follow-up real TUI mouse smoke runs. The script captures terminal environment data, runs `/doctor` through `sigil doctor`, optionally launches the TUI, prompts for pass/fail/skip results, and writes a Markdown report under `.repo-local-dev/terminal-smoke/`.
 
 ## Installed For This Smoke
 

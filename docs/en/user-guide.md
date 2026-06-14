@@ -9,10 +9,12 @@ This guide is for day-to-day Sigil users. It focuses on what you see and control
 Start the TUI:
 
 ```bash
-cargo run -p sigil-tui
+sigil
 ```
 
 If no usable config exists, Sigil opens Quick Setup. You confirm the workspace, choose a model, and provide authentication. After setup, Sigil writes `workspace.root = "."`, so the directory where you started the TUI becomes the active workspace.
+
+If you have not installed Sigil yet, see [installation.md](installation.md). During development inside a checkout, `cargo run -p sigil` is equivalent.
 
 For authentication options, including environment variables, see [configuration.md](configuration.md).
 
@@ -143,9 +145,9 @@ Use the `Terminal` section in `/config`, or set `[terminal].mouse_capture = fals
 
 Run `/doctor` to see the detected terminal profile, multiplexer or remote layers, and clipboard bridge warnings.
 
-### Why is the CLI small?
+### Why are subcommands limited?
 
-The TUI is the normal user entrypoint. The CLI is currently for automation, scripts, and debugging, not the full product surface.
+Running `sigil` opens the TUI. Subcommands such as `sigil run` and `sigil doctor` are for automation, scripts, and debugging, not the full product surface.
 
 ### Why do some tools need approval?
 

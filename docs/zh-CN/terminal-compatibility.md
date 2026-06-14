@@ -7,7 +7,7 @@
 先运行诊断：
 
 ```bash
-cargo run -p sigil-cli -- doctor
+sigil doctor
 ```
 
 在 TUI 里可以运行 `/doctor`，同一份 terminal 检查会渲染到 transcript。报告会读取 `[terminal].mouse_capture`、`[terminal].osc52_clipboard`、`[terminal].scroll_sensitivity`、`TERM`、常见终端 profile 变量、tmux/screen、SSH、WSL 和剪贴板桥接风险。

@@ -1,0 +1,70 @@
+# 源码安装
+
+[English](../en/installation.md)
+
+本文说明当前支持的源码 checkout 安装路径。Release archive、包管理器和自更新还不属于这条路径。
+
+## 前置条件
+
+- 已通过 `rustup` 或系统包安装 Rust toolchain。
+- 已有 Sigil 仓库 checkout。
+- Cargo 的 binary 目录在 `PATH` 里。macOS 和 Linux 默认是 `~/.cargo/bin`，Windows 默认是 `%USERPROFILE%\.cargo\bin`。
+
+## 安装
+
+在仓库根目录运行：
+
+```bash
+cargo install --path crates/sigil --locked
+```
+
+这会安装 `sigil` binary。直接运行 `sigil` 会打开 TUI；自动化和诊断能力放在显式子命令后面。
+
+## 启动
+
+日常使用时，先进入你希望 Sigil 操作的仓库或工作目录，再启动 TUI：
+
+```bash
+cd /path/to/workspace
+sigil
+```
+
+如果没有可用配置，Sigil 会进入 Quick Setup。完成后，`workspace.root = "."` 表示启动 `sigil` 时所在目录就是当前工作区。
+
+显式子命令只用于自动化、诊断或脚本：
+
+```bash
+sigil doctor
+sigil run "总结一下当前仓库"
+```
+
+在 TUI 内也可以用 `/doctor`，同一份诊断报告会渲染到 transcript。
+
+## 更新
+
+从已更新的 checkout 重新安装时，加 `--force`：
+
+```bash
+cargo install --path crates/sigil --locked --force
+```
+
+## 卸载
+
+按 package 名卸载：
+
+```bash
+cargo uninstall sigil
+```
+
+`cargo uninstall sigil` 会移除 `sigil` binary。
+
+## 开发运行
+
+修改仓库代码时，如果不想重新安装，可以在 checkout 内直接运行：
+
+```bash
+cargo run -p sigil
+cargo run -p sigil -- doctor
+```
+
+这些命令是开发快捷路径。面向用户的文档应优先使用安装后的 `sigil` 命令。

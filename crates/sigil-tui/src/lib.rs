@@ -4,6 +4,7 @@ pub(crate) mod commands;
 pub(crate) mod config_panel;
 pub(crate) mod context_window;
 pub(crate) mod input;
+pub mod launcher;
 pub mod mouse;
 pub mod provider_status;
 pub mod runner;

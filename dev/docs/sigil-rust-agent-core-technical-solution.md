@@ -137,7 +137,7 @@ sigil/
       src/
         lib.rs
         tests/lib_tests.rs
-    sigil-cli/
+    sigil/
       src/
         main.rs
         tests/main_tests.rs
@@ -173,8 +173,8 @@ sigil/
 - `sigil-code-intel`：隔离 LSP client 生命周期、Rust Tree-sitter fallback、符号/诊断缓存、只读 code intelligence tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态代码智能结果只通过 bounded tool result 进入 provider-visible history，不注入 system prompt。
 - `sigil-mcp`：隔离 stdio MCP client 与工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
 - `sigil-runtime`：收口跨入口共享的 provider factory、tool registry 和 run options，避免 TUI / CLI 各自硬编码装配链。它不是新的领域层，kernel 仍然不知道 runtime 存在。
-- `sigil-cli`：薄启动器、调试入口、自动化入口和本地 doctor 诊断入口，不承担最终产品心智；诊断事实由 `sigil-runtime` 提供，避免 CLI 与 TUI 后续各写一套判断。
-- `sigil-tui`：第一用户入口。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
+- `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、隐藏 provider 调试命令保留为显式子命令，不承担最终产品心智；诊断事实由 `sigil-runtime` 提供，避免 CLI 与 TUI 后续各写一套判断。
+- `sigil-tui`：第一用户入口的 TUI 实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
 
 这个拆分仍然比“教科书式 Clean Architecture”更少：crate 边界只承载产品级职责，crate 内模块才承载局部复杂度。memory、permission、config、session 继续留在 `sigil-kernel` 内，因为它们共同定义通用执行语义；TUI 的输入、modal、session、approval、timeline、worker bridge 等状态流则留在 `sigil-tui` 内，因为它们属于第一用户表面的交互模型。
 
@@ -1102,8 +1102,8 @@ pub struct ProviderCapabilities {
 
 在进入 phase 划分之前，需要先明确产品表面原则：
 
-- `sigil-tui` 是第一用户入口，也是后续能力设计的基准面
-- `sigil-cli` 保留为启动器、自动化入口和调试通道，不承载最终产品心智
+- `sigil` 无子命令启动 TUI；TUI 是第一用户表面，也是后续能力设计的基准面
+- `sigil run`、`sigil doctor` 和隐藏 provider 调试命令保留为自动化入口和调试通道，不承载最终产品心智
 - `strict tools`、`prefix completion`、`FIM` 这类 provider 专项能力，默认应被 TUI 内部流程吸收，而不是直接变成普通用户必须理解的顶层命令
 - 如果某个能力只能靠新增命令解释自己，应该先反问：它是否其实应该是 TUI 内部动作、审批卡片或编辑模式
 
@@ -1228,7 +1228,7 @@ pub struct ProviderCapabilities {
 在正式编码前，建议先锁这几件事：
 
 1. 项目配置文件名定为 `sigil.toml`
-2. 第一层用户壳先做 `sigil-tui`；`sigil-cli` 只保留 bootstrap / debug / automation，不做命令产品化
+2. 第一层用户壳由 `sigil` 默认启动 TUI；子命令只保留 debug / automation，不做命令产品化
 3. kernel 是 event-driven、agent-runtime-centered
 4. 第一个 provider backend 先做 `sigil-provider-deepseek`，并复用 OpenAI-compatible 主链路
 5. MCP `stdio` 是 phase 1 必做，streamable HTTP 放 phase 2

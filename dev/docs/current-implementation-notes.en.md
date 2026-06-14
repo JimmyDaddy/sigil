@@ -16,8 +16,8 @@ sigil/
     sigil-code-intel/          # LSP client, Tree-sitter fallback, and code intelligence tools
     sigil-mcp/                 # stdio MCP client and tool adapter
     sigil-runtime/             # Shared provider / tool / run option assembly for entrypoints
-    sigil-cli/                 # Thin CLI launcher and debugging entrypoint
-    sigil-tui/                 # Primary user entrypoint
+    sigil/                 # `sigil` binary: starts the TUI by default; subcommands are for automation/debugging
+    sigil-tui/                 # TUI state, rendering, and runner for the primary user entrypoint
   docs/                        # User documentation
   dev/governance/              # Development constraints, code standards, engineering standards
   dev/docs/                    # Architecture, roadmap, design evolution, and implementation notes
@@ -33,8 +33,8 @@ sigil/
 - `sigil-tools-builtin` provides file read/write/edit/delete, search, directory listing, and shell execution.
 - `sigil-code-intel` provides optional LSP / Tree-sitter code intelligence, including read-only symbol, definition, reference, diagnostic, and code action query tools, plus code action / rename edit tools with approval diff previews.
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
-- `sigil-cli` currently exposes the public `run` automation entrypoint and the `doctor` local diagnostics entrypoint; `prefix` and `fim` remain debugging or provider-specific entrypoints rather than normal user concepts.
-- `sigil-tui` is the primary user entrypoint. It owns chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/resume`, approval modal, tool activity, diff preview, session recovery, context compaction, markdown code block highlighting, and code intelligence status display.
+- `sigil` provides the `sigil` binary: no subcommand starts the TUI directly; `run` and `doctor` remain explicit automation and diagnostics subcommands; `prefix` and `fim` remain hidden debugging or provider-specific entrypoints rather than normal user concepts.
+- `sigil-tui` owns the primary TUI implementation: chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/resume`, approval modal, tool activity, diff preview, session recovery, context compaction, markdown code block highlighting, and code intelligence status display.
 
 ## TUI Module Boundaries
 

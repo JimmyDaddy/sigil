@@ -18,8 +18,8 @@
 
 ### 2.1 产品层
 
-- `crates/sigil-tui` 是第一用户入口
-- `crates/sigil-cli` 是自动化和调试入口
+- `crates/sigil-tui` 承载第一用户入口的 TUI 状态、渲染和 runner
+- `crates/sigil` 提供 `sigil` binary；无子命令启动 TUI，显式子命令承担自动化和调试入口
 
 ### 2.2 内核层
 

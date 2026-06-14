@@ -25,14 +25,14 @@ TUI 和 CLI 按这个顺序找配置：
 对普通使用者，直接启动 TUI 并完成 Quick Setup：
 
 ```bash
-cargo run -p sigil-tui
+sigil
 ```
 
 临时使用或 CI 场景，可以在启动前通过环境变量提供认证：
 
 ```bash
 export SIGIL_API_KEY="sk-..."
-cargo run -p sigil-tui
+sigil
 ```
 
 如果没有配置文件，TUI 会进入 Quick Setup，并在保存后生成可用配置。后续可以用 `/config` 调整常用项。
@@ -42,7 +42,7 @@ cargo run -p sigil-tui
 当配置、认证、MCP 或本地 LSP 工具链看起来不对时，先运行 `doctor`：
 
 ```bash
-cargo run -p sigil-cli -- doctor
+sigil doctor
 ```
 
 在 TUI 内可以用 `/doctor`，它会把同一份报告渲染到 transcript。TUI 版本会先显示状态汇总和 `needs attention` 修复清单，再展示完整 check 列表。
@@ -50,7 +50,7 @@ cargo run -p sigil-cli -- doctor
 如果启动 Sigil 时使用了非默认配置，也传入同一个配置路径：
 
 ```bash
-cargo run -p sigil-cli -- --config ./sigil.toml doctor
+sigil --config ./sigil.toml doctor
 ```
 
 报告会检查配置加载、workspace 解析、session log 位置、provider 设置、API key 来源、MCP command 与 trust 设置、code intelligence language server 可用性，以及当前 `TERM`。它只展示 API key 的来源，不会打印密钥值。warning 和 error 会附带 `fix:` 修复建议；如果 key 只来自明文配置，doctor 会给出 warning，提示你改用环境变量或确认本地配置不会被提交。
@@ -107,7 +107,7 @@ model = "gpt-4.1"
 root = "."
 ```
 
-`workspace.root = "."` 有特殊语义：`.` 会在启动时解析成运行 `sigil-tui` 或 `sigil-cli` 时所在的目录。这样同一份用户级配置可以跟随你当前打开的仓库工作。
+`workspace.root = "."` 有特殊语义：`.` 会在启动时解析成运行 `sigil` 时所在的目录。这样同一份用户级配置可以跟随你当前打开的仓库工作。
 
 文件类工具会限制在 workspace root 内，拒绝 `..`、绝对路径和指向 workspace 外的 symlink。`bash` 仍不提供完整进程 sandbox。
 

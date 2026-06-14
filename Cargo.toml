@@ -7,7 +7,7 @@ members = [
     "crates/sigil-code-intel",
     "crates/sigil-mcp",
     "crates/sigil-runtime",
-    "crates/sigil-cli",
+    "crates/sigil",
     "crates/sigil-tui",
 ]
 resolver = "2"
