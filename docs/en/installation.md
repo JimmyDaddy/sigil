@@ -68,7 +68,11 @@ Build for an explicit Rust target triple when needed:
 scripts/build-release-archive.sh --target aarch64-apple-darwin
 ```
 
-The archive contains the `sigil` binary plus the README and installation docs. Published package-manager installs are still future work.
+The archive contains the `sigil` binary plus the README and installation docs.
+Tagged releases are built by the release workflow and include checksums,
+GitHub artifact provenance attestations, generated release notes, and a
+`sigil.rb` Homebrew formula asset for tap maintainers. Self-update is still
+future work.
 
 ## Update
 

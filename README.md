@@ -131,6 +131,7 @@ Developer documentation:
 - [Core technical solution](dev/docs/sigil-rust-agent-core-technical-solution.md)
 - [Current implementation notes](dev/docs/current-implementation-notes.en.md) / [中文](dev/docs/current-implementation-notes.md)
 - [Capability roadmap](dev/docs/sigil-capability-roadmap.md)
+- [Release process](dev/docs/release-process.md)
 - [Agent collaboration instructions](AGENTS.md)
 
 ## Development Checks

@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+          - os: macos-15-intel
+          - os: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable
+          rustup default stable
+
+      - name: Build release archive
+        shell: bash
+        run: scripts/build-release-archive.sh --out-dir dist
+
+      - name: Generate provenance attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sigil-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_TAG}"
+          mkdir -p dist
+          find release-artifacts -maxdepth 3 -type f -exec cp {} dist/ \;
+          cat dist/*.sha256 | sort -k2 > dist/checksums.txt
+          scripts/generate-release-notes.sh "${RELEASE_TAG}" > RELEASE_NOTES.md
+
+          darwin_arm_archive="$(find dist -maxdepth 1 -name 'sigil-*-aarch64-apple-darwin.tar.gz' | sort | head -n 1)"
+          darwin_intel_archive="$(find dist -maxdepth 1 -name 'sigil-*-x86_64-apple-darwin.tar.gz' | sort | head -n 1)"
+          if [[ -n "${darwin_arm_archive}" && -n "${darwin_intel_archive}" ]]; then
+            arm_name="$(basename "${darwin_arm_archive}")"
+            arm_sha="$(awk '{print $1}' "${darwin_arm_archive}.sha256")"
+            intel_name="$(basename "${darwin_intel_archive}")"
+            intel_sha="$(awk '{print $1}' "${darwin_intel_archive}.sha256")"
+            scripts/render-homebrew-formula.sh \
+              --version "${RELEASE_TAG#v}" \
+              --arm-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${arm_name}" \
+              --arm-sha256 "${arm_sha}" \
+              --intel-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${intel_name}" \
+              --intel-sha256 "${intel_sha}" \
+              --output dist/sigil.rb
+          elif [[ -n "${darwin_arm_archive}" || -n "${darwin_intel_archive}" ]]; then
+            darwin_archive="${darwin_arm_archive:-${darwin_intel_archive}}"
+            archive_name="$(basename "${darwin_archive}")"
+            archive_sha="$(awk '{print $1}' "${darwin_archive}.sha256")"
+            scripts/render-homebrew-formula.sh \
+              --version "${RELEASE_TAG#v}" \
+              --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${archive_name}" \
+              --sha256 "${archive_sha}" \
+              --output dist/sigil.rb
+          fi
+
+          {
+            echo
+            echo "## Release assets"
+            echo
+            for asset in dist/*; do
+              echo "- \`$(basename "${asset}")\`"
+            done
+          } >> RELEASE_NOTES.md
+
+      - name: Publish GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${RELEASE_TAG}" dist/* \
+            --title "Sigil ${RELEASE_TAG}" \
+            --notes-file RELEASE_NOTES.md \
+            --verify-tag

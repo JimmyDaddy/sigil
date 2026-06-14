@@ -147,7 +147,11 @@ Two local distribution-validation paths are supported:
 - Source install: `cargo install --path crates/sigil --locked`
 - Local release archive: `scripts/build-release-archive.sh`
 
-The release archive script builds `sigil` in release mode, injects git commit, target, and profile build metadata, runs `sigil --version` and `sigil doctor` smoke checks against the built binary, then writes `dist/sigil-<version>-<target>.tar.gz` and a matching `.sha256` file. Homebrew formula, release CI, signing/provenance, and self-update remain future work.
+The release archive script builds `sigil` in release mode, injects git commit, target, and profile build metadata, runs `sigil --version` and `sigil doctor` smoke checks against the built binary, then writes `dist/sigil-<version>-<target>.tar.gz` and a matching `.sha256` file.
+
+The GitHub release workflow lives at `.github/workflows/release.yml`. On `v*` tags or manual dispatch with an existing tag, it builds release archives on Linux, macOS, and Windows runners, generates GitHub artifact provenance attestations, aggregates checksums, generates release notes from Conventional Commits, renders a `sigil.rb` Homebrew formula asset, and publishes the GitHub release through `gh release create`. The maintainer runbook lives in [`release-process.md`](release-process.md).
+
+Synchronizing an independent Homebrew tap and self-update remain future work.
 
 ## Current MCP Implementation
 

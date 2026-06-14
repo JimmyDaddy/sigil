@@ -48,7 +48,7 @@
 | P2 | PTY / background tasks | `bash` 是一次性命令 | 交互式 shell、后台任务、恢复与进程控制 |
 | P2 | 更强编辑工具 | exact snippet replace | patch plan、多文件变更集、冲突检测、可回滚 |
 | P2 | CLI / HTTP automation | CLI 公开 `run` | JSON 输出、headless 审批策略、HTTP streaming adapter |
-| P3 | Packaging / distribution | source `cargo install` 文档、`sigil --version` 构建元数据、本地 release archive 和 doctor smoke 已落地 | 后续补发布 CI、签名、Homebrew formula |
+| P3 | Packaging / distribution | source `cargo install` 文档、`sigil --version` 构建元数据、本地 release archive、release CI matrix、GitHub provenance attestation、Homebrew formula asset 和 release notes 生成已落地 | 后续补真实 tag 发布验证、自更新和可选 tap 仓库 |
 | P3 | Auto memory / indexed facts | 文档型 memory boot | 可审计自动记忆和 fact index |
 
 ## 4. Phase 0：安全与路线固化
@@ -574,10 +574,9 @@ cargo test -p sigil-tui approval timeline
 
 后续交付物：
 
-1. 发布 CI 产物矩阵。
-2. 签名或 provenance。
-3. Homebrew formula。
-4. release notes 生成规则。
+1. 首个真实 tag release 验证。
+2. 可选独立 Homebrew tap 仓库同步。
+3. 自更新策略评估。
 
 验收标准：
 
@@ -606,15 +605,14 @@ cargo test -p sigil-tui approval timeline
 
 推荐按下面顺序推进，而不是按实现趣味挑选：
 
-1. **Packaging 发布闭环**：在本地 archive 脚本后补发布 CI、签名/provenance 和 Homebrew formula。
-2. **Secret 可选 backend 评估**：只在确有价值时推进 session-only UI、Keychain 或 encrypted file backend。
-3. **Provider capability UX**：为 DeepSeek / OpenAI-compatible 能力差异补更清晰的 TUI 降级说明。
-4. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
-5. **PTY / background tasks**：解决长命令和交互式命令。
-6. **Editing Tools 2.0**：提高多文件变更可靠性。
-7. **CLI JSON / HTTP adapter**：扩展自动化表面。
-8. **MCP sampling / completion 评估**：只在有清晰产品入口时推进，不要把 server-initiated LLM 调用隐式接入默认路径。
-9. **Memory 2.0**：产品化长期记忆。
+1. **Secret 可选 backend 评估**：只在确有价值时推进 session-only UI、Keychain 或 encrypted file backend。
+2. **Provider capability UX**：为 DeepSeek / OpenAI-compatible 能力差异补更清晰的 TUI 降级说明。
+3. **Planner / executor**：在基础执行闭环稳定后支持复杂任务。
+4. **PTY / background tasks**：解决长命令和交互式命令。
+5. **Editing Tools 2.0**：提高多文件变更可靠性。
+6. **CLI JSON / HTTP adapter**：扩展自动化表面。
+7. **MCP sampling / completion 评估**：只在有清晰产品入口时推进，不要把 server-initiated LLM 调用隐式接入默认路径。
+8. **Memory 2.0**：产品化长期记忆。
 
 ## 16. 每阶段通用完成定义
 

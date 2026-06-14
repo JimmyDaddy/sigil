@@ -68,7 +68,7 @@ dist/sigil-<version>-<target>.tar.gz.sha256
 scripts/build-release-archive.sh --target aarch64-apple-darwin
 ```
 
-archive 内包含 `sigil` binary、README 和安装文档。发布到包管理器仍是后续工作。
+archive 内包含 `sigil` binary、README 和安装文档。tagged release 会由 release workflow 构建，并附带 checksum、GitHub artifact provenance attestation、生成的 release notes，以及供 tap 维护者使用的 `sigil.rb` Homebrew formula asset。自更新仍是后续工作。
 
 ## 更新
 

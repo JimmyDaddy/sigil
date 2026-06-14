@@ -131,6 +131,7 @@ Sigil 可以通过 stdio MCP server 接入外部工具。MCP tools、resources �
 - [核心技术方案](dev/docs/sigil-rust-agent-core-technical-solution.md)
 - [当前实现快照](dev/docs/current-implementation-notes.md) / [English](dev/docs/current-implementation-notes.en.md)
 - [能力路线图](dev/docs/sigil-capability-roadmap.md)
+- [发布流程](dev/docs/release-process.md)
 - [仓库内协作说明](AGENTS.md)
 
 ## 开发验证
