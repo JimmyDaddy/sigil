@@ -1214,7 +1214,7 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
     );
 
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("not connected yet"));
+    assert_eq!(app.last_notice(), Some("available via /plan"));
 
     app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;

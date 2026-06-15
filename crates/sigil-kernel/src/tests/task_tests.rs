@@ -6,7 +6,7 @@ use crate::{
     TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
     TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
     TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
-    task_plan_update_entry, task_plan_update_result_content,
+    task_plan_update_entry, task_plan_update_result_content, task_plan_update_tool_spec,
 };
 
 fn task_id(value: &str) -> Result<TaskId> {
@@ -178,6 +178,20 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
     };
     assert!(task_plan_update_entry(&context, &unsupported_status).is_err());
     Ok(())
+}
+
+#[test]
+fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
+    let spec = task_plan_update_tool_spec();
+
+    assert!(spec.description.contains("Do not call task"));
+    assert!(spec.description.contains("subagent_read"));
+    assert!(spec.description.contains("subagent_write"));
+    assert!(
+        spec.input_schema
+            .to_string()
+            .contains("delegated read-only verification")
+    );
 }
 
 #[test]

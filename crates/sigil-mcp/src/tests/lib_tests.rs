@@ -8,8 +8,8 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{
     ApprovalMode, McpServerConfig, McpServerStartup, McpServerTrustPolicy, McpTrustClass,
-    ProviderCapabilities, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
-    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    ProviderCapabilities, ReasoningStreamSupport, SecretRedactor, ToolAccess, ToolCategory,
+    ToolContext, ToolErrorKind, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::{
     io::BufReader,
@@ -214,7 +214,8 @@ fn test_provider_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         exact_prefix_cache: false,
         reports_cache_tokens: false,
-        supports_reasoning_stream: false,
+        reasoning_stream: ReasoningStreamSupport::Unsupported,
+        supports_reasoning_effort: false,
         supports_tool_stream: false,
         supports_background_tasks: false,
         supports_response_handles: false,

@@ -219,6 +219,25 @@ fn push_sample_tool_cards(app: &mut AppState) {
     );
 }
 
+fn push_long_tool_card(app: &mut AppState, call_id: &str, line_count: usize) {
+    let preview_lines = (1..=line_count)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>();
+    app.push_timeline(
+        TimelineRole::Tool,
+        json!({
+            "call_id": call_id,
+            "tool_name": "read_file",
+            "status": "ok",
+            "preview_kind": "text",
+            "summary": format!("first {line_count}/{line_count} lines - 240 B"),
+            "preview_lines": preview_lines,
+            "hidden_lines": 0
+        })
+        .to_string(),
+    );
+}
+
 #[test]
 fn layout_snapshot_hits_main_regions() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -821,6 +840,31 @@ fn mouse_click_tool_card_header_toggles_card() -> Result<()> {
 }
 
 #[test]
+fn mouse_click_tool_card_header_keeps_expanded_card_visible() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(100, 12);
+    push_long_tool_card(&mut app, "call-long", 32);
+    push_sample_tool_cards(&mut app);
+    let long_entry_index = app.tool_activity_entry_indices()[0];
+    app.reveal_timeline_entry(long_entry_index);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 12), &app);
+    let (column, row) = tool_card_header_point(&layout, long_entry_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert!(app.expanded_tool_activity_keys.contains("call:call-long"));
+    let expanded_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 12), &app);
+    let expanded_hit_area = expanded_layout
+        .tool_cards
+        .iter()
+        .find(|area| area.entry_index == long_entry_index)
+        .expect("expanded tool card should remain visible");
+    assert_eq!(expanded_hit_area.header_area.map(|area| area.y), Some(row));
+    Ok(())
+}
+
+#[test]
 fn mouse_click_tool_card_hidden_preview_toggles_card() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
@@ -1187,6 +1231,32 @@ fn mouse_click_unknown_tool_card_is_noop() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Noop));
     assert_eq!(app.selected_tool_activity_key, previous_selected);
+    Ok(())
+}
+
+#[test]
+fn mouse_tool_card_anchor_edges_ignore_stale_state() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let indices = app.tool_activity_entry_indices();
+    let (first_column, first_row) = tool_card_header_point(&layout, indices[0]);
+
+    assert!(
+        app.tool_card_mouse_anchor(indices[1], first_column, first_row, &layout)
+            .is_none()
+    );
+
+    let anchor = super::super::mouse_flow::ToolCardMouseAnchor {
+        entry_line_offset: 0,
+        viewport_line_offset: 0,
+        visible_rows: 1,
+    };
+    app.restore_tool_card_mouse_anchor(indices[0], None);
+    app.restore_tool_card_mouse_anchor(usize::MAX, Some(anchor));
+    app.timeline_render_cache.clear();
+    app.restore_tool_card_mouse_anchor(indices[0], Some(anchor));
     Ok(())
 }
 

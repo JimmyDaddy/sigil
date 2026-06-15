@@ -109,6 +109,12 @@ fn memory_loader_enabled_without_documents_keeps_base_prompt_only() -> Result<()
     assert_eq!(report.fingerprint, "none");
     assert_eq!(materialized.messages.len(), 1);
     assert_eq!(materialized.messages[0].id, "system:base");
+    assert!(
+        materialized.messages[0]
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("Direct task/subagent tool calls"))
+    );
     Ok(())
 }
 

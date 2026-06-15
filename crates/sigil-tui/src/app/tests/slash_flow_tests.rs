@@ -59,7 +59,7 @@ fn plan_continue_command_dispatches_continue_action() -> Result<()> {
 }
 
 #[test]
-fn plain_prompt_dispatches_continue_action_when_session_has_task() -> Result<()> {
+fn plain_prompt_dispatches_continue_action_when_session_has_unfinished_task() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
@@ -67,8 +67,8 @@ fn plain_prompt_dispatches_continue_action_when_session_has_task() -> Result<()>
             task_id,
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
-            status: sigil_kernel::TaskRunStatus::Completed,
-            reason: Some("task completed".to_owned()),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: Some("task running".to_owned()),
         },
     ))]);
     app.input = "优先看 runtime 状态同步".to_owned();

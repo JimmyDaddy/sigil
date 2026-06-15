@@ -547,7 +547,7 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
 }
 
 #[test]
-fn info_rail_projects_memory_off_and_muted_agent_rows() {
+fn info_rail_projects_memory_off_and_agent_rows() {
     let mut config = test_config();
     config.memory.enabled = false;
     let app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &config);
@@ -573,7 +573,7 @@ fn info_rail_projects_memory_off_and_muted_agent_rows() {
             .info_rail
             .agent_lines
             .iter()
-            .any(|line| line == "~ subagents: not connected yet")
+            .any(|line| line == "- subagents: available via /plan")
     );
 }
 

@@ -6,7 +6,8 @@ use std::{
 use anyhow::Result;
 use futures::StreamExt;
 use sigil_kernel::{
-    Provider, ProviderChunk, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolSpec,
+    Provider, ProviderChunk, ReasoningStreamSupport, ToolAccess, ToolCall, ToolCategory,
+    ToolPreviewCapability, ToolSpec,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -211,7 +212,12 @@ fn provider_trait_methods_and_frame_helpers_cover_remaining_branches() -> Result
 
     assert_eq!(provider.name(), "deepseek");
     let capabilities = provider.capabilities();
-    assert!(capabilities.supports_reasoning_stream);
+    assert_eq!(
+        capabilities.reasoning_stream,
+        ReasoningStreamSupport::Native
+    );
+    assert!(capabilities.can_surface_reasoning_stream());
+    assert!(capabilities.supports_reasoning_effort);
     assert!(capabilities.supports_tool_stream);
     assert!(capabilities.supports_infill_completion);
     assert!(capabilities.supports_system_fingerprint);

@@ -53,6 +53,80 @@ fn terminal_capability_helpers_default_on_and_follow_config() {
 }
 
 #[test]
+fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let child_task_id = sigil_kernel::TaskId::new("child_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    let rows = app.agent_sidebar_rows();
+    assert!(rows.iter().any(|row| {
+        row.label == "subagents" && row.detail == "available via /plan" && !row.muted
+    }));
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: step_id.clone(),
+                child_task_id,
+                child_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/task_1/step_1-child_1.jsonl",
+                )?,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Started,
+                summary_hash: None,
+            },
+        )),
+    ]);
+
+    let rows = app.agent_sidebar_rows();
+
+    assert!(rows.iter().any(|row| {
+        row.label == "subagents" && row.detail == "1 child session active" && !row.muted
+    }));
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Completed,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_2")?,
+                child_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/task_1/step_1-child_2.jsonl",
+                )?,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Completed,
+                summary_hash: None,
+            },
+        )),
+    ]);
+
+    let rows = app.agent_sidebar_rows();
+
+    assert!(rows.iter().any(|row| {
+        row.label == "subagents" && row.detail == "1 child session recorded" && !row.muted
+    }));
+    Ok(())
+}
+
+#[test]
 fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let step_id = sigil_kernel::TaskStepId::new("step_1")?;
@@ -341,7 +415,136 @@ fn task_sidebar_lines_keeps_hidden_current_step_visible() -> Result<()> {
     assert!(lines.contains(&"✓ 1. completed step_1 · step 1".to_owned()));
     assert!(lines.contains(&"! 2. blocked step_2 · step 2".to_owned()));
     assert!(lines.contains(&"▶ 8. running step_8 · step 8".to_owned()));
-    assert!(lines.contains(&"+2 more steps".to_owned()));
+    assert!(lines.contains(&"+2 more steps · 2 pending".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn task_sidebar_lines_completed_long_plan_shows_final_step_and_hidden_summary() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let steps = (1..=10)
+        .map(|index| {
+            Ok(sigil_kernel::TaskStepSpec {
+                step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
+                title: format!("step {index}"),
+                detail: None,
+                role: sigil_kernel::AgentRole::Executor,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps,
+            reason: None,
+        })),
+    ];
+    for index in 1..=10 {
+        entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+            sigil_kernel::TaskStepEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
+                role: sigil_kernel::AgentRole::Executor,
+                status: sigil_kernel::TaskStepStatus::Completed,
+                title: Some(format!("step {index}")),
+                summary: None,
+                reason: None,
+            },
+        )));
+    }
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Completed,
+            reason: Some("completed plan v1".to_owned()),
+        },
+    )));
+
+    app.sync_current_session_state(entries);
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"status: completed".to_owned()));
+    assert!(lines.contains(&"progress: 10/10 done".to_owned()));
+    assert!(lines.contains(&"last: v1:step_10 completed".to_owned()));
+    assert!(lines.contains(&"✓ 10. completed step_10 · step 10".to_owned()));
+    assert!(lines.contains(&"+4 more steps · 4 completed".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn task_sidebar_lines_summarizes_hidden_non_pending_statuses() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let steps = (1..=12)
+        .map(|index| {
+            Ok(sigil_kernel::TaskStepSpec {
+                step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
+                title: format!("step {index}"),
+                detail: None,
+                role: sigil_kernel::AgentRole::Executor,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps,
+            reason: None,
+        })),
+    ];
+    for (index, status) in [
+        (7, sigil_kernel::TaskStepStatus::Running),
+        (8, sigil_kernel::TaskStepStatus::Failed),
+        (9, sigil_kernel::TaskStepStatus::Blocked),
+        (10, sigil_kernel::TaskStepStatus::Cancelled),
+        (11, sigil_kernel::TaskStepStatus::Interrupted),
+        (12, sigil_kernel::TaskStepStatus::Completed),
+        (1, sigil_kernel::TaskStepStatus::Running),
+    ] {
+        entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+            sigil_kernel::TaskStepEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
+                role: sigil_kernel::AgentRole::Executor,
+                status,
+                title: Some(format!("step {index}")),
+                summary: None,
+                reason: None,
+            },
+        )));
+    }
+
+    app.sync_current_session_state(entries);
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"▶ 1. running step_1 · step 1".to_owned()));
+    assert!(lines.contains(
+        &"+6 more steps · 1 running, 1 failed, 1 blocked, 1 cancelled, 1 interrupted, 1 completed"
+            .to_owned()
+    ));
     Ok(())
 }
 

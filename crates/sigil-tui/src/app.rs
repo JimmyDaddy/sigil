@@ -1314,6 +1314,14 @@ impl AppState {
                 "current: v{plan_version}:{} {status}",
                 step_id.as_str()
             ));
+        } else if task.status == sigil_kernel::TaskRunStatus::Completed {
+            if let Some((plan_version, step_id, status)) = task_sidebar_last_plan_step(task) {
+                lines.push(format!(
+                    "last: v{plan_version}:{} {}",
+                    step_id.as_str(),
+                    task_step_status_label(status)
+                ));
+            }
         } else if let Some((plan_version, step_id, status)) = task_sidebar_last_problem_step(task) {
             lines.push(format!(
                 "last: v{plan_version}:{} {}",
@@ -1343,7 +1351,7 @@ impl AppState {
 
     fn has_task_context_for_plain_prompt(&self) -> bool {
         sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries)
-            .latest_task()
+            .latest_unfinished_task()
             .is_some()
     }
 
@@ -1401,6 +1409,31 @@ impl AppState {
     }
 
     pub(crate) fn agent_sidebar_rows(&self) -> Vec<SidebarAgentRow> {
+        let subagent_detail =
+            sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries)
+                .latest_task()
+                .and_then(|task| {
+                    let child_count = task.child_sessions.len();
+                    if child_count == 0 {
+                        return None;
+                    }
+                    let active = task
+                        .child_sessions
+                        .values()
+                        .any(|child| child.status == sigil_kernel::TaskChildSessionStatus::Started);
+                    Some(if active {
+                        format!(
+                            "{} active",
+                            count_label(child_count, "child session", "child sessions")
+                        )
+                    } else {
+                        format!(
+                            "{} recorded",
+                            count_label(child_count, "child session", "child sessions")
+                        )
+                    })
+                })
+                .unwrap_or_else(|| "available via /plan".to_owned());
         let rows = [
             (
                 "main".to_owned(),
@@ -1411,7 +1444,7 @@ impl AppState {
                 },
                 false,
             ),
-            ("subagents".to_owned(), "not connected yet".to_owned(), true),
+            ("subagents".to_owned(), subagent_detail, false),
         ];
         rows.into_iter()
             .enumerate()
@@ -1761,9 +1794,54 @@ fn task_sidebar_focus_lines(
         .collect::<Vec<_>>();
     let hidden_steps = plan.steps.len().saturating_sub(selected_indices.len());
     if hidden_steps > 0 {
-        lines.push(format!("+{hidden_steps} more steps"));
+        let summary = task_sidebar_hidden_step_summary(task, plan_version, plan, &selected_indices);
+        lines.push(format!("+{hidden_steps} more steps · {summary}"));
     }
     lines
+}
+
+fn task_sidebar_hidden_step_summary(
+    task: &sigil_kernel::TaskRunProjection,
+    plan_version: u32,
+    plan: &sigil_kernel::TaskPlanProjection,
+    selected_indices: &[usize],
+) -> String {
+    let mut pending = 0usize;
+    let mut running = 0usize;
+    let mut completed = 0usize;
+    let mut failed = 0usize;
+    let mut blocked = 0usize;
+    let mut cancelled = 0usize;
+    let mut interrupted = 0usize;
+    for (index, step) in plan.steps.iter().enumerate() {
+        if selected_indices.contains(&index) {
+            continue;
+        }
+        match task_sidebar_step_status(task, plan_version, step) {
+            sigil_kernel::TaskStepStatus::Pending => pending += 1,
+            sigil_kernel::TaskStepStatus::Running => running += 1,
+            sigil_kernel::TaskStepStatus::Completed => completed += 1,
+            sigil_kernel::TaskStepStatus::Failed => failed += 1,
+            sigil_kernel::TaskStepStatus::Blocked => blocked += 1,
+            sigil_kernel::TaskStepStatus::Cancelled => cancelled += 1,
+            sigil_kernel::TaskStepStatus::Interrupted => interrupted += 1,
+        }
+    }
+    let mut parts = Vec::new();
+    for (count, label) in [
+        (running, "running"),
+        (failed, "failed"),
+        (blocked, "blocked"),
+        (cancelled, "cancelled"),
+        (interrupted, "interrupted"),
+        (pending, "pending"),
+        (completed, "completed"),
+    ] {
+        if count > 0 {
+            parts.push(format!("{count} {label}"));
+        }
+    }
+    parts.join(", ")
 }
 
 fn task_sidebar_step_marker(status: sigil_kernel::TaskStepStatus) -> &'static str {
@@ -1790,6 +1868,9 @@ fn task_sidebar_focus_step_index(
             .position(|step| &step.step_id == current_step_id)
     {
         return Some(index);
+    }
+    if task.status == sigil_kernel::TaskRunStatus::Completed && !plan.steps.is_empty() {
+        return Some(plan.steps.len() - 1);
     }
     plan.steps
         .iter()
@@ -1819,6 +1900,19 @@ fn task_sidebar_step_status(
         .get(&(plan_version, step.step_id.clone()))
         .map(|projected| projected.status)
         .unwrap_or(sigil_kernel::TaskStepStatus::Pending)
+}
+
+fn task_sidebar_last_plan_step(
+    task: &sigil_kernel::TaskRunProjection,
+) -> Option<(u32, sigil_kernel::TaskStepId, sigil_kernel::TaskStepStatus)> {
+    let plan_version = task.latest_plan_version?;
+    let plan = task.plans.get(&plan_version)?;
+    let step = plan.steps.last()?;
+    Some((
+        plan_version,
+        step.step_id.clone(),
+        task_sidebar_step_status(task, plan_version, step),
+    ))
 }
 
 fn task_sidebar_last_problem_step(

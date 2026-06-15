@@ -1,5 +1,17 @@
 use super::*;
 
+fn task_run_entry(status: sigil_kernel::TaskRunStatus) -> Result<SessionLogEntry> {
+    Ok(SessionLogEntry::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id: sigil_kernel::TaskId::new("task_1")?,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status,
+            reason: None,
+        },
+    )))
+}
+
 #[test]
 fn cjk_input_cursor_visual_position_uses_display_width() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -79,6 +91,56 @@ fn carriage_return_key_submits_instead_of_entering_invisible_text() -> Result<()
         action,
         Some(AppAction::SubmitPrompt(prompt)) if prompt == "hello"
     ));
+    Ok(())
+}
+
+#[test]
+fn plain_prompt_after_final_task_starts_new_conversation() -> Result<()> {
+    for status in [
+        sigil_kernel::TaskRunStatus::Completed,
+        sigil_kernel::TaskRunStatus::Cancelled,
+    ] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.sync_current_session_state(vec![task_run_entry(status)?]);
+        app.input = "new question".to_owned();
+        app.input_cursor = app.input.chars().count();
+
+        let action = app.submit_input()?;
+
+        assert!(matches!(
+            action,
+            Some(AppAction::SubmitPrompt(prompt)) if prompt == "new question"
+        ));
+        assert_eq!(app.last_notice(), Some("thinking"));
+    }
+    Ok(())
+}
+
+#[test]
+fn plain_prompt_with_unfinished_task_continues_plan() -> Result<()> {
+    for status in [
+        sigil_kernel::TaskRunStatus::Started,
+        sigil_kernel::TaskRunStatus::Running,
+        sigil_kernel::TaskRunStatus::Paused,
+        sigil_kernel::TaskRunStatus::Failed,
+        sigil_kernel::TaskRunStatus::Interrupted,
+    ] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.sync_current_session_state(vec![task_run_entry(status)?]);
+        app.input = "continue with the review".to_owned();
+        app.input_cursor = app.input.chars().count();
+
+        let action = app.submit_input()?;
+
+        assert!(matches!(
+            action,
+            Some(AppAction::ContinuePlan {
+                task_id: None,
+                guidance: Some(prompt),
+            }) if prompt == "continue with the review"
+        ));
+        assert_eq!(app.last_notice(), Some("continuing task"));
+    }
     Ok(())
 }
 

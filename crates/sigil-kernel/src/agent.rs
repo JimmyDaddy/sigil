@@ -405,6 +405,30 @@ where
                         )?;
                         continue;
                     }
+                    if let Some(mut result) =
+                        direct_task_tool_guidance_result(&call, input.task_plan_update.is_some())
+                    {
+                        attach_tool_call_context(&mut result, &call, &[]);
+                        append_tool_execution_audit(
+                            session,
+                            &call,
+                            &[],
+                            ToolExecutionStatus::Started,
+                            None,
+                            None,
+                        )?;
+                        append_tool_execution_audit(
+                            session,
+                            &call,
+                            &[],
+                            ToolExecutionStatus::Completed,
+                            None,
+                            Some(&result),
+                        )?;
+                        session.append_tool_message(result.to_model_message())?;
+                        handler.handle(RunEvent::ToolResult(result))?;
+                        continue;
+                    }
                     let mut execution_subjects = Vec::new();
                     if let Some(spec) = self.tools.spec_for(&call.name) {
                         let subjects = match self.tools.permission_subjects(&tool_ctx, &call) {
@@ -819,6 +843,26 @@ where
             });
         }
     }
+}
+
+fn direct_task_tool_guidance_result(
+    call: &ToolCall,
+    task_plan_update_available: bool,
+) -> Option<ToolResult> {
+    if !matches!(call.name.as_str(), "task" | "subagent" | "sub_agent") {
+        return None;
+    }
+    let content = if task_plan_update_available {
+        "direct task/subagent tool calls are not supported in the planner; delegate work by calling task_plan_update with an accepted plan and step roles subagent_read or subagent_write"
+    } else {
+        "direct task/subagent tool calls are not available in ordinary chat; ask the user to start planned orchestration with /plan <objective>, where delegation is expressed through task_plan_update step roles subagent_read or subagent_write"
+    };
+    Some(ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        content,
+        ToolResultMeta::default(),
+    ))
 }
 
 fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &ToolResult) {

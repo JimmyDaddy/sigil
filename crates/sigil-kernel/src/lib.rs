@@ -33,7 +33,8 @@ pub use permission::{
 pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
     PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
-    ReasoningArtifact, ReasoningEffort, ResponseHandle, SessionStats, ToolCall, UsageStats,
+    ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle, SessionStats,
+    ToolCall, UsageStats,
 };
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{

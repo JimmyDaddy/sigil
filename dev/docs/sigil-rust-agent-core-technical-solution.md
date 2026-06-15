@@ -727,7 +727,7 @@ CLI、TUI、HTTP streaming、未来 desktop UI 都应该消费同一套事件流
 
 ## 9. Planner / Executor / Subagent 协作模型
 
-Planner / executor / subagent 协作已经作为 TUI-first task flow 落地。入口是 TUI `/plan <任务>`；恢复后不会自动重放未完成任务。当前 session 有 task context 时，composer 普通输入会作为 continuation guidance 触发 `ContinueTask`；`/plan continue` 保留为不带额外 guidance 的显式继续入口。
+Planner / executor / subagent 协作已经作为 TUI-first task flow 落地。入口是 TUI `/plan <任务>`；恢复后不会自动重放未完成任务。当前 session 有未完成 task context 时，composer 普通输入会作为 continuation guidance 触发 `ContinueTask`；只剩 completed/cancelled task 时普通输入回到 chat-first。`/plan continue` 保留为不带额外 guidance 的显式继续入口。普通 chat 不暴露可直接调用的 `task` / `subagent` launcher；delegation 通过 `/plan` 中的 `task_plan_update` step role 表达。
 
 当前实现选择如下：
 
@@ -1049,10 +1049,18 @@ cache_mode = "auto"        # auto | deepseek_exact_prefix | anthropic_prompt_cac
 同时建议 provider metadata 暴露这些能力位：
 
 ```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningStreamSupport {
+    Unsupported,
+    Passthrough,
+    Native,
+}
+
 pub struct ProviderCapabilities {
     pub exact_prefix_cache: bool,
     pub reports_cache_tokens: bool,
-    pub supports_reasoning_stream: bool,
+    pub reasoning_stream: ReasoningStreamSupport,
+    pub supports_reasoning_effort: bool,
     pub supports_tool_stream: bool,
     pub supports_background_tasks: bool,
     pub supports_response_handles: bool,
@@ -1071,6 +1079,8 @@ pub struct ProviderCapabilities {
 同时要明确一条边界：
 
 - `ProviderCapabilities` 只承载跨 provider 可复用的通用能力位
+- `reasoning_stream = Native` 表示 provider 原生承诺推理流；`Passthrough` 只表示兼容层可以透传并展示服务端返回的 reasoning delta，不承诺该能力是 OpenAI-compatible 标准行为
+- `supports_reasoning_effort` 只表示 provider 接受通用 `ReasoningEffort` 请求参数；兼容层即使能透传 reasoning stream，也不因此默认声明支持 reasoning effort
 - `tool_name_max_chars` 用于约束 provider-visible 工具名，例如 MCP 工具名 `mcp__<server>__<tool>` 的清洗、截断和 hash 后缀
 - 像 `reasoning_content replay`、`thinking mode 忽略采样参数`、`beta 端点切换` 这种厂商特有规则，应留在 provider profile 或 provider-specific feature/quirk 层
 

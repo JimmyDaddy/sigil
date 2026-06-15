@@ -11,16 +11,17 @@ use serde_json::{Value, json};
 use crate::{
     Agent, AgentRunOptions, AutoApproveHandler, CompletionRequest, ControlEntry, InteractionMode,
     JsonlSessionStore, MemoryConfig, MessageRole, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ReasoningEffort, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest,
-    Session, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus,
-    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunStatus, TaskStepId,
-    TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator,
+    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunStatus,
+    TaskStepId, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolApproval, ToolCall,
+    ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolSpec,
 };
 
 use super::{
-    StepRunOutput, child_status_from_output, route_id_for_call, step_status_from_outcome,
-    step_terminal_reason, task_status_from_step_status,
+    StepRunOutput, child_status_from_output, planner_prompt, route_id_for_call,
+    step_status_from_outcome, step_terminal_reason, task_status_from_step_status,
 };
 
 struct PlannerProvider;
@@ -41,6 +42,15 @@ impl crate::EventHandler for RecordingEventHandler {
         self.events.push(event);
         Ok(())
     }
+}
+
+#[test]
+fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
+    let prompt = planner_prompt("review implementation");
+
+    assert!(prompt.contains("Do not call a task or subagent tool"));
+    assert!(prompt.contains("role subagent_read or subagent_write"));
+    assert!(prompt.contains("child sessions"));
 }
 
 struct CapturingExecutorProvider {
@@ -1545,7 +1555,8 @@ fn capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         exact_prefix_cache: false,
         reports_cache_tokens: false,
-        supports_reasoning_stream: true,
+        reasoning_stream: ReasoningStreamSupport::Native,
+        supports_reasoning_effort: true,
         supports_tool_stream: true,
         supports_background_tasks: false,
         supports_response_handles: false,

@@ -762,7 +762,7 @@ fn hash_text(value: &str) -> String {
 
 fn planner_prompt(objective: &str) -> String {
     format!(
-        "Create an executable plan for this task. Call task_plan_update with an accepted plan before any execution.\n\nObjective:\n{objective}"
+        "Create an executable plan for this task. Call task_plan_update with an accepted plan before any execution. Do not call a task or subagent tool. To delegate verification or implementation, add plan steps with role subagent_read or subagent_write; the orchestrator will run those steps in child sessions.\n\nObjective:\n{objective}"
     )
 }
 

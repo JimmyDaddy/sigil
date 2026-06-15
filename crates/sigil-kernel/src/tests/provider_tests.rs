@@ -7,7 +7,8 @@ use futures::{Stream, stream};
 use crate::{MessageRole, ModelMessage, ReasoningEffort, ToolCall};
 
 use super::{
-    CompletionRequest, Provider, ProviderCapabilities, ProviderChunk, SessionStats, UsageStats,
+    CompletionRequest, Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport,
+    SessionStats, UsageStats,
 };
 
 #[test]
@@ -38,6 +39,16 @@ fn session_stats_track_latest_prompt_tokens_separately_from_totals() {
     assert_eq!(stats.last_prompt_tokens, 42);
 }
 
+#[test]
+fn reasoning_stream_support_tracks_surface_semantics() {
+    assert_eq!(ReasoningStreamSupport::Unsupported.as_str(), "unsupported");
+    assert_eq!(ReasoningStreamSupport::Passthrough.as_str(), "passthrough");
+    assert_eq!(ReasoningStreamSupport::Native.as_str(), "native");
+    assert!(!ReasoningStreamSupport::Unsupported.can_surface());
+    assert!(ReasoningStreamSupport::Passthrough.can_surface());
+    assert!(ReasoningStreamSupport::Native.can_surface());
+}
+
 struct BoxedProviderFixture;
 
 #[async_trait]
@@ -50,7 +61,8 @@ impl Provider for BoxedProviderFixture {
         ProviderCapabilities {
             exact_prefix_cache: true,
             reports_cache_tokens: false,
-            supports_reasoning_stream: false,
+            reasoning_stream: ReasoningStreamSupport::Unsupported,
+            supports_reasoning_effort: false,
             supports_tool_stream: false,
             supports_background_tasks: false,
             supports_response_handles: false,

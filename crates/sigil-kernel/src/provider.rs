@@ -46,13 +46,40 @@ impl ReasoningEffort {
     }
 }
 
+/// Declares how a provider can surface model reasoning deltas.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningStreamSupport {
+    #[default]
+    Unsupported,
+    Passthrough,
+    Native,
+}
+
+impl ReasoningStreamSupport {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsupported => "unsupported",
+            Self::Passthrough => "passthrough",
+            Self::Native => "native",
+        }
+    }
+
+    pub fn can_surface(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+}
+
 /// Capability flags exposed by a provider implementation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderCapabilities {
     pub exact_prefix_cache: bool,
     pub reports_cache_tokens: bool,
-    pub supports_reasoning_stream: bool,
+    #[serde(default)]
+    pub reasoning_stream: ReasoningStreamSupport,
+    #[serde(default)]
+    pub supports_reasoning_effort: bool,
     pub supports_tool_stream: bool,
     pub supports_background_tasks: bool,
     pub supports_response_handles: bool,
@@ -63,6 +90,12 @@ pub struct ProviderCapabilities {
     pub supports_infill_completion: bool,
     pub supports_system_fingerprint: bool,
     pub tool_name_max_chars: usize,
+}
+
+impl ProviderCapabilities {
+    pub fn can_surface_reasoning_stream(&self) -> bool {
+        self.reasoning_stream.can_surface()
+    }
 }
 
 /// Incremental stream events emitted by a provider while serving a request.

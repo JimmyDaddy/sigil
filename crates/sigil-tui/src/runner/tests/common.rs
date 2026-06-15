@@ -12,9 +12,9 @@ use async_trait::async_trait;
 use futures::{Stream, stream};
 use sigil_kernel::{
     Agent, AgentConfig, CompactionConfig, McpServerConfig, MemoryConfig, PermissionConfig,
-    Provider, ProviderCapabilities, ProviderChunk, RootConfig, SessionConfig, SessionLogEntry,
-    Tool, ToolAccess, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolResult,
-    ToolResultMeta, ToolSpec, WorkspaceConfig,
+    Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport, RootConfig,
+    SessionConfig, SessionLogEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext,
+    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::super::{
@@ -201,7 +201,8 @@ impl Provider for PlannedProvider {
         ProviderCapabilities {
             exact_prefix_cache: false,
             reports_cache_tokens: false,
-            supports_reasoning_stream: true,
+            reasoning_stream: ReasoningStreamSupport::Native,
+            supports_reasoning_effort: true,
             supports_tool_stream: true,
             supports_background_tasks: false,
             supports_response_handles: false,
@@ -248,7 +249,8 @@ impl Provider for ApprovalFlowProvider {
         ProviderCapabilities {
             exact_prefix_cache: false,
             reports_cache_tokens: false,
-            supports_reasoning_stream: true,
+            reasoning_stream: ReasoningStreamSupport::Native,
+            supports_reasoning_effort: true,
             supports_tool_stream: true,
             supports_background_tasks: false,
             supports_response_handles: false,

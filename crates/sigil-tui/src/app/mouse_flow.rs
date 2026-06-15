@@ -4,6 +4,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config_panel::{ConfigField, ConfigFooterAction, ConfigSection};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ToolCardMouseAnchor {
+    pub(super) entry_line_offset: usize,
+    pub(super) viewport_line_offset: usize,
+    pub(super) visible_rows: usize,
+}
+
 impl AppState {
     pub fn handle_mouse_event(
         &mut self,
@@ -93,9 +100,12 @@ impl AppState {
                 | crate::mouse::HitTarget::ToolCardHiddenPreview { entry_index }
                     if self.pending_approval.is_none() =>
                 {
+                    let anchor =
+                        self.tool_card_mouse_anchor(entry_index, input.column, input.row, layout);
                     self.set_mouse_hover_target(Some(target));
                     self.clear_timeline_text_selection();
                     if self.toggle_tool_activity_entry(entry_index) {
+                        self.restore_tool_card_mouse_anchor(entry_index, anchor);
                         Ok(crate::mouse::AppMouseOutcome::Redraw)
                     } else {
                         Ok(crate::mouse::AppMouseOutcome::Noop)
@@ -175,6 +185,57 @@ impl AppState {
             }
             _ => Ok(crate::mouse::AppMouseOutcome::Noop),
         }
+    }
+
+    pub(super) fn tool_card_mouse_anchor(
+        &self,
+        entry_index: usize,
+        column: u16,
+        row: u16,
+        layout: &crate::ui::LayoutSnapshot,
+    ) -> Option<ToolCardMouseAnchor> {
+        let position = layout.live_text_position_at(column, row)?;
+        let visible_start = layout.live_text_rows.first()?.line_index;
+        let entry_range = self.timeline_entry_render_range(entry_index)?;
+        if !entry_range.contains(&position.line_index) {
+            return None;
+        }
+
+        Some(ToolCardMouseAnchor {
+            entry_line_offset: position.line_index.saturating_sub(entry_range.start),
+            viewport_line_offset: position.line_index.saturating_sub(visible_start),
+            visible_rows: layout.live_text_rows.len().max(1),
+        })
+    }
+
+    pub(super) fn restore_tool_card_mouse_anchor(
+        &mut self,
+        entry_index: usize,
+        anchor: Option<ToolCardMouseAnchor>,
+    ) {
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let Some(entry_range) = self.timeline_entry_render_range(entry_index) else {
+            return;
+        };
+        let effective_len = self.effective_timeline_render_len();
+        if effective_len == 0 || entry_range.is_empty() {
+            return;
+        }
+
+        let entry_len = entry_range.end.saturating_sub(entry_range.start).max(1);
+        let target_line = entry_range
+            .start
+            .saturating_add(anchor.entry_line_offset.min(entry_len.saturating_sub(1)))
+            .min(effective_len.saturating_sub(1));
+        let visible_start = target_line.saturating_sub(anchor.viewport_line_offset);
+        let visible_end = visible_start
+            .saturating_add(anchor.visible_rows.max(1))
+            .min(effective_len);
+        self.timeline_scroll_back = effective_len
+            .saturating_sub(visible_end)
+            .min(self.max_timeline_scroll_back());
     }
 
     fn handle_mouse_scroll_target(

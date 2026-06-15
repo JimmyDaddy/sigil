@@ -269,9 +269,8 @@ pub struct TaskPlanUpdateContext {
 pub fn task_plan_update_tool_spec() -> ToolSpec {
     ToolSpec {
         name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        description:
-            "Create or replace the current durable task plan. Use this before executing task steps."
-                .to_owned(),
+        description: "Create or replace the current durable task plan. Use this before executing task steps. Do not call task, subagent, or other delegation tools; delegate work by adding steps whose role is subagent_read or subagent_write."
+            .to_owned(),
         input_schema: json!({
             "type": "object",
             "properties": {
@@ -296,7 +295,8 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                             "detail": {"type": "string"},
                             "role": {
                                 "type": "string",
-                                "enum": ["planner", "executor", "subagent_read", "subagent_write"]
+                                "enum": ["planner", "executor", "subagent_read", "subagent_write"],
+                                "description": "Use executor for main-session work, subagent_read for delegated read-only verification in a child session, and subagent_write only when the delegated step may edit files."
                             }
                         },
                         "required": ["step_id", "title", "role"],
