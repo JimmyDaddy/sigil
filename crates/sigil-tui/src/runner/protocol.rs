@@ -25,6 +25,7 @@ pub enum WorkerCommand {
     },
     ContinueTask {
         task_id: Option<String>,
+        guidance: Option<String>,
     },
     ApprovalDecision {
         call_id: String,

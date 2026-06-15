@@ -1,6 +1,7 @@
 use std::{
     fs,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -2109,6 +2110,72 @@ while True:
     .await?;
 
     assert!(registry.spec_for("mcp__healthy__echo").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_server_stderr_is_drained_without_blocking_registration() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let script = temp.path().join("stderr_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+sys.stderr.write("Secure MCP Filesystem Server running on stdio\n")
+sys.stderr.write("x" * (256 * 1024))
+sys.stderr.flush()
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    let server = McpServerConfig {
+        name: "stderr".to_owned(),
+        command: "python3".to_owned(),
+        args: vec![script.to_string_lossy().to_string()],
+        startup_timeout_secs: 5,
+        ..McpServerConfig::default()
+    };
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        register_mcp_tools(&mut registry, &[server]),
+    )
+    .await??;
+
+    assert!(registry.spec_for("mcp__stderr__echo").is_some());
     Ok(())
 }
 

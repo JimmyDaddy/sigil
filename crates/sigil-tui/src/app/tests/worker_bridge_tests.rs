@@ -58,12 +58,14 @@ fn plan_actions_map_to_worker_commands() {
 
     let continue_task = app.into_worker_command(AppAction::ContinuePlan {
         task_id: Some("task_1".to_owned()),
+        guidance: Some("focus runtime".to_owned()),
     });
     assert!(matches!(
         continue_task,
         WorkerCommand::ContinueTask {
-            task_id: Some(ref task_id)
-        } if task_id == "task_1"
+            task_id: Some(ref task_id),
+            guidance: Some(ref guidance)
+        } if task_id == "task_1" && guidance == "focus runtime"
     ));
 }
 
@@ -547,6 +549,76 @@ fn worker_messages_cover_task_start_and_all_finish_status_labels() -> Result<()>
             event.label == "task:finish" && event.detail == format!("task_1 status={label}")
         }));
     }
+
+    app.is_busy = true;
+    app.handle_worker_message(WorkerMessage::TaskRunFinished {
+        task_id: "task_1".to_owned(),
+        status: sigil_kernel::TaskRunStatus::Failed,
+        entries: vec![sigil_kernel::SessionLogEntry::Control(
+            sigil_kernel::ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+                task_id: sigil_kernel::TaskId::new("task_1")?,
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                objective: "ship task".to_owned(),
+                status: sigil_kernel::TaskRunStatus::Failed,
+                reason: Some("step gate_check failed".to_owned()),
+            }),
+        )],
+    })?;
+    assert!(!app.is_busy);
+    assert_eq!(
+        app.last_notice(),
+        Some("task task_1 failed: step gate_check failed")
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_control_events_update_task_sidebar_immediately() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("overview")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: Some("continuing plan v1".to_owned()),
+        },
+    )))?;
+    app.handle(RunEvent::Control(ControlEntry::TaskPlan(
+        sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "scan workspace".to_owned(),
+                detail: None,
+                role: sigil_kernel::AgentRole::Executor,
+            }],
+            reason: None,
+        },
+    )))?;
+    app.handle(RunEvent::Control(ControlEntry::TaskStep(
+        sigil_kernel::TaskStepEntry {
+            task_id,
+            plan_version: 1,
+            step_id,
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Running,
+            title: Some("scan workspace".to_owned()),
+            summary: None,
+            reason: None,
+        },
+    )))?;
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"status: running".to_owned()));
+    assert!(lines.contains(&"current: v1:overview running".to_owned()));
+    assert!(lines.contains(&"▶ 1. running overview · scan workspace".to_owned()));
     Ok(())
 }
 

@@ -23,9 +23,10 @@ use sigil_provider_openai_compat::{OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY
 use super::{
     SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
     build_role_provider, build_role_run_options, build_role_tool_registry, build_run_options,
-    build_tool_registry, load_deepseek_config, load_openai_compat_config,
-    refresh_mcp_server_tools_with_mcp_handlers, register_lazy_mcp_activation_tool,
-    resolve_deepseek_api_key, resolve_deepseek_api_key_with_session, resolve_openai_compat_api_key,
+    build_tool_registry, build_tool_registry_without_eager_mcp, load_deepseek_config,
+    load_openai_compat_config, refresh_mcp_server_tools_with_mcp_handlers,
+    register_lazy_mcp_activation_tool, resolve_deepseek_api_key,
+    resolve_deepseek_api_key_with_session, resolve_openai_compat_api_key,
     resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
 };
 
@@ -772,6 +773,31 @@ fn lazy_mcp_activation_tool_is_not_registered_without_lazy_servers() -> Result<(
     );
 
     assert!(registry.spec_for("mcp_activate_server").is_none());
+    Ok(())
+}
+
+#[test]
+fn build_tool_registry_without_eager_mcp_keeps_local_tools_when_required_eager_is_missing()
+-> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.mcp_servers.push(McpServerConfig {
+        name: "required-eager".to_owned(),
+        command: "/definitely/missing/sigil-mcp-server".to_owned(),
+        startup: McpServerStartup::Eager,
+        ..McpServerConfig::default()
+    });
+
+    let registry = build_tool_registry_without_eager_mcp(
+        &config,
+        &provider.capabilities(),
+        std::env::current_dir()?,
+        sigil_mcp::unsupported_mcp_elicitation_handler(),
+        sigil_mcp::unsupported_mcp_runtime_event_handler(),
+    );
+
+    assert!(registry.spec_for("read_file").is_some());
+    assert!(registry.spec_for("mcp__required_eager__echo").is_none());
     Ok(())
 }
 

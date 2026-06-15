@@ -107,6 +107,38 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
 }
 
 #[test]
+fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
+    let mut session = Session::new("deepseek", "model");
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "already done".to_owned(),
+        status: TaskRunStatus::Completed,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: TaskId::new("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![TaskStepSpec {
+            step_id: TaskStepId::new("step_1")?,
+            title: "done".to_owned(),
+            detail: None,
+            role: AgentRole::Executor,
+        }],
+        reason: None,
+    }))?;
+
+    let error = match resolve_continue_task(&session, None) {
+        Ok((task_id, _, _)) => anyhow::bail!("completed task unexpectedly resumed: {task_id:?}"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error, "task task_1 is already completed");
+    Ok(())
+}
+
+#[test]
 fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> {
     let mut session = Session::new("deepseek", "model");
     let task_id = TaskId::new("task_1")?;

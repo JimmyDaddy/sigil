@@ -154,7 +154,19 @@ fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()
         view_model
             .info_rail
             .task_lines
-            .contains(&"current: v1:step_1".to_owned())
+            .contains(&"progress: 0/1 done".to_owned())
+    );
+    assert!(
+        view_model
+            .info_rail
+            .task_lines
+            .contains(&"current: v1:step_1 running".to_owned())
+    );
+    assert!(
+        view_model
+            .info_rail
+            .task_lines
+            .contains(&"▶ 1. running step_1 · implement".to_owned())
     );
     Ok(())
 }

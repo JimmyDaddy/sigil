@@ -15,7 +15,7 @@
 | Phase 3 setup/config/session selector | 已落地 | setup/config 字段与 footer action、session row 与确认 action 均支持鼠标选择和确认 |
 | 文本选择增强 | 已落地 | 支持按列选择、`Ctrl-C` 复制状态提示、OSC52 兼容开关 |
 | Terminal capability / mouse capture 开关 | 已落地 | `[terminal].mouse_capture`、`[terminal].osc52_clipboard`、`[terminal].scroll_sensitivity` 进入配置、`/config` 和 `/doctor` |
-| Phase 4 小交互 | 已落地 | composer 点击定位光标、tool card header 展开/折叠、tool card hover visual state、可配置滚轮灵敏度 |
+| Phase 4 小交互 | 已落地 | composer 点击定位光标、tool card header / hidden-preview 行展开/折叠、tool card hover visual state、可配置滚轮灵敏度 |
 | 推迟项 | 明确推迟 | hover tooltip/preview、双击手势、拖拽 resize、右键菜单、直接操作 terminal 原生 scrollback |
 
 相关约束：
@@ -208,7 +208,7 @@ Phase 3 目标是让 setup/config/session selector 也能被鼠标操作。
 已落地：
 
 1. 点击 composer input 区域按坐标定位 `input_cursor`。
-2. 点击 tool card header 直接展开或折叠；点击 body 仍只选中。
+2. 点击 tool card header 或 collapsed hidden-preview 提示行直接展开或折叠；点击其他 body 区域仍只选中。
 3. `[terminal].scroll_sensitivity` 控制 transcript 和 approval diff 的滚轮步长，默认保持 `3`。
 4. terminal capability 检测与兼容性开关进入 `sigil doctor`、TUI `/doctor` 和 `/config`。
 5. 支持 tool card hover highlight，但只作为视觉反馈，不触发业务动作，不写 session。
@@ -507,8 +507,8 @@ hover 只保留 app-local transient state，用于 renderer visual feedback：
 
 行为：
 
-1. 命中 tool card body 时，设置 `selected_tool_timeline_entry`，不展开/折叠。
-2. 命中 tool card header 时，先选中，再复用 `Ctrl-T`/tool view 路径展开或折叠。
+1. 命中普通 tool card body 时，设置 `selected_tool_timeline_entry`，不展开/折叠。
+2. 命中 tool card header 或 collapsed hidden-preview 提示行时，先选中，再复用 `Ctrl-T`/tool view 路径展开或折叠。
 3. header/body 点击都不改变 composer 文本。
 4. pending approval 存在时，普通 tool card 点击不改变状态。
 
@@ -811,7 +811,7 @@ cargo check -p sigil-tui
 已交付：
 
 1. composer 光标定位
-2. tool card header 点击展开/折叠
+2. tool card header / hidden-preview 行点击展开/折叠
 3. terminal capability / config switch（`[terminal].mouse_capture` / `osc52_clipboard` / `scroll_sensitivity`）
 4. tool card hover visual state
 5. scroll sensitivity 配置进入 `/config` 和 `/doctor`

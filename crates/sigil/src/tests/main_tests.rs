@@ -530,6 +530,7 @@ async fn prefix_command_streams_against_configured_provider() -> Result<()> {
 
     super::prefix_command(
         &config_path,
+        &workspace,
         "write code".to_owned(),
         "```rust\n".to_owned(),
         vec!["```".to_owned()],
@@ -545,6 +546,8 @@ async fn prefix_command_streams_against_configured_provider() -> Result<()> {
     assert!(raw_request.contains("POST /chat/completions"));
     assert!(raw_request.contains("\"prefix\":true"));
     assert!(raw_request.contains("```rust"));
+    assert!(raw_request.contains("\"user_id\":\"workspace-"));
+    assert!(!raw_request.contains("local-user"));
     Ok(())
 }
 

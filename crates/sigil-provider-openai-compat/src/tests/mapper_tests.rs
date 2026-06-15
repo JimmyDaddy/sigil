@@ -79,6 +79,30 @@ fn map_envelope_emits_usage_text_and_tool_call_chunks() -> Result<()> {
 }
 
 #[test]
+fn map_envelope_emits_reasoning_content_before_text() -> Result<()> {
+    let envelope: OpenAiStreamEnvelope = serde_json::from_value(serde_json::json!({
+        "choices": [{
+            "delta": {
+                "reasoning_content": "think",
+                "content": "answer"
+            }
+        }]
+    }))?;
+
+    let mut mapper = StreamMapper::new();
+    let chunks = mapper.map_envelope(envelope)?;
+
+    assert!(matches!(
+        chunks.as_slice(),
+        [
+            ProviderChunk::ReasoningDelta(reasoning),
+            ProviderChunk::TextDelta(text)
+        ] if reasoning == "think" && text == "answer"
+    ));
+    Ok(())
+}
+
+#[test]
 fn map_envelope_uses_synthetic_tool_id_and_finish_completes_late_name() -> Result<()> {
     let args: OpenAiStreamEnvelope = serde_json::from_value(serde_json::json!({
         "choices": [{

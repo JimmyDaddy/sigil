@@ -453,7 +453,7 @@ pub(super) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                 });
             }
-            Ok(WorkerCommand::ContinueTask { task_id }) => {
+            Ok(WorkerCommand::ContinueTask { task_id, guidance }) => {
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -590,6 +590,7 @@ pub(super) fn run_worker_loop<P>(
                                 executor_options,
                                 subagent_read_options,
                                 subagent_write_options,
+                                guidance,
                                 &mut handler,
                                 &mut approval_handler,
                             )
@@ -1286,7 +1287,8 @@ pub(super) fn resolve_continue_task(
         }
         None => projection
             .latest_unfinished_task()
-            .ok_or_else(|| "no unfinished task is available to continue".to_owned())?,
+            .or_else(|| projection.latest_task())
+            .ok_or_else(|| "no task is available to continue".to_owned())?,
     };
     match task.status {
         TaskRunStatus::Completed => {

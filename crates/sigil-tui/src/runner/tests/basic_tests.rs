@@ -128,7 +128,7 @@ fn spawn_agent_worker_reports_provider_configuration_error() -> Result<()> {
 }
 
 #[test]
-fn spawn_agent_worker_reports_required_eager_mcp_startup_error() -> Result<()> {
+fn spawn_agent_worker_reports_eager_mcp_failure_without_stopping_worker() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
@@ -147,20 +147,47 @@ fn spawn_agent_worker_reports_required_eager_mcp_startup_error() -> Result<()> {
         ..McpServerConfig::default()
     });
 
-    let (_command_tx, message_rx) = spawn_agent_worker(
+    let (command_tx, message_rx) = spawn_agent_worker(
         root_config,
         session_log_path,
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
     )?;
 
-    let message = message_rx.recv_timeout(Duration::from_secs(3))?;
+    let failure = loop {
+        let message = message_rx.recv_timeout(Duration::from_secs(3))?;
+        if matches!(
+            message,
+            WorkerMessage::McpActivationStatus {
+                status: McpActivationStatus::Failed { .. },
+                ..
+            }
+        ) {
+            break message;
+        }
+    };
 
     assert!(matches!(
-        message,
-        WorkerMessage::RunFailed(ref error)
-            if error.contains("failed to spawn MCP server required-eager")
+        failure,
+        WorkerMessage::McpActivationStatus {
+            server_name: Some(ref server_name),
+            status: McpActivationStatus::Failed { ref error },
+        } if server_name == "required-eager"
+            && error.contains("failed to spawn MCP server required-eager")
     ));
+
+    command_tx.send(WorkerCommand::CancelRun)?;
+    let still_running = loop {
+        let message = message_rx.recv_timeout(Duration::from_secs(3))?;
+        if matches!(message, WorkerMessage::RunFailed(_)) {
+            break message;
+        }
+    };
+    assert!(matches!(
+        still_running,
+        WorkerMessage::RunFailed(ref error) if error == "no active run to cancel"
+    ));
+    let _ = command_tx.send(WorkerCommand::Shutdown);
     Ok(())
 }
 

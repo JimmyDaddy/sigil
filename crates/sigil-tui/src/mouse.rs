@@ -46,6 +46,7 @@ pub enum HitTarget {
     SlashOverlay,
     SlashCandidate { index: usize },
     ToolCardHeader { entry_index: usize },
+    ToolCardHiddenPreview { entry_index: usize },
     ToolCard { entry_index: usize },
     Composer,
     LivePanel,

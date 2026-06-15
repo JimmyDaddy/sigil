@@ -171,6 +171,7 @@ impl AppState {
                 status,
                 entries,
             } => {
+                let notice = task_run_finish_notice(&task_id, status, &entries);
                 self.is_busy = false;
                 self.run_phase = RunPhase::Idle;
                 self.mcp_progress = None;
@@ -179,8 +180,7 @@ impl AppState {
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
                 self.streaming_reasoning_index = None;
-                self.last_notice =
-                    Some(format!("task {task_id} {}", task_run_status_label(status)));
+                self.last_notice = Some(notice);
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
                 self.recompute_compaction_status(false);
@@ -403,7 +403,9 @@ impl AppState {
                 reasoning_effort: self.reasoning_effort.clone(),
             },
             AppAction::SubmitPlan(prompt) => WorkerCommand::SubmitTask { prompt },
-            AppAction::ContinuePlan { task_id } => WorkerCommand::ContinueTask { task_id },
+            AppAction::ContinuePlan { task_id, guidance } => {
+                WorkerCommand::ContinueTask { task_id, guidance }
+            }
             AppAction::ApprovalDecision { call_id, approved } => {
                 WorkerCommand::ApprovalDecision { call_id, approved }
             }
@@ -514,6 +516,34 @@ fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
         sigil_kernel::TaskRunStatus::Failed => "failed",
         sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
         sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_run_finish_notice(
+    task_id: &str,
+    status: sigil_kernel::TaskRunStatus,
+    entries: &[sigil_kernel::SessionLogEntry],
+) -> String {
+    let label = task_run_status_label(status);
+    let reason = entries.iter().rev().find_map(|entry| {
+        let sigil_kernel::SessionLogEntry::Control(ControlEntry::TaskRun(run)) = entry else {
+            return None;
+        };
+        if run.task_id.as_str() == task_id
+            && run.status == status
+            && !matches!(status, sigil_kernel::TaskRunStatus::Completed)
+        {
+            return run
+                .reason
+                .as_deref()
+                .filter(|value| !value.trim().is_empty());
+        }
+        None
+    });
+    if let Some(reason) = reason {
+        format!("task {task_id} {label}: {reason}")
+    } else {
+        format!("task {task_id} {label}")
     }
 }
 
@@ -823,6 +853,7 @@ impl EventHandler for AppState {
             }
             RunEvent::Control(control) => match control {
                 ControlEntry::ToolPreviewCaptured(snapshot) => {
+                    let control = ControlEntry::ToolPreviewCaptured(snapshot.clone());
                     self.push_event(
                         "control",
                         format!(
@@ -836,9 +867,11 @@ impl EventHandler for AppState {
                     );
                     self.tool_preview_snapshots
                         .insert(snapshot.call_id.clone(), snapshot);
+                    self.append_current_session_control(control);
                 }
                 other => {
                     self.push_event("control", format!("{other:?}"));
+                    self.append_current_session_control(other);
                 }
             },
             RunEvent::ContinuationState(state) => {

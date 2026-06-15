@@ -33,7 +33,7 @@ use crate::ui::{self, LayoutSnapshot};
 use crate::{
     app::{AppAction, AppState},
     mouse::AppMouseOutcome,
-    runner::{self, WorkerMessage},
+    runner::{self, WorkerCommand, WorkerMessage},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -223,9 +223,8 @@ where
             }
         }
         action => {
-            if let Some(runtime) = worker.as_ref() {
-                runtime.worker_tx.send(app.into_worker_command(action))?;
-            }
+            let command = app.into_worker_command(action);
+            send_worker_command_with_restart(app, worker, command, &mut spawn_worker_fn)?;
         }
     }
     flush_pending_worker_commands(app, worker)?;
@@ -316,15 +315,85 @@ fn flush_pending_worker_commands(
     if !app.has_pending_worker_commands() {
         return Ok(false);
     }
-    let Some(runtime) = worker.as_ref() else {
+    if worker.is_none() {
         return Ok(false);
-    };
+    }
     let commands = app.drain_pending_worker_commands();
     let dirty = !commands.is_empty();
     for command in commands {
-        runtime.worker_tx.send(command)?;
+        if send_worker_command(app, worker, command)? {
+            continue;
+        }
+        break;
     }
     Ok(dirty)
+}
+
+fn send_worker_command(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    command: WorkerCommand,
+) -> Result<bool> {
+    let Some(runtime) = worker.as_ref() else {
+        return Ok(false);
+    };
+    match runtime.worker_tx.send(command) {
+        Ok(()) => Ok(true),
+        Err(_) => {
+            *worker = None;
+            report_worker_unavailable(app, "agent worker stopped before accepting command")?;
+            Ok(false)
+        }
+    }
+}
+
+fn send_worker_command_with_restart<F>(
+    app: &mut AppState,
+    worker: &mut Option<WorkerRuntime>,
+    command: WorkerCommand,
+    spawn_worker_fn: &mut F,
+) -> Result<()>
+where
+    F: FnMut(RootConfig, &AppState) -> Result<WorkerRuntime>,
+{
+    let command = if let Some(runtime) = worker.as_ref() {
+        match runtime.worker_tx.send(command) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                *worker = None;
+                error.0
+            }
+        }
+    } else {
+        command
+    };
+
+    let Some(root_config) = app.root_config_snapshot().cloned() else {
+        report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
+        return Ok(());
+    };
+
+    match spawn_worker_fn(root_config, app) {
+        Ok(runtime) => {
+            *worker = Some(runtime);
+        }
+        Err(error) => {
+            report_worker_unavailable(app, &format!("failed to restart agent worker: {error:#}"))?;
+            return Ok(());
+        }
+    }
+
+    if let Some(runtime) = worker.as_ref()
+        && runtime.worker_tx.send(command).is_ok()
+    {
+        return Ok(());
+    }
+    *worker = None;
+    report_worker_unavailable(app, "agent worker stopped before accepting command")
+}
+
+fn report_worker_unavailable(app: &mut AppState, message: &str) -> Result<()> {
+    app.handle_worker_message(WorkerMessage::RunFailed(message.to_owned()))
 }
 
 fn apply_mouse_outcome<F>(

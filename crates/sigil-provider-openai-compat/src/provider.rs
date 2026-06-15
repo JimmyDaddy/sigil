@@ -18,6 +18,8 @@ use crate::{
     stream::{OpenAiSseDecoder, OpenAiSseFrame},
 };
 
+const OPENAI_COMPAT_MAX_ATTEMPTS: usize = 2;
+
 #[derive(Clone)]
 pub struct OpenAiCompatibleProvider {
     config: OpenAiCompatibleProviderConfig,
@@ -72,17 +74,34 @@ impl Provider for OpenAiCompatibleProvider {
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let body = build_chat_request(&request)?;
-        let response = self
-            .post_json(&self.chat_completions_url(), &body)
-            .await
-            .context("OpenAI-compatible request failed")?;
-        let status = response.status();
-        if !status.is_success() {
+        let url = self.chat_completions_url();
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            let response = self
+                .post_json(&url, &body)
+                .await
+                .context("OpenAI-compatible request failed")?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response_stream(response));
+            }
             let error_body = response.text().await.unwrap_or_default();
-            return Err(classify_status(status.as_u16(), &error_body).into());
+            let error = classify_status(status.as_u16(), &error_body);
+            if attempt < OPENAI_COMPAT_MAX_ATTEMPTS && is_retryable_status(&error) {
+                continue;
+            }
+            return Err(error.into());
         }
-        Ok(response_stream(response))
     }
+}
+
+fn is_retryable_status(error: &OpenAiCompatibleProviderError) -> bool {
+    matches!(
+        error,
+        OpenAiCompatibleProviderError::RateLimited
+            | OpenAiCompatibleProviderError::RetryableStatus(_)
+    )
 }
 
 impl OpenAiCompatibleProvider {

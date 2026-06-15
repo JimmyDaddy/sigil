@@ -153,7 +153,7 @@ allow_write_subagents = true
 # Uses the full tool surface only when allow_write_subagents = true.
 ```
 
-Planned tasks are started from the TUI with `/plan <task>`. `default_mode = "chat"` keeps normal composer submits chat-first; switch it only when a build intentionally wants planned tasks as the default flow.
+Planned tasks are started from the TUI with `/plan <task>`. `default_mode = "chat"` keeps normal composer submits chat-first until the current session has task context; after that, composer input continues the latest task as guidance. Switch the default mode only when a build intentionally wants planned tasks as the default flow.
 
 Role-specific provider/model settings inherit `[agent]` when omitted. Planner and subagent-read default to read-only file/search/code-intelligence tools. Executor can see the full runtime registry. Subagent-write can see the full runtime registry only when `allow_write_subagents = true`; otherwise it falls back to the read-only scope. Mutating tools still go through the normal approval policy.
 

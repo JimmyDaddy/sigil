@@ -90,6 +90,7 @@ impl AppState {
                     }
                 }
                 crate::mouse::HitTarget::ToolCardHeader { entry_index }
+                | crate::mouse::HitTarget::ToolCardHiddenPreview { entry_index }
                     if self.pending_approval.is_none() =>
                 {
                     self.set_mouse_hover_target(Some(target));
@@ -228,6 +229,7 @@ impl AppState {
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
             crate::mouse::HitTarget::ToolCardHeader { .. }
+            | crate::mouse::HitTarget::ToolCardHiddenPreview { .. }
             | crate::mouse::HitTarget::ToolCard { .. } => {
                 self.handle_mouse_scroll(upward);
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
@@ -412,6 +414,7 @@ fn hover_target_for(target: crate::mouse::HitTarget) -> Option<crate::mouse::Hit
 fn tool_hover_entry_index(target: Option<crate::mouse::HitTarget>) -> Option<usize> {
     match target? {
         crate::mouse::HitTarget::ToolCardHeader { entry_index }
+        | crate::mouse::HitTarget::ToolCardHiddenPreview { entry_index }
         | crate::mouse::HitTarget::ToolCard { entry_index } => Some(entry_index),
         _ => None,
     }

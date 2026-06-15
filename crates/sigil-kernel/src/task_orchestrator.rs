@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason,
-    ApprovalHandler, EventHandler, JsonlSessionStore, ModelMessage, Provider, Session,
-    ToolApproval, ToolCall, ToolSpec,
+    ApprovalHandler, EventHandler, JsonlSessionStore, ModelMessage, Provider, RunEvent, Session,
+    ToolApproval, ToolCall, ToolErrorKind, ToolSpec,
     session::ControlEntry,
     task::{
         AgentRole, SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
@@ -89,6 +89,7 @@ impl SequentialTaskOrchestrator {
     {
         append_task_run(
             session,
+            handler,
             &request,
             TaskRunStatus::Started,
             Some("planning started".to_owned()),
@@ -111,6 +112,7 @@ impl SequentialTaskOrchestrator {
         {
             append_task_run(
                 session,
+                handler,
                 &request,
                 TaskRunStatus::Failed,
                 Some(format!("planner failed: {error:#}")),
@@ -125,6 +127,7 @@ impl SequentialTaskOrchestrator {
                 executor_options,
                 subagent_read_options,
                 subagent_write_options,
+                None,
                 handler,
                 approval_handler,
             )
@@ -136,6 +139,7 @@ impl SequentialTaskOrchestrator {
                 // state before surfacing the orchestration error.
                 append_task_run(
                     session,
+                    handler,
                     &request,
                     TaskRunStatus::Failed,
                     Some(format!("task orchestration failed: {error:#}")),
@@ -161,6 +165,7 @@ impl SequentialTaskOrchestrator {
         executor_options: AgentRunOptions,
         subagent_read_options: AgentRunOptions,
         subagent_write_options: AgentRunOptions,
+        guidance: Option<String>,
         handler: &mut H,
         approval_handler: &mut A,
     ) -> Result<SequentialTaskRunOutput>
@@ -177,17 +182,20 @@ impl SequentialTaskOrchestrator {
         })?;
         let (plan_version, steps) = latest_executable_plan(task)?;
         let pending_steps = resumable_steps(task, plan_version, &steps);
+        let guidance = normalize_task_guidance(guidance);
         append_task_run(
             session,
+            handler,
             &request,
             TaskRunStatus::Running,
-            Some(format!("continuing plan v{plan_version}")),
+            Some(task_continue_reason(plan_version, guidance.as_deref())),
         )?;
 
         let mut step_outputs = Vec::new();
         for step in pending_steps {
             append_task_step(
                 session,
+                handler,
                 &request.task_id,
                 plan_version,
                 &step,
@@ -203,6 +211,7 @@ impl SequentialTaskOrchestrator {
                         plan_version,
                         &step,
                         executor_options.clone(),
+                        guidance.as_deref(),
                         handler,
                         approval_handler,
                     )
@@ -215,6 +224,7 @@ impl SequentialTaskOrchestrator {
                         plan_version,
                         &step,
                         subagent_read_options.clone(),
+                        guidance.as_deref(),
                         handler,
                         approval_handler,
                     )
@@ -227,6 +237,7 @@ impl SequentialTaskOrchestrator {
                         plan_version,
                         &step,
                         subagent_write_options.clone(),
+                        guidance.as_deref(),
                         handler,
                         approval_handler,
                     )
@@ -238,6 +249,7 @@ impl SequentialTaskOrchestrator {
                 Err(error) => {
                     append_task_step(
                         session,
+                        handler,
                         &request.task_id,
                         plan_version,
                         &step,
@@ -247,6 +259,7 @@ impl SequentialTaskOrchestrator {
                     )?;
                     append_task_run(
                         session,
+                        handler,
                         &request,
                         TaskRunStatus::Failed,
                         Some(format!("step {} failed: {error:#}", step.step_id.as_str())),
@@ -262,16 +275,13 @@ impl SequentialTaskOrchestrator {
             let status = step_status_from_outcome(&output);
             append_task_step(
                 session,
+                handler,
                 &request.task_id,
                 plan_version,
                 &step,
                 status,
                 Some(output.final_text.clone()),
-                output
-                    .outcome
-                    .tool_errors
-                    .first()
-                    .map(|error| error.message.clone()),
+                step_reason_from_output(status, &output),
             )?;
             step_outputs.push(SequentialTaskStepOutput {
                 step_id: step.step_id.clone(),
@@ -282,6 +292,7 @@ impl SequentialTaskOrchestrator {
                 let task_status = task_status_from_step_status(status);
                 append_task_run(
                     session,
+                    handler,
                     &request,
                     task_status,
                     Some(step_terminal_reason(&step.step_id, status)),
@@ -297,6 +308,7 @@ impl SequentialTaskOrchestrator {
 
         append_task_run(
             session,
+            handler,
             &request,
             TaskRunStatus::Completed,
             Some(format!("completed plan v{plan_version}")),
@@ -316,6 +328,7 @@ impl SequentialTaskOrchestrator {
         plan_version: u32,
         step: &TaskStepSpec,
         options: AgentRunOptions,
+        guidance: Option<&str>,
         handler: &mut H,
         approval_handler: &mut A,
     ) -> Result<StepRunOutput>
@@ -325,7 +338,7 @@ impl SequentialTaskOrchestrator {
     {
         let executor_input =
             AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                executor_step_prompt(&request.objective, plan_version, step),
+                executor_step_prompt(&request.objective, plan_version, step, guidance),
             )]);
         let output = self
             .executor
@@ -344,6 +357,7 @@ impl SequentialTaskOrchestrator {
         plan_version: u32,
         step: &TaskStepSpec,
         options: AgentRunOptions,
+        guidance: Option<&str>,
         handler: &mut H,
         approval_handler: &mut A,
     ) -> Result<StepRunOutput>
@@ -356,6 +370,7 @@ impl SequentialTaskOrchestrator {
         let child_session_ref = child_session_ref(&request.task_id, &step.step_id, &child_task_id)?;
         append_child_session(
             parent_session,
+            handler,
             request,
             plan_version,
             step,
@@ -366,7 +381,7 @@ impl SequentialTaskOrchestrator {
         )?;
         let mut child_session = build_child_session(parent_session, &child_session_ref)?;
         let child_input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-            subagent_step_prompt(&request.objective, plan_version, step),
+            subagent_step_prompt(&request.objective, plan_version, step, guidance),
         )]);
         let mut route_handler = TaskApprovalRouteHandler {
             inner: approval_handler,
@@ -395,6 +410,7 @@ impl SequentialTaskOrchestrator {
             Err(error) => {
                 append_child_session(
                     route_handler.parent_session,
+                    handler,
                     request,
                     plan_version,
                     step,
@@ -406,11 +422,15 @@ impl SequentialTaskOrchestrator {
                 return Err(error);
             }
         };
-        let final_text = output.result.final_text;
-        let status = child_status_from_outcome(&output.outcome);
-        let summary_hash = Some(hash_text(&final_text));
+        let step_output = StepRunOutput {
+            final_text: output.result.final_text,
+            outcome: output.outcome,
+        };
+        let status = child_status_from_output(&step_output);
+        let summary_hash = Some(hash_text(&step_output.final_text));
         append_child_session(
             route_handler.parent_session,
+            handler,
             request,
             plan_version,
             step,
@@ -419,10 +439,7 @@ impl SequentialTaskOrchestrator {
             status,
             summary_hash,
         )?;
-        Ok(StepRunOutput {
-            final_text,
-            outcome: output.outcome,
-        })
+        Ok(step_output)
     }
 }
 
@@ -475,45 +492,74 @@ where
     }
 }
 
-fn append_task_run(
+fn append_task_control<H>(
     session: &mut Session,
+    handler: &mut H,
+    control: ControlEntry,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    session.append_control(control.clone())?;
+    handler.handle(RunEvent::Control(control))
+}
+
+fn append_task_run<H>(
+    session: &mut Session,
+    handler: &mut H,
     request: &SequentialTaskRequest,
     status: TaskRunStatus,
     reason: Option<String>,
-) -> Result<()> {
-    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
-        task_id: request.task_id.clone(),
-        parent_session_ref: request.parent_session_ref.clone(),
-        objective: request.objective.clone(),
-        status,
-        reason,
-    }))
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::TaskRun(TaskRunEntry {
+            task_id: request.task_id.clone(),
+            parent_session_ref: request.parent_session_ref.clone(),
+            objective: request.objective.clone(),
+            status,
+            reason,
+        }),
+    )
 }
 
-fn append_task_step(
+fn append_task_step<H>(
     session: &mut Session,
+    handler: &mut H,
     task_id: &TaskId,
     plan_version: u32,
     step: &TaskStepSpec,
     status: TaskStepStatus,
     summary: Option<String>,
     reason: Option<String>,
-) -> Result<()> {
-    session.append_control(ControlEntry::TaskStep(TaskStepEntry {
-        task_id: task_id.clone(),
-        plan_version,
-        step_id: step.step_id.clone(),
-        role: step.role,
-        status,
-        title: Some(step.title.clone()),
-        summary,
-        reason,
-    }))
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version,
+            step_id: step.step_id.clone(),
+            role: step.role,
+            status,
+            title: Some(step.title.clone()),
+            summary,
+            reason,
+        }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_child_session(
+fn append_child_session<H>(
     session: &mut Session,
+    handler: &mut H,
     request: &SequentialTaskRequest,
     plan_version: u32,
     step: &TaskStepSpec,
@@ -521,17 +567,24 @@ fn append_child_session(
     child_session_ref: &SessionRef,
     status: TaskChildSessionStatus,
     summary_hash: Option<String>,
-) -> Result<()> {
-    session.append_control(ControlEntry::TaskChildSession(TaskChildSessionEntry {
-        task_id: request.task_id.clone(),
-        plan_version,
-        step_id: step.step_id.clone(),
-        child_task_id: child_task_id.clone(),
-        child_session_ref: child_session_ref.clone(),
-        role: step.role,
-        status,
-        summary_hash,
-    }))
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::TaskChildSession(TaskChildSessionEntry {
+            task_id: request.task_id.clone(),
+            plan_version,
+            step_id: step.step_id.clone(),
+            child_task_id: child_task_id.clone(),
+            child_session_ref: child_session_ref.clone(),
+            role: step.role,
+            status,
+            summary_hash,
+        }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -594,16 +647,25 @@ fn resumable_steps(
 }
 
 fn step_status_from_outcome(output: &StepRunOutput) -> TaskStepStatus {
-    if output.outcome.terminal_reason == AgentRunTerminalReason::MaxTurns {
+    if output.outcome.terminal_reason == AgentRunTerminalReason::MaxTurns
+        || !output.outcome.interrupted_tool_calls.is_empty()
+    {
         TaskStepStatus::Interrupted
-    } else if !output.outcome.tool_errors.is_empty() {
-        TaskStepStatus::Failed
-    } else if output.outcome.approval_denials > 0 {
+    } else if output.outcome.approval_denials > 0 || has_blocking_tool_error(&output.outcome) {
         TaskStepStatus::Blocked
-    } else if !output.outcome.interrupted_tool_calls.is_empty() {
-        TaskStepStatus::Interrupted
+    } else if !output.outcome.tool_errors.is_empty() && output.final_text.trim().is_empty() {
+        TaskStepStatus::Failed
     } else {
         TaskStepStatus::Completed
+    }
+}
+
+fn step_reason_from_output(status: TaskStepStatus, output: &StepRunOutput) -> Option<String> {
+    let error = output.outcome.tool_errors.first()?;
+    if status == TaskStepStatus::Completed {
+        Some(format!("recovered tool error: {}", error.message))
+    } else {
+        Some(error.message.clone())
     }
 }
 
@@ -631,16 +693,32 @@ fn step_terminal_reason(step_id: &TaskStepId, status: TaskStepStatus) -> String 
     }
 }
 
-fn child_status_from_outcome(outcome: &AgentRunOutcome) -> TaskChildSessionStatus {
-    if outcome.terminal_reason == AgentRunTerminalReason::MaxTurns
-        || !outcome.interrupted_tool_calls.is_empty()
+fn child_status_from_output(output: &StepRunOutput) -> TaskChildSessionStatus {
+    if output.outcome.terminal_reason == AgentRunTerminalReason::MaxTurns
+        || !output.outcome.interrupted_tool_calls.is_empty()
     {
         TaskChildSessionStatus::Interrupted
-    } else if outcome.tool_errors.is_empty() {
-        TaskChildSessionStatus::Completed
-    } else {
+    } else if output.outcome.approval_denials > 0
+        || has_blocking_tool_error(&output.outcome)
+        || (!output.outcome.tool_errors.is_empty() && output.final_text.trim().is_empty())
+    {
         TaskChildSessionStatus::Failed
+    } else {
+        TaskChildSessionStatus::Completed
     }
+}
+
+fn has_blocking_tool_error(outcome: &AgentRunOutcome) -> bool {
+    outcome.tool_errors.iter().any(|error| {
+        matches!(
+            error.kind,
+            ToolErrorKind::ApprovalRequired
+                | ToolErrorKind::ApprovalDenied
+                | ToolErrorKind::PermissionDenied
+                | ToolErrorKind::PathOutsideWorkspace
+                | ToolErrorKind::ExternalDirectoryRequired
+        )
+    })
 }
 
 fn build_child_session(
@@ -688,16 +766,49 @@ fn planner_prompt(objective: &str) -> String {
     )
 }
 
-fn executor_step_prompt(objective: &str, plan_version: u32, step: &TaskStepSpec) -> String {
-    role_step_prompt("Execute task step.", objective, plan_version, step)
+fn normalize_task_guidance(guidance: Option<String>) -> Option<String> {
+    guidance
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
-fn subagent_step_prompt(objective: &str, plan_version: u32, step: &TaskStepSpec) -> String {
+fn task_continue_reason(plan_version: u32, guidance: Option<&str>) -> String {
+    match guidance {
+        Some(value) => format!(
+            "continuing plan v{plan_version}; user guidance: {}",
+            value.trim()
+        ),
+        None => format!("continuing plan v{plan_version}"),
+    }
+}
+
+fn executor_step_prompt(
+    objective: &str,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    guidance: Option<&str>,
+) -> String {
+    role_step_prompt(
+        "Execute task step.",
+        objective,
+        plan_version,
+        step,
+        guidance,
+    )
+}
+
+fn subagent_step_prompt(
+    objective: &str,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    guidance: Option<&str>,
+) -> String {
     role_step_prompt(
         "Execute this delegated subagent step in the child session. Keep output bounded and focused on the step result.",
         objective,
         plan_version,
         step,
+        guidance,
     )
 }
 
@@ -706,18 +817,24 @@ fn role_step_prompt(
     objective: &str,
     plan_version: u32,
     step: &TaskStepSpec,
+    guidance: Option<&str>,
 ) -> String {
     let detail = step
         .detail
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("-");
-    format!(
+    let mut prompt = format!(
         "{heading}\n\nObjective:\n{objective}\nPlan version: {plan_version}\nStep: {}\nTitle: {}\nDetail: {detail}\nRole: {}",
         step.step_id.as_str(),
         step.title,
         step.role.as_str()
-    )
+    );
+    if let Some(guidance) = guidance.filter(|value| !value.trim().is_empty()) {
+        prompt.push_str("\n\nUser guidance for this continuation:\n");
+        prompt.push_str(guidance.trim());
+    }
+    prompt
 }
 
 #[cfg(test)]

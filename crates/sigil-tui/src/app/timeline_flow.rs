@@ -463,6 +463,12 @@ impl AppState {
         self.timeline_render_ranges.get(entry_index).cloned()
     }
 
+    pub(crate) fn timeline_plain_line(&self, line_index: usize) -> Option<&str> {
+        self.timeline_plain_cache
+            .get(line_index)
+            .map(String::as_str)
+    }
+
     pub(crate) fn transcript_lines(&self, max_lines: usize) -> Vec<Line<'static>> {
         let visible_range = self.visible_timeline_render_range(max_lines);
         if visible_range.is_empty() {

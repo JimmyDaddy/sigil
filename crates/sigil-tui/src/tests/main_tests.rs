@@ -425,13 +425,159 @@ fn process_app_action_forwards_worker_command_when_runtime_exists() -> anyhow::R
 }
 
 #[test]
-fn process_app_action_ignores_worker_command_without_runtime() -> anyhow::Result<()> {
+fn process_app_action_restarts_closed_worker_and_retries_command() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (closed_tx, closed_rx) = mpsc::channel();
+    drop(closed_rx);
+    let (_message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx: closed_tx,
+        worker_rx,
+    });
+    let (next_runtime, commands) = fake_worker_runtime();
+    let mut next_runtime = Some(next_runtime);
+    let mut spawn_count = 0;
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::SubmitPlan("review workspace".to_owned()),
+        |root_config, _app| {
+            spawn_count += 1;
+            assert_eq!(root_config.agent.provider, "deepseek");
+            next_runtime
+                .take()
+                .ok_or_else(|| anyhow!("worker restarted more than once"))
+        },
+    )?;
+
+    assert_eq!(spawn_count, 1);
+    assert!(worker.is_some());
+    let command = commands.recv_timeout(Duration::from_secs(1))?;
+    assert!(matches!(
+        command,
+        WorkerCommand::SubmitTask { ref prompt } if prompt == "review workspace"
+    ));
+    Ok(())
+}
+
+#[test]
+fn process_app_action_starts_missing_worker_and_sends_command() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut worker = None;
+    let (next_runtime, commands) = fake_worker_runtime();
+    let mut next_runtime = Some(next_runtime);
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::SubmitPlan("review workspace".to_owned()),
+        |_root_config, _app| {
+            next_runtime
+                .take()
+                .ok_or_else(|| anyhow!("worker restarted more than once"))
+        },
+    )?;
+
+    assert!(worker.is_some());
+    let command = commands.recv_timeout(Duration::from_secs(1))?;
+    assert!(matches!(
+        command,
+        WorkerCommand::SubmitTask { ref prompt } if prompt == "review workspace"
+    ));
+    Ok(())
+}
+
+#[test]
+fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let (closed_tx, closed_rx) = mpsc::channel();
+    drop(closed_rx);
+    let (_message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx: closed_tx,
+        worker_rx,
+    });
+
+    process_app_action_with_spawner(
+        &mut app,
+        &mut worker,
+        AppAction::SubmitPlan("review workspace".to_owned()),
+        |_root_config, _app| {
+            let (retry_tx, retry_rx) = mpsc::channel();
+            drop(retry_rx);
+            let (_message_tx, worker_rx) = mpsc::channel();
+            Ok(WorkerRuntime {
+                worker_tx: retry_tx,
+                worker_rx,
+            })
+        },
+    )?;
+
+    assert!(worker.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("agent worker stopped before accepting command")
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text.contains("Run failed: agent worker stopped"))
+    );
+    Ok(())
+}
+
+#[test]
+fn process_app_action_reports_restart_failure_without_runtime() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let mut worker = None;
 
     process_app_action(&mut app, &mut worker, AppAction::CancelRun)?;
 
     assert!(worker.is_none());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("test wrapper should not spawn"))
+    );
+    Ok(())
+}
+
+#[test]
+fn send_worker_command_returns_false_when_runtime_is_missing() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let mut worker = None;
+
+    let sent = super::send_worker_command(&mut app, &mut worker, WorkerCommand::Shutdown)?;
+
+    assert!(!sent);
+    assert!(worker.is_none());
+    Ok(())
+}
+
+#[test]
+fn send_worker_command_with_restart_reports_missing_runtime_config() -> Result<()> {
+    let mut app = AppState::from_setup(
+        PathBuf::from("sigil.toml"),
+        PathBuf::from("."),
+        Some("missing config".to_owned()),
+    );
+    let mut worker = None;
+    let mut spawn_worker = |_root_config: RootConfig, _app: &AppState| -> Result<WorkerRuntime> {
+        Err(anyhow!("spawn should not be called without runtime config"))
+    };
+
+    super::send_worker_command_with_restart(
+        &mut app,
+        &mut worker,
+        WorkerCommand::CancelRun,
+        &mut spawn_worker,
+    )?;
+
+    assert!(worker.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("agent worker stopped; runtime config unavailable")
+    );
     Ok(())
 }
 
@@ -526,6 +672,39 @@ fn flush_pending_worker_commands_handles_empty_missing_and_runtime_paths() -> an
     ));
     assert!(!app.has_pending_worker_commands());
     assert!(!flush_pending_worker_commands(&mut app, &mut worker)?);
+    Ok(())
+}
+
+#[test]
+fn flush_pending_worker_commands_reports_closed_worker_without_error() -> Result<()> {
+    let mut config = test_config();
+    config.providers.insert(
+        "deepseek".to_owned(),
+        json!({
+            "base_url": "https://example.com",
+            "model": "deepseek-v4-flash",
+            "api_key": "test-key",
+            "request_timeout_secs": 1
+        }),
+    );
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    assert!(app.has_pending_worker_commands());
+    let (worker_tx, command_rx) = mpsc::channel();
+    drop(command_rx);
+    let (_message_tx, worker_rx) = mpsc::channel();
+    let mut worker = Some(WorkerRuntime {
+        worker_tx,
+        worker_rx,
+    });
+
+    assert!(flush_pending_worker_commands(&mut app, &mut worker)?);
+
+    assert!(worker.is_none());
+    assert!(!app.has_pending_worker_commands());
+    assert_eq!(
+        app.last_notice(),
+        Some("agent worker stopped before accepting command")
+    );
     Ok(())
 }
 

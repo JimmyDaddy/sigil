@@ -108,7 +108,7 @@
 - `notifications/progress` 必须映射到节流后的产品化展示面，例如 TUI live panel；不要把每条 progress notification 刷进 timeline
 - MCP tool/resource/prompt 的 model-visible 输出必须有默认限额、脱敏和 truncation metadata
 - `elicitation/create` 必须走显式 client handler：TUI 运行时通过 modal 让用户确认 flat primitive object 字段；非交互默认 handler 必须明确返回 unsupported 或 cancel，不要静默挂起或伪造用户输入
-- MCP server 配置必须保留 lifecycle/trust 边界：默认 `required = true`、`startup = "eager"`；`startup = "lazy"` 在普通 registry 构建时只能跳过启动和注册，不要伪造 lazy 工具；显式 activation 时再启动 server、查询真实 tools，并按 required / optional 策略处理失败；`required = false` 的 eager server 失败时可以降级为 warning 并跳过
+- MCP server 配置必须保留 lifecycle/trust 边界：默认 `required = true`、`startup = "eager"`；`startup = "lazy"` 在普通 registry 构建时只能跳过启动和注册，不要伪造 lazy 工具；显式 activation 时再启动 server、查询真实 tools，并按 required / optional 策略处理失败；`required = false` 的 eager server 失败时可以降级为 warning 并跳过；TUI worker 不得因为 eager MCP server 启动失败或超时而阻断普通任务，必须把失败投影为 MCP lifecycle 状态
 - MCP trust policy 必须可配置、可序列化，至少表达 `trust_class / approval_default / egress_logging / allow_secrets / pin_version`；已接入运行时的字段必须有测试覆盖，尚未接入更细粒度 enforcement 的字段不要写成已经生效的安全保证
 
 ### 3.5 `sigil-tui`

@@ -21,7 +21,7 @@ fn from_root_config_initializes_mcp_statuses_from_startup_mode() {
 
     assert_eq!(
         app.mcp_server_runtime_status_label("eager").as_deref(),
-        Some("ready")
+        Some("activating")
     );
     assert_eq!(
         app.mcp_server_runtime_status_label("lazy").as_deref(),
@@ -29,7 +29,7 @@ fn from_root_config_initializes_mcp_statuses_from_startup_mode() {
     );
     assert_eq!(
         app.mcp_sidebar_lines(),
-        vec!["eager: ready".to_owned(), "lazy: deferred".to_owned()]
+        vec!["eager: activating".to_owned(), "lazy: deferred".to_owned()]
     );
 }
 
@@ -145,9 +145,256 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
     assert!(lines.contains(&"task: task_1".to_owned()));
     assert!(lines.contains(&"status: paused".to_owned()));
     assert!(lines.contains(&"plan: v1".to_owned()));
-    assert!(lines.contains(&"current: v1:step_1".to_owned()));
+    assert!(lines.contains(&"progress: 0/1 done".to_owned()));
+    assert!(lines.contains(&"current: v1:step_1 running".to_owned()));
+    assert!(lines.contains(&"▶ 1. running step_1 · inspect".to_owned()));
     assert!(lines.contains(&"routes: unverified".to_owned()));
     assert!(lines.contains(&"child: unavailable".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn task_sidebar_lines_show_failed_step_and_remaining_plan() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Failed,
+            reason: Some("step gate_check failed".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![
+                sigil_kernel::TaskStepSpec {
+                    step_id: sigil_kernel::TaskStepId::new("gate_check")?,
+                    title: "跑门禁".to_owned(),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::Executor,
+                },
+                sigil_kernel::TaskStepSpec {
+                    step_id: sigil_kernel::TaskStepId::new("overview")?,
+                    title: "扫描项目整体结构".to_owned(),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::Executor,
+                },
+            ],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id,
+            plan_version: 1,
+            step_id: sigil_kernel::TaskStepId::new("gate_check")?,
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Failed,
+            title: Some("跑门禁".to_owned()),
+            summary: Some("门禁全部通过".to_owned()),
+            reason: Some("invalid tool arguments".to_owned()),
+        })),
+    ]);
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"status: failed".to_owned()));
+    assert!(lines.contains(&"progress: 0/2 done".to_owned()));
+    assert!(lines.contains(&"last: v1:gate_check failed".to_owned()));
+    assert!(lines.contains(&"reason: step gate_check failed".to_owned()));
+    assert!(lines.contains(&"! 1. failed gate_check · 跑门禁".to_owned()));
+    assert!(lines.contains(&"· 2. pending overview · 扫描项目整体结构".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn task_sidebar_lines_distinguish_cancelled_and_interrupted_steps() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let cancelled_step = sigil_kernel::TaskStepId::new("cancel_setup")?;
+    let interrupted_step = sigil_kernel::TaskStepId::new("interrupt_review")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Cancelled,
+            reason: Some("user cancelled task".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![
+                sigil_kernel::TaskStepSpec {
+                    step_id: cancelled_step.clone(),
+                    title: "cancel setup".to_owned(),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::Executor,
+                },
+                sigil_kernel::TaskStepSpec {
+                    step_id: interrupted_step.clone(),
+                    title: "review interrupted".to_owned(),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::Executor,
+                },
+            ],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: cancelled_step,
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Cancelled,
+            title: Some("cancel setup".to_owned()),
+            summary: None,
+            reason: Some("user cancelled task".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id,
+            plan_version: 1,
+            step_id: interrupted_step,
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Interrupted,
+            title: Some("review interrupted".to_owned()),
+            summary: None,
+            reason: Some("tool interrupted".to_owned()),
+        })),
+    ]);
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"× 1. cancelled cancel_setup · cancel setup".to_owned()));
+    assert!(lines.contains(&"⏸ 2. interrupted interrupt_review · review interrupted".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn task_sidebar_lines_keeps_hidden_current_step_visible() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let steps = (1..=8)
+        .map(|index| {
+            Ok(sigil_kernel::TaskStepSpec {
+                step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
+                title: format!("step {index}"),
+                detail: None,
+                role: sigil_kernel::AgentRole::Executor,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: sigil_kernel::TaskStepId::new("step_1")?,
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Completed,
+            title: Some("step 1".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: sigil_kernel::TaskStepId::new("step_2")?,
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Blocked,
+            title: Some("step 2".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id,
+            plan_version: 1,
+            step_id: sigil_kernel::TaskStepId::new("step_8")?,
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Running,
+            title: Some("step 8".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+    ]);
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"progress: 1/8 done".to_owned()));
+    assert!(lines.contains(&"✓ 1. completed step_1 · step 1".to_owned()));
+    assert!(lines.contains(&"! 2. blocked step_2 · step 2".to_owned()));
+    assert!(lines.contains(&"▶ 8. running step_8 · step 8".to_owned()));
+    assert!(lines.contains(&"+2 more steps".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn task_sidebar_lines_focuses_first_pending_without_problem_step() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![
+                sigil_kernel::TaskStepSpec {
+                    step_id: sigil_kernel::TaskStepId::new("step_1")?,
+                    title: "step 1".to_owned(),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::Executor,
+                },
+                sigil_kernel::TaskStepSpec {
+                    step_id: sigil_kernel::TaskStepId::new("step_2")?,
+                    title: "step 2".to_owned(),
+                    detail: None,
+                    role: sigil_kernel::AgentRole::Executor,
+                },
+            ],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id,
+            plan_version: 1,
+            step_id: sigil_kernel::TaskStepId::new("step_1")?,
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Completed,
+            title: Some("step 1".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+    ]);
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"✓ 1. completed step_1 · step 1".to_owned()));
+    assert!(lines.contains(&"· 2. pending step_2 · step 2".to_owned()));
+    assert!(!lines.iter().any(|line| line.starts_with("last: ")));
     Ok(())
 }
 

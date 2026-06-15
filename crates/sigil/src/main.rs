@@ -10,7 +10,7 @@ use futures::StreamExt;
 use sigil_kernel::preferred_config_path;
 use sigil_kernel::{
     Agent, EventHandler, InteractionMode, JsonlSessionStore, ProviderChunk, RootConfig, RunEvent,
-    Session, resolve_workspace_root,
+    Session, UsageStats, resolve_workspace_root,
 };
 use sigil_provider_deepseek::{
     DeepSeekFimCompletionRequest, DeepSeekPrefixCompletionRequest, DeepSeekProvider,
@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
             assistant_prefix,
             stop,
             model,
-        } => prefix_command(&config_path, prompt, assistant_prefix, stop, model).await,
+        } => prefix_command(&config_path, &cwd, prompt, assistant_prefix, stop, model).await,
         Commands::Fim {
             prompt,
             suffix,
@@ -189,13 +189,15 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
 
 async fn prefix_command(
     config_path: &Path,
+    launch_cwd: &Path,
     prompt: String,
     assistant_prefix: String,
     stop: Vec<String>,
     model: Option<String>,
 ) -> Result<()> {
-    let root_config = RootConfig::load(config_path)?;
-    let provider = DeepSeekProvider::new(sigil_runtime::load_deepseek_config(&root_config)?)?;
+    let (root_config, provider) = load_deepseek_provider(config_path)?;
+    let traffic_partition_key =
+        headless_traffic_partition_key(&root_config, config_path, launch_cwd);
     let mut stream = provider
         .stream_prefix_completion(DeepSeekPrefixCompletionRequest {
             model,
@@ -203,7 +205,7 @@ async fn prefix_command(
             assistant_prefix,
             stop,
             reasoning_effort: None,
-            traffic_partition_key: Some("local-user".to_owned()),
+            traffic_partition_key,
         })
         .await?;
     drain_provider_stream(&mut stream).await
@@ -217,8 +219,7 @@ async fn fim_command(
     model: Option<String>,
     max_tokens: Option<u32>,
 ) -> Result<()> {
-    let root_config = RootConfig::load(config_path)?;
-    let provider = DeepSeekProvider::new(sigil_runtime::load_deepseek_config(&root_config)?)?;
+    let (_, provider) = load_deepseek_provider(config_path)?;
     let mut stream = provider
         .stream_fim_completion(DeepSeekFimCompletionRequest {
             model,
@@ -229,6 +230,23 @@ async fn fim_command(
         })
         .await?;
     drain_provider_stream(&mut stream).await
+}
+
+fn load_deepseek_provider(config_path: &Path) -> Result<(RootConfig, DeepSeekProvider)> {
+    let root_config = RootConfig::load(config_path)?;
+    let provider = DeepSeekProvider::new(sigil_runtime::load_deepseek_config(&root_config)?)?;
+    Ok((root_config, provider))
+}
+
+fn headless_traffic_partition_key(
+    root_config: &RootConfig,
+    config_path: &Path,
+    launch_cwd: &Path,
+) -> Option<String> {
+    let workspace_root =
+        resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+    sigil_runtime::build_run_options(root_config, workspace_root, InteractionMode::Headless)
+        .traffic_partition_key
 }
 
 fn default_session_path(workspace_root: &Path, configured_log_dir: &str) -> PathBuf {
@@ -244,19 +262,24 @@ struct RenderedOutput {
     stop: bool,
 }
 
-fn render_provider_chunk(chunk: ProviderChunk) -> RenderedOutput {
-    match chunk {
-        ProviderChunk::TextDelta(delta) => RenderedOutput {
+enum StreamRenderEvent {
+    TextDelta(String),
+    ReasoningDelta(String),
+    Usage(UsageStats),
+    Done,
+}
+
+fn render_stream_event(event: StreamRenderEvent) -> RenderedOutput {
+    match event {
+        StreamRenderEvent::TextDelta(delta) => RenderedOutput {
             stdout: delta,
             ..RenderedOutput::default()
         },
-        ProviderChunk::ReasoningDelta(delta) | ProviderChunk::ReasoningSummaryDelta(delta) => {
-            RenderedOutput {
-                stderr: format!("[reasoning] {delta}"),
-                ..RenderedOutput::default()
-            }
-        }
-        ProviderChunk::Usage(usage) => usage
+        StreamRenderEvent::ReasoningDelta(delta) => RenderedOutput {
+            stderr: format!("[reasoning] {delta}"),
+            ..RenderedOutput::default()
+        },
+        StreamRenderEvent::Usage(usage) => usage
             .system_fingerprint
             .map(|fingerprint| RenderedOutput {
                 stderr: format!(
@@ -266,24 +289,31 @@ fn render_provider_chunk(chunk: ProviderChunk) -> RenderedOutput {
                 ..RenderedOutput::default()
             })
             .unwrap_or_default(),
-        ProviderChunk::Done => RenderedOutput {
+        StreamRenderEvent::Done => RenderedOutput {
             stop: true,
             ..RenderedOutput::default()
         },
+    }
+}
+
+fn render_provider_chunk(chunk: ProviderChunk) -> RenderedOutput {
+    match chunk {
+        ProviderChunk::TextDelta(delta) => render_stream_event(StreamRenderEvent::TextDelta(delta)),
+        ProviderChunk::ReasoningDelta(delta) | ProviderChunk::ReasoningSummaryDelta(delta) => {
+            render_stream_event(StreamRenderEvent::ReasoningDelta(delta))
+        }
+        ProviderChunk::Usage(usage) => render_stream_event(StreamRenderEvent::Usage(usage)),
+        ProviderChunk::Done => render_stream_event(StreamRenderEvent::Done),
         _ => RenderedOutput::default(),
     }
 }
 
 fn render_run_event(event: RunEvent) -> RenderedOutput {
     match event {
-        RunEvent::TextDelta(delta) => RenderedOutput {
-            stdout: delta,
-            ..RenderedOutput::default()
-        },
-        RunEvent::ReasoningDelta(delta) => RenderedOutput {
-            stderr: format!("[reasoning] {delta}"),
-            ..RenderedOutput::default()
-        },
+        RunEvent::TextDelta(delta) => render_stream_event(StreamRenderEvent::TextDelta(delta)),
+        RunEvent::ReasoningDelta(delta) => {
+            render_stream_event(StreamRenderEvent::ReasoningDelta(delta))
+        }
         RunEvent::ToolCallStarted(call) => RenderedOutput {
             stderr: format!("\n[tool:start] {} ({})\n", call.name, call.id),
             ..RenderedOutput::default()
@@ -345,16 +375,7 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
             ),
             ..RenderedOutput::default()
         },
-        RunEvent::Usage(usage) => usage
-            .system_fingerprint
-            .map(|fingerprint| RenderedOutput {
-                stderr: format!(
-                    "\n[usage] prompt={} completion={} fingerprint={fingerprint}\n",
-                    usage.prompt_tokens, usage.completion_tokens
-                ),
-                ..RenderedOutput::default()
-            })
-            .unwrap_or_default(),
+        RunEvent::Usage(usage) => render_stream_event(StreamRenderEvent::Usage(usage)),
         RunEvent::Notice(note) => RenderedOutput {
             stderr: format!("[notice] {note}\n"),
             ..RenderedOutput::default()

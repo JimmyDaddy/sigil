@@ -48,6 +48,9 @@ impl StreamMapper {
             }));
         }
         for choice in envelope.choices {
+            if let Some(reasoning) = choice.delta.reasoning_content {
+                chunks.push(ProviderChunk::ReasoningDelta(reasoning));
+            }
             if let Some(content) = choice.delta.content {
                 chunks.push(ProviderChunk::TextDelta(content));
             }

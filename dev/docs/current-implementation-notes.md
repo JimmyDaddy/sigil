@@ -120,13 +120,15 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 
 恢复后下一轮 request 会恢复最新匹配 provider 的 response handle。当前会话身份不会因为 `/config` 保存默认 provider/model 而被静默改写。
 
-计划任务在恢复时不会自动重放。`/plan continue` 会从 durable task projection 显式继续最近一个未完成 task，并跳过已完成步骤。
+计划任务在恢复时不会自动重放。当前 session 已存在 task 时，composer 普通输入会作为 continuation guidance 触发 `ContinueTask`；`/plan continue` 仍可作为无额外 guidance 的显式继续入口。worker 会从 durable task projection 继续最近一个未完成 task，并跳过已完成步骤；如果只有 completed/cancelled task，会返回对应 terminal 状态说明。
 
 ## Task Planning 当前实现
 
-计划任务通过 TUI `/plan <任务>` 进入。worker protocol 使用 `SubmitTask` / `ContinueTask` 命令和 `TaskRunStarted` / `TaskRunFinished` 消息。Info rail 从 durable task control entries 渲染 task 状态、最新 plan 版本和当前步骤。
+计划任务通过 TUI `/plan <任务>` 进入；当前 session 已存在 task 时，普通 composer 输入会转成 `ContinueTask` 尝试，并作为 continuation guidance 注入本次 executor/subagent step prompt。没有 task context 时，普通输入仍走 chat-first。worker protocol 使用 `SubmitTask` / `ContinueTask` 命令和 `TaskRunStarted` / `TaskRunFinished` 消息；task run / step / child-session control entry 也会通过实时 `RunEvent::Control` 同步到 TUI。Info rail 从 durable task control entries 渲染 task 状态、最新 plan 版本、完成进度、当前或最近失败步骤，以及当前 plan 的步骤摘要。步骤摘要使用状态化 marker 和行文本颜色：running 高亮，completed 绿色，failed/blocked 红色，cancelled/interrupted 金色，pending 弱化。
 
 `sigil-kernel::SequentialTaskOrchestrator` 先运行 planner role，通过 internal `task_plan_update` tool 接收 plan update，再顺序执行 steps。Executor step 在 parent session 中运行，但 step context 作为 transient request context 注入，不会变成普通 user history。Subagent read/write step 在 child session 中运行，parent session 记录 child-session lifecycle link，并为 child tool approval 与 MCP elicitation 写 route 摘要。
+
+Step 执行中出现过普通 tool error 时，如果 agent 已经读取错误并给出最终回答，orchestrator 会把 step 视为已恢复并继续后续步骤，同时在 `TaskStepEntry.reason` 保留 `recovered tool error` 摘要。Max turns、interrupted tool call、审批拒绝和权限类 tool error 仍会阻断 task。
 
 Role-specific provider 和 run options 由 `sigil-runtime` 装配。Planner 与 subagent-read 默认使用只读 scoped tool registry；executor 默认使用完整 registry；subagent-write 只有在 `[task].allow_write_subagents = true` 时使用完整 registry。`ScopedToolRegistry` 会同时限制 specs、preview、execute、permission hooks 和 egress hooks。
 
@@ -183,6 +185,7 @@ MCP server 通过 `[[mcp_servers]]` 配置接入。当前支持：
 - `notifications/progress`
 - `notifications/*/list_changed`
 - lazy activation
+- TUI eager MCP 后台激活；单个 server 失败不阻断普通任务
 - required / optional server 失败策略
 - trust class
 - per-server approval default

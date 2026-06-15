@@ -259,11 +259,26 @@ fn enqueue_decoded_frames_ignores_comment_and_blank_frames() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn retryable_status_helper_accepts_only_rate_limits_and_server_errors() {
+    assert!(super::is_retryable_status(
+        &crate::errors::OpenAiCompatibleProviderError::RateLimited
+    ));
+    assert!(super::is_retryable_status(
+        &crate::errors::OpenAiCompatibleProviderError::RetryableStatus(503)
+    ));
+    assert!(!super::is_retryable_status(
+        &crate::errors::OpenAiCompatibleProviderError::Authentication(401)
+    ));
+}
+
 #[tokio::test]
 async fn provider_stream_maps_http_error_status() -> Result<()> {
-    let server =
-        TinySseServer::start("HTTP/1.1 429 Too Many Requests\r\ncontent-length: 7\r\n\r\nlimited")
-            .await?;
+    let server = TinySseServer::start_sequence(vec![
+        "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 7\r\n\r\nlimited".as_bytes(),
+        "HTTP/1.1 429 Too Many Requests\r\ncontent-length: 7\r\n\r\nlimited".as_bytes(),
+    ])
+    .await?;
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
         base_url: server.base_url(),
         api_key: Some("test-key".to_owned()),
@@ -279,6 +294,40 @@ async fn provider_stream_maps_http_error_status() -> Result<()> {
         error.to_string(),
         "OpenAI-compatible request was rate limited"
     );
+    assert_eq!(server.request_count(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_stream_retries_retryable_status_once() -> Result<()> {
+    let server = TinySseServer::start_sequence(vec![
+        "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 4\r\n\r\nbusy".as_bytes(),
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+          data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n\
+          data: [DONE]\n\n"
+            .as_bytes(),
+    ])
+    .await?;
+    let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleProviderConfig {
+        base_url: server.base_url(),
+        api_key: Some("test-key".to_owned()),
+        ..OpenAiCompatibleProviderConfig::default()
+    })?;
+
+    let chunks = provider
+        .stream(test_request())
+        .await?
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(server.request_count(), 2);
+    assert!(
+        matches!(chunks[0].as_ref().expect("text"), ProviderChunk::TextDelta(text) if text == "ok")
+    );
+    assert!(matches!(
+        chunks[1].as_ref().expect("done"),
+        ProviderChunk::Done
+    ));
     Ok(())
 }
 
@@ -302,7 +351,7 @@ fn test_request() -> CompletionRequest {
 
 struct TinySseServer {
     address: std::net::SocketAddr,
-    request: Arc<Mutex<Vec<u8>>>,
+    requests: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 struct EnvScope {
@@ -341,12 +390,19 @@ impl TinySseServer {
     }
 
     async fn start_bytes(response: &'static [u8]) -> Result<Self> {
+        Self::start_sequence(vec![response]).await
+    }
+
+    async fn start_sequence(responses: Vec<&'static [u8]>) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let request_capture = Arc::new(Mutex::new(Vec::new()));
         let task_request_capture = Arc::clone(&request_capture);
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
+            for response in responses {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
                 let mut request = Vec::new();
                 let mut buffer = [0u8; 1024];
                 loop {
@@ -373,14 +429,14 @@ impl TinySseServer {
                     let mut captured = task_request_capture
                         .lock()
                         .expect("request capture mutex should not be poisoned");
-                    *captured = request;
+                    captured.push(request);
                 }
                 let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response).await;
             }
         });
         Ok(Self {
             address,
-            request: request_capture,
+            requests: request_capture,
         })
     }
 
@@ -389,10 +445,18 @@ impl TinySseServer {
     }
 
     fn request_text(&self) -> String {
-        let request = self
-            .request
+        let requests = self
+            .requests
             .lock()
             .expect("request capture mutex should not be poisoned");
-        String::from_utf8_lossy(&request).into_owned()
+        let request = requests.first().map(Vec::as_slice).unwrap_or_default();
+        String::from_utf8_lossy(request).into_owned()
+    }
+
+    fn request_count(&self) -> usize {
+        self.requests
+            .lock()
+            .expect("request capture mutex should not be poisoned")
+            .len()
     }
 }

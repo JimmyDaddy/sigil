@@ -65,6 +65,7 @@ use self::session_flow::{current_focus_label, short_session_token};
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
 // Usage costs are currently stored as USD; CNY display mirrors the provider wallet currency.
 const USD_TO_CNY: f64 = 7.2;
+const TASK_SIDEBAR_STEP_LIMIT: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TimelineTextSelection {
@@ -211,7 +212,7 @@ fn initial_mcp_server_statuses(
 
 fn initial_mcp_server_status(server: &McpServerConfig) -> McpServerRuntimeStatus {
     match server.startup {
-        McpServerStartup::Eager => McpServerRuntimeStatus::Ready { tool_count: None },
+        McpServerStartup::Eager => McpServerRuntimeStatus::Activating,
         McpServerStartup::Lazy => McpServerRuntimeStatus::Deferred,
     }
 }
@@ -314,6 +315,7 @@ pub enum AppAction {
     SubmitPlan(String),
     ContinuePlan {
         task_id: Option<String>,
+        guidance: Option<String>,
     },
     ApprovalDecision {
         call_id: String,
@@ -1004,6 +1006,10 @@ impl AppState {
             .max(1)
     }
 
+    pub(crate) fn root_config_snapshot(&self) -> Option<&RootConfig> {
+        self.config_snapshot.as_ref()
+    }
+
     pub fn set_terminal_size(&mut self, width: u16, height: u16) -> bool {
         let next_width = width.max(3);
         let next_height = height.max(8);
@@ -1049,6 +1055,29 @@ impl AppState {
             self.push_timeline(TimelineRole::Notice, "busy; submit later");
             self.push_event("notice", "submit ignored while busy");
             return Ok(None);
+        }
+
+        if self.has_task_context_for_plain_prompt() {
+            self.input.clear();
+            self.input_cursor = 0;
+            self.reset_slash_selector();
+            self.timeline_scroll_back = 0;
+            self.push_timeline(TimelineRole::User, prompt.clone());
+            self.push_event("input", format!("submitted task continue {prompt}"));
+            self.active_pane = PaneFocus::Composer;
+            self.push_event("focus", current_focus_label(self));
+            self.is_busy = true;
+            self.run_phase = RunPhase::Thinking;
+            self.last_notice = Some("continuing task".to_owned());
+            self.last_phase_marker = None;
+            self.push_phase_marker(format!("task|{}", self.model_name));
+            self.streaming_assistant_index = None;
+            self.streaming_reasoning_index = None;
+            self.refresh_usage_sidebar_cache();
+            return Ok(Some(AppAction::ContinuePlan {
+                task_id: None,
+                guidance: Some(prompt),
+            }));
         }
 
         self.input.clear();
@@ -1110,7 +1139,12 @@ impl AppState {
                     self.push_timeline(TimelineRole::Notice, "usage: /plan <task>");
                     return Ok(None);
                 }
-                if arg == "continue" {
+                if arg == "continue" || arg.starts_with("continue ") {
+                    let guidance = arg
+                        .strip_prefix("continue")
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned);
                     self.is_busy = true;
                     self.run_phase = RunPhase::Thinking;
                     self.last_notice = Some("continuing task".to_owned());
@@ -1119,7 +1153,10 @@ impl AppState {
                     self.streaming_assistant_index = None;
                     self.streaming_reasoning_index = None;
                     self.refresh_usage_sidebar_cache();
-                    return Ok(Some(AppAction::ContinuePlan { task_id: None }));
+                    return Ok(Some(AppAction::ContinuePlan {
+                        task_id: None,
+                        guidance,
+                    }));
                 }
 
                 let objective = arg.to_owned();
@@ -1245,12 +1282,56 @@ impl AppState {
             format!("task: {}", task.task_id.as_str()),
             format!("status: {}", task_run_status_label(task.status)),
         ];
+        let mut step_lines = Vec::new();
         if let Some(plan_version) = task.latest_plan_version {
             lines.push(format!("plan: v{plan_version}"));
+            if let Some(plan) = task.plans.get(&plan_version) {
+                let completed_steps = plan
+                    .steps
+                    .iter()
+                    .filter(|step| {
+                        task.steps
+                            .get(&(plan_version, step.step_id.clone()))
+                            .is_some_and(|projected| {
+                                projected.status == sigil_kernel::TaskStepStatus::Completed
+                            })
+                    })
+                    .count();
+                lines.push(format!(
+                    "progress: {completed_steps}/{} done",
+                    plan.steps.len()
+                ));
+                step_lines = task_sidebar_focus_lines(task, plan_version, plan);
+            }
         }
         if let Some((plan_version, step_id)) = &task.current_step {
-            lines.push(format!("current: v{plan_version}:{}", step_id.as_str()));
+            let status = task
+                .steps
+                .get(&(*plan_version, step_id.clone()))
+                .map(|step| task_step_status_label(step.status))
+                .unwrap_or("running");
+            lines.push(format!(
+                "current: v{plan_version}:{} {status}",
+                step_id.as_str()
+            ));
+        } else if let Some((plan_version, step_id, status)) = task_sidebar_last_problem_step(task) {
+            lines.push(format!(
+                "last: v{plan_version}:{} {}",
+                step_id.as_str(),
+                task_step_status_label(status)
+            ));
         }
+        if let Some(reason) = task
+            .reason
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            lines.push(format!(
+                "reason: {}",
+                truncate_session_view_text(reason, 48)
+            ));
+        }
+        lines.extend(step_lines);
         if task.route_unverified {
             lines.push("routes: unverified".to_owned());
         }
@@ -1258,6 +1339,12 @@ impl AppState {
             lines.push("child: unavailable".to_owned());
         }
         lines
+    }
+
+    fn has_task_context_for_plain_prompt(&self) -> bool {
+        sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries)
+            .latest_task()
+            .is_some()
     }
 
     pub(crate) fn reasoning_effort_label(&self) -> &'static str {
@@ -1641,6 +1728,120 @@ impl AppState {
     }
 }
 
+fn task_sidebar_focus_lines(
+    task: &sigil_kernel::TaskRunProjection,
+    plan_version: u32,
+    plan: &sigil_kernel::TaskPlanProjection,
+) -> Vec<String> {
+    let focus_index = task_sidebar_focus_step_index(task, plan_version, plan);
+    let mut selected_indices: Vec<usize> =
+        (0..plan.steps.len().min(TASK_SIDEBAR_STEP_LIMIT)).collect();
+    if let Some(focus_index) = focus_index
+        && focus_index >= selected_indices.len()
+        && !selected_indices.is_empty()
+    {
+        selected_indices.pop();
+        selected_indices.push(focus_index);
+    }
+
+    let mut lines = selected_indices
+        .iter()
+        .map(|index| {
+            let step = &plan.steps[*index];
+            let status = task_sidebar_step_status(task, plan_version, step);
+            let marker = task_sidebar_step_marker(status);
+            format!(
+                "{marker} {}. {} {} · {}",
+                index + 1,
+                task_step_status_label(status),
+                step.step_id.as_str(),
+                step.title
+            )
+        })
+        .collect::<Vec<_>>();
+    let hidden_steps = plan.steps.len().saturating_sub(selected_indices.len());
+    if hidden_steps > 0 {
+        lines.push(format!("+{hidden_steps} more steps"));
+    }
+    lines
+}
+
+fn task_sidebar_step_marker(status: sigil_kernel::TaskStepStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskStepStatus::Running => "▶",
+        sigil_kernel::TaskStepStatus::Completed => "✓",
+        sigil_kernel::TaskStepStatus::Failed | sigil_kernel::TaskStepStatus::Blocked => "!",
+        sigil_kernel::TaskStepStatus::Cancelled => "×",
+        sigil_kernel::TaskStepStatus::Interrupted => "⏸",
+        sigil_kernel::TaskStepStatus::Pending => "·",
+    }
+}
+
+fn task_sidebar_focus_step_index(
+    task: &sigil_kernel::TaskRunProjection,
+    plan_version: u32,
+    plan: &sigil_kernel::TaskPlanProjection,
+) -> Option<usize> {
+    if let Some((current_plan_version, current_step_id)) = &task.current_step
+        && *current_plan_version == plan_version
+        && let Some(index) = plan
+            .steps
+            .iter()
+            .position(|step| &step.step_id == current_step_id)
+    {
+        return Some(index);
+    }
+    plan.steps
+        .iter()
+        .position(|step| {
+            matches!(
+                task_sidebar_step_status(task, plan_version, step),
+                sigil_kernel::TaskStepStatus::Failed
+                    | sigil_kernel::TaskStepStatus::Blocked
+                    | sigil_kernel::TaskStepStatus::Interrupted
+                    | sigil_kernel::TaskStepStatus::Cancelled
+            )
+        })
+        .or_else(|| {
+            plan.steps.iter().position(|step| {
+                task_sidebar_step_status(task, plan_version, step)
+                    != sigil_kernel::TaskStepStatus::Completed
+            })
+        })
+}
+
+fn task_sidebar_step_status(
+    task: &sigil_kernel::TaskRunProjection,
+    plan_version: u32,
+    step: &sigil_kernel::TaskStepSpec,
+) -> sigil_kernel::TaskStepStatus {
+    task.steps
+        .get(&(plan_version, step.step_id.clone()))
+        .map(|projected| projected.status)
+        .unwrap_or(sigil_kernel::TaskStepStatus::Pending)
+}
+
+fn task_sidebar_last_problem_step(
+    task: &sigil_kernel::TaskRunProjection,
+) -> Option<(u32, sigil_kernel::TaskStepId, sigil_kernel::TaskStepStatus)> {
+    let plan_version = task.latest_plan_version?;
+    let plan = task.plans.get(&plan_version)?;
+    plan.steps.iter().find_map(|step| {
+        let status = task_sidebar_step_status(task, plan_version, step);
+        if matches!(
+            status,
+            sigil_kernel::TaskStepStatus::Failed
+                | sigil_kernel::TaskStepStatus::Blocked
+                | sigil_kernel::TaskStepStatus::Interrupted
+                | sigil_kernel::TaskStepStatus::Cancelled
+        ) {
+            Some((plan_version, step.step_id.clone(), status))
+        } else {
+            None
+        }
+    })
+}
+
 fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
     match status {
         sigil_kernel::TaskRunStatus::Started => "started",
@@ -1650,6 +1851,18 @@ fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
         sigil_kernel::TaskRunStatus::Failed => "failed",
         sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
         sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_step_status_label(status: sigil_kernel::TaskStepStatus) -> &'static str {
+    match status {
+        sigil_kernel::TaskStepStatus::Pending => "pending",
+        sigil_kernel::TaskStepStatus::Running => "running",
+        sigil_kernel::TaskStepStatus::Completed => "completed",
+        sigil_kernel::TaskStepStatus::Failed => "failed",
+        sigil_kernel::TaskStepStatus::Blocked => "blocked",
+        sigil_kernel::TaskStepStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskStepStatus::Interrupted => "interrupted",
     }
 }
 

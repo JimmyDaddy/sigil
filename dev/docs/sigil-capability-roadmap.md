@@ -363,7 +363,7 @@ cargo test -p sigil-tui config slash session
 当前实现状态：
 
 - 已抽出 layout snapshot 与 hit target，鼠标滚轮按区域作用于 transcript、approval、slash、info rail、setup/config/session 等表面。
-- 已支持 composer 点击定位光标、slash candidate 点击选择、tool activity 聚焦、tool card header 展开/折叠和 hover visual state。
+- 已支持 composer 点击定位光标、slash candidate 点击选择、tool activity 聚焦、tool card header / hidden-preview 行展开/折叠和 hover visual state。
 - Approval modal 已支持 file row、hunk、diff mode、metadata、allow/deny 明确 hit area；审批仍走现有 `AppAction::ApprovalDecision` 和 worker command 路径。
 - Setup/config/session selector 支持鼠标选择与确认。
 - Transcript 支持按显示列拖选、OSC52 复制、复制状态提示和 terminal capability 配置开关。
@@ -392,7 +392,7 @@ cargo test -p sigil-tui config slash session
 
 1. 点击 composer 聚焦 composer。
 2. 点击 slash candidate 只选中，不执行。
-3. 点击 tool activity body 聚焦，点击 tool card header 展开/折叠。
+3. 点击 tool activity body 聚焦，点击 tool card header / hidden-preview 行展开/折叠。
 4. 点击 info rail card 切换活动区域。
 
 验收标准：

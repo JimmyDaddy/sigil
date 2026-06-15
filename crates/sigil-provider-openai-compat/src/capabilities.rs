@@ -4,7 +4,7 @@ pub fn openai_compatible_capabilities() -> ProviderCapabilities {
     ProviderCapabilities {
         exact_prefix_cache: false,
         reports_cache_tokens: true,
-        supports_reasoning_stream: false,
+        supports_reasoning_stream: true,
         supports_tool_stream: true,
         supports_background_tasks: false,
         supports_response_handles: false,

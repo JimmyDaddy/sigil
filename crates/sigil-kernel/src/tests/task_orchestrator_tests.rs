@@ -11,15 +11,15 @@ use serde_json::{Value, json};
 use crate::{
     Agent, AgentRunOptions, AutoApproveHandler, CompletionRequest, ControlEntry, InteractionMode,
     JsonlSessionStore, MemoryConfig, MessageRole, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ReasoningEffort, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus, TaskId,
-    TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunStatus, TaskStepId, TaskStepSpec,
-    TaskStepStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    ProviderChunk, ReasoningEffort, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest,
+    Session, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus,
+    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunStatus, TaskStepId,
+    TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
 };
 
 use super::{
-    StepRunOutput, child_status_from_outcome, route_id_for_call, step_status_from_outcome,
+    StepRunOutput, child_status_from_output, route_id_for_call, step_status_from_outcome,
     step_terminal_reason, task_status_from_step_status,
 };
 
@@ -27,8 +27,21 @@ struct PlannerProvider;
 struct NoPlanProvider;
 struct FailingProvider;
 struct ToolCallingProvider;
+struct RecoveringToolErrorProvider;
+struct RecoverableErrorTool;
 struct ApprovalRequiredTool;
 struct DenyApprovalHandler;
+#[derive(Default)]
+struct RecordingEventHandler {
+    events: Vec<RunEvent>,
+}
+
+impl crate::EventHandler for RecordingEventHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        self.events.push(event);
+        Ok(())
+    }
+}
 
 struct CapturingExecutorProvider {
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
@@ -187,6 +200,78 @@ impl Provider for ToolCallingProvider {
 }
 
 #[async_trait]
+impl Provider for RecoveringToolErrorProvider {
+    fn name(&self) -> &str {
+        "recovering-tool-error"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_message_seen = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        if tool_message_seen {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("recovered step".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        let args = r#"{"path":"bad.txt"}"#;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-recoverable-error".to_owned(),
+                name: "recoverable_error".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-recoverable-error".to_owned(),
+                delta: args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-recoverable-error".to_owned(),
+                name: "recoverable_error".to_owned(),
+                args_json: args.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Tool for RecoverableErrorTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "recoverable_error".to_owned(),
+            description: "recoverable read error".to_owned(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+            category: ToolCategory::File,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::error(
+            call_id,
+            "recoverable_error",
+            crate::ToolErrorKind::InvalidInput,
+            "bad path",
+        ))
+    }
+}
+
+#[async_trait]
 impl Tool for ApprovalRequiredTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
@@ -265,7 +350,7 @@ async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()
         ),
     );
     let mut session = Session::new("planner", "model");
-    let mut handler = crate::event::NoopEventHandler;
+    let mut handler = RecordingEventHandler::default();
     let mut approval_handler = AutoApproveHandler;
 
     let output = orchestrator
@@ -290,6 +375,29 @@ async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()
     assert_eq!(output.plan_version, 1);
     assert_eq!(output.steps.len(), 1);
     assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
+    assert!(handler.events.iter().any(|event| {
+        matches!(
+            event,
+            RunEvent::Control(ControlEntry::TaskRun(run))
+                if run.status == TaskRunStatus::Started
+        )
+    }));
+    assert!(handler.events.iter().any(|event| {
+        matches!(
+            event,
+            RunEvent::Control(ControlEntry::TaskStep(step))
+                if step.step_id.as_str() == "step_1"
+                    && step.status == TaskStepStatus::Running
+        )
+    }));
+    assert!(handler.events.iter().any(|event| {
+        matches!(
+            event,
+            RunEvent::Control(ControlEntry::TaskStep(step))
+                if step.step_id.as_str() == "step_1"
+                    && step.status == TaskStepStatus::Completed
+        )
+    }));
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
@@ -368,6 +476,7 @@ async fn continue_run_skips_completed_steps_and_executes_remaining() -> Result<(
             options(),
             options(),
             options(),
+            Some("focus runtime state updates".to_owned()),
             &mut handler,
             &mut approval_handler,
         )
@@ -377,15 +486,102 @@ async fn continue_run_skips_completed_steps_and_executes_remaining() -> Result<(
     assert_eq!(output.plan_version, 1);
     assert_eq!(output.steps.len(), 1);
     assert_eq!(output.steps[0].step_id, TaskStepId::new("step_2")?);
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                if run.status == TaskRunStatus::Running
+                    && run.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("focus runtime state updates")
+                    })
+        )
+    }));
     let requests = executor_requests
         .lock()
         .expect("executor request lock should not be poisoned");
     assert_eq!(requests.len(), 1);
     assert!(requests[0].messages.iter().any(|message| {
-        message
-            .content
-            .as_deref()
-            .is_some_and(|content| content.contains("Step: step_2"))
+        message.content.as_deref().is_some_and(|content| {
+            content.contains("Step: step_2")
+                && content.contains("User guidance for this continuation")
+                && content.contains("focus runtime state updates")
+        })
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn continue_run_continues_after_recovered_tool_error() -> Result<()> {
+    let mut executor_registry = ToolRegistry::new();
+    executor_registry.register(Arc::new(RecoverableErrorTool));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(RecoveringToolErrorProvider, executor_registry),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    seed_two_step_task(&mut session, TaskRunStatus::Paused, false)?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "inspect implementation".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(output.steps.len(), 2);
+    assert!(
+        output
+            .steps
+            .iter()
+            .all(|step| step.status == TaskStepStatus::Completed)
+    );
+    assert_eq!(
+        session
+            .entries()
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                    if step.status == TaskStepStatus::Completed
+            ))
+            .count(),
+        2
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.step_id == TaskStepId::new("step_1").expect("valid step id")
+                    && step.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("recovered tool error")
+                            && reason.contains("bad path")
+                    })
+        )
     }));
     Ok(())
 }
@@ -428,6 +624,7 @@ async fn continue_run_errors_when_task_is_missing() -> Result<()> {
             options(),
             options(),
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
@@ -538,6 +735,7 @@ async fn planner_role_step_runs_on_parent_executor_path() -> Result<()> {
             options(),
             options(),
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
@@ -614,6 +812,7 @@ async fn subagent_step_runs_in_child_session_and_links_parent() -> Result<()> {
             options(),
             options(),
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
@@ -687,13 +886,14 @@ async fn subagent_write_step_routes_denied_approval_to_parent_session() -> Resul
             options(),
             options(),
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
         .await?;
 
-    assert_eq!(output.status, TaskRunStatus::Failed);
-    assert_eq!(output.steps[0].status, TaskStepStatus::Failed);
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Blocked);
     assert!(session.entries().iter().any(|entry| {
         matches!(
             entry,
@@ -750,6 +950,7 @@ async fn subagent_write_step_routes_approved_approval_to_parent_session() -> Res
             options(),
             options(),
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
@@ -813,6 +1014,7 @@ async fn child_step_defensive_parent_role_fallback_uses_executor_agent() -> Resu
             1,
             &step,
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
@@ -881,6 +1083,7 @@ async fn subagent_step_error_marks_child_session_failed() -> Result<()> {
             options(),
             options(),
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
@@ -945,6 +1148,7 @@ async fn max_turns_marks_step_and_task_interrupted() -> Result<()> {
             executor_options,
             options(),
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
@@ -1086,6 +1290,7 @@ async fn proposed_plan_is_not_executable() -> Result<()> {
             options(),
             options(),
             options(),
+            None,
             &mut handler,
             &mut approval_handler,
         )
@@ -1100,6 +1305,10 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
     let step_id = TaskStepId::new("step_1")?;
     let output = |outcome| StepRunOutput {
         final_text: String::new(),
+        outcome,
+    };
+    let recovered_output = |outcome| StepRunOutput {
+        final_text: "recovered".to_owned(),
         outcome,
     };
 
@@ -1121,6 +1330,31 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
             ..crate::AgentRunOutcome::default()
         })),
         TaskStepStatus::Failed
+    );
+    assert_eq!(
+        step_status_from_outcome(&recovered_output(crate::AgentRunOutcome {
+            tool_errors: vec![crate::ToolError {
+                kind: crate::ToolErrorKind::InvalidInput,
+                message: "bad path".to_owned(),
+                retryable: false,
+                details: Value::Null,
+            }],
+            ..crate::AgentRunOutcome::default()
+        })),
+        TaskStepStatus::Completed
+    );
+    assert_eq!(
+        step_status_from_outcome(&recovered_output(crate::AgentRunOutcome {
+            approval_denials: 1,
+            tool_errors: vec![crate::ToolError {
+                kind: crate::ToolErrorKind::ApprovalDenied,
+                message: "denied".to_owned(),
+                retryable: false,
+                details: Value::Null,
+            }],
+            ..crate::AgentRunOutcome::default()
+        })),
+        TaskStepStatus::Blocked
     );
     assert_eq!(
         step_status_from_outcome(&output(crate::AgentRunOutcome {
@@ -1172,14 +1406,14 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
     );
 
     assert_eq!(
-        child_status_from_outcome(&crate::AgentRunOutcome {
+        child_status_from_output(&output(crate::AgentRunOutcome {
             terminal_reason: crate::AgentRunTerminalReason::MaxTurns,
             ..crate::AgentRunOutcome::default()
-        }),
+        })),
         TaskChildSessionStatus::Interrupted
     );
     assert_eq!(
-        child_status_from_outcome(&crate::AgentRunOutcome {
+        child_status_from_output(&output(crate::AgentRunOutcome {
             tool_errors: vec![crate::ToolError {
                 kind: crate::ToolErrorKind::Internal,
                 message: "boom".to_owned(),
@@ -1187,11 +1421,23 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
                 details: Value::Null,
             }],
             ..crate::AgentRunOutcome::default()
-        }),
+        })),
         TaskChildSessionStatus::Failed
     );
     assert_eq!(
-        child_status_from_outcome(&crate::AgentRunOutcome::default()),
+        child_status_from_output(&recovered_output(crate::AgentRunOutcome {
+            tool_errors: vec![crate::ToolError {
+                kind: crate::ToolErrorKind::InvalidInput,
+                message: "bad path".to_owned(),
+                retryable: false,
+                details: Value::Null,
+            }],
+            ..crate::AgentRunOutcome::default()
+        })),
+        TaskChildSessionStatus::Completed
+    );
+    assert_eq!(
+        child_status_from_output(&output(crate::AgentRunOutcome::default())),
         TaskChildSessionStatus::Completed
     );
 

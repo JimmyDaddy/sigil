@@ -224,6 +224,16 @@ impl AppState {
         self.refresh_usage_sidebar_cache();
     }
 
+    pub(super) fn append_current_session_control(&mut self, control: ControlEntry) {
+        self.current_session_entries
+            .push(SessionLogEntry::Control(control));
+        self.stats = session_stats_from_entries(&self.current_session_entries);
+        self.latest_compaction_record = latest_compaction_record(&self.current_session_entries);
+        self.tool_preview_snapshots =
+            restored_tool_preview_snapshot_index(&self.current_session_entries);
+        self.refresh_usage_sidebar_cache();
+    }
+
     pub(super) fn refresh_session_history(&mut self) {
         let mut sessions = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.session_log_dir) {

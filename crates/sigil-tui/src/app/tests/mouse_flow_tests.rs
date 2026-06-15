@@ -82,6 +82,19 @@ fn tool_card_body_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u1
     )
 }
 
+fn tool_card_hidden_preview_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .tool_cards
+        .iter()
+        .find(|area| area.entry_index == entry_index)
+        .expect("expected visible tool card hit area");
+    point_in(
+        hit_area
+            .hidden_preview_area
+            .expect("expected visible hidden preview hit area"),
+    )
+}
+
 fn setup_field_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
     let hit_area = layout
         .setup_hit_areas
@@ -561,6 +574,15 @@ fn layout_snapshot_hits_visible_tool_cards_over_live_panel() {
             entry_index: first_entry_index
         }
     );
+
+    let (column, row) = tool_card_hidden_preview_point(&layout, first_entry_index);
+
+    assert_eq!(
+        layout.hit_target(column, row),
+        HitTarget::ToolCardHiddenPreview {
+            entry_index: first_entry_index
+        }
+    );
 }
 
 #[test]
@@ -792,6 +814,32 @@ fn mouse_click_tool_card_header_toggles_card() -> Result<()> {
     assert_eq!(
         app.mouse_hover_target,
         Some(HitTarget::ToolCardHeader {
+            entry_index: first_entry_index
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn mouse_click_tool_card_hidden_preview_toggles_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_hidden_preview_point(&layout, first_entry_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.selected_tool_activity_key,
+        Some("call:call-first".to_owned())
+    );
+    assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
+    assert_eq!(
+        app.mouse_hover_target,
+        Some(HitTarget::ToolCardHiddenPreview {
             entry_index: first_entry_index
         })
     );

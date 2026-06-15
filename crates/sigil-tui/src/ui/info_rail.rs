@@ -12,7 +12,9 @@ use super::{
     geometry::inset_rect,
     primitives::section_badge,
     text::truncate_display_width,
-    theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink, rail_bg},
+    theme::{
+        accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink, muted, rail_bg,
+    },
 };
 
 pub(crate) fn render_info_rail(frame: &mut Frame, area: Rect, view_model: &InfoRailViewModel) {
@@ -140,21 +142,12 @@ fn render_info_line(value: &str, width: usize) -> Line<'static> {
     }
 
     if let Some((marker, rest)) = clipped.split_once(' ')
-        && matches!(marker, ">" | "-")
+        && let Some((marker_style, rest_style)) = marker_styles(marker)
     {
         return Line::from(vec![
             Span::raw("  "),
-            Span::styled(
-                format!("{marker} "),
-                if marker == ">" {
-                    Style::default()
-                        .fg(accent_blue())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(dim())
-                },
-            ),
-            Span::styled(rest.to_owned(), Style::default().fg(ink())),
+            Span::styled(format!("{marker} "), marker_style),
+            Span::styled(rest.to_owned(), rest_style),
         ]);
     }
 
@@ -162,6 +155,51 @@ fn render_info_line(value: &str, width: usize) -> Line<'static> {
         Span::raw("  "),
         Span::styled(clipped, Style::default().fg(ink())),
     ])
+}
+
+fn marker_styles(marker: &str) -> Option<(Style, Style)> {
+    match marker {
+        ">" => Some((
+            Style::default()
+                .fg(accent_blue())
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(ink()),
+        )),
+        "-" | "·" => Some((Style::default().fg(dim()), Style::default().fg(muted()))),
+        "▶" => Some((
+            Style::default()
+                .fg(accent_blue())
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(accent_blue())
+                .add_modifier(Modifier::BOLD),
+        )),
+        "✓" => Some((
+            Style::default().fg(accent_lime()),
+            Style::default().fg(accent_lime()),
+        )),
+        "!" => Some((
+            Style::default()
+                .fg(accent_rose())
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(accent_rose())
+                .add_modifier(Modifier::BOLD),
+        )),
+        "×" => Some((
+            Style::default().fg(accent_gold()),
+            Style::default().fg(accent_gold()),
+        )),
+        "⏸" => Some((
+            Style::default()
+                .fg(accent_gold())
+                .add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(accent_gold())
+                .add_modifier(Modifier::BOLD),
+        )),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

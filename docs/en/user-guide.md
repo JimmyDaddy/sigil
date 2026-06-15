@@ -46,7 +46,7 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 
 When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input.
 
-Mouse mode supports transcript scrolling, composer cursor placement, approval controls, slash candidates, setup/config rows, session selection, activity selection, and tool card header expand/collapse when your terminal supports mouse capture. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
+Mouse mode supports transcript scrolling, composer cursor placement, approval controls, slash candidates, setup/config rows, session selection, activity selection, and tool card header or hidden-preview expand/collapse when your terminal supports mouse capture. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
 
 Use the `Terminal` section in `/config` to adjust mouse capture, OSC52 copy, and scroll sensitivity.
 
@@ -60,7 +60,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/doctor` | Run local setup diagnostics with a summary and remediation list |
 | `/resume` | Select and restore a previous session |
 | `/plan <task>` | Create a durable plan and execute the task step by step |
-| `/plan continue` | Explicitly continue the latest unfinished planned task |
+| `/plan continue` | Continue the latest planned task without extra guidance |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
 | `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |
 | `/compact` | Manually compact the provider-visible context for the current session |
@@ -70,7 +70,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 
 ## Planned Tasks
 
-Normal composer input stays chat-first. Use `/plan <task>` when you want Sigil to break a larger request into durable steps before execution.
+Normal composer input stays chat-first until the current session has a planned task. After that, composer input continues the latest planned task and is passed to the active executor/subagent step as continuation guidance. Use `/plan <task>` when you want Sigil to break a larger request into durable steps before execution.
 
 Planned tasks use role-specific agents:
 
@@ -80,7 +80,7 @@ Planned tasks use role-specific agents:
 
 Task runs, plans, step status, child-session links, and subagent approval route summaries are stored as append-only control entries. The info rail shows the latest task status, plan version, and current step from that durable state.
 
-Session restore only rebuilds the visible task state. It does not automatically continue unfinished work. Use `/plan continue` to continue the latest unfinished task.
+Session restore only rebuilds the visible task state. It does not automatically continue unfinished work. Type the next instruction in the composer to continue the latest task with guidance, or use `/plan continue` to continue without extra guidance.
 
 ## Approvals and File Changes
 

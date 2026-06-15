@@ -49,7 +49,73 @@ fn plan_continue_command_dispatches_continue_action() -> Result<()> {
 
     assert!(matches!(
         action,
-        Some(AppAction::ContinuePlan { task_id: None })
+        Some(AppAction::ContinuePlan {
+            task_id: None,
+            guidance: None
+        })
+    ));
+    assert!(app.is_busy);
+    Ok(())
+}
+
+#[test]
+fn plain_prompt_dispatches_continue_action_when_session_has_task() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Completed,
+            reason: Some("task completed".to_owned()),
+        },
+    ))]);
+    app.input = "优先看 runtime 状态同步".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::ContinuePlan {
+            task_id: None,
+            guidance: Some(ref guidance)
+        }) if guidance == "优先看 runtime 状态同步"
+    ));
+    assert!(app.is_busy);
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::User && entry.text == "优先看 runtime 状态同步"
+    }));
+    Ok(())
+}
+
+#[test]
+fn plain_prompt_remains_chat_when_session_has_no_task() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "优先看 runtime 状态同步".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == "优先看 runtime 状态同步"
+    ));
+    Ok(())
+}
+
+#[test]
+fn plan_continue_command_can_pass_guidance() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/plan continue 优先看 runtime 状态同步".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::ContinuePlan {
+            task_id: None,
+            guidance: Some(ref guidance)
+        }) if guidance == "优先看 runtime 状态同步"
     ));
     assert!(app.is_busy);
     Ok(())

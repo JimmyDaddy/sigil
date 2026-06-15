@@ -47,6 +47,7 @@ pub struct ToolCardHitArea {
     pub entry_index: usize,
     pub area: Rect,
     pub header_area: Option<Rect>,
+    pub hidden_preview_area: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +283,13 @@ impl LayoutSnapshot {
                 && contains(header_area, column, row)
             {
                 return HitTarget::ToolCardHeader {
+                    entry_index: tool_card.entry_index,
+                };
+            }
+            if let Some(hidden_preview_area) = tool_card.hidden_preview_area
+                && contains(hidden_preview_area, column, row)
+            {
+                return HitTarget::ToolCardHiddenPreview {
                     entry_index: tool_card.entry_index,
                 };
             }
@@ -602,6 +610,15 @@ fn tool_card_hit_areas(live_area: Rect, app: &AppState) -> Vec<ToolCardHitArea> 
                             1,
                         )
                     });
+                let hidden_preview_area = tool_card_hidden_preview_area(
+                    rows.content_frame.x,
+                    rows.content_y,
+                    rows.content_frame.width,
+                    start,
+                    end,
+                    rows.visible_start,
+                    app,
+                );
                 ToolCardHitArea {
                     entry_index,
                     area: Rect::new(
@@ -612,10 +629,38 @@ fn tool_card_hit_areas(live_area: Rect, app: &AppState) -> Vec<ToolCardHitArea> 
                         (end - start) as u16,
                     ),
                     header_area,
+                    hidden_preview_area,
                 }
             })
         })
         .collect()
+}
+
+fn tool_card_hidden_preview_area(
+    x: u16,
+    y: u16,
+    width: u16,
+    start: usize,
+    end: usize,
+    visible_start: usize,
+    app: &AppState,
+) -> Option<Rect> {
+    (start..end).find_map(|line_index| {
+        app.timeline_plain_line(line_index)
+            .is_some_and(is_tool_hidden_preview_line)
+            .then(|| {
+                Rect::new(
+                    x,
+                    y.saturating_add((line_index - visible_start) as u16),
+                    width,
+                    1,
+                )
+            })
+    })
+}
+
+fn is_tool_hidden_preview_line(line: &str) -> bool {
+    line.contains(" hidden · ") && line.contains(" lines available")
 }
 
 fn live_text_row_hit_areas(live_area: Rect, app: &AppState) -> Vec<LiveTextRowHitArea> {

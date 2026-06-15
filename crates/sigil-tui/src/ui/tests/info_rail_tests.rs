@@ -96,6 +96,78 @@ fn render_info_line_formats_labels_markers_and_plain_values() {
     assert_eq!(muted.spans[1].content.as_ref(), "- ");
     assert_eq!(muted.spans[1].style, Style::default().fg(super::dim()));
 
+    let running = render_info_line("▶ 2. running overview", 32);
+    assert_eq!(running.spans[1].content.as_ref(), "▶ ");
+    assert_eq!(
+        running.spans[1].style,
+        Style::default()
+            .fg(super::accent_blue())
+            .add_modifier(Modifier::BOLD)
+    );
+    assert_eq!(
+        running.spans[2].style,
+        Style::default()
+            .fg(super::accent_blue())
+            .add_modifier(Modifier::BOLD)
+    );
+
+    let failed = render_info_line("! 1. failed gate_check", 32);
+    assert_eq!(failed.spans[1].content.as_ref(), "! ");
+    assert_eq!(
+        failed.spans[1].style,
+        Style::default()
+            .fg(super::accent_rose())
+            .add_modifier(Modifier::BOLD)
+    );
+    assert_eq!(
+        failed.spans[2].style,
+        Style::default()
+            .fg(super::accent_rose())
+            .add_modifier(Modifier::BOLD)
+    );
+
+    let completed = render_info_line("✓ 1. completed gate_check", 32);
+    assert_eq!(completed.spans[1].content.as_ref(), "✓ ");
+    assert_eq!(
+        completed.spans[1].style,
+        Style::default().fg(super::accent_lime())
+    );
+    assert_eq!(
+        completed.spans[2].style,
+        Style::default().fg(super::accent_lime())
+    );
+
+    let cancelled = render_info_line("× 1. cancelled gate_check", 32);
+    assert_eq!(cancelled.spans[1].content.as_ref(), "× ");
+    assert_eq!(
+        cancelled.spans[1].style,
+        Style::default().fg(super::accent_gold())
+    );
+    assert_eq!(
+        cancelled.spans[2].style,
+        Style::default().fg(super::accent_gold())
+    );
+
+    let interrupted = render_info_line("⏸ 1. interrupted gate_check", 32);
+    assert_eq!(interrupted.spans[1].content.as_ref(), "⏸ ");
+    assert_eq!(
+        interrupted.spans[1].style,
+        Style::default()
+            .fg(super::accent_gold())
+            .add_modifier(Modifier::BOLD)
+    );
+    assert_eq!(
+        interrupted.spans[2].style,
+        Style::default()
+            .fg(super::accent_gold())
+            .add_modifier(Modifier::BOLD)
+    );
+
+    let pending = render_info_line("· 2. pending overview", 32);
+    assert_eq!(pending.spans[1].content.as_ref(), "· ");
+    assert_eq!(pending.spans[1].style, Style::default().fg(super::dim()));
+    assert_eq!(pending.spans[2].style, Style::default().fg(super::muted()));
+
     let plain = render_info_line("plain value", 32);
     assert_eq!(plain.spans[1].content.as_ref(), "plain value");
     assert_eq!(plain.spans[1].style, Style::default().fg(super::ink()));

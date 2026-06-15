@@ -109,12 +109,7 @@ pub async fn build_tool_registry_with_mcp_handlers(
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
 ) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
-    sigil_tools_builtin::register_builtin_tools(&mut registry);
-    sigil_code_intel::register_code_intelligence_tools(
-        &mut registry,
-        &root_config.code_intelligence,
-        workspace_root.clone(),
-    );
+    register_local_tools(&mut registry, root_config, workspace_root.clone());
     sigil_mcp::register_mcp_tools_with_options(
         &mut registry,
         &root_config.mcp_servers,
@@ -135,6 +130,31 @@ pub async fn build_tool_registry_with_mcp_handlers(
         runtime_event_handler,
     );
     Ok(registry)
+}
+
+/// Builds the local tool surface and lazy MCP activation tool without starting eager MCP servers.
+///
+/// TUI entrypoints use this to keep the agent worker available when an external MCP server is
+/// slow or broken. Eager MCP servers can then be activated asynchronously against the returned
+/// shared registry.
+pub fn build_tool_registry_without_eager_mcp(
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+) -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    register_local_tools(&mut registry, root_config, workspace_root.clone());
+    register_lazy_mcp_activation_tool(
+        &mut registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        elicitation_handler,
+        runtime_event_handler,
+    );
+    registry
 }
 
 /// Activates lazy MCP servers against an existing runtime tool registry.
@@ -270,6 +290,19 @@ pub struct McpRefreshResult {
     pub matched_servers: usize,
     pub removed_tools: usize,
     pub added_tools: usize,
+}
+
+fn register_local_tools(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    workspace_root: PathBuf,
+) {
+    sigil_tools_builtin::register_builtin_tools(registry);
+    sigil_code_intel::register_code_intelligence_tools(
+        registry,
+        &root_config.code_intelligence,
+        workspace_root,
+    );
 }
 
 /// Refreshes provider-visible tools for one configured MCP server.

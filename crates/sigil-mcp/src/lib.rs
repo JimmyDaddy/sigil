@@ -13,8 +13,9 @@ use sigil_kernel::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::Mutex,
+    task::JoinHandle,
 };
 use tracing::warn;
 
@@ -684,6 +685,7 @@ struct McpInitializeOutcome {
 
 struct McpClient {
     _child: Mutex<Child>,
+    _stderr_task: JoinHandle<()>,
     connection: Mutex<Connection>,
     server_name: String,
     trust: McpServerTrustPolicy,
@@ -714,7 +716,7 @@ impl McpClient {
             .args(&config.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         let mut child = command
             .spawn()
@@ -728,9 +730,15 @@ impl McpClient {
             .stdout
             .take()
             .ok_or_else(|| anyhow!("missing stdout for MCP server {}", config.name))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("missing stderr for MCP server {}", config.name))?;
+        let stderr_task = tokio::spawn(drain_mcp_stderr(stderr));
 
         let mut client = Self {
             _child: Mutex::new(child),
+            _stderr_task: stderr_task,
             connection: Mutex::new(Connection {
                 stdin,
                 stdout: BufReader::new(stdout),
@@ -1427,6 +1435,11 @@ fn append_utf8_prefix(output: &mut String, text: &str, byte_budget: usize) {
 
 fn to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+async fn drain_mcp_stderr(mut stderr: ChildStderr) {
+    let mut buffer = [0_u8; 4096];
+    while stderr.read(&mut buffer).await.is_ok_and(|read| read > 0) {}
 }
 
 fn validate_mcp_pin(config: &McpServerConfig, observed: &McpServerObservedIdentity) -> Result<()> {

@@ -120,13 +120,15 @@ The current implementation uses append-only JSONL:
 
 After restore, the next request recovers the latest matching provider response handle. The current session identity is not silently rewritten when `/config` saves new default provider/model settings.
 
-Planned tasks are not auto-replayed on restore. `/plan continue` explicitly resumes the latest unfinished task from the durable task projection and skips completed steps.
+Planned tasks are not auto-replayed on restore. When the current session already has a task, normal composer input triggers `ContinueTask` with that input as continuation guidance; `/plan continue` remains an explicit continue entry with no extra guidance. The worker resumes the latest unfinished task from the durable task projection and skips completed steps; if only completed/cancelled tasks remain, it returns the corresponding terminal-state explanation.
 
 ## Current Task Planning Implementation
 
-Planned tasks enter through TUI `/plan <task>`. The worker protocol uses `SubmitTask` / `ContinueTask` commands and `TaskRunStarted` / `TaskRunFinished` messages. The info rail renders task status, latest plan version, and current step from durable task control entries.
+Planned tasks enter through TUI `/plan <task>`. When the current session already has a task, normal composer input is converted into a `ContinueTask` attempt and injected into the current executor/subagent step prompt as continuation guidance. Without task context, normal composer input remains chat-first. The worker protocol uses `SubmitTask` / `ContinueTask` commands and `TaskRunStarted` / `TaskRunFinished` messages; task run / step / child-session control entries are also streamed to the TUI through live `RunEvent::Control` updates. The info rail renders task status, latest plan version, completion progress, the current or last failed step, and a compact summary of the current plan steps from durable task control entries. Step rows use status markers and matching text colors: running is highlighted, completed is green, failed/blocked is red, cancelled/interrupted is gold, and pending is muted.
 
 `sigil-kernel::SequentialTaskOrchestrator` runs a planner role first, accepts plan updates through the internal `task_plan_update` tool, then executes steps sequentially. Executor steps run against the parent session with transient step context so plan prompts do not become ordinary user history. Subagent read/write steps run in child sessions, and the parent session records child-session lifecycle links plus approval and MCP elicitation route summaries for child interactions.
+
+When a step encounters an ordinary tool error but the agent reads that error and still produces a final answer, the orchestrator treats the step as recovered and continues later steps, while preserving a `recovered tool error` summary in `TaskStepEntry.reason`. Max turns, interrupted tool calls, approval denial, and permission-class tool errors still stop the task.
 
 Role-specific providers and run options are assembled in `sigil-runtime`. Planner and subagent-read default to a read-only scoped tool registry; executor defaults to the full registry; subagent-write uses the full registry only when `[task].allow_write_subagents = true`. `ScopedToolRegistry` gates specs, preview, execution, permission hooks, and egress hooks.
 
@@ -183,6 +185,7 @@ MCP servers are configured through `[[mcp_servers]]`. Current support includes:
 - `notifications/progress`
 - `notifications/*/list_changed`
 - lazy activation
+- TUI eager MCP background activation; one server failure does not block ordinary tasks
 - required / optional server failure policy
 - trust class
 - per-server approval default

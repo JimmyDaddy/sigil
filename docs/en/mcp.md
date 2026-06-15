@@ -40,8 +40,10 @@ Name conflicts or overly long names get a stable hash suffix.
 
 `required` controls failure behavior:
 
-- `required = true`: startup or `tools/list` failure fails registry construction.
+- `required = true`: startup or `tools/list` failure fails strict registry construction.
 - `required = false`: an eager server failure can be skipped with a warning.
+
+In the TUI, eager MCP servers are activated in the background after the core agent worker starts. If one MCP server is slow, missing, or times out, normal chat and `/plan` runs continue with built-in and code-intelligence tools; only that MCP server is marked `failed` until it is fixed or refreshed.
 
 A lazy server can be activated manually from the TUI `/config` MCP section. The model can also call `mcp_activate_server` to start a named lazy server on demand. After activation succeeds, real MCP tools are added to the current agent registry.
 
@@ -180,8 +182,10 @@ Check:
 
 - Whether `command` is available on `PATH`, or use an absolute path.
 - Whether paths inside `args` exist.
-- Whether `required` should be `false` for optional servers.
+- Whether `required` should be `false` for optional servers in strict/headless registry construction.
 - Whether pinned identity matches the observed pin when `pin_version = true`.
+
+In the TUI, this should not stop ordinary tasks. The failing server appears as `failed` in MCP status, and built-in tools remain available.
 
 ### Secret egress is blocked
 

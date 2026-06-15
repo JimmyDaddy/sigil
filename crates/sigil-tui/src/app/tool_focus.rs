@@ -40,6 +40,7 @@ impl AppState {
     pub(crate) fn hovered_tool_activity_key(&self) -> Option<String> {
         let entry_index = match self.mouse_hover_target? {
             crate::mouse::HitTarget::ToolCardHeader { entry_index }
+            | crate::mouse::HitTarget::ToolCardHiddenPreview { entry_index }
             | crate::mouse::HitTarget::ToolCard { entry_index } => entry_index,
             _ => return None,
         };

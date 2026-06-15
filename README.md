@@ -54,7 +54,7 @@ For update, PATH, release archive, and uninstall notes, see [docs/en/installatio
 - Inspect tool activities, command output, file changes, and diagnostics after a run.
 - Restore the latest session after restarting the TUI.
 - Use `/config` for common settings and `/resume` for session selection.
-- Use `/plan` for planned multi-step tasks and `/plan continue` to explicitly continue an unfinished task.
+- Use `/plan` for planned multi-step tasks; after a task exists in the current session, normal composer input continues it with additional guidance.
 - Use `/doctor` to diagnose config, authentication, MCP, LSP, and terminal readiness with suggested fixes.
 - Use `/model` and `/effort` to adjust the next model run.
 - Use `/compact` to compact long-session context.
@@ -66,7 +66,7 @@ For update, PATH, release archive, and uninstall notes, see [docs/en/installatio
 
 The TUI is centered on chat and the composer. You type a task, and Sigil shows assistant responses, tool activity, approval requests, run status, and session information in the same interface.
 
-For larger tasks, `/plan <task>` asks a planner role to create a durable plan before execution. The right info rail shows the latest task status, plan version, and current step. Restoring a session rebuilds that visible task state from the append-only log, but it does not auto-run unfinished work; use `/plan continue` when you want Sigil to continue.
+For larger tasks, `/plan <task>` asks a planner role to create a durable plan before execution. The right info rail shows the latest task status, plan version, and current step. Restoring a session rebuilds that visible task state from the append-only log, but it does not auto-run unfinished work; type your next instruction in the composer to continue the current task, or use `/plan continue` to continue without extra guidance.
 
 Common controls:
 
@@ -85,7 +85,7 @@ See [docs/en/user-guide.md](docs/en/user-guide.md) for the full TUI guide.
 
 Mouse support is optional and terminal-dependent. Keyboard controls remain the complete fallback path.
 
-When your terminal supports mouse capture, you can click the composer to focus it and place the cursor, click slash candidates, select setup/config/session rows, use approval modal controls, focus tool activities, and click tool card headers to expand or collapse activity content. The mouse wheel scrolls the transcript and approval diff views.
+When your terminal supports mouse capture, you can click the composer to focus it and place the cursor, click slash candidates, select setup/config/session rows, use approval modal controls, focus tool activities, and click tool card headers or hidden-preview rows to expand or collapse activity content. The mouse wheel scrolls the transcript and approval diff views.
 
 Transcript text selection uses the displayed terminal columns, so mixed-width text such as CJK content can be dragged and copied predictably. Press `Ctrl-C` to copy the current transcript selection through OSC52 when clipboard integration is enabled.
 
