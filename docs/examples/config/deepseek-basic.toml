@@ -1,0 +1,21 @@
+[workspace]
+root = "."
+
+[session]
+log_dir = ".sigil/sessions"
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+tool_timeout_secs = 30
+
+[permission]
+default_mode = "ask"
+
+[permission.access]
+read = "allow"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+# Prefer SIGIL_API_KEY in your shell.
+# api_key = "sk-..."

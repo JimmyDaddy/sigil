@@ -1,8 +1,10 @@
 # Sigil MCP Guide
 
-[简体中文](../zh-CN/mcp.md)
+[Docs home](README.md) · [Configuration](configuration.md) · [Troubleshooting](troubleshooting.md) · [简体中文](../zh-CN/mcp.md)
 
 Sigil can connect stdio MCP servers as external tool providers. Connected MCP tools, resources, and prompts enter the same tool registry and use the same approval, activity, session control, and secret egress rules as built-in tools.
+
+Start conservative: configure one server, keep `approval_default = "ask"`, run `/doctor`, and only loosen trust settings after you understand what the server can read or mutate.
 
 ## Minimal Config
 

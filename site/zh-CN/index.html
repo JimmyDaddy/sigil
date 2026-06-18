@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sigil - TUI-first Rust coding agent</title>
+    <meta
+      name="description"
+      content="Sigil 是一个 TUI-first Rust coding agent，用于仓库开发、审批、diff、计划任务、MCP 工具和 session 恢复。"
+    >
+    <link rel="canonical" href="https://jimmydaddy.github.io/sigil/zh-CN/">
+    <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/">
+    <link rel="alternate" hreflang="zh-CN" href="https://jimmydaddy.github.io/sigil/zh-CN/">
+    <link rel="alternate" hreflang="x-default" href="https://jimmydaddy.github.io/sigil/">
+    <link rel="icon" href="../assets/logo/sigil-mark-square-1024.png">
+    <meta name="theme-color" content="#1ecfc5">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Sigil">
+    <meta property="og:title" content="Sigil - TUI-first Rust coding agent">
+    <meta
+      property="og:description"
+      content="把仓库开发、审批、diff、计划任务、MCP 工具和 session 恢复放进一个终端界面。"
+    >
+    <meta property="og:url" content="https://jimmydaddy.github.io/sigil/zh-CN/">
+    <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
+    <meta property="og:image:alt" content="Sigil 标志">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Sigil - TUI-first Rust coding agent">
+    <meta
+      name="twitter:description"
+      content="把仓库开发、审批、diff、计划任务、MCP 工具和 session 恢复放进一个终端界面。"
+    >
+    <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
+    <link rel="stylesheet" href="../assets/site.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="../" aria-label="Sigil home">
+        <img class="brand-mark" src="../assets/logo/sigil-mark-transparent.png" alt="" width="34" height="40">
+        <img class="brand-wordmark" src="../assets/logo/sigil-wordmark-header.png" alt="" width="78" height="34">
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#workflow">工作流</a>
+        <a href="#safety">安全</a>
+        <a href="docs/">文档</a>
+        <a href="../">English</a>
+        <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <img class="hero-logo" src="../assets/logo/sigil-full.png" alt="Sigil">
+        <div class="hero-copy">
+          <p class="eyebrow">TUI-first Rust coding agent</p>
+          <h1>把真实仓库开发收进一个终端界面。</h1>
+          <p class="lede">
+            Sigil 把对话、工具调用、审批、diff、诊断、计划任务和 session 恢复放进面向 coding session 的终端产品里。
+          </p>
+          <div class="hero-actions" aria-label="Primary actions">
+            <a class="button primary" href="#quickstart">开始使用</a>
+            <a class="button secondary" href="https://github.com/JimmyDaddy/sigil">查看源码</a>
+          </div>
+        </div>
+        <div class="terminal-preview" aria-label="Sigil terminal workflow preview">
+          <div class="terminal-bar">
+            <span></span><span></span><span></span>
+            <strong>sigil</strong>
+          </div>
+          <pre><code>&gt; /plan 重构 approval flow
+planner  写入 durable steps
+executor 读取 crates/sigil-tui/src/app/approval_flow.rs
+tool     edit_file 等待审批
+diff     2 files, 5 hunks
+status   ready for review</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="quickstart">
+        <div class="section-heading">
+          <p class="eyebrow">快速开始</p>
+          <h2>从 checkout 安装，并在工作区里启动。</h2>
+        </div>
+        <div class="steps">
+          <div class="step">
+            <span>1</span>
+            <h3>安装</h3>
+            <pre><code>cargo install --path crates/sigil --locked</code></pre>
+          </div>
+          <div class="step">
+            <span>2</span>
+            <h3>启动</h3>
+            <pre><code>cd /path/to/your/project
+sigil</code></pre>
+          </div>
+          <div class="step">
+            <span>3</span>
+            <h3>配置</h3>
+            <p>找不到可用配置时，Sigil 会打开 Quick Setup。确认 workspace、选择 provider/model，并填写认证信息。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section contrast" id="workflow">
+        <div class="section-heading">
+          <p class="eyebrow">工作流</p>
+          <h2>为真实工具执行的 coding session 设计。</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <h3>Chat-first TUI</h3>
+            <p>直接在 composer 输入任务，查看流式输出，并保持 session、usage、permissions、agents 和 LSP 状态可见。</p>
+          </article>
+          <article>
+            <h3>Durable planning</h3>
+            <p>用 <code>/plan</code> 处理多步骤任务。Planner、executor 和可选 subagent 写入可恢复的 task state。</p>
+          </article>
+          <article>
+            <h3>Diff-aware tools</h3>
+            <p>文件写入、编辑、删除、命令、MCP 调用和 code-intel edit 都经过结构化工具与审批界面。</p>
+          </article>
+          <article>
+            <h3>Session recovery</h3>
+            <p>Append-only JSONL 日志让 Sigil 恢复上下文，同时不会静默重放中断的工具执行。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="safety">
+        <div class="section-heading">
+          <p class="eyebrow">安全模型</p>
+          <h2>高风险动作前保留可审计控制权。</h2>
+        </div>
+        <div class="split-list">
+          <ul>
+            <li>写入、执行、网络、MCP 和外部数据访问都经过 permission decision。</li>
+            <li>文件变更工具在审批前提供有边界的 preview 和 diff。</li>
+            <li>Provider 专项行为留在 provider crate，不污染通用 kernel。</li>
+          </ul>
+          <ul>
+            <li>Tool approval 和 execution lifecycle 都是 durable control records。</li>
+            <li>中断工具在恢复时变成 interrupted result，而不是隐藏重试。</li>
+            <li>MCP server 受显式 trust、approval 和 secret-egress policy 约束。</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section contrast" id="docs">
+        <div class="section-heading">
+          <p class="eyebrow">文档</p>
+          <h2>按任务读取对应的聚焦文档。</h2>
+        </div>
+        <div class="doc-grid">
+          <a href="docs/#quickstart">
+            <span>快速上手</span>
+            安装、启动、完成 setup、运行诊断，并完成第一个安全编辑。
+          </a>
+          <a href="docs/#workflows">
+            <span>常见工作流</span>
+            探索、编辑、调试、review 和恢复工作时可直接套用的提示词模式。
+          </a>
+          <a href="docs/#config">
+            <span>配置</span>
+            Provider、permission、memory、terminal 和环境变量设置。
+          </a>
+          <a href="docs/#troubleshooting">
+            <span>排障</span>
+            修复 setup、认证、workspace、approval、terminal、MCP 和 LSP 问题。
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span class="footer-brand">Sigil</span>
+      <a href="docs/">文档</a>
+      <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+      <a href="../">English</a>
+    </footer>
+  </body>
+</html>

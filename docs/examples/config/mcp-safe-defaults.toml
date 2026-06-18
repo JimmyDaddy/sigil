@@ -1,0 +1,14 @@
+[[mcp_servers]]
+name = "filesystem"
+command = "node"
+args = ["/absolute/path/to/server.js"]
+startup_timeout_secs = 5
+required = false
+startup = "eager"
+
+[mcp_servers.trust]
+trust_class = "self_hosted"
+approval_default = "ask"
+egress_logging = true
+allow_secrets = false
+pin_version = false

@@ -1,8 +1,10 @@
 # Sigil TUI User Guide
 
-[简体中文](../zh-CN/user-guide.md)
+[Docs home](README.md) · [Quickstart](quickstart.md) · [Workflows](workflows.md) · [Reference](reference.md) · [简体中文](../zh-CN/user-guide.md)
 
 This guide is for day-to-day Sigil users. It focuses on what you see and control in the TUI. Development constraints, crate boundaries, and testing rules live under `dev/governance/*`.
+
+If you are using Sigil for the first time, read [quickstart.md](quickstart.md) first. If you already know the UI and want prompt patterns for real tasks, use [workflows.md](workflows.md).
 
 ## Start
 

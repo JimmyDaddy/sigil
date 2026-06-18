@@ -1,8 +1,8 @@
 # Installing From Source
 
-[简体中文](../zh-CN/installation.md)
+[Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/installation.md)
 
-This guide covers the current supported install path from a local repository checkout. Release archives can be built locally for validation, but package managers and self-update are not part of this path yet.
+This guide covers the current supported install path from a local repository checkout. If you want a first-run walkthrough, start with [quickstart.md](quickstart.md). Release archives can be built locally for validation, but package managers and self-update are not part of this path yet.
 
 ## Requirements
 
@@ -68,7 +68,7 @@ Build for an explicit Rust target triple when needed:
 scripts/build-release-archive.sh --target aarch64-apple-darwin
 ```
 
-The archive contains the `sigil` binary plus the README and installation docs.
+The archive contains the `sigil` binary plus the README files, logo assets, and installation docs.
 Tagged releases are built by the release workflow and include checksums,
 GitHub artifact provenance attestations, generated release notes, and a
 `sigil.rb` Homebrew formula asset for tap maintainers. Self-update is still

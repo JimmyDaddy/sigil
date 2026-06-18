@@ -1,6 +1,6 @@
 # Terminal 兼容性检查清单
 
-[English](../en/terminal-compatibility.md)
+[文档首页](README.md) · [排障](troubleshooting.md) · [English](../en/terminal-compatibility.md)
 
 这份清单用于验证 Sigil 在真实终端里的 mouse capture 和 OSC52 剪贴板行为。它保留为人工 smoke checklist，因为 terminal multiplexer、远程 shell 和桌面终端偏好设置都可能在 Sigil 进程外拦截这些能力。
 

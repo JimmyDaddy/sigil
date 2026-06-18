@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sigil - TUI-first Rust coding agent</title>
+    <meta
+      name="description"
+      content="Sigil is a TUI-first Rust coding agent for repository work, approvals, diffs, planning, MCP tools, and session recovery."
+    >
+    <link rel="canonical" href="https://jimmydaddy.github.io/sigil/">
+    <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/">
+    <link rel="alternate" hreflang="zh-CN" href="https://jimmydaddy.github.io/sigil/zh-CN/">
+    <link rel="alternate" hreflang="x-default" href="https://jimmydaddy.github.io/sigil/">
+    <link rel="icon" href="assets/logo/sigil-mark-square-1024.png">
+    <meta name="theme-color" content="#1ecfc5">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Sigil">
+    <meta property="og:title" content="Sigil - TUI-first Rust coding agent">
+    <meta
+      property="og:description"
+      content="Repository work, approvals, diffs, planning, MCP tools, and session recovery inside one terminal interface."
+    >
+    <meta property="og:url" content="https://jimmydaddy.github.io/sigil/">
+    <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
+    <meta property="og:image:alt" content="Sigil logo">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Sigil - TUI-first Rust coding agent">
+    <meta
+      name="twitter:description"
+      content="Repository work, approvals, diffs, planning, MCP tools, and session recovery inside one terminal interface."
+    >
+    <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="./" aria-label="Sigil home">
+        <img class="brand-mark" src="assets/logo/sigil-mark-transparent.png" alt="" width="34" height="40">
+        <img class="brand-wordmark" src="assets/logo/sigil-wordmark-header.png" alt="" width="78" height="34">
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#workflow">Workflow</a>
+        <a href="#safety">Safety</a>
+        <a href="docs/">Docs</a>
+        <a href="zh-CN/">简体中文</a>
+        <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <img class="hero-logo" src="assets/logo/sigil-full.png" alt="Sigil">
+        <div class="hero-copy">
+          <p class="eyebrow">TUI-first Rust coding agent</p>
+          <h1>Repository work, kept inside one terminal interface.</h1>
+          <p class="lede">
+            Sigil brings chat, tool calls, approvals, diffs, diagnostics, planning, and session recovery into a terminal product built for real coding sessions.
+          </p>
+          <div class="hero-actions" aria-label="Primary actions">
+            <a class="button primary" href="#quickstart">Get started</a>
+            <a class="button secondary" href="https://github.com/JimmyDaddy/sigil">View source</a>
+          </div>
+        </div>
+        <div class="terminal-preview" aria-label="Sigil terminal workflow preview">
+          <div class="terminal-bar">
+            <span></span><span></span><span></span>
+            <strong>sigil</strong>
+          </div>
+          <pre><code>&gt; /plan refactor the approval flow
+planner  wrote durable steps
+executor read crates/sigil-tui/src/app/approval_flow.rs
+tool     edit_file waiting for approval
+diff     2 files, 5 hunks
+status   ready for review</code></pre>
+        </div>
+      </section>
+
+      <section class="section" id="quickstart">
+        <div class="section-heading">
+          <p class="eyebrow">Quickstart</p>
+          <h2>Install from a checkout and launch from a workspace.</h2>
+        </div>
+        <div class="steps">
+          <div class="step">
+            <span>1</span>
+            <h3>Install</h3>
+            <pre><code>cargo install --path crates/sigil --locked</code></pre>
+          </div>
+          <div class="step">
+            <span>2</span>
+            <h3>Start</h3>
+            <pre><code>cd /path/to/your/project
+sigil</code></pre>
+          </div>
+          <div class="step">
+            <span>3</span>
+            <h3>Set up</h3>
+            <p>Quick Setup opens when Sigil cannot find a usable config. Confirm the workspace, choose a provider/model, and enter authentication.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section contrast" id="workflow">
+        <div class="section-heading">
+          <p class="eyebrow">Workflow</p>
+          <h2>Designed for tool-backed coding sessions.</h2>
+        </div>
+        <div class="feature-grid">
+          <article>
+            <h3>Chat-first TUI</h3>
+            <p>Use the composer for ordinary coding work, inspect streamed output, and keep session, usage, permissions, agents, and LSP state visible.</p>
+          </article>
+          <article>
+            <h3>Durable planning</h3>
+            <p>Use <code>/plan</code> for multi-step work. Planner, executor, and optional subagent roles write recoverable task state.</p>
+          </article>
+          <article>
+            <h3>Diff-aware tools</h3>
+            <p>File writes, edits, deletes, shell commands, MCP calls, and code-intel edits run through structured tool and approval surfaces.</p>
+          </article>
+          <article>
+            <h3>Session recovery</h3>
+            <p>Append-only JSONL logs let Sigil restore context without silently replaying interrupted tool execution.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="safety">
+        <div class="section-heading">
+          <p class="eyebrow">Safety model</p>
+          <h2>Auditable control before risky actions.</h2>
+        </div>
+        <div class="split-list">
+          <ul>
+            <li>Permission decisions for write, execute, network, MCP, and external data access.</li>
+            <li>Bounded previews and diffs before file-changing tools are approved.</li>
+            <li>Provider-specific behavior stays in provider crates, not in the generic kernel.</li>
+          </ul>
+          <ul>
+            <li>Tool approval and execution lifecycle are durable control records.</li>
+            <li>Interrupted tools become interrupted results on restore, not hidden retries.</li>
+            <li>MCP servers run under explicit trust, approval, and secret-egress policy.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section contrast" id="docs">
+        <div class="section-heading">
+          <p class="eyebrow">Documentation</p>
+          <h2>Read the focused guide for the job at hand.</h2>
+        </div>
+        <div class="doc-grid">
+          <a href="docs/#quickstart">
+            <span>Quickstart</span>
+            Install, launch, complete setup, run diagnostics, and make the first safe edit.
+          </a>
+          <a href="docs/#workflows">
+            <span>Workflows</span>
+            Prompt patterns for exploring, editing, debugging, reviewing, and resuming work.
+          </a>
+          <a href="docs/#config">
+            <span>Config</span>
+            Provider, permission, memory, terminal, and environment settings.
+          </a>
+          <a href="docs/#troubleshooting">
+            <span>Troubleshooting</span>
+            Fix setup, authentication, workspace, approval, terminal, MCP, and LSP issues.
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span class="footer-brand">Sigil</span>
+      <a href="docs/">Docs</a>
+      <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+      <a href="zh-CN/">简体中文</a>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,237 @@
+# Troubleshooting
+
+[Docs home](README.md) · [简体中文](../zh-CN/troubleshooting.md)
+
+Start with the built-in diagnostics whenever setup, authentication, MCP, code intelligence, or terminal behavior looks wrong:
+
+```bash
+sigil doctor
+```
+
+Inside the TUI:
+
+```text
+/doctor
+```
+
+The report shows a status summary, warnings/errors, and remediation lines. It reports where credentials were resolved from, but it does not print secret values.
+
+## Decision Tree
+
+Start here when you know the symptom:
+
+| Symptom | Check first | Then read |
+| --- | --- | --- |
+| Sigil opens Quick Setup every time | Config resolution and load errors in `sigil doctor` | [Quick Setup Opens Every Time](#quick-setup-opens-every-time) |
+| Provider authentication fails | API key source in `sigil doctor` | [Sigil Cannot Find The API Key](#sigil-cannot-find-the-api-key) |
+| Sigil reads or edits the wrong repository | Workspace path in `/doctor` | [The Wrong Workspace Is Being Used](#the-wrong-workspace-is-being-used) |
+| A file path is denied | Workspace confinement and symlink target | [A File Tool Cannot Access A Path](#a-file-tool-cannot-access-a-path) |
+| `sigil run` says approval is required | Headless mode cannot show approval cards | [A Tool Needs Approval In Headless run](#a-tool-needs-approval-in-headless-run) |
+| Approval disappeared or was denied | Timeout or deny action | [An Approval Was Denied Or Timed Out](#an-approval-was-denied-or-timed-out) |
+| Mouse or copy does not work | Terminal section in `/config` and `/doctor` | [Mouse Or Clipboard Does Not Work](#mouse-or-clipboard-does-not-work) |
+| Restored session shows interrupted tools | Recovery projected unfinished tools | [Session Restore Shows Interrupted Tools](#session-restore-shows-interrupted-tools) |
+| MCP tools are missing | Server startup mode and lifecycle state | [MCP Server Is Missing, Failed, Or Deferred](#mcp-server-is-missing-failed-or-deferred) |
+| LSP tools are unavailable | Code-intelligence readiness rows | [Code Intelligence Is Not Ready](#code-intelligence-is-not-ready) |
+
+## Quick Setup Opens Every Time
+
+Likely causes:
+
+- No config file exists in the current resolution path.
+- The config file exists but failed to load.
+- The workspace or provider fields are incomplete.
+
+Check:
+
+```bash
+sigil doctor
+```
+
+If you use a non-default config path, pass the same path to doctor:
+
+```bash
+sigil --config ./sigil.toml doctor
+```
+
+## Sigil Cannot Find The API Key
+
+For DeepSeek, prefer:
+
+```bash
+export SIGIL_API_KEY="sk-..."
+```
+
+The legacy `DEEPSEEK_API_KEY` is still read as a fallback for the DeepSeek provider.
+
+For OpenAI-compatible providers, prefer:
+
+```bash
+export SIGIL_OPENAI_COMPATIBLE_API_KEY="sk-..."
+```
+
+`OPENAI_API_KEY` is read as a fallback for the OpenAI-compatible provider.
+
+For Anthropic, prefer:
+
+```bash
+export SIGIL_ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+`ANTHROPIC_API_KEY` is read as a fallback for the Anthropic provider.
+
+For Gemini, prefer:
+
+```bash
+export SIGIL_GEMINI_API_KEY="..."
+```
+
+`GEMINI_API_KEY` and `GOOGLE_API_KEY` are read as fallbacks for the Gemini provider.
+
+If you saved a key in `/config`, it is stored as plaintext in `sigil.toml`. That can be acceptable for a private local config, but do not commit it.
+
+## The Wrong Workspace Is Being Used
+
+With the normal setup:
+
+```toml
+[workspace]
+root = "."
+```
+
+`.` resolves to the directory where you launched `sigil`, not the directory that contains the config file.
+
+Fix:
+
+```bash
+cd /path/to/the/repository
+sigil
+```
+
+Run `/doctor` and check the workspace path in the report.
+
+## A File Tool Cannot Access A Path
+
+Sigil confines file tools to the workspace root. It rejects:
+
+- absolute paths outside the workspace;
+- paths using `..` to escape the workspace;
+- symlinks that resolve outside the workspace.
+
+If you intentionally need external-directory access, configure `[permission.external_directory]` and keep the default mode conservative.
+
+## A Tool Needs Approval In Headless `run`
+
+Interactive TUI sessions can show an approval modal. Headless `sigil run` cannot ask you interactively, so an `ask` decision is returned to the model as a structured `approval_required` tool error.
+
+For automation, either keep the task read-only or define explicit permission rules for the narrow action you trust.
+
+## An Approval Was Denied Or Timed Out
+
+If no decision is made for a long time, Sigil denies the request so the worker does not wait forever.
+
+When this happens:
+
+1. Read the denied tool summary.
+2. Restate the task with narrower scope.
+3. Ask Sigil to propose first if the diff was too large.
+
+## Mouse Or Clipboard Does Not Work
+
+Open `/config` and review the `Terminal` section.
+
+Common mitigations:
+
+```toml
+[terminal]
+mouse_capture = false
+osc52_clipboard = false
+scroll_sensitivity = 3
+```
+
+`mouse_capture` applies on the next launch. `osc52_clipboard` is checked for each copy action. `scroll_sensitivity` applies after the saved config is reloaded.
+
+See [terminal-compatibility.md](terminal-compatibility.md) for tmux, screen, SSH, WSL, and manual smoke checks.
+
+## Session Restore Shows Interrupted Tools
+
+That is expected after a process exit, crash, terminal close, or cancellation while a tool was running. Sigil restores started-but-unfinished tools as interrupted results. It does not replay them silently.
+
+Use `/resume` to select a session. If a planned task is still unfinished, continue with guidance in the composer or run:
+
+```text
+/plan continue
+```
+
+## Context Usage Is High
+
+The info rail shows context usage. Sigil can compact the provider-visible context when thresholds are reached.
+
+Manual compaction:
+
+```text
+/compact
+```
+
+Compaction appends control records and does not rewrite old session history.
+
+## MCP Server Is Missing, Failed, Or Deferred
+
+Check:
+
+- Is `command` available on `PATH`?
+- Are paths in `args` absolute and present?
+- Should the server be `required = false` while you test it?
+- Is `startup = "lazy"` expected? Lazy servers do not register tools until activated.
+- Does pinned identity match the observed server identity when `pin_version = true`?
+
+Run:
+
+```text
+/doctor
+```
+
+In the TUI, a failing eager MCP server should not block ordinary chat or planned tasks with built-in tools.
+
+## Code Intelligence Is Not Ready
+
+Check:
+
+- `[code_intelligence].enabled`
+- whether the relevant language server is installed and on `PATH`;
+- whether discovery is enabled;
+- the LSP readiness rows in `/config`;
+- `/doctor` output.
+
+If no LSP server is available, Rust projects can still use Tree-sitter fallback for outline and syntax diagnostics. Normal chat and file tools are not blocked.
+
+## Command Not Found After Install
+
+Confirm Cargo's binary directory is on `PATH`:
+
+```bash
+echo "$PATH"
+```
+
+On macOS and Linux, Cargo usually installs binaries into:
+
+```text
+~/.cargo/bin
+```
+
+Reinstall from the Sigil repository root:
+
+```bash
+cargo install --path crates/sigil --locked --force
+```
+
+## What To Include In A Bug Report
+
+Include:
+
+- `sigil --version`
+- `sigil doctor` output with secrets redacted
+- operating system and terminal emulator
+- whether you are inside tmux, screen, SSH, or WSL
+- relevant config sections without real secrets
+- the smallest prompt or command that reproduces the issue
+- any session path or log excerpt only after removing secrets

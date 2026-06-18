@@ -41,6 +41,8 @@ Each release should contain:
 - `checksums.txt`
 - `sigil.rb` with arm64 and Intel macOS archive URLs when both macOS artifacts are available
 
+Each tar archive should include the `sigil` binary, README files, `assets/logo/*`, and installation docs so repository-relative README image links keep working after extraction.
+
 The generated `sigil.rb` is a release asset for a Homebrew tap update. Publishing
 or updating a tap repository is intentionally kept outside this repository until
 there is a dedicated tap.

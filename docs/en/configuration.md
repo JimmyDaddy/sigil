@@ -1,8 +1,19 @@
 # Sigil Configuration Guide
 
-[简体中文](../zh-CN/configuration.md)
+[Docs home](README.md) · [Quickstart](quickstart.md) · [Providers](providers.md) · [Troubleshooting](troubleshooting.md) · [Reference](reference.md) · [简体中文](../zh-CN/configuration.md)
 
-This guide covers user-facing Sigil configuration. If you are changing the config schema, also read `dev/governance/code-standards.md` and `dev/governance/engineering-standards.md`.
+This guide covers user-facing Sigil configuration. Most users should start with Quick Setup in the TUI; use this page when you need a repeatable config file, environment-variable setup, automation behavior, or advanced tool policy. If you are changing the config schema, also read `dev/governance/code-standards.md` and `dev/governance/engineering-standards.md`.
+
+## Common User Paths
+
+| Goal | Recommended path |
+| --- | --- |
+| First local setup | Run `sigil` and complete Quick Setup |
+| Temporary local auth | Set `SIGIL_API_KEY` before launch |
+| CI or script auth | Use environment variables, not plaintext config |
+| Change model/provider from the TUI | Use `/config` |
+| Keep one config that follows the launch directory | Use `workspace.root = "."` |
+| Debug config/auth/provider state | Run `sigil doctor` or `/doctor` |
 
 ## Resolution Order
 
@@ -85,20 +96,25 @@ fim_model = "deepseek-v4-pro"
 
 `SIGIL_API_KEY` has higher priority than `api_key` in the config file. The legacy `DEEPSEEK_API_KEY` environment variable is still read as a fallback for the DeepSeek provider. `doctor` warns when auth only comes from plaintext config, but it does not block the run.
 
-For an OpenAI-compatible endpoint, switch the provider and use `[providers.openai_compat]`:
+Copyable templates are available under [docs/examples/config](../examples/config):
 
-```toml
-[agent]
-provider = "openai_compat"
-model = "gpt-4.1"
-tool_timeout_secs = 30
+- [deepseek-basic.toml](../examples/config/deepseek-basic.toml)
+- [openai-compatible.toml](../examples/config/openai-compatible.toml)
+- [anthropic.toml](../examples/config/anthropic.toml)
+- [gemini.toml](../examples/config/gemini.toml)
+- [mcp-safe-defaults.toml](../examples/config/mcp-safe-defaults.toml)
+- [code-intelligence-rust.toml](../examples/config/code-intelligence-rust.toml)
 
-[providers.openai_compat]
-base_url = "https://api.openai.com/v1"
-model = "gpt-4.1"
-# Prefer SIGIL_OPENAI_COMPATIBLE_API_KEY or OPENAI_API_KEY.
-# api_key = "sk-..."
-```
+Provider-specific setup now lives in focused pages:
+
+| Provider | Use when | Details |
+| --- | --- | --- |
+| DeepSeek | You want the default Quick Setup path, DeepSeek chat, and FIM-related settings. | [DeepSeek provider](provider-deepseek.md) |
+| OpenAI-compatible | You have a Chat Completions-compatible `/v1` endpoint such as OpenAI or a compatible gateway. | [OpenAI-compatible provider](provider-openai-compatible.md) |
+| Anthropic | You want Anthropic Messages streaming and Claude model settings. | [Anthropic provider](provider-anthropic.md) |
+| Gemini | You want Gemini `streamGenerateContent` with function calling support. | [Gemini provider](provider-gemini.md) |
+
+See [Provider guide](providers.md) for a comparison and copyable provider blocks.
 
 ## Workspace
 
@@ -121,7 +137,7 @@ tool_timeout_secs = 30
 # max_turns = 20
 ```
 
-- `provider`: the runtime provider name. Supported values are `deepseek` and `openai_compat`.
+- `provider`: the runtime provider name. Supported values are `deepseek`, `openai_compat`, `anthropic`, and `gemini`.
 - `model`: the default model.
 - `tool_timeout_secs`: tool execution timeout.
 - `max_turns`: optional guard. It is disabled by default; when set, a run stops recoverably if the model keeps requesting tools without producing a final answer.
@@ -168,38 +184,18 @@ allow_all = false
 
 Use explicit names and stable prefixes carefully. A scoped role registry gates tool specs, previews, execution, permission hooks, and egress hooks, so hidden tools are not merely omitted from the prompt.
 
-## DeepSeek Provider
+## Providers
 
-```toml
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-beta_base_url = "https://api.deepseek.com/beta"
-anthropic_base_url = "https://api.deepseek.com/anthropic"
-model = "deepseek-v4-flash"
-fim_model = "deepseek-v4-pro"
-# api_key = "sk-..."
-user_id_strategy = "stable_per_end_user"
-strict_tools_mode = "auto"
-request_timeout_secs = 120
-```
+`[agent].provider` selects the runtime provider. The matching `[providers.*]` block controls endpoint, model, authentication, and provider-specific options.
 
-The TUI `/config` surface exposes only high-frequency fields such as `model`, `api_key`, `base_url`, and `fim_model`. Saving `api_key` through `/config` writes plaintext to `sigil.toml`; prefer `SIGIL_API_KEY` for temporary or CI use. Lower-frequency provider-specific fields, including `beta_base_url`, `anthropic_base_url`, `user_id_strategy`, `request_timeout_secs`, and `strict_tools_mode`, remain file/env configuration.
+| Provider value | Config block | Primary API key env | Guide |
+| --- | --- | --- | --- |
+| `deepseek` | `[providers.deepseek]` | `SIGIL_API_KEY` | [DeepSeek provider](provider-deepseek.md) |
+| `openai_compat` | `[providers.openai_compat]` | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | [OpenAI-compatible provider](provider-openai-compatible.md) |
+| `anthropic` | `[providers.anthropic]` | `SIGIL_ANTHROPIC_API_KEY` | [Anthropic provider](provider-anthropic.md) |
+| `gemini` | `[providers.gemini]` | `SIGIL_GEMINI_API_KEY` | [Gemini provider](provider-gemini.md) |
 
-## OpenAI-compatible Provider
-
-```toml
-[providers.openai_compat]
-base_url = "https://api.openai.com/v1"
-model = "gpt-4.1"
-# api_key = "sk-..."
-organization = "org_..."
-project = "proj_..."
-request_timeout_secs = 120
-```
-
-This provider uses the Chat Completions streaming shape with text deltas, streamed tool calls, usage, and optional `system_fingerprint`. It does not expose DeepSeek-only prefix/FIM, reasoning replay, strict tools mode, or beta endpoint settings.
-
-`SIGIL_OPENAI_COMPATIBLE_API_KEY` has the highest priority for this provider. `OPENAI_API_KEY` is read as a fallback. `SIGIL_OPENAI_COMPATIBLE_MODEL`, `SIGIL_OPENAI_COMPATIBLE_BASE_URL`, and `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS` override the matching config fields.
+Keep provider-specific behavior in provider configuration. The shared `sigil-kernel` contract stays provider-neutral: messages, tools, usage, approvals, and session state should not contain provider-only terms.
 
 ## Permission
 
@@ -328,6 +324,26 @@ OpenAI-compatible:
 - `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS`
 
 `OPENAI_API_KEY` remains a fallback source for the OpenAI-compatible provider.
+
+Anthropic:
+
+- `SIGIL_ANTHROPIC_MODEL`
+- `SIGIL_ANTHROPIC_API_KEY`
+- `SIGIL_ANTHROPIC_BASE_URL`
+- `SIGIL_ANTHROPIC_VERSION`
+- `SIGIL_ANTHROPIC_MAX_TOKENS`
+- `SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS`
+
+`ANTHROPIC_API_KEY` remains a fallback source for the Anthropic provider.
+
+Gemini:
+
+- `SIGIL_GEMINI_MODEL`
+- `SIGIL_GEMINI_API_KEY`
+- `SIGIL_GEMINI_BASE_URL`
+- `SIGIL_GEMINI_REQUEST_TIMEOUT_SECS`
+
+`GEMINI_API_KEY` and `GOOGLE_API_KEY` remain fallback sources for the Gemini provider.
 
 ## MCP
 

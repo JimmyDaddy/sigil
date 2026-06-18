@@ -1,5 +1,6 @@
 /target
 /dist
+/_site
 /.sigil
 sigil.toml
 .repo-local-dev

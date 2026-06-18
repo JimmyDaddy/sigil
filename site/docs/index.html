@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sigil documentation</title>
+    <meta
+      name="description"
+      content="Sigil documentation hub for installation, TUI workflow, configuration, terminal compatibility, MCP, and developer reference."
+    >
+    <link rel="canonical" href="https://jimmydaddy.github.io/sigil/docs/">
+    <link rel="alternate" hreflang="en" href="https://jimmydaddy.github.io/sigil/docs/">
+    <link rel="alternate" hreflang="zh-CN" href="https://jimmydaddy.github.io/sigil/zh-CN/docs/">
+    <link rel="alternate" hreflang="x-default" href="https://jimmydaddy.github.io/sigil/docs/">
+    <link rel="icon" href="../assets/logo/sigil-mark-square-1024.png">
+    <meta name="theme-color" content="#1ecfc5">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Sigil">
+    <meta property="og:title" content="Sigil documentation">
+    <meta
+      property="og:description"
+      content="Start with the right Sigil guide for install, TUI workflow, configuration, MCP, or project development."
+    >
+    <meta property="og:url" content="https://jimmydaddy.github.io/sigil/docs/">
+    <meta property="og:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
+    <meta property="og:image:alt" content="Sigil logo">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Sigil documentation">
+    <meta
+      name="twitter:description"
+      content="Start with the right Sigil guide for install, TUI workflow, configuration, MCP, or project development."
+    >
+    <meta name="twitter:image" content="https://jimmydaddy.github.io/sigil/assets/logo/sigil-full.png">
+    <link rel="stylesheet" href="../assets/site.css">
+    <script defer src="../assets/search.js"></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="../" aria-label="Sigil home">
+        <img class="brand-mark" src="../assets/logo/sigil-mark-transparent.png" alt="" width="34" height="40">
+        <img class="brand-wordmark" src="../assets/logo/sigil-wordmark-header.png" alt="" width="78" height="34">
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="../#workflow">Workflow</a>
+        <a href="../#safety">Safety</a>
+        <a href="./">Docs</a>
+        <a href="../zh-CN/docs/">简体中文</a>
+        <a class="nav-cta" href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="docs-hero">
+        <img class="docs-logo" src="../assets/logo/sigil-full.png" alt="Sigil">
+        <div class="docs-hero-copy">
+          <p class="eyebrow">Documentation</p>
+          <h1>Choose the guide that matches the work.</h1>
+          <p class="lede">
+            Sigil keeps the product entrypoint narrow and splits operational detail into focused guides. Use this page as the stable map for user-facing and developer-facing docs.
+          </p>
+          <div class="docs-search-panel">
+            <form class="site-search" role="search" data-locale="en" data-index="../search.json">
+              <label for="docs-search-en">Search docs</label>
+              <input id="docs-search-en" type="search" name="q" autocomplete="off" placeholder="Search providers, config, approvals...">
+              <div class="search-results" aria-live="polite"></div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section class="section docs-section" id="user-docs">
+        <div class="section-heading">
+          <p class="eyebrow">User guides</p>
+          <h2>Start with a task path, then keep the reference nearby.</h2>
+        </div>
+        <div class="resource-grid">
+          <a class="resource-card" id="start" href="overview/">
+            <span class="resource-kicker">Map</span>
+            <h3>User docs home</h3>
+            <p>Choose the right guide for first use, daily workflow, configuration, troubleshooting, MCP, or reference lookup.</p>
+          </a>
+          <a class="resource-card" id="quickstart" href="quickstart/">
+            <span class="resource-kicker">Start here</span>
+            <h3>Quickstart</h3>
+            <p>Install from a checkout, launch in a workspace, complete Quick Setup, run doctor, and make the first safe edit.</p>
+          </a>
+          <a class="resource-card" id="install" href="installation/">
+            <span class="resource-kicker">Binary</span>
+            <h3>Install and update</h3>
+            <p>Install from source or release archives, update an existing binary, and remove local state when needed.</p>
+          </a>
+          <a class="resource-card" id="visual-tour" href="visual-tour/">
+            <span class="resource-kicker">Preview</span>
+            <h3>Visual tour</h3>
+            <p>Screenshot-style walkthrough of the main session, approval review, and config panel surfaces.</p>
+          </a>
+          <a class="resource-card" id="workflows" href="workflows/">
+            <span class="resource-kicker">Examples</span>
+            <h3>Common workflows</h3>
+            <p>Practical prompts for exploring a repo, making changes, planning tasks, debugging failures, reviewing diffs, and resuming work.</p>
+          </a>
+          <a class="resource-card" id="cookbook" href="cookbook/">
+            <span class="resource-kicker">Prompts</span>
+            <h3>Cookbook</h3>
+            <p>Copyable prompt patterns for repository exploration, docs edits, reviews, debugging, planning, MCP, and terminal issues.</p>
+          </a>
+          <a class="resource-card" id="tui" href="user-guide/">
+            <span class="resource-kicker">Daily use</span>
+            <h3>TUI user guide</h3>
+            <p>Composer workflow, commands, planning, session switching, controls, transcript selection, and clipboard behavior.</p>
+          </a>
+          <a class="resource-card" id="safety" href="safety/">
+            <span class="resource-kicker">Control</span>
+            <h3>Safety and permissions</h3>
+            <p>What can run, what needs approval, how to review diffs, and how workspace/MCP trust boundaries work.</p>
+          </a>
+          <a class="resource-card" id="config" href="configuration/">
+            <span class="resource-kicker">Environment</span>
+            <h3>Configuration</h3>
+            <p>Config resolution, workspace settings, permission policy, memory, planning, terminal integration, and examples.</p>
+          </a>
+          <a class="resource-card" id="providers" href="providers/">
+            <span class="resource-kicker">Models</span>
+            <h3>Provider guide</h3>
+            <p>Choose and configure DeepSeek, OpenAI-compatible, Anthropic, or Gemini providers with key priority and troubleshooting.</p>
+          </a>
+          <a class="resource-card" id="privacy" href="privacy/">
+            <span class="resource-kicker">Data</span>
+            <h3>Privacy</h3>
+            <p>Provider context, MCP egress, API keys, local session logs, doctor output, and sharing guidance.</p>
+          </a>
+          <a class="resource-card" id="troubleshooting" href="troubleshooting/">
+            <span class="resource-kicker">Fix</span>
+            <h3>Troubleshooting guide</h3>
+            <p>Diagnose setup, auth, workspace, approval, terminal, session, MCP, and code-intelligence issues.</p>
+          </a>
+          <a class="resource-card" id="reference" href="reference/">
+            <span class="resource-kicker">Lookup</span>
+            <h3>Reference</h3>
+            <p>Commands, keys, config resolution, important paths, environment variables, approvals, and recovery facts.</p>
+          </a>
+          <a class="resource-card" id="terminal" href="terminal-compatibility/">
+            <span class="resource-kicker">Runtime</span>
+            <h3>Terminal compatibility</h3>
+            <p>Checklist for rendering, mouse behavior, clipboard support, alternate screen behavior, and local smoke testing.</p>
+          </a>
+          <a class="resource-card" id="mcp" href="mcp/">
+            <span class="resource-kicker">Integrations</span>
+            <h3>MCP guide</h3>
+            <p>Configure stdio MCP servers, understand trust levels, and keep external data and secrets under explicit policy.</p>
+          </a>
+          <a class="resource-card" id="status" href="status/">
+            <span class="resource-kicker">Support</span>
+            <h3>Supported today</h3>
+            <p>What users can rely on now, what is limited or advanced, and what remains future packaging work.</p>
+          </a>
+          <a class="resource-card" id="changelog" href="changelog/">
+            <span class="resource-kicker">Release notes</span>
+            <h3>User changelog</h3>
+            <p>User-facing capability and documentation changes without implementation-only detail.</p>
+          </a>
+        </div>
+      </section>
+
+      <section class="section contrast docs-section" id="developer-docs">
+        <div class="section-heading">
+          <p class="eyebrow">Developer reference</p>
+          <h2>Use these before changing core behavior.</h2>
+        </div>
+        <div class="resource-list">
+          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/governance/code-standards.md">
+            <span>Code standards</span>
+            Direct coding constraints for this repository.
+          </a>
+          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/governance/engineering-standards.md">
+            <span>Engineering standards</span>
+            Gates, review expectations, and repository maintenance rules.
+          </a>
+          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/sigil-rust-agent-core-technical-solution.md">
+            <span>Core technical solution</span>
+            Architecture for kernel, runtime, tools, TUI, sessions, and providers.
+          </a>
+          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/current-implementation-notes.en.md">
+            <span>Current implementation notes</span>
+            Snapshot of shipped behavior and known implementation boundaries.
+          </a>
+          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/sigil-capability-roadmap.md">
+            <span>Capability roadmap</span>
+            Product and engineering direction for upcoming capability work.
+          </a>
+          <a href="https://github.com/JimmyDaddy/sigil/blob/main/dev/docs/release-process.md">
+            <span>Release process</span>
+            Archive contents, local validation, and release checklist.
+          </a>
+          <a href="https://github.com/JimmyDaddy/sigil/blob/main/AGENTS.md">
+            <span>Agent collaboration instructions</span>
+            Required context for coding agents working inside this repository.
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span class="footer-brand">Sigil</span>
+      <a href="../">Home</a>
+      <a href="https://github.com/JimmyDaddy/sigil">GitHub</a>
+      <a href="../zh-CN/docs/">简体中文</a>
+    </footer>
+  </body>
+</html>

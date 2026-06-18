@@ -1,8 +1,8 @@
 # 源码安装
 
-[English](../en/installation.md)
+[文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
 
-本文说明当前支持的源码 checkout 安装路径。Release archive 可以在本地构建用于验证；包管理器和自更新还不属于这条路径。
+本文说明当前支持的源码 checkout 安装路径。如果你想按首次使用流程走一遍，先看 [quickstart.md](quickstart.md)。Release archive 可以在本地构建用于验证；包管理器和自更新还不属于这条路径。
 
 ## 前置条件
 
@@ -68,7 +68,7 @@ dist/sigil-<version>-<target>.tar.gz.sha256
 scripts/build-release-archive.sh --target aarch64-apple-darwin
 ```
 
-archive 内包含 `sigil` binary、README 和安装文档。tagged release 会由 release workflow 构建，并附带 checksum、GitHub artifact provenance attestation、生成的 release notes，以及供 tap 维护者使用的 `sigil.rb` Homebrew formula asset。自更新仍是后续工作。
+archive 内包含 `sigil` binary、README、logo assets 和安装文档。tagged release 会由 release workflow 构建，并附带 checksum、GitHub artifact provenance attestation、生成的 release notes，以及供 tap 维护者使用的 `sigil.rb` Homebrew formula asset。自更新仍是后续工作。
 
 ## 更新
 

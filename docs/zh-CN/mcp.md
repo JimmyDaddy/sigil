@@ -1,8 +1,10 @@
 # Sigil MCP 接入指南
 
-[English](../en/mcp.md)
+[文档首页](README.md) · [配置](configuration.md) · [排障](troubleshooting.md) · [English](../en/mcp.md)
 
 Sigil 可以通过 stdio MCP server 接入外部工具。接入后的 MCP tools、resources 和 prompts 会进入同一个 tool registry，由同一套审批、activity、session control 和 secret egress 规则处理。
+
+建议从保守配置开始：先接入一个 server，保持 `approval_default = "ask"`，运行 `/doctor`，只有在理解该 server 能读取或修改什么之后，再放宽 trust settings。
 
 ## 最小配置
 

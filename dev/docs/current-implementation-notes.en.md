@@ -8,6 +8,7 @@ This document records current repository implementation facts for developer alig
 
 ```text
 sigil/
+  assets/logo/                 # Logo and wordmark PNG assets for README, releases, and package listings
   crates/
     sigil-kernel/              # Generic agent kernel and domain contracts
     sigil-provider-deepseek/   # DeepSeek provider implementation
@@ -19,6 +20,7 @@ sigil/
     sigil/                     # `sigil` binary: starts the TUI by default; subcommands are for automation/debugging
     sigil-tui/                 # TUI state, rendering, and runner for the primary user entrypoint
   docs/                        # User documentation
+  site/                        # GitHub Pages static site source
   dev/governance/              # Development constraints, code standards, engineering standards
   dev/docs/                    # Architecture, roadmap, design evolution, and implementation notes
   sigil.toml                   # Local config file, ignored by default
@@ -35,7 +37,7 @@ sigil/
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
 - `sigil` provides the `sigil` binary: no subcommand starts the TUI directly; `run` and `doctor` remain explicit automation and diagnostics subcommands; `prefix` and `fim` remain hidden debugging or provider-specific entrypoints rather than normal user concepts.
 - `sigil --version` prints the package version, git commit, target, and profile for install smoke checks, release archive validation, and issue triage.
-- `sigil-tui` owns the primary TUI implementation: chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/resume`, `/plan`, approval modal, tool activity, diff preview, session recovery, task status display, context compaction, markdown code block highlighting, and code intelligence status display.
+- `sigil-tui` owns the primary TUI implementation: chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/new`, `/resume`, `/plan`, approval modal, tool activity, diff preview, session recovery, task status display, context compaction, markdown code block highlighting, and code intelligence status display.
 
 ## TUI Module Boundaries
 
@@ -48,7 +50,7 @@ sigil/
 - `setup_flow.rs`
 - `session_flow.rs`
 - `timeline_flow.rs`
-- `tool_focus.rs`
+- `tool_card_interaction.rs`
 - `approval_flow.rs`
 - `mouse_flow.rs`
 - `worker_bridge.rs`
@@ -161,7 +163,7 @@ Two local distribution-validation paths are supported:
 - Source install: `cargo install --path crates/sigil --locked`
 - Local release archive: `scripts/build-release-archive.sh`
 
-The release archive script builds `sigil` in release mode, injects git commit, target, and profile build metadata, runs `sigil --version` and `sigil doctor` smoke checks against the built binary, then writes `dist/sigil-<version>-<target>.tar.gz` and a matching `.sha256` file.
+The release archive script builds `sigil` in release mode, injects git commit, target, and profile build metadata, runs `sigil --version` and `sigil doctor` smoke checks against the built binary, then writes `dist/sigil-<version>-<target>.tar.gz` and a matching `.sha256` file. The archive payload contains the `sigil` binary, README files, `assets/logo/*`, and installation docs so repository-relative README logo paths still work after extraction.
 
 The GitHub release workflow lives at `.github/workflows/release.yml`. On `v*` tags or manual dispatch with an existing tag, it builds release archives on Linux, macOS, and Windows runners, generates GitHub artifact provenance attestations, aggregates checksums, generates release notes from Conventional Commits, renders a `sigil.rb` Homebrew formula asset, and publishes the GitHub release through `gh release create`. The maintainer runbook lives in [`release-process.md`](release-process.md).
 
@@ -261,6 +263,8 @@ python3 -m unittest scripts/test_check_staged_coverage.py
 - `README.zh-CN.md`: Chinese user entrypoint.
 - `docs/en/*`: English user documentation.
 - `docs/zh-CN/*`: Chinese user documentation.
+- `site/*`: GitHub Pages static site source, published by `.github/workflows/pages.yml`.
+- `assets/logo/*`: brand PNG assets for README, release pages, package listings, and social previews.
 - `dev/governance/*`: directly binding development governance documents.
 - `dev/docs/*`: architecture, roadmap, design evolution, and implementation notes.
 - `AGENTS.md`: in-repository agent collaboration instructions.

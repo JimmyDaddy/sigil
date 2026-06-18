@@ -1,8 +1,10 @@
 # Sigil TUI 使用指南
 
-[English](../en/user-guide.md)
+[文档首页](README.md) · [快速上手](quickstart.md) · [常见工作流](workflows.md) · [参考](reference.md) · [English](../en/user-guide.md)
 
 本文面向 Sigil 的日常使用者，重点说明 TUI 里能看到和能操作的内容。开发约束、crate 结构和测试规则请看 `dev/governance/*`。
+
+如果你是第一次使用 Sigil，先读 [quickstart.md](quickstart.md)。如果你已经熟悉界面、想看真实任务提示词和流程，读 [workflows.md](workflows.md)。
 
 ## 启动
 

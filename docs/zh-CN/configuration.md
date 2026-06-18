@@ -1,8 +1,19 @@
 # Sigil 配置指南
 
-[English](../en/configuration.md)
+[文档首页](README.md) · [快速上手](quickstart.md) · [Provider 指南](providers.md) · [排障](troubleshooting.md) · [参考](reference.md) · [English](../en/configuration.md)
 
-本文说明 Sigil 的用户配置方式。开发者需要修改配置 schema 时，请同步阅读 `dev/governance/code-standards.md` 和 `dev/governance/engineering-standards.md`。
+本文说明 Sigil 的用户配置方式。大多数用户应该先使用 TUI 中的 Quick Setup；当你需要可重复配置文件、环境变量配置、自动化行为或高级工具策略时，再读这一页。开发者需要修改配置 schema 时，请同步阅读 `dev/governance/code-standards.md` 和 `dev/governance/engineering-standards.md`。
+
+## 常见用户路径
+
+| 目标 | 推荐路径 |
+| --- | --- |
+| 第一次本地 setup | 运行 `sigil` 并完成 Quick Setup |
+| 临时本地认证 | 启动前设置 `SIGIL_API_KEY` |
+| CI 或脚本认证 | 使用环境变量，不把 key 写进 plaintext config |
+| 从 TUI 切换 model/provider | 使用 `/config` |
+| 一份配置跟随启动目录 | 使用 `workspace.root = "."` |
+| 调试 config/auth/provider 状态 | 运行 `sigil doctor` 或 `/doctor` |
 
 ## 配置查找顺序
 
@@ -85,20 +96,25 @@ fim_model = "deepseek-v4-pro"
 
 `SIGIL_API_KEY` 优先级高于配置文件里的 `api_key`。旧环境变量 `DEEPSEEK_API_KEY` 仍作为 DeepSeek provider 的备用来源读取。`doctor` 会对仅来自明文配置的认证给 warning，但不会阻止运行。
 
-如果要接 OpenAI-compatible endpoint，把 provider 切到 `[providers.openai_compat]`：
+可复制模板位于 [docs/examples/config](../examples/config)：
 
-```toml
-[agent]
-provider = "openai_compat"
-model = "gpt-4.1"
-tool_timeout_secs = 30
+- [deepseek-basic.toml](../examples/config/deepseek-basic.toml)
+- [openai-compatible.toml](../examples/config/openai-compatible.toml)
+- [anthropic.toml](../examples/config/anthropic.toml)
+- [gemini.toml](../examples/config/gemini.toml)
+- [mcp-safe-defaults.toml](../examples/config/mcp-safe-defaults.toml)
+- [code-intelligence-rust.toml](../examples/config/code-intelligence-rust.toml)
 
-[providers.openai_compat]
-base_url = "https://api.openai.com/v1"
-model = "gpt-4.1"
-# 优先使用 SIGIL_OPENAI_COMPATIBLE_API_KEY 或 OPENAI_API_KEY。
-# api_key = "sk-..."
-```
+Provider 细节已经拆到独立页面：
+
+| Provider | 适合场景 | 详情 |
+| --- | --- | --- |
+| DeepSeek | 使用默认 Quick Setup 路径、DeepSeek chat 和 FIM 相关设置。 | [DeepSeek provider](provider-deepseek.md) |
+| OpenAI-compatible | 使用 Chat Completions-compatible `/v1` endpoint，例如 OpenAI 或兼容网关。 | [OpenAI-compatible provider](provider-openai-compatible.md) |
+| Anthropic | 使用 Anthropic Messages streaming 和 Claude model 设置。 | [Anthropic provider](provider-anthropic.md) |
+| Gemini | 使用 Gemini `streamGenerateContent` 和 function calling 支持。 | [Gemini provider](provider-gemini.md) |
+
+对比和可复制 provider block 见 [Provider 指南](providers.md)。
 
 ## Workspace
 
@@ -121,7 +137,7 @@ tool_timeout_secs = 30
 # max_turns = 20
 ```
 
-- `provider`：当前 runtime 使用的 provider 名称。当前支持 `deepseek` 和 `openai_compat`。
+- `provider`：当前 runtime 使用的 provider 名称。当前支持 `deepseek`、`openai_compat`、`anthropic` 和 `gemini`。
 - `model`：默认模型。
 - `tool_timeout_secs`：工具执行超时。
 - `max_turns`：可选保险丝。默认不限制；如果显式设置，模型连续达到阈值仍只请求工具而没有最终回答时，本轮会可恢复地停止。
@@ -168,38 +184,18 @@ allow_all = false
 
 使用 name 和 prefix 时要保持克制。Scoped role registry 会同时限制 tool specs、preview、execute、permission hooks 和 egress hooks，因此隐藏工具不是只从 prompt 里省略，而是真的不能执行。
 
-## DeepSeek Provider
+## Providers
 
-```toml
-[providers.deepseek]
-base_url = "https://api.deepseek.com"
-beta_base_url = "https://api.deepseek.com/beta"
-anthropic_base_url = "https://api.deepseek.com/anthropic"
-model = "deepseek-v4-flash"
-fim_model = "deepseek-v4-pro"
-# api_key = "sk-..."
-user_id_strategy = "stable_per_end_user"
-strict_tools_mode = "auto"
-request_timeout_secs = 120
-```
+`[agent].provider` 选择 runtime provider。对应的 `[providers.*]` 区块控制 endpoint、model、认证和 provider 专项选项。
 
-TUI 的 `/config` 只暴露高频项，例如 `model`、`api_key`、`base_url` 和 `fim_model`。通过 `/config` 保存 `api_key` 会把它以明文写入 `sigil.toml`；临时或 CI 场景优先用 `SIGIL_API_KEY`。`beta_base_url`、`anthropic_base_url`、`user_id_strategy`、`request_timeout_secs` 和 `strict_tools_mode` 属于低频或 provider 专项项，保留给配置文件和环境变量。
+| Provider value | Config block | 主要 API key 环境变量 | 指南 |
+| --- | --- | --- | --- |
+| `deepseek` | `[providers.deepseek]` | `SIGIL_API_KEY` | [DeepSeek provider](provider-deepseek.md) |
+| `openai_compat` | `[providers.openai_compat]` | `SIGIL_OPENAI_COMPATIBLE_API_KEY` | [OpenAI-compatible provider](provider-openai-compatible.md) |
+| `anthropic` | `[providers.anthropic]` | `SIGIL_ANTHROPIC_API_KEY` | [Anthropic provider](provider-anthropic.md) |
+| `gemini` | `[providers.gemini]` | `SIGIL_GEMINI_API_KEY` | [Gemini provider](provider-gemini.md) |
 
-## OpenAI-compatible Provider
-
-```toml
-[providers.openai_compat]
-base_url = "https://api.openai.com/v1"
-model = "gpt-4.1"
-# api_key = "sk-..."
-organization = "org_..."
-project = "proj_..."
-request_timeout_secs = 120
-```
-
-这个 provider 使用 Chat Completions streaming 形态，支持 text delta、流式 tool calls、usage 和可选 `system_fingerprint`。它不提供 DeepSeek 专属的 prefix/FIM、reasoning replay、strict tools mode 或 beta endpoint 配置。
-
-对这个 provider，`SIGIL_OPENAI_COMPATIBLE_API_KEY` 优先级最高，`OPENAI_API_KEY` 作为备用来源读取。`SIGIL_OPENAI_COMPATIBLE_MODEL`、`SIGIL_OPENAI_COMPATIBLE_BASE_URL` 和 `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS` 会覆盖对应配置项。
+Provider 专项行为保留在 provider 配置和 provider crate 内。共享的 `sigil-kernel` 契约保持 provider-neutral：messages、tools、usage、approvals 和 session state 不应包含 provider-only 术语。
 
 ## Permission
 
@@ -328,6 +324,26 @@ OpenAI-compatible：
 - `SIGIL_OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS`
 
 `OPENAI_API_KEY` 作为 OpenAI-compatible provider 的备用来源继续读取。
+
+Anthropic：
+
+- `SIGIL_ANTHROPIC_MODEL`
+- `SIGIL_ANTHROPIC_API_KEY`
+- `SIGIL_ANTHROPIC_BASE_URL`
+- `SIGIL_ANTHROPIC_VERSION`
+- `SIGIL_ANTHROPIC_MAX_TOKENS`
+- `SIGIL_ANTHROPIC_REQUEST_TIMEOUT_SECS`
+
+`ANTHROPIC_API_KEY` 作为 Anthropic provider 的备用来源继续读取。
+
+Gemini：
+
+- `SIGIL_GEMINI_MODEL`
+- `SIGIL_GEMINI_API_KEY`
+- `SIGIL_GEMINI_BASE_URL`
+- `SIGIL_GEMINI_REQUEST_TIMEOUT_SECS`
+
+`GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 作为 Gemini provider 的备用来源继续读取。
 
 ## MCP
 

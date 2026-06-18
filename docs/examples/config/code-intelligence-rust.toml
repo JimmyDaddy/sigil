@@ -1,0 +1,19 @@
+[code_intelligence]
+enabled = true
+startup = "lazy"
+default_timeout_ms = 5000
+max_results = 100
+max_payload_bytes = 65536
+
+[code_intelligence.discovery]
+enabled = true
+report_missing = true
+
+[[code_intelligence.servers]]
+name = "rust-analyzer"
+languages = ["rust"]
+command = "rust-analyzer"
+root_markers = ["Cargo.toml"]
+file_extensions = ["rs"]
+startup_timeout_ms = 5000
+trust_required = true

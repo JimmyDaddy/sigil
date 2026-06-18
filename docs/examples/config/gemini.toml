@@ -1,0 +1,23 @@
+[workspace]
+root = "."
+
+[session]
+log_dir = ".sigil/sessions"
+
+[agent]
+provider = "gemini"
+model = "gemini-2.5-pro"
+tool_timeout_secs = 30
+
+[permission]
+default_mode = "ask"
+
+[permission.access]
+read = "allow"
+
+[providers.gemini]
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+model = "gemini-2.5-pro"
+request_timeout_secs = 120
+# Prefer SIGIL_GEMINI_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY.
+# api_key = "..."

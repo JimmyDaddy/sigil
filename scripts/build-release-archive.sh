@@ -106,6 +106,8 @@ mkdir -p "${payload_dir}"
 
 cp "${binary_path}" "${payload_dir}/${binary_name}"
 cp README.md README.zh-CN.md "${payload_dir}/"
+mkdir -p "${payload_dir}/assets"
+cp -R assets/logo "${payload_dir}/assets/"
 mkdir -p "${payload_dir}/docs/en" "${payload_dir}/docs/zh-CN"
 cp docs/en/installation.md "${payload_dir}/docs/en/"
 cp docs/zh-CN/installation.md "${payload_dir}/docs/zh-CN/"

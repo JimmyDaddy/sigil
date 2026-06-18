@@ -1,12 +1,27 @@
 # Sigil
 
+<p align="center">
+  <img src="assets/logo/sigil-full.png" alt="Sigil logo" width="560">
+</p>
+
 English | [简体中文](README.zh-CN.md)
 
-`sigil` is a TUI-first Rust AI coding agent. It brings chat, tool calls, approvals, diff review, run status, and session recovery into one terminal interface instead of asking users to learn an expanding command surface.
+[![CI](https://github.com/JimmyDaddy/sigil/actions/workflows/ci.yml/badge.svg)](https://github.com/JimmyDaddy/sigil/actions/workflows/ci.yml)
+[![Pages](https://github.com/JimmyDaddy/sigil/actions/workflows/pages.yml/badge.svg)](https://github.com/JimmyDaddy/sigil/actions/workflows/pages.yml)
 
-The project is still validated through local development workflows. For day-to-day use from a checkout, install the source package locally and start from the `sigil` binary.
+Sigil is a TUI-first Rust coding agent for working inside a real repository. It keeps chat, tool calls, approvals, diffs, diagnostics, planning, and session recovery in one terminal interface, while keeping the CLI as a thin automation surface.
 
-## Quick Start
+Project site source lives in [site](site). After GitHub Pages is enabled for this repository, it publishes to [jimmydaddy.github.io/sigil](https://jimmydaddy.github.io/sigil/).
+
+Sigil is still validated through local development workflows. The recommended path today is to install it from a checkout and launch the `sigil` binary from the workspace you want it to operate on.
+
+## Quickstart
+
+Prerequisites:
+
+- A modern terminal emulator.
+- A Rust toolchain compatible with this repository.
+- A model provider credential. Quick Setup can collect it on first launch.
 
 Install from the repository root:
 
@@ -14,11 +29,14 @@ Install from the repository root:
 cargo install --path crates/sigil --locked
 ```
 
-Start the TUI:
+Start Sigil in the project you want to work on:
 
 ```bash
+cd /path/to/your/project
 sigil
 ```
+
+If Sigil cannot find a usable config, it opens Quick Setup. Confirm the workspace, choose a provider/model, and enter authentication there. For environment-variable and `sigil.toml` setups, see [configuration](docs/en/configuration.md).
 
 Check the installed binary:
 
@@ -27,105 +45,95 @@ sigil --version
 sigil doctor
 ```
 
-If no usable config exists, Sigil opens Quick Setup. You confirm the workspace, choose a model, and provide authentication there. If you prefer environment variables or a hand-written config file, see [docs/en/configuration.md](docs/en/configuration.md).
+## What Sigil Is Built For
 
-Use the CLI for automation or scripts:
+Sigil is designed for coding sessions where you want the agent to understand the current repository, make tool-backed changes, and keep you in control before risky actions happen.
+
+- Ask questions about the codebase and inspect streamed reasoning/output in the TUI.
+- Let the agent read, search, edit, and run commands through structured tools.
+- Review write operations with approval cards, affected files, and bounded diffs.
+- Resume work from append-only session logs after restarting the TUI.
+- Use `/plan` for durable multi-step tasks with planner, executor, and optional subagent roles.
+- Connect stdio MCP servers under explicit trust, approval, and secret-egress policies.
+- Optionally enable code intelligence for symbols, references, diagnostics, code actions, and rename previews.
+
+## TUI Workflow
+
+Run `sigil` with no subcommand to open the main interface. The default screen is chat-first: a transcript, a composer, live tool activity, and an info rail for session, permissions, agents, LSP, usage, and controls.
+
+Common entry points:
+
+- Type normally in the composer for ordinary chat or coding work.
+- Use `/plan <task>` when a larger task should be planned before execution.
+- Use `/new` to start a fresh session, `/resume` to switch sessions, and `/config` to update common settings.
+- Use `/doctor` to render local diagnostics inside the transcript.
+- Use `Shift-Tab` to cycle the default permission mode.
+- Use `Ctrl-C` or `Esc` to cancel the current run or close an overlay.
+
+The full keyboard, mouse, transcript selection, and OSC52 clipboard behavior is covered in the [TUI user guide](docs/en/user-guide.md) and [terminal compatibility checklist](docs/en/terminal-compatibility.md).
+
+## Safety And State
+
+Sigil treats tool execution as auditable state, not as hidden side effects.
+
+- File writes, edits, deletes, command execution, MCP calls, and external data access go through the permission model.
+- Write tools are designed to provide previews and diffs before approval.
+- Session and control records are append-only JSONL under `.sigil/sessions/`.
+- Interrupted tool executions are restored as interrupted results instead of being replayed silently.
+- Provider-specific behavior stays in provider crates; `sigil-kernel` keeps generic agent, tool, session, approval, and event contracts.
+
+## Automation
+
+The CLI exists for scripts, CI, and diagnostics. It is not the primary product surface.
 
 ```bash
 sigil run "summarize this repository"
-```
-
-Use `doctor` when setup or local tooling looks wrong:
-
-```bash
 sigil doctor
 ```
 
-Inside the TUI, use `/doctor` to render the same local diagnostics report in the transcript. The TUI report starts with a status summary and a `needs attention` remediation list, then keeps the full check list. Doctor warns when the API key is only stored as plaintext in config.
+For local development without installing:
 
-The CLI is not the primary product surface. It is intentionally kept as an automation and debugging entrypoint.
+```bash
+cargo run -p sigil
+cargo run -p sigil -- doctor
+```
 
-For update, PATH, release archive, and uninstall notes, see [docs/en/installation.md](docs/en/installation.md). For development-only runs inside the checkout, use `cargo run -p sigil` or `cargo run -p sigil -- doctor`.
+## Providers And Integrations
 
-## What It Does
+Sigil currently supports:
 
-- Run coding tasks inside the TUI and stream model output.
-- Review approvals, affected files, and diff previews before risky tool calls.
-- Inspect tool activities, command output, file changes, and diagnostics after a run.
-- Restore the latest session after restarting the TUI.
-- Use `/config` for common settings and `/resume` for session selection.
-- Use `/plan` for planned multi-step tasks; after a task exists in the current session, normal composer input continues it with additional guidance.
-- Use `/doctor` to diagnose config, authentication, MCP, LSP, and terminal readiness with suggested fixes.
-- Use `/model` and `/effort` to adjust the next model run.
-- Use `/compact` to compact long-session context.
-- Use mouse clicks, scrolling, transcript drag selection, and OSC52 copy when your terminal supports them.
-- Optionally enable code intelligence for symbols, definitions, references, diagnostics, code actions, rename previews, and `/config` readiness checks.
-- Optionally connect stdio MCP servers under explicit trust and approval policies.
+- DeepSeek through `[providers.deepseek]`
+- OpenAI-compatible Chat Completions through `[providers.openai_compat]`
+- Anthropic Messages through `[providers.anthropic]`
+- Gemini GenerateContent through `[providers.gemini]`
+- stdio MCP servers through `[[mcp_servers]]`
+- optional code intelligence through `[code_intelligence]`
 
-## TUI Model
-
-The TUI is centered on chat and the composer. You type a task, and Sigil shows assistant responses, tool activity, approval requests, run status, and session information in the same interface.
-
-For larger tasks, `/plan <task>` asks a planner role to create a durable plan before execution. The right info rail shows the latest task status, plan version, and current step. Restoring a session rebuilds that visible task state from the append-only log, but it does not auto-run unfinished work; type your next instruction in the composer to continue the current task, or use `/plan continue` to continue without extra guidance.
-
-Common controls:
-
-- `F1`: open keyboard help
-- `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End`: scroll transcript history
-- `/`: open the slash command selector
-- `Shift-Tab`: cycle the default permission mode
-- `Ctrl-C` or `Esc`: cancel the current run or leave the current overlay
-- `Ctrl-G`: focus the latest tool activity
-- `Alt-J` / `Alt-K`: move between activities
-- `Ctrl-T`: expand or collapse thinking / activity content
-
-See [docs/en/user-guide.md](docs/en/user-guide.md) for the full TUI guide.
-
-## Mouse And Terminal Support
-
-Mouse support is optional and terminal-dependent. Keyboard controls remain the complete fallback path.
-
-When your terminal supports mouse capture, you can click the composer to focus it and place the cursor, click slash candidates, select setup/config/session rows, use approval modal controls, focus tool activities, and click tool card headers or hidden-preview rows to expand or collapse activity content. The mouse wheel scrolls the transcript and approval diff views.
-
-Transcript text selection uses the displayed terminal columns, so mixed-width text such as CJK content can be dragged and copied predictably. Press `Ctrl-C` to copy the current transcript selection through OSC52 when clipboard integration is enabled.
-
-Use `/config` to adjust the `Terminal` settings: `mouse_capture`, `osc52_clipboard`, and `scroll_sensitivity`. Use `/doctor` to inspect terminal, multiplexer, remote-shell, and clipboard bridge signals. See [docs/en/terminal-compatibility.md](docs/en/terminal-compatibility.md) for the real-terminal smoke checklist.
-
-## Configuration
-
-Sigil resolves configuration in this order:
-
-1. `--config <path>`
-2. `./sigil.toml` in the current working directory
-3. `sigil.toml` in the standard per-user config directory
-
-Common per-user config paths:
-
-- macOS: `~/Library/Application Support/sigil/sigil.toml`
-- Linux: `$XDG_CONFIG_HOME/sigil/sigil.toml` or `~/.config/sigil/sigil.toml`
-- Windows: `%APPDATA%\sigil\sigil.toml`
-
-For examples covering authentication, provider settings, permissions, memory, compaction, code intelligence, terminal compatibility, and environment variable overrides, see [docs/en/configuration.md](docs/en/configuration.md). For real-terminal mouse and clipboard smoke checks, see [docs/en/terminal-compatibility.md](docs/en/terminal-compatibility.md).
-
-## Providers
-
-Sigil currently supports DeepSeek and OpenAI-compatible Chat Completions providers. DeepSeek remains the default Quick Setup path; OpenAI-compatible endpoints are configured with `provider = "openai_compat"` and `[providers.openai_compat]`.
-
-## MCP
-
-Sigil can connect stdio MCP servers as external tool providers. MCP tools, resources, and prompts use the same approval, activity, session control, secret egress, and trust policy surfaces as built-in tools.
-
-See [docs/en/mcp.md](docs/en/mcp.md) for configuration and safety notes.
+DeepSeek remains the default Quick Setup path. Other providers are selected with `[agent].provider` and configured in their matching `[providers.*]` block.
+See the [Provider guide](docs/en/providers.md) for provider-specific setup, key priority, and troubleshooting.
 
 ## Documentation
 
 User documentation:
 
-- [Installation from source](docs/en/installation.md) / [中文](docs/zh-CN/installation.md)
+- [User docs home](docs/en/README.md) / [中文](docs/zh-CN/README.md)
+- [Quickstart](docs/en/quickstart.md) / [中文](docs/zh-CN/quickstart.md)
+- [Installation](docs/en/installation.md) / [中文](docs/zh-CN/installation.md)
+- [Visual tour](docs/en/visual-tour.md) / [中文](docs/zh-CN/visual-tour.md)
+- [Common workflows](docs/en/workflows.md) / [中文](docs/zh-CN/workflows.md)
+- [Cookbook](docs/en/cookbook.md) / [中文](docs/zh-CN/cookbook.md)
 - [TUI user guide](docs/en/user-guide.md) / [中文](docs/zh-CN/user-guide.md)
-- [Configuration guide](docs/en/configuration.md) / [中文](docs/zh-CN/configuration.md)
-- [Terminal compatibility checklist](docs/en/terminal-compatibility.md) / [中文](docs/zh-CN/terminal-compatibility.md)
+- [Safety and permissions](docs/en/safety.md) / [中文](docs/zh-CN/safety.md)
+- [Configuration](docs/en/configuration.md) / [中文](docs/zh-CN/configuration.md)
+- [Provider guide](docs/en/providers.md) / [中文](docs/zh-CN/providers.md)
+- [Privacy and data handling](docs/en/privacy.md) / [中文](docs/zh-CN/privacy.md)
+- [Troubleshooting](docs/en/troubleshooting.md) / [中文](docs/zh-CN/troubleshooting.md)
+- [Command and key reference](docs/en/reference.md) / [中文](docs/zh-CN/reference.md)
 - [MCP guide](docs/en/mcp.md) / [中文](docs/zh-CN/mcp.md)
+- [Terminal compatibility](docs/en/terminal-compatibility.md) / [中文](docs/zh-CN/terminal-compatibility.md)
+- [Supported today and future work](docs/en/status.md) / [中文](docs/zh-CN/status.md)
+- [User changelog](docs/en/changelog.md) / [中文](docs/zh-CN/changelog.md)
+- [Config examples](docs/examples/config)
 
 Developer documentation:
 
@@ -137,7 +145,11 @@ Developer documentation:
 - [Release process](dev/docs/release-process.md)
 - [Agent collaboration instructions](AGENTS.md)
 
-## Development Checks
+## Brand Assets
+
+Logo files live in [assets/logo](assets/logo). Use transparent `sigil-full.png` for README, release pages, and the website hero; use `sigil-mark-square-1024.png` for square package or social previews; use `*-on-white.png` variants when the target does not preserve transparency.
+
+## Development
 
 Code changes should run the relevant repository gates:
 

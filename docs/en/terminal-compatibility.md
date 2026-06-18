@@ -1,6 +1,6 @@
 # Terminal Compatibility Checklist
 
-[简体中文](../zh-CN/terminal-compatibility.md)
+[Docs home](README.md) · [Troubleshooting](troubleshooting.md) · [简体中文](../zh-CN/terminal-compatibility.md)
 
 This checklist helps verify Sigil mouse capture and OSC52 clipboard behavior in real terminals. It is intentionally manual because terminal multiplexers, remote shells, and desktop terminal preferences can block features outside Sigil's process.
 
