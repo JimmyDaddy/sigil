@@ -10,7 +10,7 @@ use sigil_kernel::{
     RootConfig, SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry,
     SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskRouteId,
     TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepStatus,
-    TaskSubagentElicitationRouteEntry, ToolApproval,
+    TaskSubagentElicitationRouteEntry, ToolApproval, ToolRegistry,
 };
 
 use crate::{
@@ -318,133 +318,33 @@ pub(super) fn run_worker_loop<P>(
                     objective: prompt.clone(),
                 });
 
-                let mut handler = ChannelEventHandler::new(message_tx.clone());
+                let handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
                 let elicitation_audit_buffer: McpElicitationAuditBuffer =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let base_registry = agent.tool_registry().clone();
-                let root_config_for_task = root_config.clone();
-                let planner_options = sigil_runtime::build_role_run_options(
-                    &root_config_for_task,
-                    options.workspace_root.clone(),
-                    options.interaction_mode,
-                    AgentRole::Planner,
-                );
-                let executor_options = sigil_runtime::build_role_run_options(
-                    &root_config_for_task,
-                    options.workspace_root.clone(),
-                    options.interaction_mode,
-                    AgentRole::Executor,
-                );
-                let subagent_read_options = sigil_runtime::build_role_run_options(
-                    &root_config_for_task,
-                    options.workspace_root.clone(),
-                    options.interaction_mode,
-                    AgentRole::SubagentRead,
-                );
-                let subagent_write_options = sigil_runtime::build_role_run_options(
-                    &root_config_for_task,
-                    options.workspace_root.clone(),
-                    options.interaction_mode,
-                    AgentRole::SubagentWrite,
-                );
-                let task_result_tx = task_result_tx.clone();
                 let run_id = next_run_id;
                 next_run_id += 1;
 
-                let handle = runtime.spawn(async move {
-                    let mut run_session = run_session;
-                    let result = async {
-                        let planner_provider = sigil_runtime::build_role_provider(
-                            &root_config_for_task,
-                            AgentRole::Planner,
-                        )
-                        .map_err(|error| format!("{error:#}"))?;
-                        let executor_provider = sigil_runtime::build_role_provider(
-                            &root_config_for_task,
-                            AgentRole::Executor,
-                        )
-                        .map_err(|error| format!("{error:#}"))?;
-                        let subagent_read_provider = sigil_runtime::build_role_provider(
-                            &root_config_for_task,
-                            AgentRole::SubagentRead,
-                        )
-                        .map_err(|error| format!("{error:#}"))?;
-                        let subagent_write_provider = sigil_runtime::build_role_provider(
-                            &root_config_for_task,
-                            AgentRole::SubagentWrite,
-                        )
-                        .map_err(|error| format!("{error:#}"))?;
-                        let planner_registry = sigil_runtime::build_role_tool_registry(
-                            &base_registry,
-                            &root_config_for_task,
-                            AgentRole::Planner,
-                        )
-                        .into_registry();
-                        let executor_registry = sigil_runtime::build_role_tool_registry(
-                            &base_registry,
-                            &root_config_for_task,
-                            AgentRole::Executor,
-                        )
-                        .into_registry();
-                        let subagent_read_registry = sigil_runtime::build_role_tool_registry(
-                            &base_registry,
-                            &root_config_for_task,
-                            AgentRole::SubagentRead,
-                        )
-                        .into_registry();
-                        let subagent_write_registry = sigil_runtime::build_role_tool_registry(
-                            &base_registry,
-                            &root_config_for_task,
-                            AgentRole::SubagentWrite,
-                        )
-                        .into_registry();
-                        let orchestrator = SequentialTaskOrchestrator::new(
-                            Agent::new(planner_provider, planner_registry),
-                            Agent::new(executor_provider, executor_registry),
-                            Agent::new(subagent_read_provider, subagent_read_registry),
-                            Agent::new(subagent_write_provider, subagent_write_registry),
-                        );
-                        let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-                        orchestrator
-                            .run(
-                                &mut run_session,
-                                SequentialTaskRequest {
-                                    task_id,
-                                    parent_session_ref,
-                                    objective: prompt,
-                                },
-                                planner_options,
-                                executor_options,
-                                subagent_read_options,
-                                subagent_write_options,
-                                root_config_for_task.task.max_plan_steps,
-                                &mut handler,
-                                &mut approval_handler,
-                            )
-                            .await
-                            .map(|output| output.status)
-                            .map_err(|error| format!("{error:#}"))
-                    }
-                    .await;
-                    let result = match append_mcp_elicitation_audits(
-                        &mut run_session,
-                        &run_elicitation_audit_buffer,
-                    ) {
-                        Ok(()) => result,
-                        Err(error) => Err(error),
-                    };
-                    let _ = task_result_tx.send(RunTaskResult {
+                let handle = spawn_task_run(
+                    &runtime,
+                    TaskRunSpawn {
                         run_id,
                         session: run_session,
-                        payload: RunTaskPayload::Task {
-                            task_id: task_id_value,
-                            result,
-                        },
-                    });
-                });
+                        task_id,
+                        task_id_value,
+                        parent_session_ref,
+                        objective: prompt,
+                        root_config: root_config.clone(),
+                        options: options.clone(),
+                        base_registry: agent.tool_registry().clone(),
+                        task_result_tx: task_result_tx.clone(),
+                        approval_rx,
+                        handler,
+                        elicitation_audit_buffer: run_elicitation_audit_buffer,
+                    },
+                );
 
                 active_run = Some(ActiveRun {
                     run_id,
@@ -495,126 +395,34 @@ pub(super) fn run_worker_loop<P>(
                     objective: objective.clone(),
                 });
 
-                let mut handler = ChannelEventHandler::new(message_tx.clone());
+                let handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
                 let elicitation_audit_buffer: McpElicitationAuditBuffer =
                     Arc::new(std::sync::Mutex::new(Vec::new()));
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
-                let base_registry = agent.tool_registry().clone();
-                let root_config_for_task = root_config.clone();
-                let executor_options = sigil_runtime::build_role_run_options(
-                    &root_config_for_task,
-                    options.workspace_root.clone(),
-                    options.interaction_mode,
-                    AgentRole::Executor,
-                );
-                let subagent_read_options = sigil_runtime::build_role_run_options(
-                    &root_config_for_task,
-                    options.workspace_root.clone(),
-                    options.interaction_mode,
-                    AgentRole::SubagentRead,
-                );
-                let subagent_write_options = sigil_runtime::build_role_run_options(
-                    &root_config_for_task,
-                    options.workspace_root.clone(),
-                    options.interaction_mode,
-                    AgentRole::SubagentWrite,
-                );
-                let task_result_tx = task_result_tx.clone();
                 let run_id = next_run_id;
                 next_run_id += 1;
 
-                let handle = runtime.spawn(async move {
-                    let mut run_session = run_session;
-                    let result = async {
-                        let planner_provider = sigil_runtime::build_role_provider(
-                            &root_config_for_task,
-                            AgentRole::Planner,
-                        )
-                        .map_err(|error| format!("{error:#}"))?;
-                        let executor_provider = sigil_runtime::build_role_provider(
-                            &root_config_for_task,
-                            AgentRole::Executor,
-                        )
-                        .map_err(|error| format!("{error:#}"))?;
-                        let subagent_read_provider = sigil_runtime::build_role_provider(
-                            &root_config_for_task,
-                            AgentRole::SubagentRead,
-                        )
-                        .map_err(|error| format!("{error:#}"))?;
-                        let subagent_write_provider = sigil_runtime::build_role_provider(
-                            &root_config_for_task,
-                            AgentRole::SubagentWrite,
-                        )
-                        .map_err(|error| format!("{error:#}"))?;
-                        let planner_registry = sigil_runtime::build_role_tool_registry(
-                            &base_registry,
-                            &root_config_for_task,
-                            AgentRole::Planner,
-                        )
-                        .into_registry();
-                        let executor_registry = sigil_runtime::build_role_tool_registry(
-                            &base_registry,
-                            &root_config_for_task,
-                            AgentRole::Executor,
-                        )
-                        .into_registry();
-                        let subagent_read_registry = sigil_runtime::build_role_tool_registry(
-                            &base_registry,
-                            &root_config_for_task,
-                            AgentRole::SubagentRead,
-                        )
-                        .into_registry();
-                        let subagent_write_registry = sigil_runtime::build_role_tool_registry(
-                            &base_registry,
-                            &root_config_for_task,
-                            AgentRole::SubagentWrite,
-                        )
-                        .into_registry();
-                        let orchestrator = SequentialTaskOrchestrator::new(
-                            Agent::new(planner_provider, planner_registry),
-                            Agent::new(executor_provider, executor_registry),
-                            Agent::new(subagent_read_provider, subagent_read_registry),
-                            Agent::new(subagent_write_provider, subagent_write_registry),
-                        );
-                        let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-                        orchestrator
-                            .continue_run(
-                                &mut run_session,
-                                SequentialTaskRequest {
-                                    task_id,
-                                    parent_session_ref,
-                                    objective,
-                                },
-                                executor_options,
-                                subagent_read_options,
-                                subagent_write_options,
-                                guidance,
-                                &mut handler,
-                                &mut approval_handler,
-                            )
-                            .await
-                            .map(|output| output.status)
-                            .map_err(|error| format!("{error:#}"))
-                    }
-                    .await;
-                    let result = match append_mcp_elicitation_audits(
-                        &mut run_session,
-                        &run_elicitation_audit_buffer,
-                    ) {
-                        Ok(()) => result,
-                        Err(error) => Err(error),
-                    };
-                    let _ = task_result_tx.send(RunTaskResult {
+                let handle = spawn_task_continue(
+                    &runtime,
+                    TaskContinueSpawn {
                         run_id,
                         session: run_session,
-                        payload: RunTaskPayload::Task {
-                            task_id: task_id_value,
-                            result,
-                        },
-                    });
-                });
+                        task_id,
+                        task_id_value,
+                        parent_session_ref,
+                        objective,
+                        guidance,
+                        root_config: root_config.clone(),
+                        options: options.clone(),
+                        base_registry: agent.tool_registry().clone(),
+                        task_result_tx: task_result_tx.clone(),
+                        approval_rx,
+                        handler,
+                        elicitation_audit_buffer: run_elicitation_audit_buffer,
+                    },
+                );
 
                 active_run = Some(ActiveRun {
                     run_id,
@@ -930,6 +738,37 @@ pub(super) fn run_worker_loop<P>(
                     }
                 }
             }
+            Ok(WorkerCommand::StartNewSession { session_log_path }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot start a new session while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+
+                match load_session(
+                    &root_config.agent.provider,
+                    &root_config.agent.model,
+                    &session_log_path,
+                ) {
+                    Ok(session) => {
+                        let entries = session.entries().to_vec();
+                        current_session_log_path = session_log_path.clone();
+                        let provider_name = session.provider_name().to_owned();
+                        let model_name = session.model_name().to_owned();
+                        current_session = Some(session);
+                        let _ = message_tx.send(WorkerMessage::NewSessionStarted {
+                            session_log_path,
+                            provider_name,
+                            model_name,
+                            entries,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    }
+                }
+            }
             Ok(WorkerCommand::Shutdown) => {
                 if let Some(active_run) = active_run.take() {
                     elicitation_handler.set_audit_buffer(None);
@@ -969,6 +808,325 @@ struct ActiveRun {
     handle: tokio::task::JoinHandle<()>,
     approval_tx: mpsc::Sender<ApprovalSignal>,
     elicitation_audit_buffer: McpElicitationAuditBuffer,
+}
+
+struct TaskRunSpawn {
+    run_id: u64,
+    session: Session,
+    task_id: TaskId,
+    task_id_value: String,
+    parent_session_ref: SessionRef,
+    objective: String,
+    root_config: RootConfig,
+    options: AgentRunOptions,
+    base_registry: ToolRegistry,
+    task_result_tx: mpsc::Sender<RunTaskResult>,
+    approval_rx: mpsc::Receiver<ApprovalSignal>,
+    handler: ChannelEventHandler,
+    elicitation_audit_buffer: McpElicitationAuditBuffer,
+}
+
+struct TaskContinueSpawn {
+    run_id: u64,
+    session: Session,
+    task_id: TaskId,
+    task_id_value: String,
+    parent_session_ref: SessionRef,
+    objective: String,
+    guidance: Option<String>,
+    root_config: RootConfig,
+    options: AgentRunOptions,
+    base_registry: ToolRegistry,
+    task_result_tx: mpsc::Sender<RunTaskResult>,
+    approval_rx: mpsc::Receiver<ApprovalSignal>,
+    handler: ChannelEventHandler,
+    elicitation_audit_buffer: McpElicitationAuditBuffer,
+}
+
+struct TaskRoleRuntime {
+    orchestrator: SequentialTaskOrchestrator,
+    planner_options: AgentRunOptions,
+    executor_options: AgentRunOptions,
+    subagent_read_options: AgentRunOptions,
+    subagent_write_options: AgentRunOptions,
+}
+
+fn spawn_task_run(
+    runtime: &tokio::runtime::Runtime,
+    spawn: TaskRunSpawn,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        let TaskRunSpawn {
+            run_id,
+            mut session,
+            task_id,
+            task_id_value,
+            parent_session_ref,
+            objective,
+            root_config,
+            options,
+            base_registry,
+            task_result_tx,
+            approval_rx,
+            mut handler,
+            elicitation_audit_buffer,
+        } = spawn;
+        let result = run_task_orchestration(
+            &mut session,
+            TaskRunOrchestration {
+                task_id,
+                parent_session_ref,
+                objective,
+                root_config,
+                options,
+                base_registry,
+                approval_rx,
+                handler: &mut handler,
+            },
+        )
+        .await;
+        let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        send_task_result(run_id, session, task_id_value, result, task_result_tx);
+    })
+}
+
+fn spawn_task_continue(
+    runtime: &tokio::runtime::Runtime,
+    spawn: TaskContinueSpawn,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        let TaskContinueSpawn {
+            run_id,
+            mut session,
+            task_id,
+            task_id_value,
+            parent_session_ref,
+            objective,
+            guidance,
+            root_config,
+            options,
+            base_registry,
+            task_result_tx,
+            approval_rx,
+            mut handler,
+            elicitation_audit_buffer,
+        } = spawn;
+        let result = continue_task_orchestration(
+            &mut session,
+            TaskContinueOrchestration {
+                task_id,
+                parent_session_ref,
+                objective,
+                guidance,
+                root_config,
+                options,
+                base_registry,
+                approval_rx,
+                handler: &mut handler,
+            },
+        )
+        .await;
+        let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        send_task_result(run_id, session, task_id_value, result, task_result_tx);
+    })
+}
+
+struct TaskRunOrchestration<'a> {
+    task_id: TaskId,
+    parent_session_ref: SessionRef,
+    objective: String,
+    root_config: RootConfig,
+    options: AgentRunOptions,
+    base_registry: ToolRegistry,
+    approval_rx: mpsc::Receiver<ApprovalSignal>,
+    handler: &'a mut ChannelEventHandler,
+}
+
+struct TaskContinueOrchestration<'a> {
+    task_id: TaskId,
+    parent_session_ref: SessionRef,
+    objective: String,
+    guidance: Option<String>,
+    root_config: RootConfig,
+    options: AgentRunOptions,
+    base_registry: ToolRegistry,
+    approval_rx: mpsc::Receiver<ApprovalSignal>,
+    handler: &'a mut ChannelEventHandler,
+}
+
+async fn run_task_orchestration(
+    session: &mut Session,
+    request: TaskRunOrchestration<'_>,
+) -> std::result::Result<TaskRunStatus, String> {
+    let TaskRunOrchestration {
+        task_id,
+        parent_session_ref,
+        objective,
+        root_config,
+        options,
+        base_registry,
+        approval_rx,
+        handler,
+    } = request;
+    let TaskRoleRuntime {
+        orchestrator,
+        planner_options,
+        executor_options,
+        subagent_read_options,
+        subagent_write_options,
+    } = build_task_role_runtime(&root_config, &options, &base_registry)?;
+    let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+    orchestrator
+        .run(
+            session,
+            SequentialTaskRequest {
+                task_id,
+                parent_session_ref,
+                objective,
+            },
+            planner_options,
+            executor_options,
+            subagent_read_options,
+            subagent_write_options,
+            root_config.task.max_plan_steps,
+            handler,
+            &mut approval_handler,
+        )
+        .await
+        .map(|output| output.status)
+        .map_err(|error| format!("{error:#}"))
+}
+
+async fn continue_task_orchestration(
+    session: &mut Session,
+    request: TaskContinueOrchestration<'_>,
+) -> std::result::Result<TaskRunStatus, String> {
+    let TaskContinueOrchestration {
+        task_id,
+        parent_session_ref,
+        objective,
+        guidance,
+        root_config,
+        options,
+        base_registry,
+        approval_rx,
+        handler,
+    } = request;
+    let TaskRoleRuntime {
+        orchestrator,
+        executor_options,
+        subagent_read_options,
+        subagent_write_options,
+        ..
+    } = build_task_role_runtime(&root_config, &options, &base_registry)?;
+    let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+    orchestrator
+        .continue_run(
+            session,
+            SequentialTaskRequest {
+                task_id,
+                parent_session_ref,
+                objective,
+            },
+            executor_options,
+            subagent_read_options,
+            subagent_write_options,
+            guidance,
+            handler,
+            &mut approval_handler,
+        )
+        .await
+        .map(|output| output.status)
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn build_task_role_runtime(
+    root_config: &RootConfig,
+    options: &AgentRunOptions,
+    base_registry: &ToolRegistry,
+) -> std::result::Result<TaskRoleRuntime, String> {
+    let planner_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Planner)
+        .map_err(|error| format!("{error:#}"))?;
+    let executor_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Executor)
+        .map_err(|error| format!("{error:#}"))?;
+    let subagent_read_provider =
+        sigil_runtime::build_role_provider(root_config, AgentRole::SubagentRead)
+            .map_err(|error| format!("{error:#}"))?;
+    let subagent_write_provider =
+        sigil_runtime::build_role_provider(root_config, AgentRole::SubagentWrite)
+            .map_err(|error| format!("{error:#}"))?;
+    let planner_registry =
+        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
+            .into_registry();
+    let executor_registry =
+        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Executor)
+            .into_registry();
+    let subagent_read_registry = sigil_runtime::build_role_tool_registry(
+        base_registry,
+        root_config,
+        AgentRole::SubagentRead,
+    )
+    .into_registry();
+    let subagent_write_registry = sigil_runtime::build_role_tool_registry(
+        base_registry,
+        root_config,
+        AgentRole::SubagentWrite,
+    )
+    .into_registry();
+    let workspace_root = options.workspace_root.clone();
+    let interaction_mode = options.interaction_mode;
+    Ok(TaskRoleRuntime {
+        orchestrator: SequentialTaskOrchestrator::new(
+            Agent::new(planner_provider, planner_registry),
+            Agent::new(executor_provider, executor_registry),
+            Agent::new(subagent_read_provider, subagent_read_registry),
+            Agent::new(subagent_write_provider, subagent_write_registry),
+        ),
+        planner_options: sigil_runtime::build_role_run_options(
+            root_config,
+            workspace_root.clone(),
+            interaction_mode,
+            AgentRole::Planner,
+        ),
+        executor_options: sigil_runtime::build_role_run_options(
+            root_config,
+            workspace_root.clone(),
+            interaction_mode,
+            AgentRole::Executor,
+        ),
+        subagent_read_options: sigil_runtime::build_role_run_options(
+            root_config,
+            workspace_root.clone(),
+            interaction_mode,
+            AgentRole::SubagentRead,
+        ),
+        subagent_write_options: sigil_runtime::build_role_run_options(
+            root_config,
+            workspace_root,
+            interaction_mode,
+            AgentRole::SubagentWrite,
+        ),
+    })
+}
+
+fn send_task_result(
+    run_id: u64,
+    session: Session,
+    task_id: String,
+    result: std::result::Result<TaskRunStatus, String>,
+    task_result_tx: mpsc::Sender<RunTaskResult>,
+) {
+    let _ = task_result_tx.send(RunTaskResult {
+        run_id,
+        session,
+        payload: RunTaskPayload::Task { task_id, result },
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

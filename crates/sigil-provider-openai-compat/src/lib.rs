@@ -8,6 +8,7 @@ mod provider;
 mod request;
 mod stream;
 
+pub use capabilities::openai_compatible_capabilities;
 pub use config::{
     OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV, OPENAI_COMPATIBLE_BASE_URL_ENV,
     OPENAI_COMPATIBLE_MODEL_ENV, OPENAI_COMPATIBLE_REQUEST_TIMEOUT_SECS_ENV,

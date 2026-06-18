@@ -719,10 +719,15 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
 
+    for index in 0..12 {
+        app.push_timeline(TimelineRole::Assistant, format!("activity message {index}"));
+    }
+    app.set_terminal_size(80, 10);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE))?;
-    assert_eq!(app.sidebar_selected_card, SidebarCard::Permission);
-    assert_eq!(app.sidebar_agent_selected, 0);
+    assert!(app.timeline_scroll_back > 0);
+    assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))?;
+    assert_eq!(app.timeline_scroll_back, 0);
     assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
 
     app.sidebar_selected_card = SidebarCard::Agents;

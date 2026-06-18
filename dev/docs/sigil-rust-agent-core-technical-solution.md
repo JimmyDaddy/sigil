@@ -21,7 +21,7 @@
 
 1. 用 Rust 构建一个可被 TUI、CLI、HTTP、未来桌面端共同复用的 agent kernel，其中 TUI 是第一用户表面。
 2. 保持 provider、tool、plugin 都由配置和注册机制驱动，而不是写死在核心里。
-3. 第一阶段优先支持 OpenAI-compatible chat completions provider，同时给未来更多 provider 留出扩展位。
+3. 通过独立 provider crate 支持 DeepSeek、OpenAI-compatible、Anthropic 和 Gemini，同时保持内核 provider-neutral。
 4. 内置工具和 MCP 工具通过统一的工具注册表暴露给 agent。
 5. 保持 cache-stable 的 session 设计，把 prefix-cache 命中率视为顶层架构约束，而不是附带优化。
 6. 提供适合自动化 coding 场景的 permission layer 和 workspace confinement。
@@ -34,7 +34,7 @@
 - 第一阶段不做桌面壳
 - 第一阶段不做 codegraph 或更重的代码智能子系统
 - 第一阶段不做 npm、Homebrew、自更新这类分发包装层；只保留源码安装和本地 release archive 脚本用于分发验证
-- 在 OpenAI-compatible 路径稳定前，不铺太多 provider
+- 不把 Anthropic/Gemini/DeepSeek/OpenAI-compatible 的私有 request 或 stream 语义上移进 kernel
 - 在单会话内核跑稳之前，不做复杂的多 agent 编排
 - 第一阶段不继续扩张用户可见命令面，不把 provider 专项能力直接暴露成产品主心智
 
@@ -169,6 +169,8 @@ sigil/
 - `sigil-kernel`：承载 provider、tool、session、event、approval、permission、memory、config 和 agent loop 等通用契约。当前采用 flat public module 文件，测试统一收纳在 `src/tests/*_tests.rs`；这里不出现 DeepSeek 专有字段，也不持有 TUI 状态。
 - `sigil-provider-deepseek`：首个旗舰 provider，内部拆成 transport、endpoint、request、response、stream、mapper、reasoning、tools、pricing 等模块。DeepSeek 专项能力在这里解释和降级，不反向污染 kernel。
 - `sigil-provider-openai-compat`：OpenAI-compatible Chat Completions provider，覆盖通用 streaming text、tool call、usage 和 endpoint/header 配置，不承载 DeepSeek reasoning replay、strict tools、prefix/FIM 或 beta endpoint 语义。
+- `sigil-provider-anthropic`：Anthropic Messages provider，负责 Anthropic 版本 header、beta header、top-level system、`tool_use` / `tool_result` 和 incremental tool argument 映射；kernel 只看到中立的 message、tool spec、usage 和 `ProviderChunk`。
+- `sigil-provider-gemini`：Gemini GenerateContent provider，负责 `systemInstruction`、`functionDeclarations`、`functionCall` / `functionResponse` 和 block reason 映射；Gemini 的 function-response 配对细节保留在 provider crate 内。
 - `sigil-tools-builtin`：隔离文件、shell、搜索等内置工具实现，统一通过 `Tool` trait、preview、permission subject 和结构化 `ToolResult` 回到 agent loop。
 - `sigil-code-intel`：隔离 LSP client 生命周期、Rust Tree-sitter fallback、符号/诊断缓存、只读 code intelligence tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态代码智能结果只通过 bounded tool result 进入 provider-visible history，不注入 system prompt。
 - `sigil-mcp`：隔离 stdio MCP client 与工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
@@ -188,13 +190,7 @@ sigil/
 - Markdown 只由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一解析和缩进，不允许 assistant timeline、tool preview、approval modal 各自维护解析规则。
 - 新增快捷键或命令时，必须同步 `commands.rs` metadata、info rail、keyboard help 和 README。
 
-这里要特别说明：这不意味着 `sigil` 被做成 DeepSeek 专属，而是表示第一套“做深做透”的 provider 先落在 DeepSeek 上。未来仍可增加：
-
-- `sigil-provider-openai-compat`
-- `sigil-provider-anthropic`
-- `sigil-provider-gemini`
-
-但这些 provider 都应该服从同一个 `sigil-kernel` 契约，而不是反过来把内核做成某家厂商私有运行时。
+这里要特别说明：这不意味着 `sigil` 被做成 DeepSeek 专属，而是表示第一套“做深做透”的 provider 先落在 DeepSeek 上；OpenAI-compatible、Anthropic 和 Gemini 也必须服从同一个 `sigil-kernel` 契约，而不是反过来把内核做成某家厂商私有运行时。TUI `/config` 和 `doctor` 只消费 `ProviderCapabilities` 派生出的中立 capability view，不展示 provider 私有字段作为产品主心智。
 
 ## 6. 核心领域模型
 
@@ -640,6 +636,7 @@ cost 字段当前仍以 provider 计价逻辑输出的 USD 金额作为内部源
 - `ApprovalDecision { call_id, approved }`
 - `CancelRun`
 - `CompactNow`
+- `StartNewSession { session_log_path }`
 - `SwitchSession { session_log_path }`
 - `Shutdown`
 
@@ -652,6 +649,7 @@ cost 字段当前仍以 provider 计价逻辑输出的 USD 金额作为内部源
 - `TaskRunStarted`
 - `TaskRunFinished`
 - `RunCancelled`
+- `NewSessionStarted`
 - `SessionSwitched`
 - `SessionCompacted`
 - `RunFailed`
@@ -1221,7 +1219,7 @@ pub struct ProviderCapabilities {
 
 这意味着 `kernel` 事件流在 phase 1 就要按 TUI 消费习惯设计，而不是先按“stdout 打印一堆日志”来塑形。
 
-当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛字段、bootstrap、顶层 key routing 和跨状态编排；输入焦点、slash selector、modal、setup/config、session/resume、timeline/scrollback、tool focus、approval、worker bridge、command dispatch 分别维护在 `crates/sigil-tui/src/app/*`；状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`，共享 fixture 只放 `app/tests/common.rs`。setup/config、commands、context window、provider status、view model 等普通模块的测试维护在 `crates/sigil-tui/src/tests/*_tests.rs`；worker runner 通过 `runner.rs` façade 暴露协议和启动入口，worker protocol、spawn 装配、运行 loop、event/approval bridge、session/compaction flow 与 runner 状态机测试分别维护在 `crates/sigil-tui/src/runner/*` 和 `runner/tests/*_tests.rs`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，renderer 测试维护在 `ui/tests/*_tests.rs`。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
+当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛字段、bootstrap、顶层 key routing 和跨状态编排；输入焦点、slash selector、modal、setup/config、session/resume、timeline/scrollback、tool card interaction/focus、approval、worker bridge、command dispatch 分别维护在 `crates/sigil-tui/src/app/*`；状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`，共享 fixture 只放 `app/tests/common.rs`。setup/config、commands、context window、provider status、view model 等普通模块的测试维护在 `crates/sigil-tui/src/tests/*_tests.rs`；worker runner 通过 `runner.rs` façade 暴露协议和启动入口，worker protocol、spawn 装配、运行 loop、event/approval bridge、session/compaction flow 与 runner 状态机测试分别维护在 `crates/sigil-tui/src/runner/*` 和 `runner/tests/*_tests.rs`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，renderer 测试维护在 `ui/tests/*_tests.rs`。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
 
 ### 15.2 TUI-first 下的能力暴露规则
 
@@ -1333,7 +1331,7 @@ pub struct DeepSeekProviderQuirkProfile {
 - agent runtime 特判
 - request builder 的隐式 if/else
 
-这样未来如果加 `sigil-provider-anthropic` 或 `sigil-provider-openai-compat`，也能沿用同样模式：
+已经落地的 `sigil-provider-anthropic`、`sigil-provider-gemini` 和 `sigil-provider-openai-compat` 也沿用同样模式：
 
 - 通用能力进 `ProviderCapabilities`
 - 厂商怪异行为进 provider-specific quirk profile
@@ -1980,20 +1978,14 @@ pub fn prepare_tools(
 - strict schema 不兼容错误
 - `reasoning_content` 缺失导致的 400
 
-### 20.10 对未来通用 provider 的保护
+### 20.10 对通用 provider 的保护
 
-为了避免 `sigil-provider-deepseek` 反向污染 `kernel`，建议提前定两条红线：
+为了避免 `sigil-provider-deepseek`、`sigil-provider-anthropic`、`sigil-provider-gemini` 或兼容层反向污染 `kernel`，保持两条红线：
 
-1. `kernel` 中不出现 `reasoning_content`、`beta_base_url`、`user_id` 这类 DeepSeek 专有字段名
+1. `kernel` 中不出现 `reasoning_content`、`beta_base_url`、`user_id`、`tool_use`、`systemInstruction`、`functionDeclarations` 这类 provider 专有字段名
 2. provider-specific repair 逻辑只存在于对应 crate，不写进通用 agent loop
 
-只要守住这两条，后面再加：
-
-- `sigil-provider-openai-compat`
-- `sigil-provider-anthropic`
-- `sigil-provider-gemini`
-
-都还是在扩展同一个通用内核，而不是不断为 DeepSeek 特判打洞。
+只要守住这两条，新增或增强 provider 都是在扩展同一个通用内核，而不是不断为某家 provider 特判打洞。
 
 ### 20.11 后续实现顺序
 

@@ -660,7 +660,8 @@ fn tool_card_hidden_preview_area(
 }
 
 fn is_tool_hidden_preview_line(line: &str) -> bool {
-    line.contains(" hidden · ") && line.contains(" lines available")
+    (line.contains(" hidden · ") && line.contains(" lines available"))
+        || line.contains(" more lines hidden")
 }
 
 fn live_text_row_hit_areas(live_area: Rect, app: &AppState) -> Vec<LiveTextRowHitArea> {

@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 
-use sigil_kernel::{ProviderChunk, ToolCall, UsageStats};
+use sigil_kernel::{
+    ProviderChunk, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
+};
 
 use crate::{
     models::{DeepSeekStreamEnvelope, DeepSeekToolCallDelta},
@@ -12,7 +12,7 @@ use crate::{
 
 pub struct StreamMapper {
     model: String,
-    tool_parts: BTreeMap<usize, ToolAccumulator>,
+    tool_parts: ToolCallStreamAccumulator,
     saw_tool_call: bool,
     reasoning_buffer: String,
 }
@@ -21,19 +21,11 @@ impl StreamMapper {
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            tool_parts: BTreeMap::new(),
+            tool_parts: ToolCallStreamAccumulator::new(),
             saw_tool_call: false,
             reasoning_buffer: String::new(),
         }
     }
-}
-
-#[derive(Default)]
-struct ToolAccumulator {
-    id: Option<String>,
-    name: Option<String>,
-    args: String,
-    started: bool,
 }
 
 impl StreamMapper {
@@ -69,17 +61,10 @@ impl StreamMapper {
                 }
             }
             if matches!(choice.finish_reason.as_deref(), Some("tool_calls")) {
-                for accumulator in self.tool_parts.values() {
-                    if let (Some(id), Some(name)) =
-                        (accumulator.id.clone(), accumulator.name.clone())
-                    {
-                        chunks.push(ProviderChunk::ToolCallComplete(ToolCall {
-                            id,
-                            name,
-                            args_json: accumulator.args.clone(),
-                        }));
-                    }
-                }
+                self.tool_parts.complete_open_calls(
+                    &mut chunks,
+                    ToolCallCompletionIdPolicy::RequireProviderId,
+                );
                 if !self.reasoning_buffer.is_empty() {
                     chunks.push(ProviderChunk::ContinuationState(
                         DeepSeekReasoningReplayPayload {
@@ -100,37 +85,12 @@ impl StreamMapper {
     }
 
     fn map_tool_delta(&mut self, chunks: &mut Vec<ProviderChunk>, delta: DeepSeekToolCallDelta) {
-        let accumulator = self.tool_parts.entry(delta.index).or_default();
-        if let Some(id) = delta.id {
-            accumulator.id = Some(id);
-        }
-        if let Some(function) = delta.function {
-            if let Some(name) = function.name {
-                if !accumulator.started {
-                    let id = accumulator
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| format!("call-{}", delta.index));
-                    chunks.push(ProviderChunk::ToolCallStart {
-                        id,
-                        name: name.clone(),
-                    });
-                    accumulator.started = true;
-                }
-                accumulator.name = Some(name);
-            }
-            if let Some(arguments) = function.arguments {
-                let id = accumulator
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| format!("call-{}", delta.index));
-                accumulator.args.push_str(&arguments);
-                chunks.push(ProviderChunk::ToolCallArgsDelta {
-                    id,
-                    delta: arguments,
-                });
-            }
-        }
+        let (name, arguments) = delta
+            .function
+            .map(|function| (function.name, function.arguments))
+            .unwrap_or_default();
+        self.tool_parts
+            .append_delta(chunks, delta.index, delta.id, name, arguments);
     }
 }
 

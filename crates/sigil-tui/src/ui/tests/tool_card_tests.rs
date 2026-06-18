@@ -121,43 +121,14 @@ fn tool_card_parses_legacy_previews_and_mcp_metadata() {
 }
 
 #[test]
-fn tool_card_hidden_preview_labels_and_title_truncation_cover_edge_cases() {
-    let diff_summary = ToolCardRender {
-        diff: Some(ToolCardDiff {
-            summary: "+1 -0".to_owned(),
-            truncated: false,
-            original_line_count: 12,
-            rendered_line_count: 12,
-            files: vec![ToolCardDiffFile {
-                path: "note.txt".to_owned(),
-                lines: vec!["+new".to_owned()],
-                truncated: false,
-                original_line_count: 1,
-                rendered_line_count: 1,
-            }],
-        }),
-        ..base_summary("write_file")
-    };
-    let read_summary = ToolCardRender {
-        preview_lines: vec!["line".to_owned()],
-        ..base_summary("read_file")
-    };
-    let bash_summary = ToolCardRender {
-        preview_lines: vec!["ok".to_owned()],
+fn tool_card_collapsed_preview_and_title_truncation_cover_edge_cases() {
+    let long_summary = ToolCardRender {
+        preview_lines: (1..=8).map(|index| format!("line {index}")).collect(),
+        hidden_lines: 2,
         ..base_summary("bash")
     };
-    let grep_summary = ToolCardRender {
-        preview_lines: vec!["hit".to_owned()],
-        ..base_summary("grep")
-    };
-    let ls_summary = ToolCardRender {
-        preview_lines: vec!["src".to_owned()],
-        ..base_summary("ls")
-    };
-    let generic_summary = ToolCardRender {
-        preview_lines: vec!["preview".to_owned()],
-        ..base_summary("custom_tool")
-    };
+    let collapsed = render_tool_collapsed_preview_body(&long_summary, accent_rose(), 80);
+    let collapsed_text = plain_text(&collapsed);
     let title = ToolCardTitle::new(
         "Called",
         "extraordinarily-long-tool-name",
@@ -169,16 +140,13 @@ fn tool_card_hidden_preview_labels_and_title_truncation_cover_edge_cases() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
 
-    assert_eq!(tool_hidden_preview_label(&diff_summary), "diff");
-    assert_eq!(tool_available_preview_lines(&diff_summary), 12);
-    assert_eq!(tool_hidden_preview_label(&read_summary), "file preview");
-    assert_eq!(tool_hidden_preview_label(&bash_summary), "output");
-    assert_eq!(tool_hidden_preview_label(&grep_summary), "matches");
-    assert_eq!(tool_hidden_preview_label(&ls_summary), "paths");
-    assert_eq!(
-        tool_hidden_preview_label(&generic_summary),
-        "result preview"
-    );
+    assert_eq!(collapsed.len(), COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS + 1);
+    assert!(collapsed_text.contains("output"));
+    assert!(collapsed_text.contains("line 1"));
+    assert!(collapsed_text.contains("line 2"));
+    assert!(collapsed_text.contains("line 3"));
+    assert!(collapsed_text.contains("7 more lines hidden"));
+    assert!(!collapsed_text.contains("line 4"));
 
     assert!(title_text.ends_with("..."));
     assert!(title_spans[0].style.add_modifier.contains(Modifier::BOLD));
@@ -384,8 +352,10 @@ fn tool_card_render_entry_lines_respect_selection_and_hidden_preview_state() {
 
     assert!(text.contains("Read README.md"));
     assert!(text.contains("●"));
-    assert!(text.contains("file preview hidden · 4 lines available"));
-    assert!(!text.contains("# Title"));
+    assert!(text.contains("Title"));
+    assert!(text.contains("body"));
+    assert!(text.contains("2 more lines hidden"));
+    assert!(!text.contains("preview hidden"));
 }
 
 #[test]

@@ -419,6 +419,62 @@ base_url = 123
 }
 
 #[test]
+fn doctor_reports_anthropic_and_gemini_provider_config_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let anthropic_config_path = workspace.join("anthropic.toml");
+    fs::write(
+        &anthropic_config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "anthropic"
+model = "claude-test"
+"#,
+    )?;
+    let anthropic_report = build_doctor_report(&anthropic_config_path, &workspace);
+    assert!(
+        anthropic_report.checks.iter().any(|check| {
+            check.name == "provider:anthropic"
+                && check.status == DoctorStatus::Error
+                && check.message.contains("missing [providers.anthropic]")
+                && check
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|value| value.contains("[providers.anthropic]"))
+        }),
+        "{anthropic_report:#?}"
+    );
+
+    let gemini_config_path = workspace.join("gemini.toml");
+    fs::write(
+        &gemini_config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "gemini"
+model = "gemini-test"
+"#,
+    )?;
+    let gemini_report = build_doctor_report(&gemini_config_path, &workspace);
+    assert!(
+        gemini_report.checks.iter().any(|check| {
+            check.name == "provider:gemini"
+                && check.status == DoctorStatus::Error
+                && check.message.contains("missing [providers.gemini]")
+                && check
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|value| value.contains("[providers.gemini]"))
+        }),
+        "{gemini_report:#?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn doctor_reports_openai_compat_provider_config_and_plaintext_auth() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
@@ -457,6 +513,97 @@ api_key = "test-secret-key"
                 && check.status == DoctorStatus::Warn
                 && check.message.contains("config plaintext"))
     );
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|check| check.message.contains("test-secret-key"))
+    );
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:openai_compat:capabilities"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("supported")
+    }));
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_anthropic_provider_config_and_capabilities() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "anthropic"
+model = "claude-test"
+
+[providers.anthropic]
+base_url = "https://anthropic.example.com"
+model = "claude-test"
+api_key = "test-secret-key"
+max_tokens = 2048
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:anthropic"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("model=claude-test")
+            && check.message.contains("max_tokens=2048")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:anthropic:capabilities"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("supported")
+    }));
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|check| check.message.contains("test-secret-key"))
+    );
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_gemini_provider_config_and_capabilities() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "gemini"
+model = "gemini-test"
+
+[providers.gemini]
+base_url = "https://gemini.example.com/v1beta"
+model = "gemini-test"
+api_key = "test-secret-key"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:gemini"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("model=gemini-test")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:gemini:capabilities"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("supported")
+    }));
     assert!(
         !report
             .checks
@@ -804,6 +951,81 @@ fn terminal_checks_warn_for_multiplexer_and_remote_clipboard_bridges() {
                 .as_deref()
                 .is_some_and(|remediation| remediation.contains("osc52_clipboard"))
     }));
+}
+
+#[test]
+fn terminal_checks_warn_when_iterm_profile_disables_mouse_reporting() {
+    let mut report = DoctorReport::default();
+    let config = TerminalConfig::default();
+    let environment = TerminalEnvironment {
+        term: Some("xterm-256color".to_owned()),
+        term_program: Some("iTerm.app".to_owned()),
+        term_program_version: Some("3.6.10".to_owned()),
+        iterm_profile: Some("Default".to_owned()),
+        iterm_mouse_reporting: Some(false),
+        ..TerminalEnvironment::default()
+    };
+
+    check_terminal_with_env(&mut report, Some(&config), &environment);
+
+    assert_eq!(report.overall_status(), DoctorStatus::Warn);
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:profile"
+            && check.message.contains("ITERM_PROFILE=Default")
+            && check.message.contains("iterm_mouse_reporting=false")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "terminal:mouse"
+            && check.status == DoctorStatus::Warn
+            && check
+                .message
+                .contains("iTerm profile Default disables Mouse Reporting")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("Mouse Reporting"))
+    }));
+}
+
+#[test]
+fn iterm_bookmarks_parser_reads_mouse_reporting_from_single_dump() {
+    let bookmarks = r#"
+Array {
+    Dict {
+        Name = Default
+        Mouse Reporting = true
+        Nested = Dict {
+            Name = Ignored
+            Mouse Reporting = false
+        }
+    }
+    Dict {
+        Name = Work Profile
+        Mouse Reporting = false
+    }
+    Dict {
+        "Name" = Quoted Profile
+        "Mouse Reporting" = true
+    }
+}
+"#;
+
+    assert_eq!(
+        iterm_mouse_reporting_from_bookmarks(bookmarks, "Default"),
+        Some(true)
+    );
+    assert_eq!(
+        iterm_mouse_reporting_from_bookmarks(bookmarks, "Work Profile"),
+        Some(false)
+    );
+    assert_eq!(
+        iterm_mouse_reporting_from_bookmarks(bookmarks, "Quoted Profile"),
+        Some(true)
+    );
+    assert_eq!(
+        iterm_mouse_reporting_from_bookmarks(bookmarks, "Missing"),
+        None
+    );
 }
 
 #[test]

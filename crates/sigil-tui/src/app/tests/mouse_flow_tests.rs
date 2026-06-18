@@ -198,10 +198,10 @@ fn push_sample_tool_cards(app: &mut AppState) {
   "tool_name": "ls",
   "status": "ok",
   "preview_kind": "json",
-  "summary": "first 1/1 lines - 8 B",
+  "summary": "first 1/3 lines - 8 B",
   "preview_lines": ["[\".git\"]"],
   "preview_value": [".git"],
-  "hidden_lines": 0
+  "hidden_lines": 2
 }"#,
     );
     app.push_timeline(
@@ -791,7 +791,7 @@ fn mouse_click_composer_focuses_and_positions_cursor() -> Result<()> {
 }
 
 #[test]
-fn mouse_click_tool_card_body_selects_without_toggling() -> Result<()> {
+fn mouse_press_tool_card_body_selects_without_toggling() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.input = "draft".to_owned();
@@ -807,9 +807,68 @@ fn mouse_click_tool_card_body_selects_without_toggling() -> Result<()> {
         app.selected_tool_activity_key,
         Some("call:call-first".to_owned())
     );
+    assert_eq!(app.active_pane, PaneFocus::Activity);
     assert_eq!(app.input, "draft");
     assert!(app.expanded_tool_activity_keys.is_empty());
     assert!(app.collapsed_tool_activity_keys.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mouse_click_tool_card_body_toggles_card_on_release() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_body_point(&layout, first_entry_index);
+
+    let down = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    assert!(matches!(down, AppMouseOutcome::Redraw));
+    assert!(app.expanded_tool_activity_keys.is_empty());
+
+    let up = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, column, row), &layout)?;
+
+    assert!(matches!(up, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.selected_tool_activity_key,
+        Some("call:call-first".to_owned())
+    );
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
+    Ok(())
+}
+
+#[test]
+fn mouse_drag_tool_card_body_does_not_toggle_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (start_column, start_row) = tool_card_body_point(&layout, first_entry_index);
+    let end_column = start_column.saturating_add(12);
+
+    let _ = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, start_column, start_row),
+        &layout,
+    )?;
+    let drag =
+        app.handle_mouse_event(mouse(MouseInputKind::Drag, end_column, start_row), &layout)?;
+    let up = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftUp, end_column, start_row),
+        &layout,
+    )?;
+
+    assert!(matches!(
+        drag,
+        AppMouseOutcome::Noop | AppMouseOutcome::Redraw
+    ));
+    assert!(matches!(
+        up,
+        AppMouseOutcome::Noop | AppMouseOutcome::Redraw
+    ));
+    assert!(app.expanded_tool_activity_keys.is_empty());
     Ok(())
 }
 
@@ -829,6 +888,7 @@ fn mouse_click_tool_card_header_toggles_card() -> Result<()> {
         app.selected_tool_activity_key,
         Some("call:call-first".to_owned())
     );
+    assert_eq!(app.active_pane, PaneFocus::Activity);
     assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
     assert_eq!(
         app.mouse_hover_target,
@@ -840,21 +900,42 @@ fn mouse_click_tool_card_header_toggles_card() -> Result<()> {
 }
 
 #[test]
+fn mouse_release_only_tool_card_header_toggles_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    push_sample_tool_cards(&mut app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let first_entry_index = app.tool_activity_entry_indices()[0];
+    let (column, row) = tool_card_header_point(&layout, first_entry_index);
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.selected_tool_activity_key,
+        Some("call:call-first".to_owned())
+    );
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
+    Ok(())
+}
+
+#[test]
 fn mouse_click_tool_card_header_keeps_expanded_card_visible() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.set_terminal_size(100, 12);
+    app.set_terminal_size(100, 20);
     push_long_tool_card(&mut app, "call-long", 32);
     push_sample_tool_cards(&mut app);
     let long_entry_index = app.tool_activity_entry_indices()[0];
     app.reveal_timeline_entry(long_entry_index);
-    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 12), &app);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 20), &app);
     let (column, row) = tool_card_header_point(&layout, long_entry_index);
 
     let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert!(app.expanded_tool_activity_keys.contains("call:call-long"));
-    let expanded_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 12), &app);
+    let expanded_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 100, 20), &app);
     let expanded_hit_area = expanded_layout
         .tool_cards
         .iter()
@@ -880,6 +961,7 @@ fn mouse_click_tool_card_hidden_preview_toggles_card() -> Result<()> {
         app.selected_tool_activity_key,
         Some("call:call-first".to_owned())
     );
+    assert_eq!(app.active_pane, PaneFocus::Activity);
     assert!(app.expanded_tool_activity_keys.contains("call:call-first"));
     assert_eq!(
         app.mouse_hover_target,
@@ -977,6 +1059,40 @@ fn mouse_click_regular_slash_candidate_executes() -> Result<()> {
     assert_eq!(app.active_pane, PaneFocus::Composer);
     assert!(app.is_config_mode());
     assert!(app.input.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mouse_release_only_slash_candidate_executes_without_prior_down() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/".to_owned();
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = slash_candidate_point_by_label(&app, &layout, "/config");
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert!(app.is_config_mode());
+    assert!(app.input.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mouse_down_then_release_slash_candidate_does_not_execute_release_again() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.input = "/".to_owned();
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = slash_candidate_point_by_label(&app, &layout, "/config");
+
+    let down = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+    let up = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, column, row), &layout)?;
+
+    assert!(matches!(down, AppMouseOutcome::Redraw));
+    assert!(matches!(up, AppMouseOutcome::Noop));
+    assert!(app.is_config_mode());
     Ok(())
 }
 

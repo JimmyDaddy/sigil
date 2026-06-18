@@ -1,15 +1,21 @@
 use crate::config_panel::{
-    CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
-    CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField, ConfigFieldMove,
-    ConfigFooterAction, ConfigSection, ConfigState, cycle_provider_name,
-    render_config_readonly_row, render_config_value_row,
+    ANTHROPIC_PROVIDER_KEY, CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT,
+    CONFIG_FIELD_NAV_HINT, CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField,
+    ConfigFieldMove, ConfigFooterAction, ConfigSection, ConfigState, GEMINI_PROVIDER_KEY,
+    OPENAI_COMPAT_PROVIDER_KEY, cycle_provider_name, render_config_readonly_row,
+    render_config_value_row,
 };
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{ApprovalMode, CodeIntelStartup, McpServerConfig, McpServerStartup, RootConfig};
+use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
-use sigil_runtime::doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks};
+use sigil_runtime::{
+    doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks},
+    provider_capabilities_for_name, provider_capability_view,
+};
 
 use super::{
     AppAction, AppState, McpServerRuntimeStatus, code_intelligence_config_status,
@@ -209,6 +215,9 @@ impl AppState {
                     ConfigField::ProviderFimModel,
                 ));
                 lines.extend(render_config_selection_details(config_state));
+                lines.push(String::new());
+                lines.push("[capabilities]".to_owned());
+                lines.extend(render_provider_capability_summary(config_state));
             }
             ConfigSection::Permissions => {
                 lines.push("[policy]".to_owned());
@@ -1053,11 +1062,7 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     ];
 
     if matches!(field, ConfigField::ProviderApiKey) {
-        let env_name = if config_state.draft.provider_name == "openai_compat" {
-            OPENAI_COMPATIBLE_API_KEY_ENV
-        } else {
-            SIGIL_API_KEY_ENV
-        };
+        let env_name = provider_api_key_env_name(&config_state.draft.provider_name);
         lines.push(format!("override: {env_name}"));
         lines.push("storage: saved api_key is plaintext in sigil.toml".to_owned());
     }
@@ -1069,6 +1074,45 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     }
 
     lines
+}
+
+fn render_provider_capability_summary(config_state: &ConfigState) -> Vec<String> {
+    let provider_name = config_state.draft.provider_name.as_str();
+    let Some(capabilities) = provider_capabilities_for_name(provider_name) else {
+        return vec![render_config_hint_row("Unknown provider capabilities")];
+    };
+    let view = provider_capability_view(provider_name, &capabilities);
+    let supported = view
+        .rows
+        .iter()
+        .filter(|row| row.status.as_str() == "supported")
+        .count();
+    let advanced = view
+        .rows
+        .iter()
+        .filter(|row| row.status.as_str() == "advanced")
+        .count();
+    vec![
+        render_config_readonly_row(
+            "Provider matrix",
+            &format!(
+                "{} supported · {} advanced · {} total",
+                supported,
+                advanced,
+                view.rows.len()
+            ),
+        ),
+        render_config_hint_row("Full capability summary is available in /doctor"),
+    ]
+}
+
+fn provider_api_key_env_name(provider_name: &str) -> &'static str {
+    match provider_name {
+        OPENAI_COMPAT_PROVIDER_KEY => OPENAI_COMPATIBLE_API_KEY_ENV,
+        ANTHROPIC_PROVIDER_KEY => SIGIL_ANTHROPIC_API_KEY_ENV,
+        GEMINI_PROVIDER_KEY => SIGIL_GEMINI_API_KEY_ENV,
+        _ => SIGIL_API_KEY_ENV,
+    }
 }
 
 fn render_permission_rule_summary(config_state: &ConfigState) -> Vec<String> {

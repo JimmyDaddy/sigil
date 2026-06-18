@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
@@ -6,7 +6,7 @@ use serde_json::json;
 use sigil_kernel::{
     AgentConfig, CompactionConfig, EventHandler, MemoryConfig, PermissionConfig, RootConfig,
     RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolSpec, WorkspaceConfig,
+    ToolPreviewCapability, ToolPreviewFile, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use crate::app::AppState;
@@ -1254,6 +1254,45 @@ fn render_main_screen_supports_activity_pane_without_cursor_logic() -> anyhow::R
     Ok(())
 }
 
+#[test]
+#[ignore = "generates documentation screenshots under site/assets/screenshots"]
+fn render_docs_screenshot_assets() -> anyhow::Result<()> {
+    let screenshot_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("site/assets/screenshots");
+    fs::create_dir_all(&screenshot_dir)?;
+
+    write_terminal_svg(
+        &screenshot_dir.join("tui-session.svg"),
+        "Sigil TUI session preview",
+        "Generated from the Sigil TUI renderer: transcript, tool activity, composer, and info rail.",
+        &mut docs_session_app()?,
+    )?;
+
+    let mut approval_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    approval_app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
+    inject_write_file_approval(&mut approval_app)?;
+    write_terminal_svg(
+        &screenshot_dir.join("approval-review.svg"),
+        "Sigil approval review preview",
+        "Generated from the Sigil TUI renderer: approval modal with file diff preview and allow/deny actions.",
+        &mut approval_app,
+    )?;
+
+    let mut config_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    config_app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
+    config_app.input = "/config".to_owned();
+    let _ = config_app.submit_input()?;
+    write_terminal_svg(
+        &screenshot_dir.join("config-panel.svg"),
+        "Sigil config panel preview",
+        "Generated from the Sigil TUI renderer: provider, memory, compaction, tools, terminal, and MCP settings.",
+        &mut config_app,
+    )?;
+
+    Ok(())
+}
+
 fn inject_write_file_approval(app: &mut AppState) -> anyhow::Result<()> {
     app.handle(RunEvent::ToolApprovalRequested {
         call: ToolCall {
@@ -1295,4 +1334,302 @@ fn inject_write_file_approval(app: &mut AppState) -> anyhow::Result<()> {
             }],
         }),
     })
+}
+
+const DOC_SCREENSHOT_COLUMNS: u16 = 160;
+const DOC_SCREENSHOT_ROWS: u16 = 36;
+const DOC_CELL_WIDTH: u32 = 9;
+const DOC_CELL_HEIGHT: u32 = 18;
+const DOC_FONT_SIZE: u32 = 14;
+const DOC_PADDING: u32 = 24;
+const DOC_TITLE_BAR_HEIGHT: u32 = 42;
+
+fn docs_session_app() -> anyhow::Result<AppState> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
+    app.input = "Explain the repo layout and identify the main entrypoints.".to_owned();
+    let _ = app.submit_input()?;
+    app.handle(RunEvent::ReasoningDelta(
+        "I will inspect the workspace metadata, crates, and user docs first.".to_owned(),
+    ))?;
+
+    let read_call = ToolCall {
+        id: "call-read-cargo".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: r#"{"path":"Cargo.toml"}"#.to_owned(),
+    };
+    app.handle(RunEvent::ToolCallStarted(read_call.clone()))?;
+    app.handle(RunEvent::ToolCallCompleted(read_call.clone()))?;
+    let mut read_meta = ToolResultMeta {
+        returned_bytes: Some(4096),
+        total_bytes: Some(4096),
+        ..ToolResultMeta::default()
+    };
+    read_meta.details = json!({"path":"Cargo.toml"});
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        read_call.id,
+        read_call.name,
+        "[workspace]\nmembers = [\"crates/sigil\", \"crates/sigil-tui\", ...]",
+        read_meta,
+    )))?;
+
+    let grep_call = ToolCall {
+        id: "call-grep-entrypoints".to_owned(),
+        name: "grep".to_owned(),
+        args_json: r#"{"pattern":"run_tui|Subcommand","path":"crates"}"#.to_owned(),
+    };
+    app.handle(RunEvent::ToolCallStarted(grep_call.clone()))?;
+    app.handle(RunEvent::ToolCallCompleted(grep_call.clone()))?;
+    let grep_meta = ToolResultMeta {
+        returned_matches: Some(8),
+        total_matches: Some(8),
+        ..ToolResultMeta::default()
+    };
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        grep_call.id,
+        grep_call.name,
+        "crates/sigil/src/main.rs:92: run_tui\ncrates/sigil-tui/src/launcher.rs:53: run_tui",
+        grep_meta,
+    )))?;
+
+    app.handle(RunEvent::TextDelta(
+        "Sigil is TUI-first. Runtime wires providers and tools; kernel owns the agent contracts."
+            .to_owned(),
+    ))?;
+    app.is_busy = false;
+    Ok(app)
+}
+
+fn write_terminal_svg(
+    path: &Path,
+    title: &str,
+    description: &str,
+    app: &mut AppState,
+) -> anyhow::Result<()> {
+    let backend = TestBackend::new(DOC_SCREENSHOT_COLUMNS, DOC_SCREENSHOT_ROWS);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.draw(|frame| render(frame, app))?;
+    fs::write(path, terminal_buffer_svg(&terminal, title, description))?;
+    Ok(())
+}
+
+fn terminal_buffer_svg(terminal: &Terminal<TestBackend>, title: &str, description: &str) -> String {
+    let buffer = terminal.backend().buffer();
+    let columns = u32::from(buffer.area.width);
+    let rows = u32::from(buffer.area.height);
+    let terminal_width = columns * DOC_CELL_WIDTH;
+    let terminal_height = rows * DOC_CELL_HEIGHT;
+    let window_height = terminal_height + DOC_TITLE_BAR_HEIGHT;
+    let width = terminal_width + DOC_PADDING * 2;
+    let height = terminal_height + DOC_PADDING * 2 + DOC_TITLE_BAR_HEIGHT;
+    let screen_x = DOC_PADDING;
+    let screen_y = DOC_PADDING + DOC_TITLE_BAR_HEIGHT;
+    let clip_id = title
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    let clip_id = if clip_id.is_empty() {
+        "terminalClip".to_owned()
+    } else {
+        format!("terminalClip{clip_id}")
+    };
+    let mut svg = String::new();
+
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" viewBox=\"0 0 {width} {height}\" role=\"img\" aria-labelledby=\"title desc\">\n"
+    ));
+    svg.push_str(&format!(
+        "  <title id=\"title\">{}</title>\n",
+        svg_escape(title)
+    ));
+    svg.push_str(&format!(
+        "  <desc id=\"desc\">{}</desc>\n",
+        svg_escape(description)
+    ));
+    svg.push_str("  <rect width=\"100%\" height=\"100%\" rx=\"18\" fill=\"#101820\"/>\n");
+    svg.push_str(&format!(
+        "  <rect x=\"{screen_x}\" y=\"{DOC_PADDING}\" width=\"{terminal_width}\" height=\"{window_height}\" rx=\"14\" fill=\"#07080a\" stroke=\"#30414d\"/>\n"
+    ));
+    svg.push_str(&format!(
+        "  <rect x=\"{screen_x}\" y=\"{DOC_PADDING}\" width=\"{terminal_width}\" height=\"{DOC_TITLE_BAR_HEIGHT}\" rx=\"14\" fill=\"#151a20\"/>\n"
+    ));
+    for (index, color) in ["#ff6b5f", "#f7c948", "#42d392"].iter().enumerate() {
+        let cx = screen_x + 24 + index as u32 * 22;
+        let cy = DOC_PADDING + DOC_TITLE_BAR_HEIGHT / 2;
+        svg.push_str(&format!(
+            "  <circle cx=\"{cx}\" cy=\"{cy}\" r=\"6\" fill=\"{color}\"/>\n"
+        ));
+    }
+    svg.push_str(&format!(
+        "  <text x=\"{}\" y=\"{}\" fill=\"#d9f6f3\" font-family=\"SFMono-Regular, ui-monospace, Menlo, Consolas, monospace\" font-size=\"14\">sigil</text>\n",
+        screen_x + 92,
+        DOC_PADDING + 27
+    ));
+    svg.push_str(&format!(
+        "  <clipPath id=\"{clip_id}\"><rect x=\"{screen_x}\" y=\"{screen_y}\" width=\"{terminal_width}\" height=\"{terminal_height}\"/></clipPath>\n"
+    ));
+    svg.push_str(&format!("  <g clip-path=\"url(#{clip_id})\">\n"));
+    svg.push_str(&format!(
+        "    <rect x=\"{screen_x}\" y=\"{screen_y}\" width=\"{terminal_width}\" height=\"{terminal_height}\" fill=\"#07080a\"/>\n"
+    ));
+
+    for row in 0..buffer.area.height {
+        let mut run_start = 0;
+        while run_start < buffer.area.width {
+            let run_bg = color_css(
+                buffer
+                    .cell((run_start, row))
+                    .map(|cell| cell.bg)
+                    .unwrap_or(Color::Reset),
+                "#07080a",
+            );
+            let mut run_end = run_start + 1;
+            while run_end < buffer.area.width
+                && color_css(
+                    buffer
+                        .cell((run_end, row))
+                        .map(|cell| cell.bg)
+                        .unwrap_or(Color::Reset),
+                    "#07080a",
+                ) == run_bg
+            {
+                run_end += 1;
+            }
+            if run_bg != "#07080a" {
+                let x = screen_x + u32::from(run_start) * DOC_CELL_WIDTH;
+                let y = screen_y + u32::from(row) * DOC_CELL_HEIGHT;
+                let width = u32::from(run_end - run_start) * DOC_CELL_WIDTH;
+                svg.push_str(&format!(
+                    "    <rect x=\"{x}\" y=\"{y}\" width=\"{width}\" height=\"{DOC_CELL_HEIGHT}\" fill=\"{run_bg}\"/>\n"
+                ));
+            }
+            run_start = run_end;
+        }
+    }
+
+    for row in 0..buffer.area.height {
+        let mut column = 0;
+        while column < buffer.area.width {
+            let Some(cell) = buffer.cell((column, row)) else {
+                column += 1;
+                continue;
+            };
+            if cell.symbol().trim().is_empty() {
+                column += 1;
+                continue;
+            }
+            let run_start = column;
+            let fg = color_css(cell.fg, "#ecf0f6");
+            let weight = font_weight(cell.modifier);
+            let mut text = String::new();
+            while column < buffer.area.width {
+                let Some(run_cell) = buffer.cell((column, row)) else {
+                    break;
+                };
+                let run_fg = color_css(run_cell.fg, "#ecf0f6");
+                if run_fg != fg || font_weight(run_cell.modifier) != weight {
+                    break;
+                }
+                text.push_str(run_cell.symbol());
+                column += 1;
+            }
+            let text = text.trim_end();
+            if text.trim().is_empty() {
+                continue;
+            }
+            let x = screen_x + u32::from(run_start) * DOC_CELL_WIDTH;
+            let y = screen_y + u32::from(row) * DOC_CELL_HEIGHT + 14;
+            svg.push_str(&format!(
+                "    <text x=\"{x}\" y=\"{y}\" fill=\"{fg}\" font-family=\"SFMono-Regular, ui-monospace, Menlo, Consolas, monospace\" font-size=\"{DOC_FONT_SIZE}\" font-weight=\"{weight}\">{}</text>\n",
+                svg_escape(text)
+            ));
+        }
+    }
+
+    svg.push_str("  </g>\n");
+    svg.push_str("  <metadata>Generated from Sigil TUI renderer by render_docs_screenshot_assets.</metadata>\n");
+    svg.push_str("</svg>\n");
+    svg
+}
+
+fn color_css(color: Color, reset: &str) -> String {
+    let (red, green, blue) = match color {
+        Color::Reset => return reset.to_owned(),
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 49, 49),
+        Color::Green => (13, 188, 121),
+        Color::Yellow => (229, 229, 16),
+        Color::Blue => (36, 114, 200),
+        Color::Magenta => (188, 63, 188),
+        Color::Cyan => (17, 168, 205),
+        Color::Gray => (229, 229, 229),
+        Color::DarkGray => (102, 102, 102),
+        Color::LightRed => (241, 76, 76),
+        Color::LightGreen => (35, 209, 139),
+        Color::LightYellow => (245, 245, 67),
+        Color::LightBlue => (59, 142, 234),
+        Color::LightMagenta => (214, 112, 214),
+        Color::LightCyan => (41, 184, 219),
+        Color::White => (255, 255, 255),
+        Color::Indexed(index) => indexed_color(index),
+        Color::Rgb(red, green, blue) => (red, green, blue),
+    };
+    format!("#{red:02x}{green:02x}{blue:02x}")
+}
+
+fn font_weight(modifier: Modifier) -> &'static str {
+    if modifier.contains(Modifier::BOLD) {
+        "700"
+    } else {
+        "400"
+    }
+}
+
+fn indexed_color(index: u8) -> (u8, u8, u8) {
+    const ANSI_16: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    if index < 16 {
+        return ANSI_16[index as usize];
+    }
+    if index < 232 {
+        let offset = index - 16;
+        let red = offset / 36;
+        let green = (offset % 36) / 6;
+        let blue = offset % 6;
+        return (
+            xterm_color_level(red),
+            xterm_color_level(green),
+            xterm_color_level(blue),
+        );
+    }
+    let level = 8 + (index - 232) * 10;
+    (level, level, level)
+}
+
+fn xterm_color_level(value: u8) -> u8 {
+    if value == 0 { 0 } else { 55 + value * 40 }
+}
+
+fn svg_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

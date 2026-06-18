@@ -2,11 +2,15 @@ use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, RootConfig,
 };
+use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
+use sigil_provider_gemini::GeminiProviderConfig;
 use sigil_provider_openai_compat::OpenAiCompatibleProviderConfig;
 
 pub(crate) const DEEPSEEK_PROVIDER_KEY: &str = "deepseek";
 pub(crate) const OPENAI_COMPAT_PROVIDER_KEY: &str = "openai_compat";
+pub(crate) const ANTHROPIC_PROVIDER_KEY: &str = "anthropic";
+pub(crate) const GEMINI_PROVIDER_KEY: &str = "gemini";
 
 pub(crate) const CONFIG_SECTION_NAV_HINT: &str = "Tab section";
 pub(crate) const CONFIG_FIELD_NAV_HINT: &str = "Up/Down field";
@@ -237,7 +241,7 @@ impl ConfigField {
                 "Chat model used for new runs. Switching the saved default does not rewrite the current session."
             }
             Self::ProviderApiKey => {
-                "Saved locally when entered here. SIGIL_API_KEY still overrides it at runtime."
+                "Saved locally when entered here. Provider-specific environment variables override it at runtime."
             }
             Self::ProviderBaseUrl => {
                 "Provider API base URL. Leave this unchanged unless you use a proxy or compatible endpoint."
@@ -510,33 +514,41 @@ impl ConfigDraft {
             .unwrap_or_else(|| default_deepseek_provider_config(&root_config.agent.model));
         let openai_provider = load_openai_compat_provider_config(root_config)
             .unwrap_or_else(|| default_openai_compat_provider_config(&root_config.agent.model));
+        let anthropic_provider = load_anthropic_provider_config(root_config)
+            .unwrap_or_else(|| default_anthropic_provider_config(&root_config.agent.model));
+        let gemini_provider = load_gemini_provider_config(root_config)
+            .unwrap_or_else(|| default_gemini_provider_config(&root_config.agent.model));
         Self {
             base_root_config: root_config.clone(),
             provider_name: provider_name.clone(),
-            provider_model: if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
-                openai_provider.model
-            } else {
-                deepseek_provider.model
+            provider_model: match provider_name.as_str() {
+                OPENAI_COMPAT_PROVIDER_KEY => openai_provider.model,
+                ANTHROPIC_PROVIDER_KEY => anthropic_provider.model,
+                GEMINI_PROVIDER_KEY => gemini_provider.model,
+                _ => deepseek_provider.model,
             },
-            provider_api_key: if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
-                openai_provider.api_key.unwrap_or_default()
-            } else {
-                deepseek_provider.api_key.unwrap_or_default()
+            provider_api_key: match provider_name.as_str() {
+                OPENAI_COMPAT_PROVIDER_KEY => openai_provider.api_key.unwrap_or_default(),
+                ANTHROPIC_PROVIDER_KEY => anthropic_provider.api_key.unwrap_or_default(),
+                GEMINI_PROVIDER_KEY => gemini_provider.api_key.unwrap_or_default(),
+                _ => deepseek_provider.api_key.unwrap_or_default(),
             },
-            provider_base_url: if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
-                openai_provider.base_url
-            } else {
-                deepseek_provider.base_url
+            provider_base_url: match provider_name.as_str() {
+                OPENAI_COMPAT_PROVIDER_KEY => openai_provider.base_url,
+                ANTHROPIC_PROVIDER_KEY => anthropic_provider.base_url,
+                GEMINI_PROVIDER_KEY => gemini_provider.base_url,
+                _ => deepseek_provider.base_url,
             },
             provider_beta_base_url: deepseek_provider.beta_base_url,
             provider_anthropic_base_url: deepseek_provider.anthropic_base_url,
             provider_user_id_strategy: deepseek_provider.user_id_strategy.unwrap_or_default(),
             provider_strict_tools_mode: deepseek_provider.strict_tools_mode,
             provider_fim_model: deepseek_provider.fim_model,
-            provider_request_timeout_secs: if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
-                openai_provider.request_timeout_secs.to_string()
-            } else {
-                deepseek_provider.request_timeout_secs.to_string()
+            provider_request_timeout_secs: match provider_name.as_str() {
+                OPENAI_COMPAT_PROVIDER_KEY => openai_provider.request_timeout_secs.to_string(),
+                ANTHROPIC_PROVIDER_KEY => anthropic_provider.request_timeout_secs.to_string(),
+                GEMINI_PROVIDER_KEY => gemini_provider.request_timeout_secs.to_string(),
+                _ => deepseek_provider.request_timeout_secs.to_string(),
             },
             permission_default_mode: root_config.permission.default_mode,
             memory_enabled: root_config.memory.enabled,
@@ -682,38 +694,66 @@ impl ConfigDraft {
             .map(|(index, server)| server.to_config(index))
             .collect::<Result<Vec<_>>>()?;
 
-        if provider_name == OPENAI_COMPAT_PROVIDER_KEY {
-            let mut provider_config = load_openai_compat_provider_config(&root_config)
-                .unwrap_or_else(|| default_openai_compat_provider_config(model));
-            provider_config.model = model.to_owned();
-            provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
-            provider_config.base_url = base_url.to_owned();
-            provider_config.request_timeout_secs = request_timeout_secs;
-            let provider_value = serialize_openai_compat_provider_value(&provider_config)?;
-            root_config
-                .providers
-                .insert(OPENAI_COMPAT_PROVIDER_KEY.to_owned(), provider_value);
-        } else {
-            let beta_base_url = self.provider_beta_base_url.trim();
-            let anthropic_base_url = self.provider_anthropic_base_url.trim();
-            let fim_model = self.provider_fim_model.trim();
-            let mut provider_config = load_deepseek_provider_config(&root_config)
-                .unwrap_or_else(|| default_deepseek_provider_config(model));
-            provider_config.model = model.to_owned();
-            provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
-            provider_config.base_url = base_url.to_owned();
-            provider_config.beta_base_url = beta_base_url.to_owned();
-            provider_config.anthropic_base_url = anthropic_base_url.to_owned();
-            provider_config.user_id_strategy = (!self.provider_user_id_strategy.trim().is_empty())
-                .then(|| self.provider_user_id_strategy.trim().to_owned());
-            provider_config.strict_tools_mode = self.provider_strict_tools_mode;
-            provider_config.fim_model = fim_model.to_owned();
-            provider_config.request_timeout_secs = request_timeout_secs;
+        match provider_name {
+            OPENAI_COMPAT_PROVIDER_KEY => {
+                let mut provider_config = load_openai_compat_provider_config(&root_config)
+                    .unwrap_or_else(|| default_openai_compat_provider_config(model));
+                provider_config.model = model.to_owned();
+                provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
+                provider_config.base_url = base_url.to_owned();
+                provider_config.request_timeout_secs = request_timeout_secs;
+                let provider_value = serialize_openai_compat_provider_value(&provider_config)?;
+                root_config
+                    .providers
+                    .insert(OPENAI_COMPAT_PROVIDER_KEY.to_owned(), provider_value);
+            }
+            ANTHROPIC_PROVIDER_KEY => {
+                let mut provider_config = load_anthropic_provider_config(&root_config)
+                    .unwrap_or_else(|| default_anthropic_provider_config(model));
+                provider_config.model = model.to_owned();
+                provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
+                provider_config.base_url = base_url.to_owned();
+                provider_config.request_timeout_secs = request_timeout_secs;
+                let provider_value = serialize_anthropic_provider_value(&provider_config)?;
+                root_config
+                    .providers
+                    .insert(ANTHROPIC_PROVIDER_KEY.to_owned(), provider_value);
+            }
+            GEMINI_PROVIDER_KEY => {
+                let mut provider_config = load_gemini_provider_config(&root_config)
+                    .unwrap_or_else(|| default_gemini_provider_config(model));
+                provider_config.model = model.to_owned();
+                provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
+                provider_config.base_url = base_url.to_owned();
+                provider_config.request_timeout_secs = request_timeout_secs;
+                let provider_value = serialize_gemini_provider_value(&provider_config)?;
+                root_config
+                    .providers
+                    .insert(GEMINI_PROVIDER_KEY.to_owned(), provider_value);
+            }
+            _ => {
+                let beta_base_url = self.provider_beta_base_url.trim();
+                let anthropic_base_url = self.provider_anthropic_base_url.trim();
+                let fim_model = self.provider_fim_model.trim();
+                let mut provider_config = load_deepseek_provider_config(&root_config)
+                    .unwrap_or_else(|| default_deepseek_provider_config(model));
+                provider_config.model = model.to_owned();
+                provider_config.api_key = (!api_key.is_empty()).then(|| api_key.to_owned());
+                provider_config.base_url = base_url.to_owned();
+                provider_config.beta_base_url = beta_base_url.to_owned();
+                provider_config.anthropic_base_url = anthropic_base_url.to_owned();
+                provider_config.user_id_strategy =
+                    (!self.provider_user_id_strategy.trim().is_empty())
+                        .then(|| self.provider_user_id_strategy.trim().to_owned());
+                provider_config.strict_tools_mode = self.provider_strict_tools_mode;
+                provider_config.fim_model = fim_model.to_owned();
+                provider_config.request_timeout_secs = request_timeout_secs;
 
-            let provider_value = serialize_deepseek_provider_value(&provider_config)?;
-            root_config
-                .providers
-                .insert(DEEPSEEK_PROVIDER_KEY.to_owned(), provider_value);
+                let provider_value = serialize_deepseek_provider_value(&provider_config)?;
+                root_config
+                    .providers
+                    .insert(DEEPSEEK_PROVIDER_KEY.to_owned(), provider_value);
+            }
         }
         Ok(root_config)
     }
@@ -1088,12 +1128,40 @@ pub(crate) fn load_openai_compat_provider_config(
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
+pub(crate) fn load_anthropic_provider_config(
+    root_config: &RootConfig,
+) -> Option<AnthropicProviderConfig> {
+    root_config
+        .providers
+        .get(ANTHROPIC_PROVIDER_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+pub(crate) fn load_gemini_provider_config(
+    root_config: &RootConfig,
+) -> Option<GeminiProviderConfig> {
+    root_config
+        .providers
+        .get(GEMINI_PROVIDER_KEY)
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
 pub(crate) fn default_deepseek_provider_config(model: &str) -> DeepSeekProviderConfig {
     DeepSeekProviderConfig::default_for_model(model)
 }
 
 pub(crate) fn default_openai_compat_provider_config(model: &str) -> OpenAiCompatibleProviderConfig {
     OpenAiCompatibleProviderConfig::default_for_model(model)
+}
+
+pub(crate) fn default_anthropic_provider_config(model: &str) -> AnthropicProviderConfig {
+    AnthropicProviderConfig::default_for_model(model)
+}
+
+pub(crate) fn default_gemini_provider_config(model: &str) -> GeminiProviderConfig {
+    GeminiProviderConfig::default_for_model(model)
 }
 
 pub(crate) fn serialize_deepseek_provider_value(
@@ -1118,9 +1186,33 @@ pub(crate) fn serialize_openai_compat_provider_value(
     Ok(value)
 }
 
+pub(crate) fn serialize_anthropic_provider_value(
+    provider_config: &AnthropicProviderConfig,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(provider_config)
+        .map_err(|error| anyhow!("failed to serialize anthropic provider config: {error}"))?;
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|_, entry| !entry.is_null());
+    }
+    Ok(value)
+}
+
+pub(crate) fn serialize_gemini_provider_value(
+    provider_config: &GeminiProviderConfig,
+) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(provider_config)
+        .map_err(|error| anyhow!("failed to serialize gemini provider config: {error}"))?;
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|_, entry| !entry.is_null());
+    }
+    Ok(value)
+}
+
 pub(crate) fn normalize_provider_name(provider: &str) -> &'static str {
     match provider {
         "openai-compatible" | "openai_compatible" | "openai_compat" => OPENAI_COMPAT_PROVIDER_KEY,
+        "anthropic" | "claude" => ANTHROPIC_PROVIDER_KEY,
+        "gemini" | "google" | "google_gemini" | "google-gemini" => GEMINI_PROVIDER_KEY,
         _ => DEEPSEEK_PROVIDER_KEY,
     }
 }
@@ -1128,6 +1220,8 @@ pub(crate) fn normalize_provider_name(provider: &str) -> &'static str {
 pub(crate) fn cycle_provider_name(provider: &str) -> String {
     match normalize_provider_name(provider) {
         DEEPSEEK_PROVIDER_KEY => OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
+        OPENAI_COMPAT_PROVIDER_KEY => ANTHROPIC_PROVIDER_KEY.to_owned(),
+        ANTHROPIC_PROVIDER_KEY => GEMINI_PROVIDER_KEY.to_owned(),
         _ => DEEPSEEK_PROVIDER_KEY.to_owned(),
     }
 }

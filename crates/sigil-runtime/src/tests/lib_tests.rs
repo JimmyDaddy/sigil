@@ -17,16 +17,20 @@ use sigil_kernel::{
     Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext,
     ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
+use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
+use sigil_provider_gemini::{GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, SIGIL_GEMINI_API_KEY_ENV};
 use sigil_provider_openai_compat::{OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV};
 
 use super::{
     SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
     build_role_provider, build_role_run_options, build_role_tool_registry, build_run_options,
-    build_tool_registry, build_tool_registry_without_eager_mcp, load_deepseek_config,
-    load_openai_compat_config, refresh_mcp_server_tools_with_mcp_handlers,
-    register_lazy_mcp_activation_tool, resolve_deepseek_api_key,
-    resolve_deepseek_api_key_with_session, resolve_openai_compat_api_key,
+    build_tool_registry, build_tool_registry_without_eager_mcp, load_anthropic_config,
+    load_deepseek_config, load_gemini_config, load_openai_compat_config,
+    provider_capabilities_for_name, provider_capability_view,
+    refresh_mcp_server_tools_with_mcp_handlers, register_lazy_mcp_activation_tool,
+    resolve_anthropic_api_key, resolve_deepseek_api_key, resolve_deepseek_api_key_with_session,
+    resolve_gemini_api_key, resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
     resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
 };
 
@@ -75,6 +79,26 @@ fn test_root_config(provider: &str) -> RootConfig {
                     "organization": "org-test",
                     "project": "project-test",
                     "request_timeout_secs": 20
+                }),
+            ),
+            (
+                "anthropic".to_owned(),
+                json!({
+                    "base_url": "https://anthropic.example.com",
+                    "model": "claude-test",
+                    "api_key": "anthropic-config-key",
+                    "anthropic_version": "2023-06-01",
+                    "max_tokens": 1024,
+                    "request_timeout_secs": 21
+                }),
+            ),
+            (
+                "gemini".to_owned(),
+                json!({
+                    "base_url": "https://gemini.example.com/v1beta",
+                    "model": "gemini-test",
+                    "api_key": "gemini-config-key",
+                    "request_timeout_secs": 22
                 }),
             ),
         ]),
@@ -133,6 +157,23 @@ fn load_openai_compat_config_reads_provider_block() -> Result<()> {
     assert_eq!(config.organization.as_deref(), Some("org-test"));
     assert_eq!(config.project.as_deref(), Some("project-test"));
     assert_eq!(config.request_timeout_secs, 20);
+    Ok(())
+}
+
+#[test]
+fn load_anthropic_and_gemini_config_read_provider_blocks() -> Result<()> {
+    let anthropic = load_anthropic_config(&test_root_config("anthropic"))?;
+    assert_eq!(anthropic.base_url, "https://anthropic.example.com");
+    assert_eq!(anthropic.model, "claude-test");
+    assert_eq!(anthropic.api_key.as_deref(), Some("anthropic-config-key"));
+    assert_eq!(anthropic.max_tokens, 1024);
+    assert_eq!(anthropic.request_timeout_secs, 21);
+
+    let gemini = load_gemini_config(&test_root_config("gemini"))?;
+    assert_eq!(gemini.base_url, "https://gemini.example.com/v1beta");
+    assert_eq!(gemini.model, "gemini-test");
+    assert_eq!(gemini.api_key.as_deref(), Some("gemini-config-key"));
+    assert_eq!(gemini.request_timeout_secs, 22);
     Ok(())
 }
 
@@ -225,6 +266,74 @@ fn resolve_openai_compat_api_key_prefers_env_session_then_config() -> Result<()>
 }
 
 #[test]
+fn resolve_anthropic_and_gemini_api_keys_prefer_env_session_then_config() -> Result<()> {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let anthropic = load_anthropic_config(&test_root_config("anthropic"))?;
+    let gemini = load_gemini_config(&test_root_config("gemini"))?;
+
+    {
+        let _scope = EnvScope::set_many(&[(SIGIL_ANTHROPIC_API_KEY_ENV, "anthropic-env")]);
+        let resolved = resolve_anthropic_api_key(&anthropic).expect("expected Anthropic api key");
+        assert_eq!(resolved.value, "anthropic-env");
+        assert_eq!(
+            resolved.source,
+            SecretSource::Environment(SIGIL_ANTHROPIC_API_KEY_ENV)
+        );
+    }
+
+    {
+        let _scope = EnvScope::set_many(&[
+            (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
+            (ANTHROPIC_API_KEY_ENV, "anthropic-provider-env"),
+        ]);
+        let resolved = resolve_anthropic_api_key(&anthropic).expect("expected Anthropic api key");
+        assert_eq!(resolved.value, "anthropic-provider-env");
+        assert_eq!(
+            resolved.source,
+            SecretSource::Environment(ANTHROPIC_API_KEY_ENV)
+        );
+    }
+
+    let resolved = super::resolve_anthropic_api_key_with_session(&anthropic, Some(" session-key "))
+        .expect("expected Anthropic session key");
+    assert_eq!(resolved.value, "session-key");
+    assert_eq!(resolved.source, SecretSource::Session);
+
+    {
+        let _scope = EnvScope::set_many(&[(SIGIL_GEMINI_API_KEY_ENV, "gemini-env")]);
+        let resolved = resolve_gemini_api_key(&gemini).expect("expected Gemini api key");
+        assert_eq!(resolved.value, "gemini-env");
+        assert_eq!(
+            resolved.source,
+            SecretSource::Environment(SIGIL_GEMINI_API_KEY_ENV)
+        );
+    }
+
+    {
+        let _scope = EnvScope::set_many(&[
+            (SIGIL_GEMINI_API_KEY_ENV, "   "),
+            (GEMINI_API_KEY_ENV, "gemini-provider-env"),
+            (GOOGLE_API_KEY_ENV, "google-env"),
+        ]);
+        let resolved = resolve_gemini_api_key(&gemini).expect("expected Gemini api key");
+        assert_eq!(resolved.value, "gemini-provider-env");
+        assert_eq!(
+            resolved.source,
+            SecretSource::Environment(GEMINI_API_KEY_ENV)
+        );
+    }
+
+    let resolved = resolve_gemini_api_key_with_session(&gemini, Some(" gemini-session "))
+        .expect("expected Gemini session key");
+    assert_eq!(resolved.value, "gemini-session");
+    assert_eq!(resolved.source, SecretSource::Session);
+    Ok(())
+}
+
+#[test]
 fn secret_redactor_for_root_config_redacts_resolved_api_key() {
     let _guard = ENV_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -253,6 +362,16 @@ fn secret_redactor_for_root_config_redacts_openai_compat_api_key() {
     assert_eq!(
         redactor.redact_text("Authorization: Bearer openai-env-secret"),
         "Authorization: [redacted] [redacted]"
+    );
+}
+
+#[test]
+fn secret_redactor_for_root_config_redacts_anthropic_and_gemini_api_keys() {
+    let redactor = secret_redactor_for_root_config(&test_root_config("anthropic"));
+
+    assert_eq!(
+        redactor.redact_text("x-api-key: anthropic-config-key; key=gemini-config-key"),
+        "x-api-key: [redacted]; key=[redacted]"
     );
 }
 
@@ -295,6 +414,53 @@ fn build_provider_supports_openai_compat_aliases_and_missing_config_errors() -> 
             .contains("missing [providers.openai_compat]")
     );
     Ok(())
+}
+
+#[test]
+fn build_provider_supports_anthropic_and_gemini_and_missing_config_errors() -> Result<()> {
+    let anthropic = build_provider(&test_root_config("anthropic"))?;
+    assert_eq!(anthropic.name(), "anthropic");
+
+    let gemini = build_provider(&test_root_config("gemini"))?;
+    assert_eq!(gemini.name(), "gemini");
+
+    for provider_name in ["google", "google_gemini", "google-gemini"] {
+        let provider = build_provider(&test_root_config(provider_name))?;
+        assert_eq!(provider.name(), "gemini");
+    }
+
+    let mut missing_anthropic = test_root_config("anthropic");
+    missing_anthropic.providers.remove("anthropic");
+    let error = load_anthropic_config(&missing_anthropic)
+        .expect_err("missing Anthropic provider config should fail");
+    assert!(error.to_string().contains("missing [providers.anthropic]"));
+
+    let mut missing_gemini = test_root_config("gemini");
+    missing_gemini.providers.remove("gemini");
+    let error = load_gemini_config(&missing_gemini)
+        .expect_err("missing Gemini provider config should fail");
+    assert!(error.to_string().contains("missing [providers.gemini]"));
+    Ok(())
+}
+
+#[test]
+fn provider_capability_view_uses_provider_neutral_rows() {
+    let capabilities =
+        provider_capabilities_for_name("anthropic").expect("Anthropic capabilities should exist");
+    let view = provider_capability_view("anthropic", &capabilities);
+
+    assert_eq!(view.provider_name, "anthropic");
+    assert!(
+        view.rows
+            .iter()
+            .any(|row| { row.key == "tool_calls" && row.status.as_str() == "supported" })
+    );
+    assert!(
+        view.rows
+            .iter()
+            .any(|row| { row.key == "reasoning_effort" && row.status.as_str() == "unsupported" })
+    );
+    assert!(provider_capabilities_for_name("unknown").is_none());
 }
 
 #[test]

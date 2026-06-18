@@ -125,6 +125,133 @@ pub struct ToolCall {
     pub args_json: String,
 }
 
+/// Controls whether a completed streamed tool call may use a generated fallback id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCallCompletionIdPolicy {
+    /// Complete only when the provider emitted an explicit tool-call id.
+    RequireProviderId,
+    /// Complete with `call-{index}` when the provider omitted an id.
+    SynthesizeFromIndex,
+}
+
+/// Provider-neutral accumulator for streamed tool-call deltas.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallStreamAccumulator {
+    parts: BTreeMap<usize, ToolCallStreamPart>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolCallStreamPart {
+    id: Option<String>,
+    event_id: Option<String>,
+    name: Option<String>,
+    args: String,
+    started: bool,
+    completed: bool,
+}
+
+impl ToolCallStreamAccumulator {
+    /// Creates an empty accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Applies one provider tool-call delta and appends any emitted stream chunks.
+    pub fn append_delta(
+        &mut self,
+        chunks: &mut Vec<ProviderChunk>,
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    ) {
+        let part = self.parts.entry(index).or_default();
+        if let Some(id) = id {
+            part.id = Some(id);
+        }
+        if let Some(name) = name {
+            part.name = Some(name);
+            emit_tool_start(chunks, index, part);
+        }
+        if let Some(arguments) = arguments {
+            part.args.push_str(&arguments);
+            chunks.push(ProviderChunk::ToolCallArgsDelta {
+                id: stable_tool_call_id(index, part),
+                delta: arguments,
+            });
+        }
+    }
+
+    /// Completes every currently open tool call that has enough provider data.
+    pub fn complete_open_calls(
+        &mut self,
+        chunks: &mut Vec<ProviderChunk>,
+        id_policy: ToolCallCompletionIdPolicy,
+    ) {
+        for (index, part) in &mut self.parts {
+            emit_tool_start(chunks, *index, part);
+            if part.completed {
+                continue;
+            }
+            let Some(name) = part.name.clone() else {
+                continue;
+            };
+            let Some(id) = completion_tool_call_id(*index, part, id_policy) else {
+                continue;
+            };
+            chunks.push(ProviderChunk::ToolCallComplete(ToolCall {
+                id,
+                name,
+                args_json: part.args.clone(),
+            }));
+            part.completed = true;
+        }
+        self.parts.retain(|_, part| !part.completed);
+    }
+
+    /// Discards all buffered streamed tool-call state.
+    pub fn clear(&mut self) {
+        self.parts.clear();
+    }
+}
+
+fn emit_tool_start(chunks: &mut Vec<ProviderChunk>, index: usize, part: &mut ToolCallStreamPart) {
+    if part.started {
+        return;
+    }
+    let Some(name) = part.name.clone() else {
+        return;
+    };
+    chunks.push(ProviderChunk::ToolCallStart {
+        id: stable_tool_call_id(index, part),
+        name,
+    });
+    part.started = true;
+}
+
+fn completion_tool_call_id(
+    index: usize,
+    part: &mut ToolCallStreamPart,
+    policy: ToolCallCompletionIdPolicy,
+) -> Option<String> {
+    match (part.id.is_some(), policy) {
+        (true, _) => Some(stable_tool_call_id(index, part)),
+        (false, ToolCallCompletionIdPolicy::SynthesizeFromIndex) => {
+            Some(stable_tool_call_id(index, part))
+        }
+        (false, ToolCallCompletionIdPolicy::RequireProviderId) => None,
+    }
+}
+
+fn stable_tool_call_id(index: usize, part: &mut ToolCallStreamPart) -> String {
+    if let Some(id) = part.event_id.clone() {
+        return id;
+    }
+    let id = part.id.clone().unwrap_or_else(|| format!("call-{index}"));
+    part.event_id = Some(id.clone());
+    id
+}
+
 /// Provider-facing chat message persisted in session history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

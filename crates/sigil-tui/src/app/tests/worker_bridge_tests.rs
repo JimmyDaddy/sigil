@@ -806,6 +806,13 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         WorkerCommand::CheckChangedFilesDiagnostics
     ));
     assert!(matches!(
+        app.into_worker_command(AppAction::StartNewSession {
+            session_log_path: std::path::PathBuf::from("session-new.jsonl"),
+        }),
+        WorkerCommand::StartNewSession { session_log_path }
+            if session_log_path == std::path::Path::new("session-new.jsonl")
+    ));
+    assert!(matches!(
         app.into_worker_command(AppAction::SwitchSession {
             session_log_path: std::path::PathBuf::from("session.jsonl"),
         }),
@@ -823,6 +830,38 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         })
     }));
     assert!(panic.is_err());
+}
+
+#[test]
+fn new_session_started_restores_empty_session_view() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(TimelineRole::Assistant, "old context");
+    let new_session_log_path = std::path::PathBuf::from(".sigil/sessions/session-new.jsonl");
+
+    app.handle_worker_message(WorkerMessage::NewSessionStarted {
+        session_log_path: new_session_log_path.clone(),
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        entries: vec![SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-pro".to_owned(),
+        })],
+    })?;
+
+    assert_eq!(app.session_log_path, new_session_log_path);
+    assert_eq!(app.model_name, "deepseek-v4-pro");
+    assert_eq!(app.last_notice(), Some("started new session"));
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "started new session")
+    );
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Assistant && entry.text == "old context")
+    );
+    Ok(())
 }
 
 #[test]

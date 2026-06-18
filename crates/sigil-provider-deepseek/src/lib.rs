@@ -16,6 +16,7 @@ mod retry;
 mod stream;
 mod tools;
 
+pub use capabilities::deepseek_capabilities;
 pub use config::{
     DeepSeekProviderConfig, DeepSeekProviderProfile, DeepSeekProviderQuirkProfile,
     LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_ANTHROPIC_BASE_URL_ENV, SIGIL_API_KEY_ENV,

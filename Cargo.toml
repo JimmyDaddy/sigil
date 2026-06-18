@@ -3,6 +3,8 @@ members = [
     "crates/sigil-kernel",
     "crates/sigil-provider-deepseek",
     "crates/sigil-provider-openai-compat",
+    "crates/sigil-provider-anthropic",
+    "crates/sigil-provider-gemini",
     "crates/sigil-tools-builtin",
     "crates/sigil-code-intel",
     "crates/sigil-mcp",

@@ -1,4 +1,4 @@
-use super::{AppAction, AppState, PaneFocus};
+use super::{AppAction, AppState};
 use crate::commands::UiCommand;
 use sigil_kernel::CodeIntelStartup;
 
@@ -31,9 +31,7 @@ impl AppState {
             self.open_keyboard_help();
             return true;
         }
-        if self.pending_approval.is_some()
-            || (self.active_pane == PaneFocus::Composer && !self.input.is_empty())
-        {
+        if self.pending_approval.is_some() || !self.input.is_empty() {
             return false;
         }
 
@@ -51,6 +49,7 @@ impl AppState {
             | UiCommand::OpenKeyboardHelp
             | UiCommand::OpenConfig
             | UiCommand::OpenDoctor
+            | UiCommand::StartNewSession
             | UiCommand::CompactNow
             | UiCommand::CheckChangedFilesDiagnostics => false,
         }

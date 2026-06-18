@@ -29,11 +29,12 @@ use sigil_kernel::RootConfig;
 use sigil_kernel::preferred_config_path;
 
 #[cfg(not(test))]
-use crate::ui::{self, LayoutSnapshot};
+use crate::ui;
 use crate::{
     app::{AppAction, AppState},
     mouse::AppMouseOutcome,
     runner::{self, WorkerCommand, WorkerMessage},
+    ui::LayoutSnapshot,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -63,8 +64,8 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     let inline_viewport_height = current_inline_viewport_height()?;
     let mut stdout = io::stdout();
     let keyboard_enhancement_enabled = enable_keyboard_enhancement(&mut stdout)?;
-    let mouse_capture_enabled = app.terminal_mouse_capture_enabled();
-    if mouse_capture_enabled {
+    let mut mouse_capture_active = app.terminal_mouse_capture_enabled();
+    if mouse_capture_active {
         execute!(stdout, EnableMouseCapture)?;
     }
     let backend = CrosstermBackend::new(stdout);
@@ -74,12 +75,17 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
             viewport: Viewport::Inline(inline_viewport_height),
         },
     )?;
-    let result = run_app(&mut terminal, &mut app, &mut worker);
+    let result = run_app(
+        &mut terminal,
+        &mut app,
+        &mut worker,
+        &mut mouse_capture_active,
+    );
 
     if keyboard_enhancement_enabled {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
-    if mouse_capture_enabled {
+    if mouse_capture_active {
         execute!(terminal.backend_mut(), DisableMouseCapture)?;
     }
     disable_raw_mode()?;
@@ -108,16 +114,29 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut AppState,
     worker: &mut Option<WorkerRuntime>,
+    mouse_capture_active: &mut bool,
 ) -> Result<()> {
     let mut scrollback = ScrollbackSyncState::default();
     let mut needs_render = true;
     let mut last_spinner_tick = live_spinner_tick();
+    let mut latest_frame_area = Rect::default();
 
     loop {
         let mut dirty = needs_render;
         dirty |= drain_worker_messages(app, worker)?;
         dirty |= app.poll_background_tasks();
         dirty |= flush_pending_worker_commands(app, worker)?;
+        if let Some(enable) =
+            next_mouse_capture_action(*mouse_capture_active, app.terminal_mouse_capture_enabled())
+        {
+            if enable {
+                execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            } else {
+                execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            }
+            *mouse_capture_active = enable;
+            dirty = true;
+        }
 
         let size = terminal.size()?;
         dirty |= app.set_terminal_size(size.width, size.height);
@@ -130,7 +149,10 @@ fn run_app(
 
         if dirty {
             sync_terminal_scrollback(terminal, app, &mut scrollback)?;
-            terminal.draw(|frame| ui::render(frame, app))?;
+            terminal.draw(|frame| {
+                latest_frame_area = frame.area();
+                ui::render(frame, app);
+            })?;
             last_spinner_tick = spinner_tick;
             needs_render = false;
         }
@@ -149,8 +171,7 @@ fn run_app(
                     needs_render = true;
                 }
                 CrosstermEvent::Mouse(mouse) => {
-                    let layout =
-                        LayoutSnapshot::from_app(Rect::new(0, 0, size.width, size.height), app);
+                    let layout = mouse_layout_snapshot(latest_frame_area, size.into(), app);
                     let outcome = app.handle_mouse_event(mouse.into(), &layout)?;
                     needs_render |= apply_mouse_outcome(app, worker, outcome, spawn_worker)?;
                 }
@@ -164,6 +185,15 @@ fn run_app(
     }
 
     Ok(())
+}
+
+fn mouse_layout_snapshot(frame_area: Rect, terminal_size: Rect, app: &AppState) -> LayoutSnapshot {
+    let screen = if frame_area.width == 0 || frame_area.height == 0 {
+        Rect::new(0, 0, terminal_size.width, terminal_size.height)
+    } else {
+        frame_area
+    };
+    LayoutSnapshot::from_app(screen, app)
 }
 
 fn build_initial_app<F>(
@@ -428,6 +458,13 @@ where
         process_app_action_with_spawner(app, worker, action, &mut spawn_worker_fn)?;
     }
     Ok(true)
+}
+
+fn next_mouse_capture_action(active: bool, desired: bool) -> Option<bool> {
+    if active == desired {
+        return None;
+    }
+    Some(desired)
 }
 
 #[derive(Debug, Clone, Default)]

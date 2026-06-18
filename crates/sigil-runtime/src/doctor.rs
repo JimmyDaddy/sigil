@@ -1,17 +1,22 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use sigil_kernel::{
     McpServerConfig, McpServerStartup, RootConfig, config::TerminalConfig, resolve_workspace_root,
 };
+use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 
 use crate::{
-    SecretResolution, SecretSource, load_deepseek_config, load_openai_compat_config,
-    resolve_deepseek_api_key, resolve_openai_compat_api_key,
+    SecretResolution, SecretSource, load_anthropic_config, load_deepseek_config,
+    load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
+    provider_capability_view, resolve_anthropic_api_key, resolve_deepseek_api_key,
+    resolve_gemini_api_key, resolve_openai_compat_api_key,
 };
 
 /// Severity for one local diagnostics check.
@@ -243,11 +248,15 @@ fn check_provider(report: &mut DoctorReport, root_config: &RootConfig) {
         "openai_compat" | "openai-compatible" | "openai_compatible" => {
             check_openai_compat_provider(report, root_config);
         }
+        "anthropic" => check_anthropic_provider(report, root_config),
+        "gemini" | "google" | "google_gemini" | "google-gemini" => {
+            check_gemini_provider(report, root_config);
+        }
         other => report.push_with_remediation(
             DoctorStatus::Error,
             "provider",
             format!("unsupported provider {other}"),
-            Some("set [agent].provider to \"deepseek\" or \"openai_compat\""),
+            Some("set [agent].provider to \"deepseek\", \"openai_compat\", \"anthropic\", or \"gemini\""),
         ),
     }
 }
@@ -277,6 +286,7 @@ fn check_deepseek_provider(report: &mut DoctorReport, root_config: &RootConfig) 
         SIGIL_API_KEY_ENV,
         "[providers.deepseek].api_key",
     );
+    push_provider_capability_checks(report, "deepseek");
 }
 
 fn check_openai_compat_provider(report: &mut DoctorReport, root_config: &RootConfig) {
@@ -303,6 +313,93 @@ fn check_openai_compat_provider(report: &mut DoctorReport, root_config: &RootCon
         resolve_openai_compat_api_key(&config),
         OPENAI_COMPATIBLE_API_KEY_ENV,
         "[providers.openai_compat].api_key",
+    );
+    push_provider_capability_checks(report, "openai_compat");
+}
+
+fn check_anthropic_provider(report: &mut DoctorReport, root_config: &RootConfig) {
+    let config = match load_anthropic_config(root_config).and_then(|config| config.resolved()) {
+        Ok(config) => config,
+        Err(error) => {
+            report.push_with_remediation(
+                DoctorStatus::Error,
+                "provider:anthropic",
+                error.to_string(),
+                Some("add a valid [providers.anthropic] block"),
+            );
+            return;
+        }
+    };
+    report.push(
+        DoctorStatus::Ok,
+        "provider:anthropic",
+        format!(
+            "model={} base_url={} version={} max_tokens={}",
+            config.model, config.base_url, config.anthropic_version, config.max_tokens
+        ),
+    );
+
+    push_provider_auth_check(
+        report,
+        resolve_anthropic_api_key(&config),
+        SIGIL_ANTHROPIC_API_KEY_ENV,
+        "[providers.anthropic].api_key",
+    );
+    push_provider_capability_checks(report, "anthropic");
+}
+
+fn check_gemini_provider(report: &mut DoctorReport, root_config: &RootConfig) {
+    let config = match load_gemini_config(root_config).and_then(|config| config.resolved()) {
+        Ok(config) => config,
+        Err(error) => {
+            report.push_with_remediation(
+                DoctorStatus::Error,
+                "provider:gemini",
+                error.to_string(),
+                Some("add a valid [providers.gemini] block"),
+            );
+            return;
+        }
+    };
+    report.push(
+        DoctorStatus::Ok,
+        "provider:gemini",
+        format!("model={} base_url={}", config.model, config.base_url),
+    );
+
+    push_provider_auth_check(
+        report,
+        resolve_gemini_api_key(&config),
+        SIGIL_GEMINI_API_KEY_ENV,
+        "[providers.gemini].api_key",
+    );
+    push_provider_capability_checks(report, "gemini");
+}
+
+fn push_provider_capability_checks(report: &mut DoctorReport, provider_name: &str) {
+    let Some(capabilities) = provider_capabilities_for_name(provider_name) else {
+        return;
+    };
+    let view = provider_capability_view(provider_name, &capabilities);
+    let supported = view
+        .rows
+        .iter()
+        .filter(|row| row.status.as_str() == "supported")
+        .count();
+    let advanced = view
+        .rows
+        .iter()
+        .filter(|row| row.status.as_str() == "advanced")
+        .count();
+    report.push(
+        DoctorStatus::Ok,
+        format!("provider:{provider_name}:capabilities"),
+        format!(
+            "{} supported, {} advanced, {} total",
+            supported,
+            advanced,
+            view.rows.len()
+        ),
     );
 }
 
@@ -531,6 +628,22 @@ fn check_terminal_mouse(
         return;
     }
 
+    if environment.iterm_mouse_reporting == Some(false) {
+        let profile = environment
+            .iterm_profile
+            .as_deref()
+            .unwrap_or("current profile");
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "terminal:mouse",
+            format!("mouse capture enabled but iTerm profile {profile} disables Mouse Reporting"),
+            Some(
+                "enable iTerm Settings > Profiles > Terminal > Mouse Reporting for this profile, or set [terminal].mouse_capture = false",
+            ),
+        );
+        return;
+    }
+
     if environment.has_multiplexer() {
         report.push_with_remediation(
             DoctorStatus::Warn,
@@ -604,6 +717,8 @@ struct TerminalEnvironment {
     term: Option<String>,
     term_program: Option<String>,
     term_program_version: Option<String>,
+    iterm_profile: Option<String>,
+    iterm_mouse_reporting: Option<bool>,
     tmux: bool,
     screen: bool,
     ssh: bool,
@@ -618,6 +733,14 @@ impl TerminalEnvironment {
         let term = non_empty_env("TERM");
         let term_program = non_empty_env("TERM_PROGRAM");
         let term_program_version = non_empty_env("TERM_PROGRAM_VERSION");
+        let iterm_profile = non_empty_env("ITERM_PROFILE");
+        let iterm_mouse_reporting = if term_program.as_deref() == Some("iTerm.app") {
+            iterm_profile
+                .as_deref()
+                .and_then(iterm_mouse_reporting_for_profile)
+        } else {
+            None
+        };
         Self {
             wezterm: non_empty_env("WEZTERM_EXECUTABLE").is_some()
                 || term_program.as_deref() == Some("WezTerm"),
@@ -635,6 +758,8 @@ impl TerminalEnvironment {
             term,
             term_program,
             term_program_version,
+            iterm_profile,
+            iterm_mouse_reporting,
         }
     }
 
@@ -691,6 +816,12 @@ impl TerminalEnvironment {
         if let Some(version) = self.term_program_version.as_deref() {
             parts.push(format!("TERM_PROGRAM_VERSION={version}"));
         }
+        if let Some(profile) = self.iterm_profile.as_deref() {
+            parts.push(format!("ITERM_PROFILE={profile}"));
+        }
+        if let Some(mouse_reporting) = self.iterm_mouse_reporting {
+            parts.push(format!("iterm_mouse_reporting={mouse_reporting}"));
+        }
         if self.wezterm {
             parts.push("profile=wezterm".to_owned());
         }
@@ -718,6 +849,83 @@ impl TerminalEnvironment {
             parts.join(" ")
         }
     }
+}
+
+fn iterm_mouse_reporting_for_profile(profile: &str) -> Option<bool> {
+    let home = env::var_os("HOME")?;
+    let plist = PathBuf::from(home)
+        .join("Library")
+        .join("Preferences")
+        .join("com.googlecode.iterm2.plist");
+    let bookmarks = plistbuddy_print(&plist, "Print :\"New Bookmarks\"")?;
+    iterm_mouse_reporting_from_bookmarks(&bookmarks, profile)
+}
+
+fn iterm_mouse_reporting_from_bookmarks(bookmarks: &str, profile: &str) -> Option<bool> {
+    let mut depth = 0usize;
+    let mut in_profile = false;
+    let mut profile_name = None;
+    let mut mouse_reporting = None;
+
+    for raw_line in bookmarks.lines() {
+        let line = raw_line.trim();
+        if line.ends_with('{') {
+            if line == "Dict {" && depth == 1 {
+                in_profile = true;
+                profile_name = None;
+                mouse_reporting = None;
+            }
+            depth = depth.saturating_add(1);
+            continue;
+        }
+        if line == "}" {
+            if in_profile && depth == 2 {
+                if profile_name.as_deref() == Some(profile) {
+                    return mouse_reporting;
+                }
+                in_profile = false;
+            }
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        if !in_profile || depth != 2 {
+            continue;
+        }
+        if let Some(value) = plistbuddy_line_value(line, "Name") {
+            profile_name = Some(value.to_owned());
+        }
+        if let Some(value) = plistbuddy_line_value(line, "Mouse Reporting") {
+            mouse_reporting = parse_plist_bool(value);
+        }
+    }
+    None
+}
+
+fn plistbuddy_line_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let value = line
+        .strip_prefix(&format!("{key} = "))
+        .or_else(|| line.strip_prefix(&format!("\"{key}\" = ")))?;
+    Some(value.trim().trim_matches('"'))
+}
+
+fn parse_plist_bool(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn plistbuddy_print(plist: &Path, command: &str) -> Option<String> {
+    let output = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", command])
+        .arg(plist)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
 }
 
 fn non_empty_env(name: &str) -> Option<String> {

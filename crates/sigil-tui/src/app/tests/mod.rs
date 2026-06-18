@@ -12,7 +12,7 @@ mod session_flow_tests;
 mod setup_flow_tests;
 mod slash_flow_tests;
 mod timeline_flow_tests;
-mod tool_focus_tests;
+mod tool_card_interaction_tests;
 mod worker_bridge_tests;
 
 use std::path::Path;

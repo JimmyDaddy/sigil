@@ -12,21 +12,22 @@ mod formatting;
 mod input_flow;
 mod modal_flow;
 mod mouse_flow;
+mod runtime_status;
 mod session_flow;
 mod setup_flow;
 mod slash_flow;
+mod task_sidebar;
 mod timeline_flow;
-mod tool_focus;
+mod tool_card_interaction;
 mod worker_bridge;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
-    ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig, CompactionRecord,
-    CompactionThresholdStatus, McpServerConfig, McpServerStartup, MemoryConfig, ReasoningEffort,
-    RootConfig, SecretRedactor, Session, SessionLogEntry, SessionStats, ToolPreviewSnapshot,
-    resolve_workspace_root,
+    ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus, MemoryConfig,
+    ReasoningEffort, RootConfig, SecretRedactor, Session, SessionLogEntry, SessionStats,
+    ToolPreviewSnapshot, resolve_workspace_root,
 };
 use uuid::Uuid;
 
@@ -60,162 +61,14 @@ pub(crate) use crate::timeline::{
 use self::config_flow::cycle_approval_mode;
 use self::formatting::*;
 use self::modal_flow::{ModalState, ModelPickerRefresh, PendingModelPickerRefresh};
+use self::runtime_status::{McpProgressState, UsageCostCurrency};
+pub(crate) use self::runtime_status::{
+    McpServerRuntimeStatus, TimelineTextSelection, code_intelligence_config_status, count_label,
+    diagnostic_summary_label, initial_mcp_server_status, initial_mcp_server_statuses,
+};
 use self::session_flow::{current_focus_label, short_session_token};
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
-// Usage costs are currently stored as USD; CNY display mirrors the provider wallet currency.
-const USD_TO_CNY: f64 = 7.2;
-const TASK_SIDEBAR_STEP_LIMIT: usize = 6;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TimelineTextSelection {
-    pub anchor: usize,
-    pub cursor: usize,
-    pub anchor_column: Option<usize>,
-    pub cursor_column: Option<usize>,
-}
-
-impl TimelineTextSelection {
-    pub(crate) fn line(anchor: usize, cursor: usize) -> Self {
-        Self {
-            anchor,
-            cursor,
-            anchor_column: None,
-            cursor_column: None,
-        }
-    }
-
-    pub(crate) fn column(
-        anchor: usize,
-        anchor_column: usize,
-        cursor: usize,
-        cursor_column: usize,
-    ) -> Self {
-        Self {
-            anchor,
-            cursor,
-            anchor_column: Some(anchor_column),
-            cursor_column: Some(cursor_column),
-        }
-    }
-
-    pub(crate) fn normalized_range(self) -> Range<usize> {
-        let start = self.anchor.min(self.cursor);
-        let end = self.anchor.max(self.cursor).saturating_add(1);
-        start..end
-    }
-
-    pub(crate) fn normalized_column_bounds(self) -> Option<(usize, usize, usize, usize)> {
-        let anchor_column = self.anchor_column?;
-        let cursor_column = self.cursor_column?;
-        if (self.anchor, anchor_column) <= (self.cursor, cursor_column) {
-            Some((self.anchor, anchor_column, self.cursor, cursor_column))
-        } else {
-            Some((self.cursor, cursor_column, self.anchor, anchor_column))
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UsageCostCurrency {
-    Usd,
-    Cny,
-}
-
-impl UsageCostCurrency {
-    fn from_code(code: Option<&str>) -> Self {
-        match code {
-            Some(code) if code.eq_ignore_ascii_case("CNY") => Self::Cny,
-            _ => Self::Usd,
-        }
-    }
-
-    fn format_cost(self, usd_value: f64) -> String {
-        match self {
-            Self::Usd => format!("USD {usd_value:.4}"),
-            Self::Cny => format!("CNY {:.4}", usd_value * USD_TO_CNY),
-        }
-    }
-}
-
-fn code_intelligence_config_status(config: &CodeIntelligenceConfig) -> String {
-    if !config.enabled || config.startup == CodeIntelStartup::Off {
-        "off".to_owned()
-    } else {
-        config.startup.as_str().to_owned()
-    }
-}
-
-fn diagnostic_summary_label(summary: ApprovalDiagnosticSummary) -> String {
-    if summary.is_clean() {
-        return "clean".to_owned();
-    }
-    let mut parts = Vec::new();
-    if summary.errors > 0 {
-        parts.push(count_label(summary.errors, "error", "errors"));
-    }
-    if summary.warnings > 0 {
-        parts.push(count_label(summary.warnings, "warning", "warnings"));
-    }
-    parts.join(" ")
-}
-
-fn count_label(count: usize, singular: &str, plural: &str) -> String {
-    if count == 1 {
-        format!("1 {singular}")
-    } else {
-        format!("{count} {plural}")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum McpServerRuntimeStatus {
-    Deferred,
-    Activating,
-    Refreshing,
-    Stale { capability: String },
-    Ready { tool_count: Option<usize> },
-    Failed { message: String },
-}
-
-impl McpServerRuntimeStatus {
-    fn label(&self) -> String {
-        match self {
-            Self::Deferred => "deferred".to_owned(),
-            Self::Activating => "activating".to_owned(),
-            Self::Refreshing => "refreshing".to_owned(),
-            Self::Stale { capability } => format!("stale {capability}"),
-            Self::Ready { tool_count: None } => "ready".to_owned(),
-            Self::Ready {
-                tool_count: Some(count),
-            } => format!("ready {}", count_label(*count, "tool", "tools")),
-            Self::Failed { message } => format!("failed: {}", summarize_error(message)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct McpProgressState {
-    server_name: String,
-    detail: String,
-}
-
-fn initial_mcp_server_statuses(
-    root_config: &RootConfig,
-) -> BTreeMap<String, McpServerRuntimeStatus> {
-    root_config
-        .mcp_servers
-        .iter()
-        .map(|server| (server.name.clone(), initial_mcp_server_status(server)))
-        .collect()
-}
-
-fn initial_mcp_server_status(server: &McpServerConfig) -> McpServerRuntimeStatus {
-    match server.startup {
-        McpServerStartup::Eager => McpServerRuntimeStatus::Activating,
-        McpServerStartup::Lazy => McpServerRuntimeStatus::Deferred,
-    }
-}
 
 #[derive(Debug)]
 pub struct AppState {
@@ -270,6 +123,8 @@ pub struct AppState {
     collapsed_tool_activity_keys: BTreeSet<String>,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     mouse_hover_target: Option<crate::mouse::HitTarget>,
+    pending_mouse_left_down: bool,
+    pending_tool_card_body_click_entry: Option<usize>,
     last_notice: Option<String>,
     mcp_progress: Option<McpProgressState>,
     reasoning_effort: ReasoningEffort,
@@ -329,6 +184,9 @@ pub enum AppAction {
     CheckChangedFilesDiagnostics,
     ActivateLazyMcp {
         server_name: Option<String>,
+    },
+    StartNewSession {
+        session_log_path: PathBuf,
     },
     SwitchSession {
         session_log_path: PathBuf,
@@ -416,6 +274,8 @@ impl AppState {
             collapsed_tool_activity_keys: BTreeSet::new(),
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
+            pending_mouse_left_down: false,
+            pending_tool_card_body_click_entry: None,
             last_notice: None,
             mcp_progress: None,
             reasoning_effort: ReasoningEffort::Max,
@@ -528,6 +388,8 @@ impl AppState {
             collapsed_tool_activity_keys: BTreeSet::new(),
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
+            pending_mouse_left_down: false,
+            pending_tool_card_body_click_entry: None,
             last_notice: startup_error,
             mcp_progress: None,
             reasoning_effort: ReasoningEffort::Max,
@@ -708,11 +570,18 @@ impl AppState {
         self.collapsed_tool_activity_keys.clear();
         self.pending_mouse_slash_confirmation = None;
         self.mouse_hover_target = None;
+        self.pending_mouse_left_down = false;
+        self.pending_tool_card_body_click_entry = None;
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
         self.refresh_session_history();
         self.refresh_usage_sidebar_cache();
+    }
+
+    fn new_session_log_path(&self) -> PathBuf {
+        self.session_log_dir
+            .join(format!("session-{}.jsonl", Uuid::new_v4()))
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<Option<AppAction>> {
@@ -771,7 +640,8 @@ impl AppState {
         {
             match key.code {
                 KeyCode::Char(character)
-                    if normalize_command_prefix_character(character).is_some() =>
+                    if key.modifiers.is_empty()
+                        && normalize_command_prefix_character(character).is_some() =>
                 {
                     self.active_pane = PaneFocus::Composer;
                     self.insert_input_character('/');
@@ -790,15 +660,6 @@ impl AppState {
                     self.move_sidebar_selection(true);
                     return Ok(None);
                 }
-                KeyCode::PageUp | KeyCode::Home => {
-                    self.sidebar_selected_card = SidebarCard::Permission;
-                    self.sidebar_agent_selected = 0;
-                    return Ok(None);
-                }
-                KeyCode::PageDown | KeyCode::End => {
-                    self.sidebar_selected_card = SidebarCard::Usage;
-                    return Ok(None);
-                }
                 KeyCode::Enter if self.sidebar_selected_card == SidebarCard::Agents => {
                     let detail = self
                         .agent_sidebar_rows()
@@ -810,10 +671,15 @@ impl AppState {
                     return Ok(None);
                 }
                 KeyCode::Esc => {
+                    if self.handle_ui_command(UiCommand::ClearToolCardFocus) {
+                        return Ok(None);
+                    }
                     self.active_pane = PaneFocus::Composer;
                     return Ok(None);
                 }
-                KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right => {
+                KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Left | KeyCode::Right
+                    if key.modifiers.is_empty() =>
+                {
                     return Ok(None);
                 }
                 _ => {}
@@ -1129,6 +995,14 @@ impl AppState {
             }
             "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
             "/model" => self.set_runtime_model_from_command(&command.arg),
+            "/new" => {
+                if self.is_busy {
+                    self.push_timeline(TimelineRole::Notice, "busy; start new session later");
+                    return Ok(None);
+                }
+                let session_log_path = self.new_session_log_path();
+                Ok(Some(AppAction::StartNewSession { session_log_path }))
+            }
             "/plan" => {
                 if self.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; plan later");
@@ -1273,80 +1147,7 @@ impl AppState {
     }
 
     pub(crate) fn task_sidebar_lines(&self) -> Vec<String> {
-        let projection =
-            sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries);
-        let Some(task) = projection.latest_task() else {
-            return Vec::new();
-        };
-        let mut lines = vec![
-            format!("task: {}", task.task_id.as_str()),
-            format!("status: {}", task_run_status_label(task.status)),
-        ];
-        let mut step_lines = Vec::new();
-        if let Some(plan_version) = task.latest_plan_version {
-            lines.push(format!("plan: v{plan_version}"));
-            if let Some(plan) = task.plans.get(&plan_version) {
-                let completed_steps = plan
-                    .steps
-                    .iter()
-                    .filter(|step| {
-                        task.steps
-                            .get(&(plan_version, step.step_id.clone()))
-                            .is_some_and(|projected| {
-                                projected.status == sigil_kernel::TaskStepStatus::Completed
-                            })
-                    })
-                    .count();
-                lines.push(format!(
-                    "progress: {completed_steps}/{} done",
-                    plan.steps.len()
-                ));
-                step_lines = task_sidebar_focus_lines(task, plan_version, plan);
-            }
-        }
-        if let Some((plan_version, step_id)) = &task.current_step {
-            let status = task
-                .steps
-                .get(&(*plan_version, step_id.clone()))
-                .map(|step| task_step_status_label(step.status))
-                .unwrap_or("running");
-            lines.push(format!(
-                "current: v{plan_version}:{} {status}",
-                step_id.as_str()
-            ));
-        } else if task.status == sigil_kernel::TaskRunStatus::Completed {
-            if let Some((plan_version, step_id, status)) = task_sidebar_last_plan_step(task) {
-                lines.push(format!(
-                    "last: v{plan_version}:{} {}",
-                    step_id.as_str(),
-                    task_step_status_label(status)
-                ));
-            }
-        } else if let Some((plan_version, step_id, status)) = task_sidebar_last_problem_step(task) {
-            lines.push(format!(
-                "last: v{plan_version}:{} {}",
-                step_id.as_str(),
-                task_step_status_label(status)
-            ));
-        }
-        if let Some(reason) = task
-            .reason
-            .as_ref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            lines.push(format!(
-                "reason: {}",
-                truncate_session_view_text(reason, 48)
-            ));
-        }
-        lines.extend(step_lines);
-        if task.route_unverified {
-            lines.push("routes: unverified".to_owned());
-        }
-        if task.child_unavailable {
-            lines.push("child: unavailable".to_owned());
-        }
-        lines
+        task_sidebar::task_sidebar_lines(&self.current_session_entries)
     }
 
     fn has_task_context_for_plain_prompt(&self) -> bool {
@@ -1758,205 +1559,6 @@ impl AppState {
         Ok(Some(AppAction::RuntimeConfigUpdated {
             root_config: Box::new(next_config),
         }))
-    }
-}
-
-fn task_sidebar_focus_lines(
-    task: &sigil_kernel::TaskRunProjection,
-    plan_version: u32,
-    plan: &sigil_kernel::TaskPlanProjection,
-) -> Vec<String> {
-    let focus_index = task_sidebar_focus_step_index(task, plan_version, plan);
-    let mut selected_indices: Vec<usize> =
-        (0..plan.steps.len().min(TASK_SIDEBAR_STEP_LIMIT)).collect();
-    if let Some(focus_index) = focus_index
-        && focus_index >= selected_indices.len()
-        && !selected_indices.is_empty()
-    {
-        selected_indices.pop();
-        selected_indices.push(focus_index);
-    }
-
-    let mut lines = selected_indices
-        .iter()
-        .map(|index| {
-            let step = &plan.steps[*index];
-            let status = task_sidebar_step_status(task, plan_version, step);
-            let marker = task_sidebar_step_marker(status);
-            format!(
-                "{marker} {}. {} {} · {}",
-                index + 1,
-                task_step_status_label(status),
-                step.step_id.as_str(),
-                step.title
-            )
-        })
-        .collect::<Vec<_>>();
-    let hidden_steps = plan.steps.len().saturating_sub(selected_indices.len());
-    if hidden_steps > 0 {
-        let summary = task_sidebar_hidden_step_summary(task, plan_version, plan, &selected_indices);
-        lines.push(format!("+{hidden_steps} more steps · {summary}"));
-    }
-    lines
-}
-
-fn task_sidebar_hidden_step_summary(
-    task: &sigil_kernel::TaskRunProjection,
-    plan_version: u32,
-    plan: &sigil_kernel::TaskPlanProjection,
-    selected_indices: &[usize],
-) -> String {
-    let mut pending = 0usize;
-    let mut running = 0usize;
-    let mut completed = 0usize;
-    let mut failed = 0usize;
-    let mut blocked = 0usize;
-    let mut cancelled = 0usize;
-    let mut interrupted = 0usize;
-    for (index, step) in plan.steps.iter().enumerate() {
-        if selected_indices.contains(&index) {
-            continue;
-        }
-        match task_sidebar_step_status(task, plan_version, step) {
-            sigil_kernel::TaskStepStatus::Pending => pending += 1,
-            sigil_kernel::TaskStepStatus::Running => running += 1,
-            sigil_kernel::TaskStepStatus::Completed => completed += 1,
-            sigil_kernel::TaskStepStatus::Failed => failed += 1,
-            sigil_kernel::TaskStepStatus::Blocked => blocked += 1,
-            sigil_kernel::TaskStepStatus::Cancelled => cancelled += 1,
-            sigil_kernel::TaskStepStatus::Interrupted => interrupted += 1,
-        }
-    }
-    let mut parts = Vec::new();
-    for (count, label) in [
-        (running, "running"),
-        (failed, "failed"),
-        (blocked, "blocked"),
-        (cancelled, "cancelled"),
-        (interrupted, "interrupted"),
-        (pending, "pending"),
-        (completed, "completed"),
-    ] {
-        if count > 0 {
-            parts.push(format!("{count} {label}"));
-        }
-    }
-    parts.join(", ")
-}
-
-fn task_sidebar_step_marker(status: sigil_kernel::TaskStepStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskStepStatus::Running => "▶",
-        sigil_kernel::TaskStepStatus::Completed => "✓",
-        sigil_kernel::TaskStepStatus::Failed | sigil_kernel::TaskStepStatus::Blocked => "!",
-        sigil_kernel::TaskStepStatus::Cancelled => "×",
-        sigil_kernel::TaskStepStatus::Interrupted => "⏸",
-        sigil_kernel::TaskStepStatus::Pending => "·",
-    }
-}
-
-fn task_sidebar_focus_step_index(
-    task: &sigil_kernel::TaskRunProjection,
-    plan_version: u32,
-    plan: &sigil_kernel::TaskPlanProjection,
-) -> Option<usize> {
-    if let Some((current_plan_version, current_step_id)) = &task.current_step
-        && *current_plan_version == plan_version
-        && let Some(index) = plan
-            .steps
-            .iter()
-            .position(|step| &step.step_id == current_step_id)
-    {
-        return Some(index);
-    }
-    if task.status == sigil_kernel::TaskRunStatus::Completed && !plan.steps.is_empty() {
-        return Some(plan.steps.len() - 1);
-    }
-    plan.steps
-        .iter()
-        .position(|step| {
-            matches!(
-                task_sidebar_step_status(task, plan_version, step),
-                sigil_kernel::TaskStepStatus::Failed
-                    | sigil_kernel::TaskStepStatus::Blocked
-                    | sigil_kernel::TaskStepStatus::Interrupted
-                    | sigil_kernel::TaskStepStatus::Cancelled
-            )
-        })
-        .or_else(|| {
-            plan.steps.iter().position(|step| {
-                task_sidebar_step_status(task, plan_version, step)
-                    != sigil_kernel::TaskStepStatus::Completed
-            })
-        })
-}
-
-fn task_sidebar_step_status(
-    task: &sigil_kernel::TaskRunProjection,
-    plan_version: u32,
-    step: &sigil_kernel::TaskStepSpec,
-) -> sigil_kernel::TaskStepStatus {
-    task.steps
-        .get(&(plan_version, step.step_id.clone()))
-        .map(|projected| projected.status)
-        .unwrap_or(sigil_kernel::TaskStepStatus::Pending)
-}
-
-fn task_sidebar_last_plan_step(
-    task: &sigil_kernel::TaskRunProjection,
-) -> Option<(u32, sigil_kernel::TaskStepId, sigil_kernel::TaskStepStatus)> {
-    let plan_version = task.latest_plan_version?;
-    let plan = task.plans.get(&plan_version)?;
-    let step = plan.steps.last()?;
-    Some((
-        plan_version,
-        step.step_id.clone(),
-        task_sidebar_step_status(task, plan_version, step),
-    ))
-}
-
-fn task_sidebar_last_problem_step(
-    task: &sigil_kernel::TaskRunProjection,
-) -> Option<(u32, sigil_kernel::TaskStepId, sigil_kernel::TaskStepStatus)> {
-    let plan_version = task.latest_plan_version?;
-    let plan = task.plans.get(&plan_version)?;
-    plan.steps.iter().find_map(|step| {
-        let status = task_sidebar_step_status(task, plan_version, step);
-        if matches!(
-            status,
-            sigil_kernel::TaskStepStatus::Failed
-                | sigil_kernel::TaskStepStatus::Blocked
-                | sigil_kernel::TaskStepStatus::Interrupted
-                | sigil_kernel::TaskStepStatus::Cancelled
-        ) {
-            Some((plan_version, step.step_id.clone(), status))
-        } else {
-            None
-        }
-    })
-}
-
-fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskRunStatus::Started => "started",
-        sigil_kernel::TaskRunStatus::Running => "running",
-        sigil_kernel::TaskRunStatus::Paused => "paused",
-        sigil_kernel::TaskRunStatus::Completed => "completed",
-        sigil_kernel::TaskRunStatus::Failed => "failed",
-        sigil_kernel::TaskRunStatus::Cancelled => "cancelled",
-        sigil_kernel::TaskRunStatus::Interrupted => "interrupted",
-    }
-}
-
-fn task_step_status_label(status: sigil_kernel::TaskStepStatus) -> &'static str {
-    match status {
-        sigil_kernel::TaskStepStatus::Pending => "pending",
-        sigil_kernel::TaskStepStatus::Running => "running",
-        sigil_kernel::TaskStepStatus::Completed => "completed",
-        sigil_kernel::TaskStepStatus::Failed => "failed",
-        sigil_kernel::TaskStepStatus::Blocked => "blocked",
-        sigil_kernel::TaskStepStatus::Cancelled => "cancelled",
-        sigil_kernel::TaskStepStatus::Interrupted => "interrupted",
     }
 }
 

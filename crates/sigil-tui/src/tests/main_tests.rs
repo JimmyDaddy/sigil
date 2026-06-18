@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, path::Path, path::PathBuf, sync::mpsc, time::Du
 
 use crate::{
     app::{AppAction, AppState},
+    mouse::HitTarget,
     runner::{WorkerCommand, WorkerMessage},
 };
 use anyhow::{Result, anyhow};
@@ -21,12 +22,12 @@ use super::{
     AppMouseOutcome, BUSY_POLL_INTERVAL, IDLE_POLL_INTERVAL, SCROLLBACK_SEED_POLL_INTERVAL,
     ScrollbackSeedProgress, ScrollbackSyncPlan, ScrollbackSyncState, WorkerRuntime,
     apply_key_action, apply_mouse_outcome, base64_encode, build_initial_app, drain_worker_messages,
-    flush_pending_worker_commands, next_poll_interval, osc52_clipboard_sequence,
-    plan_scrollback_sync, plan_scrollback_sync_with_chunk_size, poll_interval,
-    prepare_scrollback_sync, prepare_scrollback_sync_with_chunk_size, process_app_action,
-    process_app_action_with_spawner, render_scrollback_rows, scrollback_plain_line,
-    scrollback_row_style, scrollback_separator, scrollback_wrapped_rows,
-    should_sync_terminal_scrollback, wrap_scrollback_text,
+    flush_pending_worker_commands, mouse_layout_snapshot, next_mouse_capture_action,
+    next_poll_interval, osc52_clipboard_sequence, plan_scrollback_sync,
+    plan_scrollback_sync_with_chunk_size, poll_interval, prepare_scrollback_sync,
+    prepare_scrollback_sync_with_chunk_size, process_app_action, process_app_action_with_spawner,
+    render_scrollback_rows, scrollback_plain_line, scrollback_row_style, scrollback_separator,
+    scrollback_wrapped_rows, should_sync_terminal_scrollback, wrap_scrollback_text,
 };
 
 fn test_config() -> RootConfig {
@@ -59,6 +60,57 @@ fn osc52_clipboard_sequence_encodes_text() {
     assert_eq!(base64_encode(b"h"), "aA==");
     assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
     assert_eq!(osc52_clipboard_sequence("hi"), "\x1b]52;c;aGk=\x07");
+}
+
+#[test]
+fn next_mouse_capture_action_tracks_runtime_terminal_config_changes() {
+    let mut active = false;
+
+    assert_eq!(next_mouse_capture_action(active, false), None);
+    assert!(!active);
+
+    assert_eq!(next_mouse_capture_action(active, true), Some(true));
+    assert!(!active);
+    active = true;
+    assert!(active);
+
+    assert_eq!(next_mouse_capture_action(active, true), None);
+    assert!(active);
+
+    assert_eq!(next_mouse_capture_action(active, false), Some(false));
+    assert!(active);
+    active = false;
+    assert!(!active);
+}
+
+#[test]
+fn mouse_layout_snapshot_tracks_inline_frame_origin() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 40);
+    app.input = "/".to_owned();
+    let frame_area = Rect::new(0, 7, 120, 20);
+
+    let layout = mouse_layout_snapshot(frame_area, Rect::new(0, 0, 120, 40), &app);
+
+    assert_eq!(layout.screen, frame_area);
+    let slash = layout
+        .slash_overlay
+        .expect("slash overlay should be visible");
+    assert!(slash.overlay.y >= frame_area.y);
+    let candidate_y = slash.content.y.saturating_add(slash.title_rows);
+    assert_eq!(
+        layout.hit_target(slash.content.x, candidate_y),
+        HitTarget::SlashCandidate { index: 0 }
+    );
+}
+
+#[test]
+fn mouse_layout_snapshot_falls_back_to_terminal_size_before_first_frame() {
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    let layout = mouse_layout_snapshot(Rect::default(), Rect::new(0, 0, 100, 30), &app);
+
+    assert_eq!(layout.screen, Rect::new(0, 0, 100, 30));
 }
 
 #[test]

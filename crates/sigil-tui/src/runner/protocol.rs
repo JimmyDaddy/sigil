@@ -48,6 +48,9 @@ pub enum WorkerCommand {
     ActivateLazyMcp {
         server_name: Option<String>,
     },
+    StartNewSession {
+        session_log_path: PathBuf,
+    },
     SwitchSession {
         session_log_path: PathBuf,
     },
@@ -81,6 +84,12 @@ pub enum WorkerMessage {
         entries: Vec<SessionLogEntry>,
     },
     SessionSwitched {
+        session_log_path: PathBuf,
+        provider_name: String,
+        model_name: String,
+        entries: Vec<SessionLogEntry>,
+    },
+    NewSessionStarted {
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,

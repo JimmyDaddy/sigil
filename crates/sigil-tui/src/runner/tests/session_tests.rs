@@ -58,6 +58,44 @@ fn switch_session_restores_identity_and_entries() -> Result<()> {
 }
 
 #[test]
+fn start_new_session_creates_empty_session_with_current_identity() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let current_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
+    let new_log_path = temp.path().join(".sigil/sessions/session-new.jsonl");
+    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+
+    let worker = spawn_test_worker(root_config, current_log_path, agent, workspace_root)?;
+    worker.send(WorkerCommand::StartNewSession {
+        session_log_path: new_log_path.clone(),
+    })?;
+    let started =
+        worker.recv_until(|message| matches!(message, WorkerMessage::NewSessionStarted { .. }))?;
+
+    assert!(matches!(
+        started,
+        WorkerMessage::NewSessionStarted {
+            ref session_log_path,
+            ref provider_name,
+            ref model_name,
+            ref entries,
+        }
+            if session_log_path == &new_log_path
+                && provider_name == "default-provider"
+                && model_name == "default-model"
+                && entries.len() == 1
+                && matches!(entries[0], SessionLogEntry::Control(ControlEntry::SessionIdentity { .. }))
+    ));
+    let entries = JsonlSessionStore::read_entries(&new_log_path)?;
+    assert_eq!(entries.len(), 1);
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn invalid_initial_session_log_reports_worker_failure() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
@@ -178,6 +216,38 @@ fn switch_session_while_active_run_reports_error() -> Result<()> {
         error,
         WorkerMessage::RunFailed(ref text)
             if text == "cannot switch sessions while the agent is running"
+    ));
+
+    worker.send(WorkerCommand::CancelRun)?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunCancelled { .. }))?;
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn start_new_session_while_active_run_reports_error() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-active.jsonl");
+    let new_log_path = temp.path().join(".sigil/sessions/session-new.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "keep running".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    worker.send(WorkerCommand::StartNewSession {
+        session_log_path: new_log_path,
+    })?;
+    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    assert!(matches!(
+        error,
+        WorkerMessage::RunFailed(ref text)
+            if text == "cannot start a new session while the agent is running"
     ));
 
     worker.send(WorkerCommand::CancelRun)?;

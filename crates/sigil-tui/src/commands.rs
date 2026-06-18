@@ -10,6 +10,7 @@ pub(crate) enum UiCommand {
     OpenKeyboardHelp,
     OpenConfig,
     OpenDoctor,
+    StartNewSession,
     CompactNow,
     CheckChangedFilesDiagnostics,
     FocusLatestToolCard,
@@ -104,6 +105,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: Some("/doctor"),
         label: "Doctor",
         help: "Run local setup diagnostics.",
+        surface: CommandSurface::Slash,
+    },
+    UiCommandSpec {
+        command: UiCommand::StartNewSession,
+        keys: &[],
+        slash: Some("/new"),
+        label: "New session",
+        help: "Start a fresh session.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {

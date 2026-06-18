@@ -197,6 +197,12 @@ struct ProcessLanguageServer {
     versions: BTreeMap<PathBuf, i32>,
 }
 
+struct LspRequestOutput {
+    server_name: String,
+    languages: Vec<String>,
+    value: Value,
+}
+
 impl Drop for ProcessLanguageServer {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -539,31 +545,18 @@ impl CodeIntelligenceService {
         let limit = self.limit(max_results);
         let path = self.resolve_file(requested)?;
         self.ensure_server_plan().await;
-        let server_handle = self.ensure_client(&path).await?;
-        let mut server_guard = server_handle.lock().await;
-        let server = language_server_mut(&mut server_guard, "textDocument/definition")?;
-        if !definition_supported(&server.capabilities) {
-            return Err(CodeIntelError::UnsupportedCapability {
-                server: server.config.name.clone(),
-                capability: "textDocument/definition",
-            }
-            .into());
-        }
-        server.sync_document(&path).await?;
-        let value = server
-            .client
-            .request(
+        let response = self
+            .synced_lsp_request(
+                &path,
                 "textDocument/definition",
+                definition_supported,
                 position_params(&path, line, character),
-                self.request_timeout(),
             )
             .await?;
-        let server_name = server.config.name.clone();
-        let languages = server.config.languages.clone();
-        let (locations, filtered) = self.parse_locations(response_array(value)).await?;
+        let (locations, filtered) = self.parse_locations(response_array(response.value)).await?;
         Ok(self.with_discovery_statuses(response_with_filtered(
-            server_name,
-            languages,
+            response.server_name,
+            response.languages,
             "textDocument/definition".to_owned(),
             locations,
             limit,
@@ -584,29 +577,20 @@ impl CodeIntelligenceService {
         let limit = self.limit(max_results);
         let path = self.resolve_file(requested)?;
         self.ensure_server_plan().await;
-        let server_handle = self.ensure_client(&path).await?;
-        let mut server_guard = server_handle.lock().await;
-        let server = language_server_mut(&mut server_guard, "textDocument/references")?;
-        if !references_supported(&server.capabilities) {
-            return Err(CodeIntelError::UnsupportedCapability {
-                server: server.config.name.clone(),
-                capability: "textDocument/references",
-            }
-            .into());
-        }
-        server.sync_document(&path).await?;
         let mut params = position_params(&path, line, character);
         params["context"] = json!({ "includeDeclaration": include_declaration });
-        let value = server
-            .client
-            .request("textDocument/references", params, self.request_timeout())
+        let response = self
+            .synced_lsp_request(
+                &path,
+                "textDocument/references",
+                references_supported,
+                params,
+            )
             .await?;
-        let server_name = server.config.name.clone();
-        let languages = server.config.languages.clone();
-        let (locations, filtered) = self.parse_locations(response_array(value)).await?;
+        let (locations, filtered) = self.parse_locations(response_array(response.value)).await?;
         Ok(self.with_discovery_statuses(response_with_filtered(
-            server_name,
-            languages,
+            response.server_name,
+            response.languages,
             "textDocument/references".to_owned(),
             locations,
             limit,
@@ -629,29 +613,16 @@ impl CodeIntelligenceService {
         let limit = self.limit(max_results);
         let path = self.resolve_file(requested)?;
         self.ensure_server_plan().await;
-        let server_handle = self.ensure_client(&path).await?;
-        let mut server_guard = server_handle.lock().await;
-        let server = language_server_mut(&mut server_guard, "textDocument/codeAction")?;
-        if !code_action_supported(&server.capabilities) {
-            return Err(CodeIntelError::UnsupportedCapability {
-                server: server.config.name.clone(),
-                capability: "textDocument/codeAction",
-            }
-            .into());
-        }
-        server.sync_document(&path).await?;
-        let value = server
-            .client
-            .request(
+        let response = self
+            .synced_lsp_request(
+                &path,
                 "textDocument/codeAction",
+                code_action_supported,
                 code_action_params(&path, line, character, end_line, end_character, only),
-                self.request_timeout(),
             )
             .await?;
-        let server_name = server.config.name.clone();
-        let languages = server.config.languages.clone();
         let mut filtered = 0usize;
-        let mut actions = response_array(value)
+        let mut actions = response_array(response.value)
             .into_iter()
             .filter_map(|value| {
                 parse_code_action_summary(&value).or_else(|| {
@@ -669,8 +640,8 @@ impl CodeIntelligenceService {
             });
         }
         Ok(self.with_discovery_statuses(response_with_filtered(
-            server_name,
-            languages,
+            response.server_name,
+            response.languages,
             "textDocument/codeAction".to_owned(),
             actions,
             limit,
@@ -692,42 +663,36 @@ impl CodeIntelligenceService {
         let started = Instant::now();
         let path = self.resolve_file(requested)?;
         self.ensure_server_plan().await;
-        let server_handle = self.ensure_client(&path).await?;
-        let mut server_guard = server_handle.lock().await;
-        let server = language_server_mut(&mut server_guard, "textDocument/codeAction")?;
-        if !code_action_supported(&server.capabilities) {
-            return Err(CodeIntelError::UnsupportedCapability {
-                server: server.config.name.clone(),
-                capability: "textDocument/codeAction",
-            }
-            .into());
-        }
-        server.sync_document(&path).await?;
-        let value = server
-            .client
-            .request(
+        let response = self
+            .synced_lsp_request(
+                &path,
                 "textDocument/codeAction",
+                code_action_supported,
                 code_action_params(&path, line, character, end_line, end_character, kind),
-                self.request_timeout(),
             )
             .await?;
-        let actions = response_array(value);
+        let actions = response_array(response.value);
         let mut selected = select_code_action(actions, title, kind)?;
-        if selected.get("edit").is_none() && code_action_resolve_supported(&server.capabilities) {
-            selected = server
-                .client
-                .request(
+        if selected.get("edit").is_none()
+            && self
+                .lsp_capability_supported(&path, code_action_resolve_supported)
+                .await?
+        {
+            selected = self
+                .synced_lsp_request(
+                    &path,
                     "codeAction/resolve",
+                    code_action_resolve_supported,
                     selected.clone(),
-                    self.request_timeout(),
                 )
-                .await?;
+                .await?
+                .value;
         }
         let edit_value =
             selected
                 .get("edit")
                 .ok_or_else(|| CodeIntelError::UnsupportedCapability {
-                    server: server.config.name.clone(),
+                    server: response.server_name.clone(),
                     capability: "codeAction/edit",
                 })?;
         let edit = workspace_edit_from_lsp(&self.inner.workspace_root, edit_value)?;
@@ -735,7 +700,7 @@ impl CodeIntelligenceService {
             return Err(anyhow!("selected code action produced no workspace edits"));
         }
         Ok(CodeEditPlan {
-            server: server.config.name.clone(),
+            server: response.server_name,
             capability: "textDocument/codeAction".to_owned(),
             metadata: QueryMetadata {
                 returned: edit.files.len(),
@@ -758,29 +723,17 @@ impl CodeIntelligenceService {
         let started = Instant::now();
         let path = self.resolve_file(requested)?;
         self.ensure_server_plan().await;
-        let server_handle = self.ensure_client(&path).await?;
-        let mut server_guard = server_handle.lock().await;
-        let server = language_server_mut(&mut server_guard, "textDocument/rename")?;
-        if !rename_supported(&server.capabilities) {
-            return Err(CodeIntelError::UnsupportedCapability {
-                server: server.config.name.clone(),
-                capability: "textDocument/rename",
-            }
-            .into());
-        }
-        server.sync_document(&path).await?;
         let mut params = position_params(&path, line, character);
         params["newName"] = json!(new_name);
-        let value = server
-            .client
-            .request("textDocument/rename", params, self.request_timeout())
+        let response = self
+            .synced_lsp_request(&path, "textDocument/rename", rename_supported, params)
             .await?;
-        let edit = workspace_edit_from_lsp(&self.inner.workspace_root, &value)?;
+        let edit = workspace_edit_from_lsp(&self.inner.workspace_root, &response.value)?;
         if edit.files.is_empty() {
             return Err(anyhow!("rename produced no workspace edits"));
         }
         Ok(CodeEditPlan {
-            server: server.config.name.clone(),
+            server: response.server_name,
             capability: "textDocument/rename".to_owned(),
             metadata: QueryMetadata {
                 returned: edit.files.len(),
@@ -892,38 +845,25 @@ impl CodeIntelligenceService {
         limit: usize,
         started: Instant,
     ) -> Result<CodeIntelResponse<CodeSymbol>> {
-        let server_handle = self.ensure_client(path).await?;
-        let mut server_guard = server_handle.lock().await;
-        let server = language_server_mut(&mut server_guard, "textDocument/documentSymbol")?;
-        if !document_symbol_supported(&server.capabilities) {
-            return Err(CodeIntelError::UnsupportedCapability {
-                server: server.config.name.clone(),
-                capability: "textDocument/documentSymbol",
-            }
-            .into());
-        }
-        server.sync_document(path).await?;
-        let value = server
-            .client
-            .request(
+        let lsp_response = self
+            .synced_lsp_request(
+                path,
                 "textDocument/documentSymbol",
+                document_symbol_supported,
                 json!({ "textDocument": text_document_identifier(path) }),
-                self.request_timeout(),
             )
             .await?;
-        let server_name = server.config.name.clone();
-        let languages = server.config.languages.clone();
         let query = query.map(str::to_ascii_lowercase);
         let mut symbols = Vec::new();
         collect_lsp_symbols(
-            &value,
+            &lsp_response.value,
             &workspace_relative_path(&self.inner.workspace_root, path),
             query.as_deref(),
             &mut symbols,
         );
         Ok(self.with_discovery_statuses(response(
-            server_name,
-            languages,
+            lsp_response.server_name,
+            lsp_response.languages,
             "textDocument/documentSymbol".to_owned(),
             symbols,
             limit,
@@ -1083,6 +1023,46 @@ impl CodeIntelligenceService {
             capability.to_owned(),
             diagnostics,
         ))
+    }
+
+    async fn synced_lsp_request(
+        &self,
+        path: &Path,
+        capability: &'static str,
+        supported: fn(&Value) -> bool,
+        params: Value,
+    ) -> Result<LspRequestOutput> {
+        let server_handle = self.ensure_client(path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, capability)?;
+        if !supported(&server.capabilities) {
+            return Err(CodeIntelError::UnsupportedCapability {
+                server: server.config.name.clone(),
+                capability,
+            }
+            .into());
+        }
+        server.sync_document(path).await?;
+        let value = server
+            .client
+            .request(capability, params, self.request_timeout())
+            .await?;
+        Ok(LspRequestOutput {
+            server_name: server.config.name.clone(),
+            languages: server.config.languages.clone(),
+            value,
+        })
+    }
+
+    async fn lsp_capability_supported(
+        &self,
+        path: &Path,
+        supported: fn(&Value) -> bool,
+    ) -> Result<bool> {
+        let server_handle = self.ensure_client(path).await?;
+        let mut server_guard = server_handle.lock().await;
+        let server = language_server_mut(&mut server_guard, "capability check")?;
+        Ok(supported(&server.capabilities))
     }
 
     async fn ensure_client(&self, path: &Path) -> Result<LanguageServerHandle> {

@@ -20,6 +20,8 @@ use super::{
     theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, badge_bg, dim, ink},
 };
 
+const COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS: usize = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolActivityView {
     pub(crate) key: String,
@@ -81,7 +83,11 @@ pub(crate) fn render_tool_entry_lines(
                 options.max_content_width,
             ));
         } else {
-            lines.push(render_tool_hidden_preview_line(&summary, accent, selected));
+            lines.extend(render_tool_collapsed_preview_body(
+                &summary,
+                accent,
+                options.max_content_width,
+            ));
         }
     }
     lines
@@ -91,57 +97,35 @@ fn tool_has_preview(summary: &ToolCardRender) -> bool {
     !summary.preview_lines.is_empty() || summary.preview_value.is_some() || summary.diff.is_some()
 }
 
-fn render_tool_hidden_preview_line(
+fn render_tool_collapsed_preview_body(
     summary: &ToolCardRender,
     accent: Color,
-    selected: bool,
-) -> Line<'static> {
-    let available_lines = tool_available_preview_lines(summary);
-    timeline_content_line(
-        accent,
-        vec![Span::styled(
-            format!(
-                "{} hidden · {} lines available",
-                tool_hidden_preview_label(summary),
-                available_lines
-            ),
-            Style::default()
-                .fg(if selected { accent_blue() } else { dim() })
-                .add_modifier(Modifier::BOLD),
-        )],
-    )
+    max_content_width: usize,
+) -> Vec<Line<'static>> {
+    let body = render_tool_preview_body(summary, accent, max_content_width);
+    if body.len() <= COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS {
+        return body;
+    }
+
+    let visible_rows = COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS;
+    let hidden_rows = collapsed_tool_hidden_rows(summary, body.len(), visible_rows);
+    let mut lines = body.into_iter().take(visible_rows).collect::<Vec<_>>();
+    lines.extend(render_tool_hidden_tail(accent, hidden_rows));
+    lines
 }
 
-fn tool_hidden_preview_label(summary: &ToolCardRender) -> &'static str {
-    if summary.diff.is_some() {
-        return "diff";
+fn collapsed_tool_hidden_rows(
+    summary: &ToolCardRender,
+    body_rows: usize,
+    visible_rows: usize,
+) -> usize {
+    let omitted_rows = body_rows.saturating_sub(visible_rows);
+    if summary.hidden_lines == 0 {
+        return omitted_rows;
     }
-    if tool_name_matches(&summary.tool_name, "read_file") {
-        return "file preview";
-    }
-    if tool_name_matches(&summary.tool_name, "bash") {
-        return "output";
-    }
-    if tool_name_matches(&summary.tool_name, "grep") {
-        return "matches";
-    }
-    if tool_name_matches(&summary.tool_name, "ls") || tool_name_matches(&summary.tool_name, "glob")
-    {
-        return "paths";
-    }
-    "result preview"
-}
-
-fn tool_available_preview_lines(summary: &ToolCardRender) -> usize {
-    if let Some(diff) = &summary.diff {
-        return diff.rendered_line_count.max(
-            diff.files
-                .iter()
-                .map(|file| file.lines.len())
-                .sum::<usize>(),
-        );
-    }
-    summary.preview_lines.len() + summary.hidden_lines
+    summary
+        .hidden_lines
+        .saturating_add(omitted_rows.saturating_sub(1))
 }
 
 fn tool_card_header_line(

@@ -104,6 +104,43 @@ fn plain_prompt_remains_chat_when_session_has_no_task() -> Result<()> {
 }
 
 #[test]
+fn new_command_dispatches_new_session_action_when_idle() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let current_session_log_path = app.session_log_path.clone();
+    app.push_timeline(TimelineRole::Assistant, "old context");
+    app.input = "/new".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::StartNewSession { ref session_log_path })
+            if session_log_path != &current_session_log_path
+                && session_log_path.parent() == Some(app.session_log_dir.as_path())
+    ));
+    assert!(!app.is_busy);
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::User && entry.text == "/new")
+    );
+    Ok(())
+}
+
+#[test]
+fn new_command_reports_busy_without_dispatching() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.is_busy = true;
+    app.input = "/new".to_owned();
+
+    assert!(app.submit_input()?.is_none());
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text == "busy; start new session later"
+    }));
+    Ok(())
+}
+
+#[test]
 fn plan_continue_command_can_pass_guidance() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/plan continue 优先看 runtime 状态同步".to_owned();

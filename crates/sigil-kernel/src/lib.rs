@@ -34,7 +34,7 @@ pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
     PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
     ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle, SessionStats,
-    ToolCall, UsageStats,
+    ToolCall, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
 };
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{

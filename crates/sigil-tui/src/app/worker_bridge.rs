@@ -237,6 +237,30 @@ impl AppState {
                 );
                 self.schedule_balance_refresh();
             }
+            WorkerMessage::NewSessionStarted {
+                session_log_path,
+                provider_name,
+                model_name,
+                entries,
+            } => {
+                self.is_busy = false;
+                self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
+                self.pending_approval = None;
+                self.modal_state = None;
+                self.last_phase_marker = None;
+                self.finish_streaming_assistant_entry();
+                self.streaming_reasoning_index = None;
+                self.session_delta_stats = sigil_kernel::SessionStats::default();
+                self.restore_session_view(
+                    session_log_path,
+                    provider_name,
+                    model_name,
+                    entries,
+                    "started new session",
+                );
+                self.schedule_balance_refresh();
+            }
             WorkerMessage::SessionCompacted {
                 session_log_path,
                 provider_name,
@@ -414,6 +438,9 @@ impl AppState {
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
+            }
+            AppAction::StartNewSession { session_log_path } => {
+                WorkerCommand::StartNewSession { session_log_path }
             }
             AppAction::SwitchSession { session_log_path } => {
                 WorkerCommand::SwitchSession { session_log_path }

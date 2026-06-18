@@ -60,6 +60,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         completes_with_space: true,
     },
     SlashCommandSpec {
+        canonical: "/new",
+        aliases: &[],
+        description: "start a fresh session",
+        completes_with_space: false,
+    },
+    SlashCommandSpec {
         canonical: "/plan",
         aliases: &[],
         description: "plan and execute a task",

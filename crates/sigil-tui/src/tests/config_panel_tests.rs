@@ -244,7 +244,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert!(
         ConfigField::ProviderApiKey
             .help_text()
-            .contains("SIGIL_API_KEY")
+            .contains("environment variables")
     );
     assert!(
         ConfigField::TerminalScrollSensitivity
@@ -464,6 +464,88 @@ fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
 }
 
 #[test]
+fn config_draft_serializes_anthropic_provider() -> anyhow::Result<()> {
+    let mut root_config = test_root_config();
+    root_config.agent.provider = "anthropic".to_owned();
+    root_config.agent.model = "claude-old".to_owned();
+    root_config.providers.insert(
+        "anthropic".to_owned(),
+        serde_json::json!({
+            "base_url": "https://anthropic.example.com",
+            "model": "claude-old",
+            "api_key": "old-key",
+            "anthropic_version": "2023-06-01",
+            "max_tokens": 1024,
+            "request_timeout_secs": 20
+        }),
+    );
+
+    let mut state = ConfigState::from_root_config(&root_config);
+    assert_eq!(state.draft.provider_name, ANTHROPIC_PROVIDER_KEY);
+    assert_eq!(
+        state.display_value(ConfigField::ProviderFimModel),
+        "not supported"
+    );
+
+    state.draft.provider_model = " claude-new ".to_owned();
+    state.draft.provider_api_key = " new-key ".to_owned();
+    state.draft.provider_base_url = " https://proxy.example.test ".to_owned();
+    state.draft.provider_request_timeout_secs = "45".to_owned();
+
+    let config = state.draft.to_root_config()?;
+    let provider = load_anthropic_provider_config(&config).expect("anthropic should serialize");
+
+    assert_eq!(config.agent.provider, ANTHROPIC_PROVIDER_KEY);
+    assert_eq!(config.agent.model, "claude-new");
+    assert_eq!(provider.model, "claude-new");
+    assert_eq!(provider.api_key.as_deref(), Some("new-key"));
+    assert_eq!(provider.base_url, "https://proxy.example.test");
+    assert_eq!(provider.anthropic_version, "2023-06-01");
+    assert_eq!(provider.max_tokens, 1024);
+    assert_eq!(provider.request_timeout_secs, 45);
+    Ok(())
+}
+
+#[test]
+fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
+    let mut root_config = test_root_config();
+    root_config.agent.provider = "gemini".to_owned();
+    root_config.agent.model = "gemini-old".to_owned();
+    root_config.providers.insert(
+        "gemini".to_owned(),
+        serde_json::json!({
+            "base_url": "https://gemini.example.com/v1beta",
+            "model": "gemini-old",
+            "api_key": "old-key",
+            "request_timeout_secs": 20
+        }),
+    );
+
+    let mut state = ConfigState::from_root_config(&root_config);
+    assert_eq!(state.draft.provider_name, GEMINI_PROVIDER_KEY);
+    assert_eq!(
+        state.display_value(ConfigField::ProviderFimModel),
+        "not supported"
+    );
+
+    state.draft.provider_model = " gemini-new ".to_owned();
+    state.draft.provider_api_key = " new-key ".to_owned();
+    state.draft.provider_base_url = " https://proxy.example.test/v1beta ".to_owned();
+    state.draft.provider_request_timeout_secs = "46".to_owned();
+
+    let config = state.draft.to_root_config()?;
+    let provider = load_gemini_provider_config(&config).expect("gemini should serialize");
+
+    assert_eq!(config.agent.provider, GEMINI_PROVIDER_KEY);
+    assert_eq!(config.agent.model, "gemini-new");
+    assert_eq!(provider.model, "gemini-new");
+    assert_eq!(provider.api_key.as_deref(), Some("new-key"));
+    assert_eq!(provider.base_url, "https://proxy.example.test/v1beta");
+    assert_eq!(provider.request_timeout_secs, 46);
+    Ok(())
+}
+
+#[test]
 fn provider_name_helpers_normalize_aliases_and_cycle_known_providers() {
     assert_eq!(
         normalize_provider_name("openai-compatible"),
@@ -473,9 +555,13 @@ fn provider_name_helpers_normalize_aliases_and_cycle_known_providers() {
         normalize_provider_name("openai_compatible"),
         "openai_compat"
     );
+    assert_eq!(normalize_provider_name("claude"), "anthropic");
+    assert_eq!(normalize_provider_name("google"), "gemini");
     assert_eq!(normalize_provider_name("deepseek"), "deepseek");
     assert_eq!(cycle_provider_name("deepseek"), "openai_compat");
-    assert_eq!(cycle_provider_name("openai_compat"), "deepseek");
+    assert_eq!(cycle_provider_name("openai_compat"), "anthropic");
+    assert_eq!(cycle_provider_name("anthropic"), "gemini");
+    assert_eq!(cycle_provider_name("gemini"), "deepseek");
 }
 
 #[test]

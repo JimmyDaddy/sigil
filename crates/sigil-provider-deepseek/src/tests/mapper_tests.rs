@@ -123,3 +123,61 @@ fn map_envelope_uses_synthetic_tool_id_and_clears_state_on_stop() -> Result<()> 
     ));
     Ok(())
 }
+
+#[test]
+fn map_envelope_keeps_stream_event_id_when_provider_id_arrives_late() -> Result<()> {
+    let start: DeepSeekStreamEnvelope = serde_json::from_value(serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "function": {
+                        "name": "echo",
+                        "arguments": "{\"value\""
+                    }
+                }]
+            }
+        }]
+    }))?;
+    let finish: DeepSeekStreamEnvelope = serde_json::from_value(serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "provider-call-1",
+                    "function": {
+                        "arguments": ":1}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    }))?;
+
+    let mut mapper = StreamMapper::new("deepseek-v4-flash");
+    let first = mapper.map_envelope(start)?;
+    let second = mapper.map_envelope(finish)?;
+
+    assert!(matches!(
+        first.as_slice(),
+        [
+            ProviderChunk::ToolCallStart { id, name },
+            ProviderChunk::ToolCallArgsDelta { id: args_id, delta }
+        ] if id == "call-0"
+            && name == "echo"
+            && args_id == "call-0"
+            && delta == "{\"value\""
+    ));
+    assert!(matches!(
+        second.as_slice(),
+        [
+            ProviderChunk::ToolCallArgsDelta { id, delta },
+            ProviderChunk::ToolCallComplete(call)
+        ] if id == "call-0"
+            && delta == ":1}"
+            && call.id == "call-0"
+            && call.name == "echo"
+            && call.args_json == "{\"value\":1}"
+    ));
+    Ok(())
+}

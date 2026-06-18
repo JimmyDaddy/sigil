@@ -2193,6 +2193,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-provider-anthropic"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "sigil-provider-deepseek"
 version = "0.1.0"
 dependencies = [
@@ -2207,6 +2222,21 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+]
+
+[[package]]
+name = "sigil-provider-gemini"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -2235,7 +2265,9 @@ dependencies = [
  "sigil-code-intel",
  "sigil-kernel",
  "sigil-mcp",
+ "sigil-provider-anthropic",
  "sigil-provider-deepseek",
+ "sigil-provider-gemini",
  "sigil-provider-openai-compat",
  "sigil-tools-builtin",
  "tempfile",
@@ -2273,7 +2305,9 @@ dependencies = [
  "reqwest",
  "serde_json",
  "sigil-kernel",
+ "sigil-provider-anthropic",
  "sigil-provider-deepseek",
+ "sigil-provider-gemini",
  "sigil-provider-openai-compat",
  "sigil-runtime",
  "syntect",

@@ -1357,7 +1357,7 @@ fn render_timeline_entry_lines_renders_generic_json_tree_preview() {
 }
 
 #[test]
-fn render_timeline_entry_lines_hide_tool_preview_by_default() {
+fn render_timeline_entry_lines_show_short_tool_preview_by_default() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
         text: r##"{
@@ -1376,13 +1376,18 @@ fn render_timeline_entry_lines_hide_tool_preview_by_default() {
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("preview hidden"))
+            .any(|span| span.content.as_ref().contains("Title"))
     }));
-    assert!(!lines.iter().any(|line| {
+    assert!(lines.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("# Title"))
+            .any(|span| span.content.as_ref().contains("item"))
     }));
+    assert!(
+        !rendered_plain_lines(&lines)
+            .join("\n")
+            .contains("preview hidden")
+    );
 }
 
 #[test]
@@ -1601,7 +1606,9 @@ fn render_timeline_entry_lines_can_collapse_default_expanded_tool_diff() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    assert!(plain.contains("diff hidden"));
+    assert!(plain.contains("note.txt"));
+    assert!(plain.contains("diff"));
+    assert!(plain.contains("more lines hidden"));
     assert!(!plain.contains("--- current/note.txt"));
 }
 

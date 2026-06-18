@@ -1,30 +1,21 @@
-use std::collections::BTreeMap;
-
 use anyhow::Result;
 
-use sigil_kernel::{ProviderChunk, ToolCall, UsageStats};
+use sigil_kernel::{
+    ProviderChunk, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
+};
 
 use crate::models::{OpenAiStreamEnvelope, OpenAiToolCallDelta};
 
 pub struct StreamMapper {
-    tool_parts: BTreeMap<usize, ToolAccumulator>,
+    tool_parts: ToolCallStreamAccumulator,
 }
 
 impl StreamMapper {
     pub fn new() -> Self {
         Self {
-            tool_parts: BTreeMap::new(),
+            tool_parts: ToolCallStreamAccumulator::new(),
         }
     }
-}
-
-#[derive(Default)]
-struct ToolAccumulator {
-    id: Option<String>,
-    name: Option<String>,
-    args: String,
-    started: bool,
-    completed: bool,
 }
 
 impl StreamMapper {
@@ -71,74 +62,24 @@ impl StreamMapper {
 
     pub fn finish(&mut self) -> Vec<ProviderChunk> {
         let mut chunks = Vec::new();
-        self.complete_open_tool_calls(&mut chunks);
+        self.tool_parts
+            .complete_open_calls(&mut chunks, ToolCallCompletionIdPolicy::SynthesizeFromIndex);
         chunks
     }
 
     fn map_tool_delta(&mut self, chunks: &mut Vec<ProviderChunk>, delta: OpenAiToolCallDelta) {
-        let accumulator = self.tool_parts.entry(delta.index).or_default();
-        if let Some(id) = delta.id {
-            accumulator.id = Some(id);
-        }
-        if let Some(function) = delta.function {
-            if let Some(name) = function.name {
-                accumulator.name = Some(name);
-                emit_tool_start(chunks, delta.index, accumulator);
-            }
-            if let Some(arguments) = function.arguments {
-                accumulator.args.push_str(&arguments);
-                let id = tool_id(delta.index, accumulator);
-                chunks.push(ProviderChunk::ToolCallArgsDelta {
-                    id,
-                    delta: arguments,
-                });
-            }
-        }
+        let (name, arguments) = delta
+            .function
+            .map(|function| (function.name, function.arguments))
+            .unwrap_or_default();
+        self.tool_parts
+            .append_delta(chunks, delta.index, delta.id, name, arguments);
     }
 
     fn complete_open_tool_calls(&mut self, chunks: &mut Vec<ProviderChunk>) {
-        for (index, accumulator) in &mut self.tool_parts {
-            emit_tool_start(chunks, *index, accumulator);
-            if accumulator.completed {
-                continue;
-            }
-            if let Some(name) = accumulator.name.clone() {
-                chunks.push(ProviderChunk::ToolCallComplete(ToolCall {
-                    id: tool_id(*index, accumulator),
-                    name,
-                    args_json: accumulator.args.clone(),
-                }));
-                accumulator.completed = true;
-            }
-        }
         self.tool_parts
-            .retain(|_, accumulator| !accumulator.completed);
+            .complete_open_calls(chunks, ToolCallCompletionIdPolicy::SynthesizeFromIndex);
     }
-}
-
-fn emit_tool_start(
-    chunks: &mut Vec<ProviderChunk>,
-    index: usize,
-    accumulator: &mut ToolAccumulator,
-) {
-    if accumulator.started {
-        return;
-    }
-    let Some(name) = accumulator.name.clone() else {
-        return;
-    };
-    chunks.push(ProviderChunk::ToolCallStart {
-        id: tool_id(index, accumulator),
-        name,
-    });
-    accumulator.started = true;
-}
-
-fn tool_id(index: usize, accumulator: &ToolAccumulator) -> String {
-    accumulator
-        .id
-        .clone()
-        .unwrap_or_else(|| format!("call-{index}"))
 }
 
 #[cfg(test)]

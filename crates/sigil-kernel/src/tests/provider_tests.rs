@@ -8,7 +8,7 @@ use crate::{MessageRole, ModelMessage, ReasoningEffort, ToolCall};
 
 use super::{
     CompletionRequest, Provider, ProviderCapabilities, ProviderChunk, ReasoningStreamSupport,
-    SessionStats, UsageStats,
+    SessionStats, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
 };
 
 #[test]
@@ -47,6 +47,111 @@ fn reasoning_stream_support_tracks_surface_semantics() {
     assert!(!ReasoningStreamSupport::Unsupported.can_surface());
     assert!(ReasoningStreamSupport::Passthrough.can_surface());
     assert!(ReasoningStreamSupport::Native.can_surface());
+}
+
+#[test]
+fn tool_call_stream_accumulator_emits_start_args_and_complete() {
+    let mut accumulator = ToolCallStreamAccumulator::new();
+    let mut chunks = Vec::new();
+
+    accumulator.append_delta(
+        &mut chunks,
+        0,
+        Some("call-1".to_owned()),
+        Some("read_file".to_owned()),
+        Some("{\"path\"".to_owned()),
+    );
+    accumulator.append_delta(
+        &mut chunks,
+        0,
+        None,
+        None,
+        Some(":\"src/lib.rs\"}".to_owned()),
+    );
+    accumulator.complete_open_calls(&mut chunks, ToolCallCompletionIdPolicy::RequireProviderId);
+
+    assert!(matches!(
+        &chunks[0],
+        ProviderChunk::ToolCallStart { id, name } if id == "call-1" && name == "read_file"
+    ));
+    assert!(matches!(
+        &chunks[1],
+        ProviderChunk::ToolCallArgsDelta { id, delta } if id == "call-1" && delta == "{\"path\""
+    ));
+    assert!(matches!(
+        &chunks[2],
+        ProviderChunk::ToolCallArgsDelta { id, delta } if id == "call-1" && delta == ":\"src/lib.rs\"}"
+    ));
+    assert!(matches!(
+        &chunks[3],
+        ProviderChunk::ToolCallComplete(call)
+            if call.id == "call-1"
+                && call.name == "read_file"
+                && call.args_json == "{\"path\":\"src/lib.rs\"}"
+    ));
+}
+
+#[test]
+fn tool_call_stream_accumulator_respects_completion_id_policy() {
+    let mut accumulator = ToolCallStreamAccumulator::new();
+    let mut chunks = Vec::new();
+
+    accumulator.append_delta(
+        &mut chunks,
+        2,
+        None,
+        Some("echo".to_owned()),
+        Some("{}".to_owned()),
+    );
+    accumulator.complete_open_calls(&mut chunks, ToolCallCompletionIdPolicy::RequireProviderId);
+    assert_eq!(chunks.len(), 2);
+
+    accumulator.complete_open_calls(&mut chunks, ToolCallCompletionIdPolicy::SynthesizeFromIndex);
+    assert!(matches!(
+        chunks.last(),
+        Some(ProviderChunk::ToolCallComplete(call))
+            if call.id == "call-2" && call.name == "echo" && call.args_json == "{}"
+    ));
+}
+
+#[test]
+fn tool_call_stream_accumulator_keeps_event_id_when_provider_id_arrives_late() {
+    let mut accumulator = ToolCallStreamAccumulator::new();
+    let mut chunks = Vec::new();
+
+    accumulator.append_delta(
+        &mut chunks,
+        0,
+        None,
+        Some("echo".to_owned()),
+        Some("{\"value\"".to_owned()),
+    );
+    accumulator.append_delta(
+        &mut chunks,
+        0,
+        Some("provider-call-1".to_owned()),
+        None,
+        Some(":1}".to_owned()),
+    );
+    accumulator.complete_open_calls(&mut chunks, ToolCallCompletionIdPolicy::RequireProviderId);
+
+    assert!(matches!(
+        &chunks[0],
+        ProviderChunk::ToolCallStart { id, name } if id == "call-0" && name == "echo"
+    ));
+    assert!(matches!(
+        &chunks[1],
+        ProviderChunk::ToolCallArgsDelta { id, delta } if id == "call-0" && delta == "{\"value\""
+    ));
+    assert!(matches!(
+        &chunks[2],
+        ProviderChunk::ToolCallArgsDelta { id, delta } if id == "call-0" && delta == ":1}"
+    ));
+    assert!(matches!(
+        &chunks[3],
+        ProviderChunk::ToolCallComplete(call)
+            if call.id == "call-0" && call.name == "echo" && call.args_json == "{\"value\":1}"
+    ));
 }
 
 struct BoxedProviderFixture;

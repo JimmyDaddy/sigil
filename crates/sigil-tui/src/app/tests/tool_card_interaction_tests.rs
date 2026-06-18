@@ -66,7 +66,7 @@ fn tool_card_shortcuts_focus_and_toggle_one_card() -> Result<()> {
     assert!(lines.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("hidden"))
+            .any(|span| span.content.as_ref().contains("src/lib.rs"))
     }));
 
     app.input = "draft".to_owned();
@@ -131,7 +131,12 @@ fn file_diff_tool_card_defaults_open_and_can_toggle_closed() -> Result<()> {
     assert!(collapsed.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("diff hidden"))
+            .any(|span| span.content.as_ref().contains("note.txt"))
+    }));
+    assert!(collapsed.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("more lines hidden"))
     }));
     assert!(!collapsed.iter().any(|line| {
         line.spans
@@ -143,6 +148,47 @@ fn file_diff_tool_card_defaults_open_and_can_toggle_closed() -> Result<()> {
 
     assert!(!app.collapsed_tool_activity_keys.contains(&tool_key));
     assert!(app.tool_card_status_line().contains("open"));
+    Ok(())
+}
+
+#[test]
+fn ctrl_t_tool_toggle_preserves_live_tail_when_already_at_latest() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(80, 8);
+    app.push_timeline(
+        TimelineRole::Tool,
+        r##"{
+  "call_id": "call-old",
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "first 1/1 lines · 8 B",
+  "preview_lines": ["[\".git\"]"],
+  "preview_value": [".git"],
+  "hidden_lines": 0
+}"##,
+    );
+    for index in 0..24 {
+        app.push_timeline(TimelineRole::Assistant, format!("tail message {index}"));
+    }
+    let tool_key = "call:call-old".to_owned();
+    assert_eq!(app.selected_tool_activity_key, Some(tool_key.clone()));
+    assert_eq!(app.timeline_scroll_back, 0);
+    assert!(
+        app.max_timeline_scroll_back() > 0,
+        "test setup should have scrollback"
+    );
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+
+    assert!(app.expanded_tool_activity_keys.contains(&tool_key));
+    assert_eq!(app.timeline_scroll_back, 0);
+    let lines = app.transcript_lines(20);
+    assert!(lines.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("tail message 23"))
+    }));
     Ok(())
 }
 
@@ -253,7 +299,7 @@ fn tool_activity_metadata_is_cached_after_append() {
 }
 
 #[test]
-fn tool_focus_commands_are_noop_without_tool_cards() -> Result<()> {
+fn tool_card_interaction_commands_are_noop_without_tool_cards() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     assert_eq!(app.tool_card_status_line(), "activities: none");
     assert_eq!(app.selected_tool_activity_key, None);
@@ -285,7 +331,7 @@ fn tool_focus_commands_are_noop_without_tool_cards() -> Result<()> {
 }
 
 #[test]
-fn tool_focus_private_helpers_cover_stale_selection_and_reveal_guards() {
+fn tool_card_interaction_private_helpers_cover_stale_selection_and_reveal_guards() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let entries = vec![(2, "first".to_owned()), (5, "second".to_owned())];
 

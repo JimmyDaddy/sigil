@@ -19,6 +19,12 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     state.draft.provider_name = "openai_compat".to_owned();
     let api_key_details = render_config_selection_details(&state).join("\n");
     assert!(api_key_details.contains("override: SIGIL_OPENAI_COMPATIBLE_API_KEY"));
+    state.draft.provider_name = "anthropic".to_owned();
+    let api_key_details = render_config_selection_details(&state).join("\n");
+    assert!(api_key_details.contains("override: SIGIL_ANTHROPIC_API_KEY"));
+    state.draft.provider_name = "gemini".to_owned();
+    let api_key_details = render_config_selection_details(&state).join("\n");
+    assert!(api_key_details.contains("override: SIGIL_GEMINI_API_KEY"));
 
     state.selected_field = Some(ConfigField::ProviderFimModel);
     let fim_details = render_config_selection_details(&state).join("\n");
@@ -55,6 +61,19 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
         cycle_code_intel_startup(sigil_kernel::CodeIntelStartup::Eager),
         sigil_kernel::CodeIntelStartup::Off
     );
+}
+
+#[test]
+fn provider_detail_renders_capability_summary() {
+    let root_config = test_config();
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
+    app.open_config_panel();
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("[capabilities]"));
+    assert!(detail.contains("Provider matrix"));
+    assert!(detail.contains("Full capability summary is available in /doctor"));
 }
 
 #[test]

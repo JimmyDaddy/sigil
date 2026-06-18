@@ -99,7 +99,8 @@ fn render_slash_selector_overlay_marks_selected_command() -> anyhow::Result<()> 
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(rendered.contains("› "));
-    assert!(rendered.contains("resume"));
+    assert!(rendered.contains("config"));
+    assert!(rendered.contains("new"));
     Ok(())
 }
 
