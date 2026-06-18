@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod approval;
+pub mod changeset;
 pub mod config;
 pub mod event;
 pub mod memory;
@@ -16,6 +17,11 @@ pub use agent::{
     AgentRunTerminalReason,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
+pub use changeset::{
+    ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
+    ChangeSetId, ChangeSetProjection, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk,
+    ChangeSetState, ChangeSetValidation, ChangeSetValidationKind, ChangeSetValidationStatus,
+};
 pub use config::{
     AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig,
     CompactionConfig, CompactionThresholdStatus, LanguageServerConfig, McpServerConfig,

@@ -729,6 +729,19 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 snapshot.original_stats.added,
                 snapshot.original_stats.removed
             ),
+            ControlEntry::ChangeSetProposed(change_set) => format!(
+                "[ctl] changeset {} proposed risk={} files={} {}",
+                change_set.id.as_str(),
+                change_set.risk.as_str(),
+                change_set.files.len(),
+                truncate_session_view_text(&change_set.title, 48)
+            ),
+            ControlEntry::ChangeSetApplied(result) => format!(
+                "[ctl] changeset {} status={} files={}",
+                result.id.as_str(),
+                result.status.as_str(),
+                result.file_results.len()
+            ),
             ControlEntry::CompactionApplied(record) => format!(
                 "[ctl] compacted={} tail={}",
                 record.compacted_message_count, record.retained_tail_message_count

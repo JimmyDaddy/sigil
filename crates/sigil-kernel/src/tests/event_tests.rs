@@ -1,8 +1,9 @@
 use serde_json::json;
 
 use crate::{
-    AgentRole, ApprovalMode, BackgroundTaskHandle, CompactionRecord, ControlEntry,
-    McpElicitationDecision, McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
+    AgentRole, ApprovalMode, BackgroundTaskHandle, ChangeSet, ChangeSetId, ChangeSetResult,
+    ChangeSetResultStatus, ChangeSetRisk, CompactionRecord, ControlEntry, McpElicitationDecision,
+    McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
     PUBLIC_RUN_EVENT_SCHEMA_VERSION, PrefixSnapshot, ProviderContinuationState, PublicControlEvent,
     PublicRunEvent, PublicRunEventKind, ResponseHandle, RunEvent, SessionRef,
     TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
@@ -326,6 +327,26 @@ fn public_control_event_kinds_cover_control_entry_variants() {
         (
             ControlEntry::ToolPreviewCaptured(tool_preview_snapshot()),
             "tool_preview_captured",
+        ),
+        (
+            ControlEntry::ChangeSetProposed(ChangeSet {
+                id: ChangeSetId::new("change-1").expect("valid change set id"),
+                title: "Update README".to_owned(),
+                summary: "Update project overview".to_owned(),
+                risk: ChangeSetRisk::Low,
+                files: Vec::new(),
+                validations: Vec::new(),
+            }),
+            "change_set_proposed",
+        ),
+        (
+            ControlEntry::ChangeSetApplied(ChangeSetResult {
+                id: ChangeSetId::new("change-1").expect("valid change set id"),
+                status: ChangeSetResultStatus::Applied,
+                file_results: Vec::new(),
+                message: None,
+            }),
+            "change_set_applied",
         ),
         (
             ControlEntry::CompactionApplied(CompactionRecord {

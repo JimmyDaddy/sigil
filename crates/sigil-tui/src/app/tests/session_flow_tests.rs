@@ -931,6 +931,22 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
             redacted: true,
         }))),
         SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(preview)),
+        SessionLogEntry::Control(ControlEntry::ChangeSetProposed(sigil_kernel::ChangeSet {
+            id: sigil_kernel::ChangeSetId::new("change-1")?,
+            title: "Update README".to_owned(),
+            summary: "Update project overview".to_owned(),
+            risk: sigil_kernel::ChangeSetRisk::Low,
+            files: Vec::new(),
+            validations: Vec::new(),
+        })),
+        SessionLogEntry::Control(ControlEntry::ChangeSetApplied(
+            sigil_kernel::ChangeSetResult {
+                id: sigil_kernel::ChangeSetId::new("change-1")?,
+                status: sigil_kernel::ChangeSetResultStatus::Applied,
+                file_results: Vec::new(),
+                message: None,
+            },
+        )),
         SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
             summary: "summary".to_owned(),
             compacted_message_count: 3,
@@ -955,6 +971,8 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
     assert!(rendered.contains("[ctl] execution call-write-1 write_file status=completed"));
     assert!(rendered.contains("[ctl] egress call-net-1 fetch_url"));
     assert!(rendered.contains("[ctl] preview call-write-1 write_file"));
+    assert!(rendered.contains("[ctl] changeset change-1 proposed risk=low files=0 Update README"));
+    assert!(rendered.contains("[ctl] changeset change-1 status=applied files=0"));
     assert!(rendered.contains("[ctl] compacted=3 tail=2"));
     assert!(rendered.contains("[ctl] note checkpoint"));
     Ok(())

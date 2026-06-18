@@ -3,6 +3,7 @@ use std::fs;
 use anyhow::Result;
 
 use crate::{
+    ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk,
     CompactionRecord, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
     ProviderContinuationState, ResponseHandle, ToolEgressEntry, ToolExecutionEntry,
     ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
@@ -190,6 +191,37 @@ fn mcp_elicitation_control_entry_roundtrips_without_content_values() -> Result<(
                 && restored.content_redacted
                 && restored.content_field_names == vec!["path".to_owned(), "token".to_owned()]
                 && restored.required_field_names == vec!["token".to_owned()]
+    ));
+    Ok(())
+}
+
+#[test]
+fn session_changeset_projection_replays_control_entries() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let id = ChangeSetId::new("change-1")?;
+    session.append_control(ControlEntry::ChangeSetProposed(ChangeSet {
+        id: id.clone(),
+        title: "Update README".to_owned(),
+        summary: "Update project overview".to_owned(),
+        risk: ChangeSetRisk::Low,
+        files: Vec::new(),
+        validations: Vec::new(),
+    }))?;
+    session.append_control(ControlEntry::ChangeSetApplied(ChangeSetResult {
+        id: id.clone(),
+        status: ChangeSetResultStatus::Applied,
+        file_results: Vec::new(),
+        message: None,
+    }))?;
+
+    let projection = session.changeset_projection();
+    let latest = projection.latest().expect("latest changeset");
+
+    assert_eq!(projection.latest_change_set_id.as_ref(), Some(&id));
+    assert!(latest.proposal.is_some());
+    assert!(matches!(
+        latest.result.as_ref(),
+        Some(result) if result.status == ChangeSetResultStatus::Applied
     ));
     Ok(())
 }

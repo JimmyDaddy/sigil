@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CompactionConfig, MemoryConfig, MemoryLoadReport,
+    changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     memory::{apply_memory_report, materialize_memory},
     permission::ApprovalMode,
     provider::{
@@ -97,6 +98,10 @@ pub enum ControlEntry {
     McpElicitation(Box<McpElicitationEntry>),
     #[serde(alias = "ToolPreviewCaptured")]
     ToolPreviewCaptured(ToolPreviewSnapshot),
+    #[serde(alias = "ChangeSetProposed")]
+    ChangeSetProposed(ChangeSet),
+    #[serde(alias = "ChangeSetApplied")]
+    ChangeSetApplied(ChangeSetResult),
     #[serde(alias = "CompactionApplied")]
     CompactionApplied(CompactionRecord),
     #[serde(alias = "TaskRun")]
@@ -481,6 +486,11 @@ impl Session {
     /// Returns a durable task projection reconstructed from append-only control entries.
     pub fn task_state_projection(&self) -> TaskStateProjection {
         TaskStateProjection::from_entries(&self.entries)
+    }
+
+    /// Returns a durable change set projection reconstructed from append-only control entries.
+    pub fn changeset_projection(&self) -> ChangeSetProjection {
+        ChangeSetProjection::from_entries(&self.entries)
     }
 
     /// Builds one provider request from stable system memory, projected session history, and tools.
