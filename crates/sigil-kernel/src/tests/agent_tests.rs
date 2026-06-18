@@ -718,6 +718,7 @@ struct UnknownToolProvider;
 struct DirectTaskToolProvider;
 struct ExecuteFailingProvider;
 struct TextOnlyContinuationProvider;
+struct ToolContinuationProvider;
 
 #[async_trait]
 impl Provider for PreviewFallbackProvider {
@@ -983,6 +984,72 @@ impl Provider for TextOnlyContinuationProvider {
                 opaque_blob: json!({"ignored": true}),
             })),
             Ok(ProviderChunk::TextDelta("text only".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
+impl Provider for ToolContinuationProvider {
+    fn name(&self) -> &str {
+        "mock-tool-continuation"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            reasoning_stream: ReasoningStreamSupport::Native,
+            supports_reasoning_effort: true,
+            supports_tool_stream: true,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: true,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        if tool_used {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-echo-1".to_owned(),
+                name: "echo".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-echo-1".to_owned(),
+                delta: r#"{"value":"hello"}"#.to_owned(),
+            }),
+            Ok(ProviderChunk::ContinuationState(
+                ProviderContinuationState {
+                    provider_name: "mock-tool-continuation".to_owned(),
+                    state_kind: "mock.tool_state".to_owned(),
+                    message_id: None,
+                    opaque_blob: json!({"tool_call_id":"call-echo-1"}),
+                },
+            )),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-echo-1".to_owned(),
+                name: "echo".to_owned(),
+                args_json: r#"{"value":"hello"}"#.to_owned(),
+            })),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -3342,6 +3409,51 @@ async fn agent_binds_text_only_continuation_state_to_final_assistant_message() -
         matches!(event, RunEvent::ContinuationState(state)
             if state.provider_name == "mock-text-only")
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_binds_tool_continuation_state_without_reasoning_to_assistant_message() -> Result<()>
+{
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(ToolContinuationProvider, registry);
+    let mut session = Session::new("mock-tool-continuation", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+
+    let result = agent
+        .run(
+            &mut session,
+            "call echo",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    let assistant_tool_message_id = session
+        .messages()
+        .iter()
+        .find(|message| !message.tool_calls.is_empty())
+        .map(|message| message.id.clone());
+    let saved_state = session.entries().iter().find_map(|entry| match entry {
+        SessionLogEntry::Control(ControlEntry::ContinuationStateSaved(state)) => Some(state),
+        _ => None,
+    });
+    assert_eq!(
+        saved_state.and_then(|state| state.message_id.clone()),
+        assistant_tool_message_id
+    );
     Ok(())
 }
 

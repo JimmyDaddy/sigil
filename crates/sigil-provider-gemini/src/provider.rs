@@ -51,11 +51,17 @@ impl GeminiProvider {
         Err(GeminiProviderError::MissingApiKey.into())
     }
 
-    fn stream_generate_content_url(&self) -> String {
-        let model_path = if self.config.model.starts_with("models/") {
-            self.config.model.clone()
+    fn stream_generate_content_url(&self, request_model: &str) -> String {
+        let model = request_model.trim();
+        let model = if model.is_empty() {
+            self.config.model.as_str()
         } else {
-            format!("models/{}", self.config.model)
+            model
+        };
+        let model_path = if model.starts_with("models/") {
+            model.to_owned()
+        } else {
+            format!("models/{model}")
         };
         format!(
             "{}/{}:streamGenerateContent",
@@ -80,7 +86,7 @@ impl Provider for GeminiProvider {
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
         let body = build_generate_content_request(&request)?;
-        let url = self.stream_generate_content_url();
+        let url = self.stream_generate_content_url(&request.model_name);
         let mut attempt = 0usize;
         loop {
             attempt += 1;

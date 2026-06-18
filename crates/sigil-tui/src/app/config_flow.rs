@@ -2,8 +2,7 @@ use crate::config_panel::{
     ANTHROPIC_PROVIDER_KEY, CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT,
     CONFIG_FIELD_NAV_HINT, CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField,
     ConfigFieldMove, ConfigFooterAction, ConfigSection, ConfigState, GEMINI_PROVIDER_KEY,
-    OPENAI_COMPAT_PROVIDER_KEY, cycle_provider_name, render_config_readonly_row,
-    render_config_value_row,
+    OPENAI_COMPAT_PROVIDER_KEY, render_config_readonly_row, render_config_value_row,
 };
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -623,8 +622,7 @@ impl AppState {
                             ));
                         }
                         ConfigField::ProviderName => {
-                            config_state.draft.provider_name =
-                                cycle_provider_name(&config_state.draft.provider_name);
+                            config_state.draft.cycle_provider();
                             config_state.dirty = true;
                             self.last_notice =
                                 Some(format!("provider -> {}", config_state.draft.provider_name));

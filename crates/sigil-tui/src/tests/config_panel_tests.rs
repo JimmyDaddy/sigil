@@ -184,6 +184,118 @@ fn api_key_display_uses_status_without_secret_length() {
 }
 
 #[test]
+fn provider_cycle_keeps_per_provider_field_drafts_separate() -> anyhow::Result<()> {
+    let mut config = test_root_config();
+    config.providers.insert(
+        "deepseek".to_owned(),
+        serde_json::json!({
+            "model": "deepseek-model",
+            "api_key": "deepseek-key",
+            "base_url": "https://deepseek.example.com",
+            "beta_base_url": "https://deepseek.example.com/beta",
+            "anthropic_base_url": "https://deepseek.example.com/anthropic",
+            "fim_model": "deepseek-fim",
+            "request_timeout_secs": 11
+        }),
+    );
+    config.providers.insert(
+        "openai_compat".to_owned(),
+        serde_json::json!({
+            "model": "openai-model",
+            "api_key": "openai-key",
+            "base_url": "https://openai.example.com/v1",
+            "request_timeout_secs": 12
+        }),
+    );
+    config.providers.insert(
+        "anthropic".to_owned(),
+        serde_json::json!({
+            "model": "anthropic-model",
+            "api_key": "anthropic-key",
+            "base_url": "https://anthropic.example.com",
+            "request_timeout_secs": 13
+        }),
+    );
+    config.providers.insert(
+        "gemini".to_owned(),
+        serde_json::json!({
+            "model": "gemini-model",
+            "api_key": "gemini-key",
+            "base_url": "https://gemini.example.com/v1beta",
+            "request_timeout_secs": 14
+        }),
+    );
+
+    let mut state = ConfigState::from_root_config(&config);
+    assert_eq!(state.draft.provider_model, "deepseek-model");
+    assert_eq!(state.draft.provider_api_key, "deepseek-key");
+
+    state.draft.cycle_provider();
+    assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
+    assert_eq!(state.draft.provider_model, "openai-model");
+    state.draft.provider_model = "openai-edited".to_owned();
+    state.draft.provider_api_key = "openai-edited-key".to_owned();
+
+    state.draft.cycle_provider();
+    assert_eq!(state.draft.provider_name, ANTHROPIC_PROVIDER_KEY);
+    assert_eq!(state.draft.provider_model, "anthropic-model");
+    assert_eq!(state.draft.provider_api_key, "anthropic-key");
+    let saved = state.draft.to_root_config()?;
+    assert_eq!(saved.agent.provider, ANTHROPIC_PROVIDER_KEY);
+    assert_eq!(
+        saved.providers["anthropic"]["api_key"],
+        serde_json::Value::String("anthropic-key".to_owned())
+    );
+    assert_ne!(
+        saved.providers["anthropic"]["api_key"],
+        serde_json::Value::String("deepseek-key".to_owned())
+    );
+
+    state.draft.cycle_provider();
+    assert_eq!(state.draft.provider_name, GEMINI_PROVIDER_KEY);
+    assert_eq!(state.draft.provider_model, "gemini-model");
+    state.draft.cycle_provider();
+    assert_eq!(state.draft.provider_name, DEEPSEEK_PROVIDER_KEY);
+    assert_eq!(state.draft.provider_model, "deepseek-model");
+    state.draft.cycle_provider();
+    assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
+    assert_eq!(state.draft.provider_model, "openai-edited");
+    assert_eq!(state.draft.provider_api_key, "openai-edited-key");
+    Ok(())
+}
+
+#[test]
+fn provider_cycle_loads_default_draft_when_provider_cache_is_missing() {
+    let mut state = ConfigState::from_root_config(&test_root_config());
+    state
+        .draft
+        .provider_drafts
+        .remove(OPENAI_COMPAT_PROVIDER_KEY);
+
+    state.draft.cycle_provider();
+
+    assert_eq!(state.draft.provider_name, OPENAI_COMPAT_PROVIDER_KEY);
+    assert_eq!(state.draft.provider_model, "deepseek-v4-flash");
+    assert!(!state.draft.provider_base_url.is_empty());
+}
+
+#[test]
+fn default_provider_field_draft_uses_provider_specific_defaults() {
+    for provider_name in [
+        OPENAI_COMPAT_PROVIDER_KEY,
+        ANTHROPIC_PROVIDER_KEY,
+        GEMINI_PROVIDER_KEY,
+        DEEPSEEK_PROVIDER_KEY,
+    ] {
+        let draft = default_provider_field_draft(provider_name, "provider-model");
+
+        assert_eq!(draft.model, "provider-model");
+        assert!(!draft.base_url.is_empty());
+        assert!(!draft.request_timeout_secs.is_empty());
+    }
+}
+
+#[test]
 fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Permissions.summary(), "approval rules");
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));

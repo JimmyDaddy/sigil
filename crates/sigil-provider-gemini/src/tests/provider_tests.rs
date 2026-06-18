@@ -145,6 +145,62 @@ async fn provider_stream_surfaces_sse_events_and_query() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn provider_stream_url_uses_request_model_name() -> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+         data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await?;
+    let provider = gemini_provider(GeminiProviderConfig {
+        base_url: server.base_url(),
+        model: "gemini-config".to_owned(),
+        api_key: Some("test-key".to_owned()),
+        ..GeminiProviderConfig::default()
+    })?;
+    let mut request = test_request();
+    request.model_name = "gemini-request".to_owned();
+
+    let chunks = provider.stream(request).await?.collect::<Vec<_>>().await;
+
+    assert!(
+        matches!(chunks[0].as_ref().expect("text"), ProviderChunk::TextDelta(text) if text == "hi")
+    );
+    let raw_request = server.request_text();
+    assert!(raw_request.starts_with("POST /models/gemini-request:streamGenerateContent?"));
+    assert!(!raw_request.contains("gemini-config:streamGenerateContent"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_stream_url_falls_back_to_prefixed_config_model() -> anyhow::Result<()> {
+    let server = TinySseServer::start(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+         data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n\
+         data: [DONE]\n\n",
+    )
+    .await?;
+    let provider = gemini_provider(GeminiProviderConfig {
+        base_url: server.base_url(),
+        model: "models/gemini-config".to_owned(),
+        api_key: Some("test-key".to_owned()),
+        ..GeminiProviderConfig::default()
+    })?;
+    let mut request = test_request();
+    request.model_name = " ".to_owned();
+
+    let chunks = provider.stream(request).await?.collect::<Vec<_>>().await;
+
+    assert!(
+        matches!(chunks[0].as_ref().expect("text"), ProviderChunk::TextDelta(text) if text == "hi")
+    );
+    let raw_request = server.request_text();
+    assert!(raw_request.starts_with("POST /models/gemini-config:streamGenerateContent?"));
+    assert!(!raw_request.contains("/models/models/gemini-config"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn provider_stream_emits_done_when_http_stream_ends_without_done_frame() -> anyhow::Result<()>
 {
     let server = TinySseServer::start(

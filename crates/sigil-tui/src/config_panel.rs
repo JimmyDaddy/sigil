@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, RootConfig,
@@ -6,6 +8,7 @@ use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
 use sigil_provider_gemini::GeminiProviderConfig;
 use sigil_provider_openai_compat::OpenAiCompatibleProviderConfig;
+use sigil_runtime::provider_config_key;
 
 pub(crate) const DEEPSEEK_PROVIDER_KEY: &str = "deepseek";
 pub(crate) const OPENAI_COMPAT_PROVIDER_KEY: &str = "openai_compat";
@@ -484,6 +487,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) provider_model: String,
     pub(crate) provider_api_key: String,
     pub(crate) provider_base_url: String,
+    provider_drafts: BTreeMap<String, ProviderFieldDraft>,
     pub(crate) provider_beta_base_url: String,
     pub(crate) provider_anthropic_base_url: String,
     pub(crate) provider_user_id_strategy: String,
@@ -507,6 +511,52 @@ pub(crate) struct ConfigDraft {
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
 
+#[derive(Debug, Clone)]
+struct ProviderFieldDraft {
+    model: String,
+    api_key: String,
+    base_url: String,
+    request_timeout_secs: String,
+}
+
+impl ProviderFieldDraft {
+    fn from_deepseek(config: &DeepSeekProviderConfig) -> Self {
+        Self {
+            model: config.model.clone(),
+            api_key: config.api_key.clone().unwrap_or_default(),
+            base_url: config.base_url.clone(),
+            request_timeout_secs: config.request_timeout_secs.to_string(),
+        }
+    }
+
+    fn from_openai_compat(config: &OpenAiCompatibleProviderConfig) -> Self {
+        Self {
+            model: config.model.clone(),
+            api_key: config.api_key.clone().unwrap_or_default(),
+            base_url: config.base_url.clone(),
+            request_timeout_secs: config.request_timeout_secs.to_string(),
+        }
+    }
+
+    fn from_anthropic(config: &AnthropicProviderConfig) -> Self {
+        Self {
+            model: config.model.clone(),
+            api_key: config.api_key.clone().unwrap_or_default(),
+            base_url: config.base_url.clone(),
+            request_timeout_secs: config.request_timeout_secs.to_string(),
+        }
+    }
+
+    fn from_gemini(config: &GeminiProviderConfig) -> Self {
+        Self {
+            model: config.model.clone(),
+            api_key: config.api_key.clone().unwrap_or_default(),
+            base_url: config.base_url.clone(),
+            request_timeout_secs: config.request_timeout_secs.to_string(),
+        }
+    }
+}
+
 impl ConfigDraft {
     pub(crate) fn from_root_config(root_config: &RootConfig) -> Self {
         let provider_name = normalize_provider_name(&root_config.agent.provider).to_owned();
@@ -518,38 +568,40 @@ impl ConfigDraft {
             .unwrap_or_else(|| default_anthropic_provider_config(&root_config.agent.model));
         let gemini_provider = load_gemini_provider_config(root_config)
             .unwrap_or_else(|| default_gemini_provider_config(&root_config.agent.model));
+        let mut provider_drafts = BTreeMap::new();
+        provider_drafts.insert(
+            DEEPSEEK_PROVIDER_KEY.to_owned(),
+            ProviderFieldDraft::from_deepseek(&deepseek_provider),
+        );
+        provider_drafts.insert(
+            OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
+            ProviderFieldDraft::from_openai_compat(&openai_provider),
+        );
+        provider_drafts.insert(
+            ANTHROPIC_PROVIDER_KEY.to_owned(),
+            ProviderFieldDraft::from_anthropic(&anthropic_provider),
+        );
+        provider_drafts.insert(
+            GEMINI_PROVIDER_KEY.to_owned(),
+            ProviderFieldDraft::from_gemini(&gemini_provider),
+        );
+        let current_provider_draft = provider_drafts
+            .get(provider_name.as_str())
+            .cloned()
+            .expect("normalized provider has an initialized draft");
         Self {
             base_root_config: root_config.clone(),
             provider_name: provider_name.clone(),
-            provider_model: match provider_name.as_str() {
-                OPENAI_COMPAT_PROVIDER_KEY => openai_provider.model,
-                ANTHROPIC_PROVIDER_KEY => anthropic_provider.model,
-                GEMINI_PROVIDER_KEY => gemini_provider.model,
-                _ => deepseek_provider.model,
-            },
-            provider_api_key: match provider_name.as_str() {
-                OPENAI_COMPAT_PROVIDER_KEY => openai_provider.api_key.unwrap_or_default(),
-                ANTHROPIC_PROVIDER_KEY => anthropic_provider.api_key.unwrap_or_default(),
-                GEMINI_PROVIDER_KEY => gemini_provider.api_key.unwrap_or_default(),
-                _ => deepseek_provider.api_key.unwrap_or_default(),
-            },
-            provider_base_url: match provider_name.as_str() {
-                OPENAI_COMPAT_PROVIDER_KEY => openai_provider.base_url,
-                ANTHROPIC_PROVIDER_KEY => anthropic_provider.base_url,
-                GEMINI_PROVIDER_KEY => gemini_provider.base_url,
-                _ => deepseek_provider.base_url,
-            },
+            provider_model: current_provider_draft.model,
+            provider_api_key: current_provider_draft.api_key,
+            provider_base_url: current_provider_draft.base_url,
+            provider_drafts,
             provider_beta_base_url: deepseek_provider.beta_base_url,
             provider_anthropic_base_url: deepseek_provider.anthropic_base_url,
             provider_user_id_strategy: deepseek_provider.user_id_strategy.unwrap_or_default(),
             provider_strict_tools_mode: deepseek_provider.strict_tools_mode,
             provider_fim_model: deepseek_provider.fim_model,
-            provider_request_timeout_secs: match provider_name.as_str() {
-                OPENAI_COMPAT_PROVIDER_KEY => openai_provider.request_timeout_secs.to_string(),
-                ANTHROPIC_PROVIDER_KEY => anthropic_provider.request_timeout_secs.to_string(),
-                GEMINI_PROVIDER_KEY => gemini_provider.request_timeout_secs.to_string(),
-                _ => deepseek_provider.request_timeout_secs.to_string(),
-            },
+            provider_request_timeout_secs: current_provider_draft.request_timeout_secs,
             permission_default_mode: root_config.permission.default_mode,
             memory_enabled: root_config.memory.enabled,
             compaction_enabled: root_config.compaction.enabled,
@@ -583,6 +635,41 @@ impl ConfigDraft {
                 .map(McpServerDraft::from_config)
                 .collect(),
         }
+    }
+
+    pub(crate) fn cycle_provider(&mut self) {
+        self.capture_current_provider_draft();
+        let provider_name = cycle_provider_name(&self.provider_name);
+        self.provider_name = provider_name.clone();
+        self.load_provider_draft(&provider_name);
+    }
+
+    fn capture_current_provider_draft(&mut self) {
+        let provider_name = normalize_provider_name(&self.provider_name).to_owned();
+        self.provider_drafts.insert(
+            provider_name,
+            ProviderFieldDraft {
+                model: self.provider_model.clone(),
+                api_key: self.provider_api_key.clone(),
+                base_url: self.provider_base_url.clone(),
+                request_timeout_secs: self.provider_request_timeout_secs.clone(),
+            },
+        );
+    }
+
+    fn load_provider_draft(&mut self, provider_name: &str) {
+        let provider_name = normalize_provider_name(provider_name);
+        let draft = self
+            .provider_drafts
+            .get(provider_name)
+            .cloned()
+            .unwrap_or_else(|| {
+                default_provider_field_draft(provider_name, &self.base_root_config.agent.model)
+            });
+        self.provider_model = draft.model;
+        self.provider_api_key = draft.api_key;
+        self.provider_base_url = draft.base_url;
+        self.provider_request_timeout_secs = draft.request_timeout_secs;
     }
 
     pub(crate) fn to_root_config(&self) -> Result<RootConfig> {
@@ -1164,6 +1251,21 @@ pub(crate) fn default_gemini_provider_config(model: &str) -> GeminiProviderConfi
     GeminiProviderConfig::default_for_model(model)
 }
 
+fn default_provider_field_draft(provider_name: &str, model: &str) -> ProviderFieldDraft {
+    match provider_name {
+        OPENAI_COMPAT_PROVIDER_KEY => {
+            ProviderFieldDraft::from_openai_compat(&default_openai_compat_provider_config(model))
+        }
+        ANTHROPIC_PROVIDER_KEY => {
+            ProviderFieldDraft::from_anthropic(&default_anthropic_provider_config(model))
+        }
+        GEMINI_PROVIDER_KEY => {
+            ProviderFieldDraft::from_gemini(&default_gemini_provider_config(model))
+        }
+        _ => ProviderFieldDraft::from_deepseek(&default_deepseek_provider_config(model)),
+    }
+}
+
 pub(crate) fn serialize_deepseek_provider_value(
     provider_config: &DeepSeekProviderConfig,
 ) -> Result<serde_json::Value> {
@@ -1209,10 +1311,10 @@ pub(crate) fn serialize_gemini_provider_value(
 }
 
 pub(crate) fn normalize_provider_name(provider: &str) -> &'static str {
-    match provider {
-        "openai-compatible" | "openai_compatible" | "openai_compat" => OPENAI_COMPAT_PROVIDER_KEY,
-        "anthropic" | "claude" => ANTHROPIC_PROVIDER_KEY,
-        "gemini" | "google" | "google_gemini" | "google-gemini" => GEMINI_PROVIDER_KEY,
+    match provider_config_key(provider) {
+        OPENAI_COMPAT_PROVIDER_KEY => OPENAI_COMPAT_PROVIDER_KEY,
+        ANTHROPIC_PROVIDER_KEY => ANTHROPIC_PROVIDER_KEY,
+        GEMINI_PROVIDER_KEY => GEMINI_PROVIDER_KEY,
         _ => DEEPSEEK_PROVIDER_KEY,
     }
 }

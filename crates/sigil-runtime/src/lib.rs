@@ -1173,9 +1173,11 @@ fn read_only_role_tool_scope() -> ToolRegistryScope {
     )
 }
 
-fn provider_config_key(provider: &str) -> &str {
+#[must_use]
+pub fn provider_config_key(provider: &str) -> &str {
     match provider {
         "openai-compatible" | "openai_compatible" => "openai_compat",
+        "claude" => "anthropic",
         "google" | "google_gemini" | "google-gemini" => "gemini",
         other => other,
     }

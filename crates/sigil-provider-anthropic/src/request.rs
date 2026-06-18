@@ -11,6 +11,7 @@ pub fn build_messages_request(
 ) -> Result<AnthropicMessagesRequest> {
     let mut system_parts = Vec::new();
     let mut messages = Vec::new();
+    let mut pending_tool_results = Vec::new();
     for message in &request.messages {
         match message.role {
             MessageRole::System => {
@@ -18,14 +19,21 @@ pub fn build_messages_request(
                     system_parts.push(content.to_owned());
                 }
             }
-            MessageRole::User => messages.push(json!({
-                "role": "user",
-                "content": non_empty_content(message).unwrap_or_default(),
-            })),
-            MessageRole::Assistant => messages.push(assistant_message_to_json(message)?),
-            MessageRole::Tool => messages.push(tool_result_message_to_json(message)?),
+            MessageRole::User => {
+                flush_tool_results(&mut messages, &mut pending_tool_results);
+                messages.push(json!({
+                    "role": "user",
+                    "content": non_empty_content(message).unwrap_or_default(),
+                }));
+            }
+            MessageRole::Assistant => {
+                flush_tool_results(&mut messages, &mut pending_tool_results);
+                messages.push(assistant_message_to_json(message)?);
+            }
+            MessageRole::Tool => pending_tool_results.push(tool_result_block(message)?),
         }
     }
+    flush_tool_results(&mut messages, &mut pending_tool_results);
     let tools = anthropic_tools(&request.tools);
 
     Ok(AnthropicMessagesRequest {
@@ -66,20 +74,27 @@ fn tool_use_block(call: &ToolCall) -> Result<Value> {
     }))
 }
 
-fn tool_result_message_to_json(message: &ModelMessage) -> Result<Value> {
+fn tool_result_block(message: &ModelMessage) -> Result<Value> {
     let tool_use_id = message
         .tool_call_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("Anthropic tool result message is missing tool_call_id"))?;
     Ok(json!({
-        "role": "user",
-        "content": [{
             "type": "tool_result",
             "tool_use_id": tool_use_id,
             "content": non_empty_content(message).unwrap_or_default(),
-        }],
     }))
+}
+
+fn flush_tool_results(messages: &mut Vec<Value>, pending_tool_results: &mut Vec<Value>) {
+    if pending_tool_results.is_empty() {
+        return;
+    }
+    messages.push(json!({
+        "role": "user",
+        "content": std::mem::take(pending_tool_results),
+    }));
 }
 
 fn anthropic_tools(tools: &[ToolSpec]) -> Option<Vec<Value>> {

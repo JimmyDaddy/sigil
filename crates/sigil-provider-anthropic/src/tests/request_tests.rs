@@ -93,6 +93,45 @@ fn build_messages_request_maps_assistant_tool_use_and_tool_result() -> anyhow::R
 }
 
 #[test]
+fn build_messages_request_merges_consecutive_tool_results() -> anyhow::Result<()> {
+    let assistant = ModelMessage::assistant(
+        None,
+        vec![
+            ToolCall {
+                id: "toolu_1".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: r#"{"path":"src/lib.rs"}"#.to_owned(),
+            },
+            ToolCall {
+                id: "toolu_2".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: r#"{"path":"Cargo.toml"}"#.to_owned(),
+            },
+        ],
+    );
+    let request = completion_request(vec![
+        ModelMessage::user("read"),
+        assistant,
+        ModelMessage::tool("toolu_1", "one"),
+        ModelMessage::tool("toolu_2", "two"),
+    ]);
+
+    let body = build_messages_request(&request, 1024)?;
+
+    assert_eq!(body.messages.len(), 3);
+    assert_eq!(body.messages[2]["role"], "user");
+    let content = body.messages[2]["content"]
+        .as_array()
+        .expect("tool results should be content array");
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "tool_result");
+    assert_eq!(content[0]["tool_use_id"], "toolu_1");
+    assert_eq!(content[1]["type"], "tool_result");
+    assert_eq!(content[1]["tool_use_id"], "toolu_2");
+    Ok(())
+}
+
+#[test]
 fn build_messages_request_rejects_malformed_tool_args_and_missing_result_id() {
     let mut invalid = completion_request(vec![ModelMessage::assistant(
         None,

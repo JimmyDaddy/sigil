@@ -355,11 +355,9 @@ where
                 session.append_assistant_message(assistant_message.clone())?;
                 handler.handle(RunEvent::AssistantMessage(assistant_message))?;
 
-                if !reasoning_buffer.is_empty() {
-                    for state in &mut pending_states {
-                        if state.message_id.is_none() {
-                            state.message_id = Some(assistant_message_id.clone());
-                        }
+                for state in &mut pending_states {
+                    if state.message_id.is_none() {
+                        state.message_id = Some(assistant_message_id.clone());
                     }
                 }
 

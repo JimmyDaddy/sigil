@@ -90,15 +90,7 @@ sigil/
         endpoint.rs
         errors.rs
         fim.rs
-    sigil-provider-openai-compat/
-      src/
-        capabilities.rs
-        client.rs
-        config.rs
-        mapper.rs
-        provider.rs
-        request.rs
-        stream.rs
+        lib.rs
         mapper.rs
         models.rs
         prefix.rs
@@ -112,7 +104,49 @@ sigil/
         tools.rs
         tests/
           *_tests.rs
-          *_test_support.rs
+          stream_test_support.rs
+    sigil-provider-openai-compat/
+      src/
+        capabilities.rs
+        client.rs
+        config.rs
+        errors.rs
+        lib.rs
+        mapper.rs
+        models.rs
+        provider.rs
+        request.rs
+        stream.rs
+        tests/
+          *_tests.rs
+    sigil-provider-anthropic/
+      src/
+        capabilities.rs
+        client.rs
+        config.rs
+        errors.rs
+        lib.rs
+        mapper.rs
+        models.rs
+        provider.rs
+        request.rs
+        stream.rs
+        tests/
+          *_tests.rs
+    sigil-provider-gemini/
+      src/
+        capabilities.rs
+        client.rs
+        config.rs
+        errors.rs
+        lib.rs
+        mapper.rs
+        models.rs
+        provider.rs
+        request.rs
+        stream.rs
+        tests/
+          *_tests.rs
     sigil-tools-builtin/
       src/
         lib.rs
@@ -1240,28 +1274,28 @@ pub struct ProviderCapabilities {
 5. 过早拆太多 crate：行为还没稳定前，包过多只会拖慢迭代。
 6. 如果先把 provider 专项能力做成越来越多的 CLI 子命令，再补 TUI，最终很容易得到“命令集合”而不是“交互产品”。
 
-## 17. 建议现在就锁定的决策
+## 17. 已锁定的关键决策
 
-在正式编码前，建议先锁这几件事：
+当前实现已经锁定并落地这些工程决策：
 
-1. 项目配置文件名定为 `sigil.toml`
+1. 项目配置文件名为 `sigil.toml`
 2. 第一层用户壳由 `sigil` 默认启动 TUI；子命令只保留 debug / automation，不做命令产品化
 3. kernel 是 event-driven、agent-runtime-centered
-4. 第一个 provider backend 先做 `sigil-provider-deepseek`，并复用 OpenAI-compatible 主链路
-5. MCP `stdio` 是 phase 1 必做，streamable HTTP 放 phase 2
-6. 先做层级文档 memory，再做 indexed auto memory
-7. planner / executor 在 base loop 稳定前保持可选
+4. provider crate 保持 provider-specific 协议细节内聚，kernel 只承载中立契约
+5. DeepSeek、OpenAI-compatible、Anthropic、Gemini 共用 runtime 装配与 capability view
+6. MCP `stdio` 进入 runtime/TUI 生命周期，server lifecycle 和 trust policy 保持可配置
+7. planner / executor / subagent 在 base loop 之上以可审计的 task state 继续演进
 
 ## 18. 立即下一步
 
-现在最正确的下一步不是继续扩张命令表面，也不是分发包装，而是：
+当前阶段最正确的下一步不是继续扩张命令表面，也不是把 provider 专项能力做成更多 CLI 入口，而是：
 
-1. 搭 workspace
-2. 定 kernel contracts 和 event types
-3. 搭最小 `sigil-tui` 壳和 app state
-4. 实现 `sigil-provider-deepseek`
-5. 实现最小 tool registry 和三个文件工具
-6. 先跑通一个端到端 TUI 工作流，再继续扩范围
+1. 补齐 `/doctor` 与 `/config` 的 provider capability 明细，确保用户能核验具体能力差异
+2. 扩充 Anthropic/Gemini provider 的真实协议 fixture，覆盖 tool result、thought signature、finish reason 和 safety 边界
+3. 继续收紧 provider alias、model routing、auth resolution 在 TUI/runtime/doctor 之间的一致性
+4. 为 provider-specific continuation state 保持 durable、append-only 的恢复测试
+5. 让 provider setup assistant 进入 TUI，而不是把配置体验继续摊到 README 或隐藏命令里
+6. 在不破坏 TUI-first 心智的前提下，再评估 packaging 和分发包装
 
 这样做能让 `sigil` 一开始就站在两件最重要的东西上：一个可复用、可扩展、契约稳定的 agent 内核，以及一个真实面向用户的终端交互产品，而不是一个子命令越来越多的命令集合。
 

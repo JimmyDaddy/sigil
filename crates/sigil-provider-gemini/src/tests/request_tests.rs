@@ -1,7 +1,7 @@
 use serde_json::json;
 use sigil_kernel::{
-    CompletionRequest, ModelMessage, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability,
-    ToolSpec,
+    CompletionRequest, ModelMessage, ProviderContinuationState, ToolAccess, ToolCall, ToolCategory,
+    ToolPreviewCapability, ToolSpec,
 };
 
 use super::*;
@@ -102,6 +102,46 @@ fn build_generate_content_request_maps_function_call_and_response() -> anyhow::R
     assert_eq!(
         serialized["contents"][2]["parts"][0]["functionResponse"]["response"]["result"]["status"],
         "ok"
+    );
+    Ok(())
+}
+
+#[test]
+fn build_generate_content_request_replays_matching_thought_signature() -> anyhow::Result<()> {
+    let assistant = ModelMessage::assistant(
+        None,
+        vec![ToolCall {
+            id: "call-1".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: r#"{"path":"src/lib.rs"}"#.to_owned(),
+        }],
+    );
+    let assistant_id = assistant.id.clone();
+    let mut request = completion_request(vec![
+        ModelMessage::user("read"),
+        assistant,
+        ModelMessage::tool("call-1", "ok"),
+    ]);
+    request.continuation_states.push(ProviderContinuationState {
+        provider_name: "gemini".to_owned(),
+        state_kind: GEMINI_THOUGHT_SIGNATURE_STATE_KIND.to_owned(),
+        message_id: Some(assistant_id),
+        opaque_blob: json!({
+            "tool_call_id": "call-1",
+            "thought_signature": "sig-1",
+        }),
+    });
+
+    let body = build_generate_content_request(&request)?;
+    let serialized = serde_json::to_value(&body)?;
+
+    assert_eq!(
+        serialized["contents"][1]["parts"][0]["thoughtSignature"],
+        "sig-1"
+    );
+    assert_eq!(
+        serialized["contents"][1]["parts"][0]["functionCall"]["id"],
+        "call-1"
     );
     Ok(())
 }

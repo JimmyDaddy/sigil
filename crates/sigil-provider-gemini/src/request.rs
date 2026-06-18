@@ -5,7 +5,10 @@ use serde_json::{Value, json};
 
 use sigil_kernel::{CompletionRequest, MessageRole, ModelMessage, ToolCall, ToolSpec};
 
-use crate::models::{GeminiGenerateContentRequest, GeminiGenerationConfig};
+use crate::{
+    mapper::GEMINI_THOUGHT_SIGNATURE_STATE_KIND,
+    models::{GeminiGenerateContentRequest, GeminiGenerationConfig},
+};
 
 pub fn build_generate_content_request(
     request: &CompletionRequest,
@@ -13,6 +16,7 @@ pub fn build_generate_content_request(
     let mut system_parts = Vec::new();
     let mut contents = Vec::new();
     let mut tool_names_by_id = BTreeMap::new();
+    let thought_signatures = index_thought_signatures(request);
 
     for message in &request.messages {
         match message.role {
@@ -26,6 +30,7 @@ pub fn build_generate_content_request(
                 contents.push(assistant_message_to_content(
                     message,
                     &mut tool_names_by_id,
+                    &thought_signatures,
                 )?);
             }
             MessageRole::Tool => {
@@ -60,6 +65,7 @@ fn content_with_text_role(role: &str, message: &ModelMessage) -> Value {
 fn assistant_message_to_content(
     message: &ModelMessage,
     tool_names_by_id: &mut BTreeMap<String, String>,
+    thought_signatures: &BTreeMap<(String, String), String>,
 ) -> Result<Value> {
     let mut parts = Vec::new();
     if let Some(content) = non_empty_content(message) {
@@ -67,7 +73,8 @@ fn assistant_message_to_content(
     }
     for call in &message.tool_calls {
         tool_names_by_id.insert(call.id.clone(), call.name.clone());
-        parts.push(function_call_part(call)?);
+        let signature = thought_signatures.get(&(message.id.clone(), call.id.clone()));
+        parts.push(function_call_part(call, signature.map(String::as_str))?);
     }
     Ok(json!({
         "role": "model",
@@ -75,14 +82,20 @@ fn assistant_message_to_content(
     }))
 }
 
-fn function_call_part(call: &ToolCall) -> Result<Value> {
-    Ok(json!({
+fn function_call_part(call: &ToolCall, thought_signature: Option<&str>) -> Result<Value> {
+    let mut part = json!({
         "functionCall": {
             "id": call.id,
             "name": call.name,
             "args": parse_tool_args(&call.args_json)?,
         }
-    }))
+    });
+    if let Some(signature) = thought_signature
+        && !signature.trim().is_empty()
+    {
+        part["thoughtSignature"] = Value::String(signature.to_owned());
+    }
+    Ok(part)
 }
 
 fn tool_result_message_to_content(
@@ -161,6 +174,31 @@ fn non_empty_content(message: &ModelMessage) -> Option<&str> {
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn index_thought_signatures(request: &CompletionRequest) -> BTreeMap<(String, String), String> {
+    request
+        .continuation_states
+        .iter()
+        .filter(|state| {
+            state.provider_name == "gemini"
+                && state.state_kind == GEMINI_THOUGHT_SIGNATURE_STATE_KIND
+        })
+        .filter_map(|state| {
+            let message_id = state.message_id.as_ref()?.to_owned();
+            let tool_call_id = state
+                .opaque_blob
+                .get("tool_call_id")
+                .and_then(Value::as_str)?
+                .to_owned();
+            let thought_signature = state
+                .opaque_blob
+                .get("thought_signature")
+                .and_then(Value::as_str)?
+                .to_owned();
+            Some(((message_id, tool_call_id), thought_signature))
+        })
+        .collect()
 }
 
 #[cfg(test)]

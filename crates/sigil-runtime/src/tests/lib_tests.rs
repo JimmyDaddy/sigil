@@ -421,6 +421,9 @@ fn build_provider_supports_anthropic_and_gemini_and_missing_config_errors() -> R
     let anthropic = build_provider(&test_root_config("anthropic"))?;
     assert_eq!(anthropic.name(), "anthropic");
 
+    let claude_alias = build_provider(&test_root_config("claude"))?;
+    assert_eq!(claude_alias.name(), "anthropic");
+
     let gemini = build_provider(&test_root_config("gemini"))?;
     assert_eq!(gemini.name(), "gemini");
 
@@ -448,8 +451,12 @@ fn provider_capability_view_uses_provider_neutral_rows() {
     let capabilities =
         provider_capabilities_for_name("anthropic").expect("Anthropic capabilities should exist");
     let view = provider_capability_view("anthropic", &capabilities);
+    let alias_capabilities =
+        provider_capabilities_for_name("claude").expect("Claude alias should resolve");
+    let alias_view = provider_capability_view("claude", &alias_capabilities);
 
     assert_eq!(view.provider_name, "anthropic");
+    assert_eq!(alias_view.provider_name, "anthropic");
     assert!(
         view.rows
             .iter()

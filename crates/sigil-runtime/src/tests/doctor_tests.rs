@@ -562,12 +562,53 @@ max_tokens = 2048
             && check.status == DoctorStatus::Ok
             && check.message.contains("supported")
     }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:anthropic:capability:tool_calls"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("Tool calls")
+            && check.message.contains("supported")
+    }));
     assert!(
         !report
             .checks
             .iter()
             .any(|check| check.message.contains("test-secret-key"))
     );
+    Ok(())
+}
+
+#[test]
+fn doctor_supports_claude_provider_alias() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "claude"
+model = "claude-test"
+
+[providers.anthropic]
+base_url = "https://anthropic.example.com"
+model = "claude-test"
+api_key = "test-secret-key"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:anthropic"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("model=claude-test")
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "provider:anthropic:capability:tool_calls"
+            && check.message.contains("supported")
+    }));
     Ok(())
 }
 

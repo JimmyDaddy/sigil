@@ -15,8 +15,8 @@ use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 use crate::{
     SecretResolution, SecretSource, load_anthropic_config, load_deepseek_config,
     load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
-    provider_capability_view, resolve_anthropic_api_key, resolve_deepseek_api_key,
-    resolve_gemini_api_key, resolve_openai_compat_api_key,
+    provider_capability_view, provider_config_key, resolve_anthropic_api_key,
+    resolve_deepseek_api_key, resolve_gemini_api_key, resolve_openai_compat_api_key,
 };
 
 /// Severity for one local diagnostics check.
@@ -243,15 +243,11 @@ fn check_session_log_dir(
 }
 
 fn check_provider(report: &mut DoctorReport, root_config: &RootConfig) {
-    match root_config.agent.provider.as_str() {
+    match provider_config_key(&root_config.agent.provider) {
         "deepseek" => check_deepseek_provider(report, root_config),
-        "openai_compat" | "openai-compatible" | "openai_compatible" => {
-            check_openai_compat_provider(report, root_config);
-        }
+        "openai_compat" => check_openai_compat_provider(report, root_config),
         "anthropic" => check_anthropic_provider(report, root_config),
-        "gemini" | "google" | "google_gemini" | "google-gemini" => {
-            check_gemini_provider(report, root_config);
-        }
+        "gemini" => check_gemini_provider(report, root_config),
         other => report.push_with_remediation(
             DoctorStatus::Error,
             "provider",
@@ -401,6 +397,13 @@ fn push_provider_capability_checks(report: &mut DoctorReport, provider_name: &st
             view.rows.len()
         ),
     );
+    for row in view.rows {
+        report.push(
+            DoctorStatus::Ok,
+            format!("provider:{provider_name}:capability:{}", row.key),
+            format!("{}: {} ({})", row.label, row.status.as_str(), row.detail),
+        );
+    }
 }
 
 fn push_provider_auth_check(

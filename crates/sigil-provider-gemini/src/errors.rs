@@ -14,6 +14,8 @@ pub enum GeminiProviderError {
     Status { status: u16, body: String },
     #[error("Gemini response was blocked: {0}")]
     Blocked(String),
+    #[error("Gemini response finished abnormally: {reason}{message}")]
+    AbnormalFinish { reason: String, message: String },
 }
 
 pub fn classify_status(status: u16, body: &str) -> GeminiProviderError {

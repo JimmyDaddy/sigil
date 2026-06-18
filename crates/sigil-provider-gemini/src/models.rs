@@ -42,6 +42,10 @@ pub struct GeminiCandidate {
     pub content: Option<GeminiContent>,
     #[serde(default)]
     pub finish_reason: Option<String>,
+    #[serde(default)]
+    pub finish_message: Option<String>,
+    #[serde(default)]
+    pub safety_ratings: Vec<GeminiSafetyRating>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +61,8 @@ pub struct GeminiPart {
     pub text: Option<String>,
     #[serde(default)]
     pub function_call: Option<GeminiFunctionCall>,
+    #[serde(default)]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,4 +90,15 @@ pub struct GeminiUsageMetadata {
 pub struct GeminiPromptFeedback {
     #[serde(default)]
     pub block_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiSafetyRating {
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub probability: Option<String>,
+    #[serde(default)]
+    pub blocked: Option<bool>,
 }
