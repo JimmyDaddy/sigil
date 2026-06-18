@@ -24,7 +24,10 @@ pub use config::{
     WorkspaceConfig, default_user_config_dir, default_user_config_path, preferred_config_path,
     resolve_workspace_root,
 };
-pub use event::{EventHandler, NoopEventHandler, RunEvent};
+pub use event::{
+    EventHandler, NoopEventHandler, PUBLIC_RUN_EVENT_SCHEMA_VERSION, PublicAssistantMessage,
+    PublicControlEvent, PublicRunEvent, PublicRunEventKind, RunEvent,
+};
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use permission::{
     ApprovalMode, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
