@@ -117,6 +117,7 @@ The current implementation uses append-only JSONL:
 - Tool approval, execution lifecycle, and reasoning deltas append control records.
 - Task run, plan, step, child-session, and subagent approval-route summaries append control records and are projected through `Session::task_state_projection`.
 - Terminal task handles, statuses, and output preview summaries have a dedicated control entry and `Session::terminal_task_projection`; this is the durable contract layer, with process/PTY backends still to be wired.
+- `sigil-tools-builtin` now has a non-PTY terminal process manager: output is written under `.sigil/tasks/<task-id>/{meta.json,output.log,stdout.log,stderr.log}`, with bounded read, status, and cooperative cancel support; model-facing `terminal_*` tools are still wired in a follow-up task.
 - Tool executions that started without a terminal record are marked `interrupted` on restore.
 - Dangling tool calls are projected as structured `interrupted` tool results.
 - Historical file-change result cards are restored with the session.

@@ -117,6 +117,7 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 - tool approval、execution lifecycle 和 reasoning delta 会追加到 control log。
 - task run、plan、step、child-session 和 subagent approval-route 摘要会追加到 control log，并通过 `Session::task_state_projection` 投影。
 - terminal task handle/status/output preview 摘要有独立 control entry 和 `Session::terminal_task_projection`；当前这是 durable 契约层，process/PTY backend 后续接入。
+- `sigil-tools-builtin` 已有 non-PTY terminal process manager：输出写入 `.sigil/tasks/<task-id>/{meta.json,output.log,stdout.log,stderr.log}`，支持 bounded read、status 和 cooperative cancel；model-facing `terminal_*` 工具面仍在后续任务接入。
 - 已开始但没有终态的工具执行在恢复时标记为 `interrupted`。
 - 悬空 tool call 会投影为结构化 `interrupted` tool result。
 - 文件变更工具的历史结果卡片会随 session restore 恢复。

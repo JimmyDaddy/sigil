@@ -26,6 +26,12 @@ use sigil_kernel::{
 use similar::TextDiff;
 use tokio::{process::Command, task, time::Duration};
 
+mod terminal_process;
+
+pub use terminal_process::{
+    TerminalProcessManager, TerminalReadResult, TerminalStartRequest, TerminalTaskArtifacts,
+};
+
 pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(ReadFileTool));
     registry.register(Arc::new(WriteFileTool));
