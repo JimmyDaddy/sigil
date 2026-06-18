@@ -1,10 +1,10 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex},
     time::UNIX_EPOCH,
 };
 
@@ -19,9 +19,10 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
-    ChangeSetValidationKind, ChangeSetValidationStatus, Tool, ToolAccess, ToolCategory,
-    ToolContext, ToolDiffStats, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
+    ChangeSetValidationKind, ChangeSetValidationStatus, TerminalTaskEntry, TerminalTaskId, Tool,
+    ToolAccess, ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, ToolSubjectScope,
 };
 use similar::TextDiff;
 use tokio::{process::Command, task, time::Duration};
@@ -33,6 +34,7 @@ pub use terminal_process::{
 };
 
 pub fn register_builtin_tools(registry: &mut ToolRegistry) {
+    let terminal_managers = Arc::new(TerminalProcessManagers::default());
     registry.register(Arc::new(ReadFileTool));
     registry.register(Arc::new(WriteFileTool));
     registry.register(Arc::new(EditFileTool));
@@ -42,6 +44,16 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(GlobTool));
     registry.register(Arc::new(GrepTool));
     registry.register(Arc::new(BashTool));
+    registry.register(Arc::new(TerminalStartTool {
+        managers: Arc::clone(&terminal_managers),
+    }));
+    registry.register(Arc::new(TerminalReadTool {
+        managers: Arc::clone(&terminal_managers),
+    }));
+    registry.register(Arc::new(TerminalInputTool));
+    registry.register(Arc::new(TerminalCancelTool {
+        managers: terminal_managers,
+    }));
 }
 
 struct ReadFileTool;
@@ -53,6 +65,21 @@ struct ListTool;
 struct GlobTool;
 struct GrepTool;
 struct BashTool;
+struct TerminalStartTool {
+    managers: Arc<TerminalProcessManagers>,
+}
+struct TerminalReadTool {
+    managers: Arc<TerminalProcessManagers>,
+}
+struct TerminalInputTool;
+struct TerminalCancelTool {
+    managers: Arc<TerminalProcessManagers>,
+}
+
+#[derive(Default)]
+struct TerminalProcessManagers {
+    managers: StdMutex<BTreeMap<PathBuf, Arc<TerminalProcessManager>>>,
+}
 
 const DEFAULT_TEXT_LIMIT_BYTES: usize = 64 * 1024;
 const HARD_TEXT_LIMIT_BYTES: usize = 256 * 1024;
@@ -71,6 +98,25 @@ const CHANGESET_ARTIFACT_ROOT: &str = ".sigil/changesets";
 const CHANGESET_PREVIEW_DIFF_FILE: &str = "preview.diff";
 const CHANGESET_REVERSE_DIFF_FILE: &str = "reverse.diff";
 const DEFAULT_CHANGESET_SUMMARY_LIMIT_BYTES: usize = 16 * 1024;
+const DEFAULT_TERMINAL_READ_LIMIT_BYTES: usize = 16 * 1024;
+const HARD_TERMINAL_READ_LIMIT_BYTES: usize = 128 * 1024;
+
+impl TerminalProcessManagers {
+    fn manager_for(&self, workspace_root: &Path) -> Result<Arc<TerminalProcessManager>> {
+        let workspace_root = canonical_workspace_root(workspace_root)?;
+        let mut managers = self
+            .managers
+            .lock()
+            .map_err(|_| anyhow!("terminal process manager registry lock poisoned"))?;
+        if let Some(manager) = managers.get(&workspace_root) {
+            return Ok(Arc::clone(manager));
+        }
+
+        let manager = Arc::new(TerminalProcessManager::new(&workspace_root)?);
+        managers.insert(workspace_root, Arc::clone(&manager));
+        Ok(manager)
+    }
+}
 
 /// Workspace-local artifact writer for durable change set diffs.
 #[derive(Debug, Clone)]
@@ -1108,6 +1154,215 @@ impl Tool for BashTool {
     }
 }
 
+#[async_trait]
+impl Tool for TerminalStartTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "terminal_start".to_owned(),
+            description: "Start a non-PTY background terminal task from the workspace.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "command": { "type": "string" },
+                    "cwd": { "type": "string" },
+                    "shell": { "type": "string" }
+                },
+                "required": ["command"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+        let command = required_string(args, "command")?;
+        let cwd = optional_string(args, "cwd");
+        let shell = optional_string(args, "shell");
+        let mut subjects = vec![ToolSubject::command(
+            command.to_owned(),
+            command_permission_subject(command),
+        )];
+        if let Some(shell) = shell {
+            subjects.push(ToolSubject::command(
+                shell.to_owned(),
+                command_permission_subject(shell),
+            ));
+        }
+        subjects.push(tool_path_subject(&ctx.workspace_root, cwd.unwrap_or("."))?);
+        subjects.extend(terminal_command_path_subjects(
+            &ctx.workspace_root,
+            cwd,
+            command,
+        )?);
+        Ok(subjects)
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let args = parse_terminal_start_args(&args)?;
+        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        let entry = manager
+            .start(TerminalStartRequest {
+                task_id: args.task_id,
+                command: args.command,
+                cwd: args.cwd,
+                shell: args.shell,
+            })
+            .await?;
+        Ok(terminal_entry_result(
+            call_id,
+            self.spec().name,
+            "started",
+            entry,
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalReadTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "terminal_read".to_owned(),
+            description: "Read a bounded slice of a terminal task output log.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "offset": { "type": "integer" },
+                    "limit_bytes": { "type": "integer" }
+                },
+                "required": ["task_id"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+        let task_id = required_terminal_task_id(args)?;
+        Ok(vec![terminal_task_subject(&task_id)])
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let task_id = required_terminal_task_id(&args)?;
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        let limit_bytes = terminal_read_limit(&args)?;
+        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        let read = manager.read(&task_id, offset, limit_bytes).await?;
+        Ok(ToolResult::ok(
+            call_id,
+            self.spec().name,
+            read.content.clone(),
+            ToolResultMeta {
+                bytes: Some(read.total_bytes),
+                truncated: read.truncated,
+                limit_bytes: Some(limit_bytes as u64),
+                returned_bytes: Some(read.returned_bytes),
+                total_bytes: Some(read.total_bytes),
+                returned_lines: Some(read.content.lines().count() as u64),
+                details: terminal_read_details(&read, limit_bytes),
+                ..ToolResultMeta::default()
+            },
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalInputTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "terminal_input".to_owned(),
+            description:
+                "Send input to an interactive terminal task when the backend supports stdin."
+                    .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "input": { "type": "string" }
+                },
+                "required": ["task_id", "input"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+        let task_id = required_terminal_task_id(args)?;
+        let input = required_string(args, "input")?;
+        Ok(vec![
+            terminal_task_subject(&task_id),
+            ToolSubject::command(input.to_owned(), command_permission_subject(input)),
+        ])
+    }
+
+    async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let task_id = required_terminal_task_id(&args)?;
+        let input = required_string(&args, "input")?;
+        let details = json!({
+            "task_id": task_id.as_str(),
+            "input_bytes": input.len(),
+            "supported": false,
+            "backend": "non_pty_process"
+        });
+        let mut result = ToolResult::error(
+            call_id,
+            self.spec().name,
+            ToolErrorKind::Unsupported,
+            "terminal_input is not supported by the current non-PTY terminal backend",
+        )
+        .with_error_details(false, details.clone());
+        result.metadata = ToolResultMeta {
+            bytes: Some(input.len() as u64),
+            details,
+            ..ToolResultMeta::default()
+        };
+        Ok(result)
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalCancelTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "terminal_cancel".to_owned(),
+            description: "Cancel a running terminal task with terminate and kill fallback."
+                .to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" }
+                },
+                "required": ["task_id"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+        let task_id = required_terminal_task_id(args)?;
+        Ok(vec![terminal_task_subject(&task_id)])
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let task_id = required_terminal_task_id(&args)?;
+        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        let entry = manager.cancel(&task_id).await?;
+        Ok(terminal_entry_result(
+            call_id,
+            self.spec().name,
+            "cancelled",
+            entry,
+        ))
+    }
+}
+
 fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
@@ -1130,6 +1385,110 @@ fn optional_usize(args: &Value, key: &str) -> Result<Option<usize>> {
                 })
         })
         .transpose()
+}
+
+#[derive(Debug, Clone)]
+struct TerminalStartArgs {
+    task_id: Option<TerminalTaskId>,
+    command: String,
+    cwd: Option<PathBuf>,
+    shell: Option<String>,
+}
+
+fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArgs> {
+    let task_id = optional_string(args, "task_id")
+        .map(|task_id| TerminalTaskId::new(task_id.to_owned()))
+        .transpose()?;
+    let command = required_string(args, "command")?.to_owned();
+    let cwd = optional_string(args, "cwd").map(PathBuf::from);
+    let shell = optional_string(args, "shell").map(str::to_owned);
+    Ok(TerminalStartArgs {
+        task_id,
+        command,
+        cwd,
+        shell,
+    })
+}
+
+fn required_terminal_task_id(args: &Value) -> Result<TerminalTaskId> {
+    TerminalTaskId::new(required_string(args, "task_id")?.to_owned())
+}
+
+fn terminal_read_limit(args: &Value) -> Result<usize> {
+    Ok(optional_usize(args, "limit_bytes")?
+        .unwrap_or(DEFAULT_TERMINAL_READ_LIMIT_BYTES)
+        .clamp(1, HARD_TERMINAL_READ_LIMIT_BYTES))
+}
+
+fn terminal_task_subject(task_id: &TerminalTaskId) -> ToolSubject {
+    let value = format!("terminal_task:{}", task_id.as_str());
+    ToolSubject::command(value.clone(), value)
+}
+
+fn terminal_command_path_subjects(
+    workspace_root: &Path,
+    cwd: Option<&str>,
+    command: &str,
+) -> Result<Vec<ToolSubject>> {
+    let workspace_root = canonical_workspace_root(workspace_root)?;
+    let cwd = cwd
+        .map(|cwd| resolve_tool_path_from_base(&workspace_root, &workspace_root, cwd))
+        .transpose()?
+        .map(|resolved| resolved.canonical)
+        .unwrap_or_else(|| workspace_root.clone());
+    bash_path_subjects_from_cwd(&workspace_root, &cwd, command)
+}
+
+fn terminal_entry_result(
+    call_id: String,
+    tool_name: String,
+    action: &'static str,
+    entry: TerminalTaskEntry,
+) -> ToolResult {
+    let content = format!(
+        "{action} terminal task {}\nstatus: {}\nlog: {}",
+        entry.handle.task_id.as_str(),
+        entry.status.as_str(),
+        entry.handle.log_path.display()
+    );
+    ToolResult::ok(
+        call_id,
+        tool_name,
+        content,
+        ToolResultMeta {
+            truncated: entry.output_truncated,
+            details: terminal_entry_details(&entry),
+            ..ToolResultMeta::default()
+        },
+    )
+}
+
+fn terminal_entry_details(entry: &TerminalTaskEntry) -> Value {
+    json!({
+        "task_id": entry.handle.task_id.as_str(),
+        "status": entry.status.as_str(),
+        "status_detail": &entry.status,
+        "command": command_permission_subject(&entry.handle.command),
+        "cwd": &entry.handle.cwd,
+        "shell": &entry.handle.shell,
+        "log_path": &entry.handle.log_path,
+        "created_at_ms": entry.handle.created_at_ms,
+        "updated_at_ms": entry.updated_at_ms,
+        "output_hash": &entry.output_hash,
+        "output_truncated": entry.output_truncated
+    })
+}
+
+fn terminal_read_details(read: &TerminalReadResult, limit_bytes: usize) -> Value {
+    json!({
+        "task_id": read.task_id.as_str(),
+        "offset": read.offset,
+        "next_offset": read.next_offset,
+        "returned_bytes": read.returned_bytes,
+        "total_bytes": read.total_bytes,
+        "limit_bytes": limit_bytes,
+        "truncated": read.truncated
+    })
 }
 
 fn parse_apply_changeset_args(args: &Value) -> Result<ApplyChangeSetArgs> {
@@ -2340,24 +2699,27 @@ fn git_segment_is_safe_readonly(words: &[String]) -> bool {
 
 fn bash_path_subjects(workspace_root: &Path, command: &str) -> Result<Vec<ToolSubject>> {
     let workspace_root = canonical_workspace_root(workspace_root)?;
+    bash_path_subjects_from_cwd(&workspace_root, &workspace_root, command)
+}
+
+fn bash_path_subjects_from_cwd(
+    workspace_root: &Path,
+    initial_cwd: &Path,
+    command: &str,
+) -> Result<Vec<ToolSubject>> {
     let tokens = tokenize_shell_subject_words(command);
     let mut subjects = Vec::new();
-    let mut cwd = workspace_root.clone();
+    let mut cwd = initial_cwd.to_path_buf();
     let mut segment_words = Vec::new();
     for token in tokens {
         if token == "&&" || token == "||" || token == ";" {
-            collect_bash_segment_subjects(
-                &workspace_root,
-                &mut cwd,
-                &segment_words,
-                &mut subjects,
-            )?;
+            collect_bash_segment_subjects(workspace_root, &mut cwd, &segment_words, &mut subjects)?;
             segment_words.clear();
         } else {
             segment_words.push(token);
         }
     }
-    collect_bash_segment_subjects(&workspace_root, &mut cwd, &segment_words, &mut subjects)?;
+    collect_bash_segment_subjects(workspace_root, &mut cwd, &segment_words, &mut subjects)?;
     Ok(subjects)
 }
 

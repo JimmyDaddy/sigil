@@ -544,7 +544,7 @@ async fn wait_for_terminal_status(
     manager: &TerminalProcessManager,
     task_id: &TerminalTaskId,
 ) -> Result<sigil_kernel::TerminalTaskEntry> {
-    for _ in 0..50 {
+    for _ in 0..250 {
         let status = manager.status(task_id).await?;
         if status.status.is_terminal() {
             return Ok(status);

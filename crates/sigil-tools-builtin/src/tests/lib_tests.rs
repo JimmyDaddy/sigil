@@ -3,9 +3,10 @@ use std::{fs, path::Path};
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    ChangeSetId, Tool, ToolAccess, ToolContext, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
-    ToolResultStatus, ToolSubjectScope,
+    ChangeSetId, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolPreviewCapability,
+    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
+use tokio::time::{Duration, sleep};
 
 use super::{
     ApplyChangeSetTool, BashTool, ChangeSetArtifactStore, DeleteFileTool, EditFileTool, GlobTool,
@@ -13,7 +14,7 @@ use super::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 #[tokio::test]
 async fn read_and_edit_file_tool_work() -> Result<()> {
@@ -233,7 +234,7 @@ async fn delete_file_errors_for_directory_path() -> Result<()> {
 fn register_builtin_tools_registers_multiple_tools() {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
-    assert!(registry.specs().len() >= 9);
+    assert!(registry.specs().len() >= 13);
     let spec = registry
         .spec_for("delete_file")
         .expect("delete_file should be registered");
@@ -244,6 +245,205 @@ fn register_builtin_tools_registers_multiple_tools() {
         .expect("apply_changeset should be registered");
     assert_eq!(apply_spec.access, ToolAccess::Write);
     assert_eq!(apply_spec.preview, ToolPreviewCapability::Required);
+    assert_eq!(
+        registry
+            .spec_for("terminal_start")
+            .expect("terminal_start should be registered")
+            .access,
+        ToolAccess::Execute
+    );
+    assert_eq!(
+        registry
+            .spec_for("terminal_read")
+            .expect("terminal_read should be registered")
+            .access,
+        ToolAccess::Read
+    );
+    assert_eq!(
+        registry
+            .spec_for("terminal_input")
+            .expect("terminal_input should be registered")
+            .access,
+        ToolAccess::Execute
+    );
+    assert_eq!(
+        registry
+            .spec_for("terminal_cancel")
+            .expect("terminal_cancel should be registered")
+            .access,
+        ToolAccess::Execute
+    );
+}
+
+#[test]
+fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir(temp.path().join("logs"))?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let start_call = tool_call(
+        "terminal_start",
+        json!({
+            "command": "cat input.txt > out.txt",
+            "cwd": "logs",
+            "shell": "/bin/sh"
+        }),
+    );
+    assert_eq!(
+        registry.permission_access(&ctx, &start_call)?,
+        ToolAccess::Execute
+    );
+    let start_subjects = registry.permission_subjects(&ctx, &start_call)?;
+    assert!(start_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Command && subject.original == "cat input.txt > out.txt"
+    }));
+    assert!(start_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Command && subject.original == "/bin/sh"
+    }));
+    assert!(start_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && subject.normalized == "logs"
+            && subject.scope == ToolSubjectScope::Workspace
+    }));
+    assert!(start_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && subject.normalized == "logs/input.txt"
+            && subject.scope == ToolSubjectScope::Workspace
+    }));
+    assert!(start_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path
+            && subject.normalized == "logs/out.txt"
+            && subject.scope == ToolSubjectScope::Workspace
+    }));
+
+    let read_call = tool_call("terminal_read", json!({ "task_id": "terminal-perm" }));
+    let input_call = tool_call(
+        "terminal_input",
+        json!({ "task_id": "terminal-perm", "input": "echo hello\n" }),
+    );
+    let cancel_call = tool_call("terminal_cancel", json!({ "task_id": "terminal-perm" }));
+    assert_eq!(
+        registry.permission_access(&ctx, &read_call)?,
+        ToolAccess::Read
+    );
+    assert_eq!(
+        registry.permission_access(&ctx, &input_call)?,
+        ToolAccess::Execute
+    );
+    assert_eq!(
+        registry.permission_access(&ctx, &cancel_call)?,
+        ToolAccess::Execute
+    );
+    assert!(
+        registry
+            .permission_subjects(&ctx, &input_call)?
+            .iter()
+            .any(|subject| subject.kind == ToolSubjectKind::Command
+                && subject.original == "echo hello\n")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let start = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-tool-read",
+                    "command": "printf 0123456789",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+    assert!(matches!(start.status, ToolResultStatus::Ok));
+    assert!(start.content.contains("terminal-tool-read"));
+    assert_eq!(start.metadata.details["task_id"], "terminal-tool-read");
+
+    let read = wait_for_terminal_read(&registry, ctx.clone(), "terminal-tool-read", 3).await?;
+    assert!(matches!(read.status, ToolResultStatus::Ok));
+    assert_eq!(read.metadata.returned_bytes, Some(3));
+    assert_eq!(read.metadata.limit_bytes, Some(3));
+    assert!(read.metadata.truncated);
+    assert_eq!(read.metadata.details["next_offset"], 3);
+    assert_eq!(read.content, "012");
+
+    let shell = test_shell(temp.path())?;
+    registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-tool-cancel",
+                    "command": "sleep 5",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+    let cancel = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_cancel",
+                json!({ "task_id": "terminal-tool-cancel" }),
+            ),
+        )
+        .await?;
+    assert!(matches!(cancel.status, ToolResultStatus::Ok));
+    assert_eq!(cancel.metadata.details["status"], "cancelled");
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_input_returns_structured_unsupported_without_echoing_input() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let result = registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_input",
+                json!({
+                    "task_id": "terminal-input",
+                    "input": "secret-token-should-not-appear\n"
+                }),
+            ),
+        )
+        .await?;
+
+    let ToolResultStatus::Error(error) = &result.status else {
+        panic!("terminal_input should return unsupported error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Unsupported);
+    assert!(!result.content.contains("secret-token"));
+    assert_eq!(result.metadata.details["supported"], false);
+    assert_eq!(result.metadata.details["input_bytes"], 31);
+    Ok(())
 }
 
 #[tokio::test]
@@ -2081,4 +2281,62 @@ fn lexical_normalize_path_returns_dot_for_current_directory() -> Result<()> {
         Path::new(".")
     );
     Ok(())
+}
+
+fn tool_call(name: &str, args: serde_json::Value) -> ToolCall {
+    ToolCall {
+        id: format!("call-{name}"),
+        name: name.to_owned(),
+        args_json: serde_json::to_string(&args).expect("tool args should serialize"),
+    }
+}
+
+async fn wait_for_terminal_read(
+    registry: &ToolRegistry,
+    ctx: ToolContext,
+    task_id: &str,
+    limit_bytes: usize,
+) -> Result<sigil_kernel::ToolResult> {
+    for _ in 0..250 {
+        let result = registry
+            .execute(
+                ctx.clone(),
+                tool_call(
+                    "terminal_read",
+                    json!({ "task_id": task_id, "limit_bytes": limit_bytes }),
+                ),
+            )
+            .await?;
+        if result.metadata.total_bytes.unwrap_or_default() >= 10 {
+            return Ok(result);
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_read",
+                json!({ "task_id": task_id, "limit_bytes": limit_bytes }),
+            ),
+        )
+        .await
+}
+
+#[cfg(unix)]
+fn test_shell(dir: &Path) -> Result<String> {
+    let shell = dir.join("test-shell");
+    fs::write(
+        &shell,
+        "#!/bin/sh\nif [ \"$1\" = \"-lc\" ]; then shift; fi\nexec /bin/sh -c \"$1\"\n",
+    )?;
+    let mut permissions = fs::metadata(&shell)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&shell, permissions)?;
+    Ok(shell.display().to_string())
+}
+
+#[cfg(not(unix))]
+fn test_shell(_dir: &Path) -> Result<String> {
+    Ok("sh".to_owned())
 }
