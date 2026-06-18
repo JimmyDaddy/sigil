@@ -268,6 +268,20 @@ fn register_builtin_tools_registers_multiple_tools() {
     );
     assert_eq!(
         registry
+            .spec_for("terminal_input")
+            .expect("terminal_input should be registered")
+            .input_schema["properties"]["input"]["maxLength"],
+        super::MAX_TERMINAL_INPUT_BYTES
+    );
+    assert_eq!(
+        registry
+            .spec_for("terminal_resize")
+            .expect("terminal_resize should be registered")
+            .access,
+        ToolAccess::Execute
+    );
+    assert_eq!(
+        registry
             .spec_for("terminal_cancel")
             .expect("terminal_cancel should be registered")
             .access,
@@ -326,6 +340,10 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
         "terminal_input",
         json!({ "task_id": "terminal-perm", "input": "echo hello\n" }),
     );
+    let resize_call = tool_call(
+        "terminal_resize",
+        json!({ "task_id": "terminal-perm", "rows": 30, "cols": 100 }),
+    );
     let cancel_call = tool_call("terminal_cancel", json!({ "task_id": "terminal-perm" }));
     assert_eq!(
         registry.permission_access(&ctx, &read_call)?,
@@ -333,6 +351,10 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
     );
     assert_eq!(
         registry.permission_access(&ctx, &input_call)?,
+        ToolAccess::Execute
+    );
+    assert_eq!(
+        registry.permission_access(&ctx, &resize_call)?,
         ToolAccess::Execute
     );
     assert_eq!(
@@ -344,7 +366,20 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
             .permission_subjects(&ctx, &input_call)?
             .iter()
             .any(|subject| subject.kind == ToolSubjectKind::Command
-                && subject.original == "echo hello\n")
+                && subject.normalized == "terminal_input_bytes:11")
+    );
+    assert!(
+        registry
+            .permission_subjects(&ctx, &input_call)?
+            .iter()
+            .all(|subject| !subject.original.contains("echo hello"))
+    );
+    assert!(
+        registry
+            .permission_subjects(&ctx, &resize_call)?
+            .iter()
+            .any(|subject| subject.kind == ToolSubjectKind::Command
+                && subject.original == "terminal_task:terminal-perm")
     );
     Ok(())
 }
@@ -416,6 +451,7 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
 #[tokio::test]
 async fn terminal_input_returns_structured_unsupported_without_echoing_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
     let ctx = ToolContext {
         workspace_root: temp.path().to_path_buf(),
         timeout_secs: 5,
@@ -423,9 +459,23 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
+    registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-input",
+                    "command": "sleep 5",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+
     let result = registry
         .execute(
-            ctx,
+            ctx.clone(),
             tool_call(
                 "terminal_input",
                 json!({
@@ -443,6 +493,111 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
     assert!(!result.content.contains("secret-token"));
     assert_eq!(result.metadata.details["supported"], false);
     assert_eq!(result.metadata.details["input_bytes"], 31);
+    let resize = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_resize",
+                json!({ "task_id": "terminal-input", "rows": 24, "cols": 80 }),
+            ),
+        )
+        .await?;
+    let ToolResultStatus::Error(error) = &resize.status else {
+        panic!("terminal_resize should return unsupported error");
+    };
+    assert_eq!(error.kind, ToolErrorKind::Unsupported);
+    assert_eq!(resize.metadata.details["supported"], false);
+    assert_eq!(resize.metadata.details["backend"], "process");
+    let oversize = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_input",
+                json!({
+                    "task_id": "terminal-input",
+                    "input": "x".repeat(super::MAX_TERMINAL_INPUT_BYTES + 1)
+                }),
+            ),
+        )
+        .await?;
+    let ToolResultStatus::Error(error) = &oversize.status else {
+        panic!("oversized terminal_input should return invalid input");
+    };
+    assert_eq!(error.kind, ToolErrorKind::InvalidInput);
+    assert!(!oversize.to_model_content().contains("secret-token"));
+    assert_eq!(
+        oversize.metadata.limit_bytes,
+        Some(super::MAX_TERMINAL_INPUT_BYTES as u64)
+    );
+    registry
+        .execute(
+            ctx,
+            tool_call("terminal_cancel", json!({ "task_id": "terminal-input" })),
+        )
+        .await?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    let start = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-pty-tool",
+                    "command": "read line; printf 'got:%s\\n' \"$line\"",
+                    "shell": shell,
+                    "pty": true,
+                    "rows": 12,
+                    "cols": 50
+                }),
+            ),
+        )
+        .await?;
+    assert!(matches!(start.status, ToolResultStatus::Ok));
+
+    let resize = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_resize",
+                json!({ "task_id": "terminal-pty-tool", "rows": 18, "cols": 70 }),
+            ),
+        )
+        .await?;
+    assert!(matches!(resize.status, ToolResultStatus::Ok));
+    assert_eq!(resize.metadata.details["backend"], "pty");
+
+    let input = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_input",
+                json!({ "task_id": "terminal-pty-tool", "input": "hello-from-pty\n" }),
+            ),
+        )
+        .await?;
+    assert!(matches!(input.status, ToolResultStatus::Ok));
+    assert!(!input.content.contains("hello-from-pty"));
+    assert_eq!(input.metadata.details["backend"], "pty");
+    assert_eq!(input.metadata.details["input_bytes"], 15);
+
+    let read =
+        wait_for_terminal_read_contains(&registry, ctx, "terminal-pty-tool", "got:hello-from-pty")
+            .await?;
+    assert!(read.content.contains("got:hello-from-pty"));
     Ok(())
 }
 
@@ -2318,6 +2473,38 @@ async fn wait_for_terminal_read(
             tool_call(
                 "terminal_read",
                 json!({ "task_id": task_id, "limit_bytes": limit_bytes }),
+            ),
+        )
+        .await
+}
+
+async fn wait_for_terminal_read_contains(
+    registry: &ToolRegistry,
+    ctx: ToolContext,
+    task_id: &str,
+    needle: &str,
+) -> Result<sigil_kernel::ToolResult> {
+    for _ in 0..250 {
+        let result = registry
+            .execute(
+                ctx.clone(),
+                tool_call(
+                    "terminal_read",
+                    json!({ "task_id": task_id, "limit_bytes": 1024 }),
+                ),
+            )
+            .await?;
+        if result.content.contains(needle) {
+            return Ok(result);
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    registry
+        .execute(
+            ctx,
+            tool_call(
+                "terminal_read",
+                json!({ "task_id": task_id, "limit_bytes": 1024 }),
             ),
         )
         .await

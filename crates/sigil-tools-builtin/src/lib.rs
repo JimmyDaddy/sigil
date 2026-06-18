@@ -30,7 +30,9 @@ use tokio::{process::Command, task, time::Duration};
 mod terminal_process;
 
 pub use terminal_process::{
-    TerminalProcessManager, TerminalReadResult, TerminalStartRequest, TerminalTaskArtifacts,
+    MAX_TERMINAL_INPUT_BYTES, TerminalBackendKind, TerminalInputResult, TerminalProcessManager,
+    TerminalPtySize, TerminalReadResult, TerminalResizeResult, TerminalStartRequest,
+    TerminalTaskArtifacts,
 };
 
 pub fn register_builtin_tools(registry: &mut ToolRegistry) {
@@ -50,7 +52,12 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     registry.register(Arc::new(TerminalReadTool {
         managers: Arc::clone(&terminal_managers),
     }));
-    registry.register(Arc::new(TerminalInputTool));
+    registry.register(Arc::new(TerminalInputTool {
+        managers: Arc::clone(&terminal_managers),
+    }));
+    registry.register(Arc::new(TerminalResizeTool {
+        managers: Arc::clone(&terminal_managers),
+    }));
     registry.register(Arc::new(TerminalCancelTool {
         managers: terminal_managers,
     }));
@@ -71,7 +78,12 @@ struct TerminalStartTool {
 struct TerminalReadTool {
     managers: Arc<TerminalProcessManagers>,
 }
-struct TerminalInputTool;
+struct TerminalInputTool {
+    managers: Arc<TerminalProcessManagers>,
+}
+struct TerminalResizeTool {
+    managers: Arc<TerminalProcessManagers>,
+}
 struct TerminalCancelTool {
     managers: Arc<TerminalProcessManagers>,
 }
@@ -1159,14 +1171,19 @@ impl Tool for TerminalStartTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "terminal_start".to_owned(),
-            description: "Start a non-PTY background terminal task from the workspace.".to_owned(),
+            description:
+                "Start a background terminal task from the workspace, optionally with PTY support."
+                    .to_owned(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string" },
                     "command": { "type": "string" },
                     "cwd": { "type": "string" },
-                    "shell": { "type": "string" }
+                    "shell": { "type": "string" },
+                    "pty": { "type": "boolean" },
+                    "rows": { "type": "integer" },
+                    "cols": { "type": "integer" }
                 },
                 "required": ["command"]
             }),
@@ -1202,14 +1219,17 @@ impl Tool for TerminalStartTool {
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let args = parse_terminal_start_args(&args)?;
         let manager = self.managers.manager_for(&ctx.workspace_root)?;
-        let entry = manager
-            .start(TerminalStartRequest {
-                task_id: args.task_id,
-                command: args.command,
-                cwd: args.cwd,
-                shell: args.shell,
-            })
-            .await?;
+        let request = TerminalStartRequest {
+            task_id: args.task_id,
+            command: args.command,
+            cwd: args.cwd,
+            shell: args.shell,
+        };
+        let entry = if args.pty {
+            manager.start_pty(request, args.pty_size).await?
+        } else {
+            manager.start(request).await?
+        };
         Ok(terminal_entry_result(
             call_id,
             self.spec().name,
@@ -1281,7 +1301,10 @@ impl Tool for TerminalInputTool {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string" },
-                    "input": { "type": "string" }
+                    "input": {
+                        "type": "string",
+                        "maxLength": MAX_TERMINAL_INPUT_BYTES
+                    }
                 },
                 "required": ["task_id", "input"]
             }),
@@ -1294,34 +1317,121 @@ impl Tool for TerminalInputTool {
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let task_id = required_terminal_task_id(args)?;
         let input = required_string(args, "input")?;
+        validate_terminal_input_len(input)?;
         Ok(vec![
             terminal_task_subject(&task_id),
-            ToolSubject::command(input.to_owned(), command_permission_subject(input)),
+            terminal_input_subject(input.len()),
         ])
     }
 
-    async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let task_id = required_terminal_task_id(&args)?;
         let input = required_string(&args, "input")?;
-        let details = json!({
-            "task_id": task_id.as_str(),
-            "input_bytes": input.len(),
-            "supported": false,
-            "backend": "non_pty_process"
-        });
-        let mut result = ToolResult::error(
-            call_id,
-            self.spec().name,
-            ToolErrorKind::Unsupported,
-            "terminal_input is not supported by the current non-PTY terminal backend",
-        )
-        .with_error_details(false, details.clone());
-        result.metadata = ToolResultMeta {
-            bytes: Some(input.len() as u64),
-            details,
-            ..ToolResultMeta::default()
-        };
-        Ok(result)
+        if let Err(error) = validate_terminal_input_len(input) {
+            let details = json!({
+                "task_id": task_id.as_str(),
+                "input_bytes": input.len(),
+                "limit_bytes": MAX_TERMINAL_INPUT_BYTES
+            });
+            let mut result = ToolResult::error(
+                call_id,
+                self.spec().name,
+                ToolErrorKind::InvalidInput,
+                error.to_string(),
+            )
+            .with_error_details(false, details.clone());
+            result.metadata = ToolResultMeta {
+                bytes: Some(input.len() as u64),
+                limit_bytes: Some(MAX_TERMINAL_INPUT_BYTES as u64),
+                details,
+                ..ToolResultMeta::default()
+            };
+            return Ok(result);
+        }
+        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        match manager.input(&task_id, input.to_owned()).await {
+            Ok(result) => Ok(terminal_input_result(call_id, self.spec().name, result)),
+            Err(error) if is_terminal_backend_unsupported(&error) => {
+                let details = json!({
+                    "task_id": task_id.as_str(),
+                    "input_bytes": input.len(),
+                    "supported": false,
+                    "backend": "process"
+                });
+                let mut result = ToolResult::error(
+                    call_id,
+                    self.spec().name,
+                    ToolErrorKind::Unsupported,
+                    "terminal_input is not supported by this terminal task backend",
+                )
+                .with_error_details(false, details.clone());
+                result.metadata = ToolResultMeta {
+                    bytes: Some(input.len() as u64),
+                    details,
+                    ..ToolResultMeta::default()
+                };
+                Ok(result)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalResizeTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "terminal_resize".to_owned(),
+            description: "Resize a PTY-backed terminal task.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "rows": { "type": "integer" },
+                    "cols": { "type": "integer" }
+                },
+                "required": ["task_id", "rows", "cols"]
+            }),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+        let task_id = required_terminal_task_id(args)?;
+        Ok(vec![terminal_task_subject(&task_id)])
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let task_id = required_terminal_task_id(&args)?;
+        let size = required_terminal_pty_size(&args)?;
+        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        match manager.resize(&task_id, size).await {
+            Ok(result) => Ok(terminal_resize_result(call_id, self.spec().name, result)),
+            Err(error) if is_terminal_backend_unsupported(&error) => {
+                let details = json!({
+                    "task_id": task_id.as_str(),
+                    "rows": size.rows,
+                    "cols": size.cols,
+                    "supported": false,
+                    "backend": "process"
+                });
+                let mut result = ToolResult::error(
+                    call_id,
+                    self.spec().name,
+                    ToolErrorKind::Unsupported,
+                    "terminal_resize is not supported by this terminal task backend",
+                )
+                .with_error_details(false, details.clone());
+                result.metadata = ToolResultMeta {
+                    details,
+                    ..ToolResultMeta::default()
+                };
+                Ok(result)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -1393,6 +1503,8 @@ struct TerminalStartArgs {
     command: String,
     cwd: Option<PathBuf>,
     shell: Option<String>,
+    pty: bool,
+    pty_size: Option<TerminalPtySize>,
 }
 
 fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArgs> {
@@ -1402,16 +1514,36 @@ fn parse_terminal_start_args(args: &Value) -> Result<TerminalStartArgs> {
     let command = required_string(args, "command")?.to_owned();
     let cwd = optional_string(args, "cwd").map(PathBuf::from);
     let shell = optional_string(args, "shell").map(str::to_owned);
+    let pty = args.get("pty").and_then(Value::as_bool).unwrap_or(false);
+    let pty_size = if args.get("rows").is_some() || args.get("cols").is_some() {
+        Some(required_terminal_pty_size(args)?)
+    } else {
+        None
+    };
     Ok(TerminalStartArgs {
         task_id,
         command,
         cwd,
         shell,
+        pty,
+        pty_size,
     })
 }
 
 fn required_terminal_task_id(args: &Value) -> Result<TerminalTaskId> {
     TerminalTaskId::new(required_string(args, "task_id")?.to_owned())
+}
+
+fn required_terminal_pty_size(args: &Value) -> Result<TerminalPtySize> {
+    TerminalPtySize::new(required_u16(args, "rows")?, required_u16(args, "cols")?)
+}
+
+fn required_u16(args: &Value, key: &str) -> Result<u16> {
+    let value = args
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("missing positive integer field {key}"))?;
+    u16::try_from(value).map_err(|_| anyhow!("{key} is too large for a terminal dimension"))
 }
 
 fn terminal_read_limit(args: &Value) -> Result<usize> {
@@ -1423,6 +1555,23 @@ fn terminal_read_limit(args: &Value) -> Result<usize> {
 fn terminal_task_subject(task_id: &TerminalTaskId) -> ToolSubject {
     let value = format!("terminal_task:{}", task_id.as_str());
     ToolSubject::command(value.clone(), value)
+}
+
+fn terminal_input_subject(input_bytes: usize) -> ToolSubject {
+    ToolSubject::command(
+        format!("terminal_input bytes={input_bytes}"),
+        format!("terminal_input_bytes:{input_bytes}"),
+    )
+}
+
+fn validate_terminal_input_len(input: &str) -> Result<()> {
+    if input.len() > MAX_TERMINAL_INPUT_BYTES {
+        bail!(
+            "terminal_input input exceeds maximum of {} bytes",
+            MAX_TERMINAL_INPUT_BYTES
+        );
+    }
+    Ok(())
 }
 
 fn terminal_command_path_subjects(
@@ -1478,6 +1627,65 @@ fn terminal_entry_details(entry: &TerminalTaskEntry) -> Value {
         "output_hash": &entry.output_hash,
         "output_truncated": entry.output_truncated
     })
+}
+
+fn terminal_input_result(
+    call_id: String,
+    tool_name: String,
+    result: TerminalInputResult,
+) -> ToolResult {
+    ToolResult::ok(
+        call_id,
+        tool_name,
+        format!(
+            "queued {} bytes for terminal task {}",
+            result.input_bytes,
+            result.task_id.as_str()
+        ),
+        ToolResultMeta {
+            bytes: Some(result.input_bytes),
+            details: json!({
+                "task_id": result.task_id.as_str(),
+                "input_bytes": result.input_bytes,
+                "backend": result.backend.as_str(),
+                "supported": true
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
+}
+
+fn terminal_resize_result(
+    call_id: String,
+    tool_name: String,
+    result: TerminalResizeResult,
+) -> ToolResult {
+    ToolResult::ok(
+        call_id,
+        tool_name,
+        format!(
+            "resized terminal task {} to {}x{}",
+            result.task_id.as_str(),
+            result.size.cols,
+            result.size.rows
+        ),
+        ToolResultMeta {
+            details: json!({
+                "task_id": result.task_id.as_str(),
+                "rows": result.size.rows,
+                "cols": result.size.cols,
+                "backend": result.backend.as_str(),
+                "supported": true
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
+}
+
+fn is_terminal_backend_unsupported(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("backend does not support input")
+        || message.contains("backend does not support resize")
 }
 
 fn terminal_read_details(read: &TerminalReadResult, limit_bytes: usize) -> Value {

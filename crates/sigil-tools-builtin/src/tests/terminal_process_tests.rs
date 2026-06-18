@@ -1,6 +1,7 @@
 use std::{
+    io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
     time::Duration,
 };
 
@@ -17,7 +18,7 @@ use tokio::{
     time::sleep,
 };
 
-use super::{TerminalProcessManager, TerminalStartRequest};
+use super::{TerminalBackendKind, TerminalProcessManager, TerminalPtySize, TerminalStartRequest};
 
 #[tokio::test]
 async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Result<()> {
@@ -111,6 +112,12 @@ async fn terminal_process_manager_cancel_marks_running_task_cancelled() -> Resul
             shell: Some(shell),
         })
         .await?;
+
+    let resize_error = manager
+        .resize(&entry.handle.task_id, TerminalPtySize::new(10, 40)?)
+        .await
+        .expect_err("non-PTY process backend should reject resize");
+    assert!(resize_error.to_string().contains("does not support resize"));
 
     let cancelled = manager.cancel(&entry.handle.task_id).await?;
 
@@ -261,6 +268,93 @@ async fn terminal_process_manager_cancel_after_exit_returns_current_status() -> 
     Ok(())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_process_manager_pty_accepts_input_resize_and_writes_combined_artifacts()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?.with_preview_limit_bytes(512);
+    let entry = manager
+        .start_pty(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-pty")?),
+                command: "read line; printf 'got:%s\\n' \"$line\"".to_owned(),
+                cwd: None,
+                shell: Some(shell),
+            },
+            Some(TerminalPtySize::new(12, 50)?),
+        )
+        .await?;
+
+    let resized = manager
+        .resize(&entry.handle.task_id, TerminalPtySize::new(18, 72)?)
+        .await?;
+    assert_eq!(resized.size.rows, 18);
+    assert_eq!(resized.size.cols, 72);
+
+    let oversize = manager
+        .input(
+            &entry.handle.task_id,
+            "x".repeat(super::MAX_TERMINAL_INPUT_BYTES + 1),
+        )
+        .await
+        .expect_err("oversized terminal input should be rejected");
+    assert!(oversize.to_string().contains("exceeds maximum"));
+
+    let input = manager.input(&entry.handle.task_id, "hello-pty\n").await?;
+    assert_eq!(input.input_bytes, 10);
+    let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+
+    assert!(matches!(
+        final_entry.status,
+        TerminalTaskStatus::Exited { exit_code: Some(0) }
+    ));
+    let read = manager.read(&entry.handle.task_id, 0, 1024).await?;
+    assert!(read.content.contains("got:hello-pty"));
+    let artifacts = manager.artifacts_for(&entry.handle.task_id)?;
+    assert!(std::fs::read_to_string(artifacts.absolute_output)?.contains("got:hello-pty"));
+    assert!(std::fs::read_to_string(artifacts.absolute_stdout)?.contains("got:hello-pty"));
+    assert_eq!(std::fs::read_to_string(artifacts.absolute_stderr)?, "");
+
+    let late_input = manager
+        .input(&entry.handle.task_id, "late\n")
+        .await
+        .expect_err("terminal input after exit should be rejected");
+    assert!(late_input.to_string().contains("not running"));
+    let late_resize = manager
+        .resize(&entry.handle.task_id, TerminalPtySize::new(20, 80)?)
+        .await
+        .expect_err("terminal resize after exit should be rejected");
+    assert!(late_resize.to_string().contains("not running"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_process_manager_pty_cancel_marks_task_cancelled() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager =
+        TerminalProcessManager::new(temp.path())?.with_cancel_grace(Duration::from_millis(50));
+    let entry = manager
+        .start_pty(
+            TerminalStartRequest {
+                task_id: Some(TerminalTaskId::new("terminal-pty-cancel")?),
+                command: "sleep 5".to_owned(),
+                cwd: None,
+                shell: Some(shell),
+            },
+            None,
+        )
+        .await?;
+
+    let cancelled = manager.cancel(&entry.handle.task_id).await?;
+
+    assert!(matches!(cancelled.status, TerminalTaskStatus::Cancelled));
+    Ok(())
+}
+
 #[tokio::test]
 async fn terminal_process_manager_reports_unknown_tasks_and_spawn_errors() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -309,6 +403,10 @@ async fn terminal_process_manager_kill_fallback_cancels_term_ignoring_process() 
 async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let manager = TerminalProcessManager::new(temp.path())?;
+    assert_eq!(TerminalBackendKind::Process.as_str(), "process");
+    assert_eq!(TerminalBackendKind::Pty.as_str(), "pty");
+    assert!(TerminalPtySize::new(0, 10).is_err());
+    assert!(TerminalPtySize::new(10, 0).is_err());
     let absolute_error = manager
         .workspace_artifact_path(Path::new("/tmp/outside"))
         .expect_err("absolute artifact path should be rejected");
@@ -318,6 +416,10 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
     assert!(super::summarize_log(&missing_log, 8).await.is_err());
     assert!(matches!(
         super::status_from_wait_result(Err(std::io::Error::other("boom"))),
+        TerminalTaskStatus::Failed { .. }
+    ));
+    assert!(matches!(
+        super::status_from_pty_wait_result(Err(std::io::Error::other("pty boom"))),
         TerminalTaskStatus::Failed { .. }
     ));
 
@@ -340,6 +442,37 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
     let empty_capture =
         super::capture_stream::<tokio::io::Empty>(None, stream_path, output_file).await?;
     assert_eq!(empty_capture, 0);
+
+    assert!(super::is_pty_eof_error(&std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "closed"
+    )));
+    assert!(!super::is_pty_eof_error(&std::io::Error::other("boom")));
+    let pty_error = super::capture_pty_reader(
+        Box::new(ErrorReader),
+        temp.path().join("pty-stream.log"),
+        temp.path().join("pty-output.log"),
+    )
+    .expect_err("pty reader error should be reported");
+    assert!(
+        pty_error
+            .to_string()
+            .contains("failed to read terminal pty stream")
+    );
+    let pty_panic_thread = std::thread::spawn(|| -> Result<u64> {
+        panic!("pty reader panicked");
+    });
+    assert!(
+        super::join_pty_read_thread(pty_panic_thread)
+            .unwrap_or_default()
+            .contains("panicked")
+    );
+    let pty_error_thread = std::thread::spawn(|| Err::<u64, anyhow::Error>(anyhow!("pty read")));
+    assert!(
+        super::join_pty_read_thread(pty_error_thread)
+            .unwrap_or_default()
+            .contains("pty read")
+    );
 
     let aborted_task = tokio::spawn(async {
         sleep(Duration::from_secs(60)).await;
@@ -449,11 +582,91 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
         task_id.clone(),
         super::ManagedTerminalTask {
             summary: Arc::clone(&summary),
-            cancel_tx,
+            control: super::TerminalTaskControl::Process { cancel_tx },
         },
     );
     let current = manager.cancel(&task_id).await?;
     assert!(matches!(current.status, TerminalTaskStatus::Running));
+
+    let missing_receiver_task_id = TerminalTaskId::new("terminal-cancel-no-receiver")?;
+    let missing_receiver_summary =
+        Arc::new(Mutex::new(test_entry(missing_receiver_task_id.clone())));
+    let (missing_receiver_tx, missing_receiver_rx) = mpsc::channel::<super::CancelCommand>(1);
+    drop(missing_receiver_rx);
+    manager.tasks.lock().await.insert(
+        missing_receiver_task_id.clone(),
+        super::ManagedTerminalTask {
+            summary: Arc::clone(&missing_receiver_summary),
+            control: super::TerminalTaskControl::Process {
+                cancel_tx: missing_receiver_tx,
+            },
+        },
+    );
+    let send_error = manager
+        .cancel(&missing_receiver_task_id)
+        .await
+        .expect_err("closed cancel receiver should be reported");
+    assert!(send_error.to_string().contains("no longer running"));
+
+    let waiting_summary = Arc::new(Mutex::new(test_entry(TerminalTaskId::new(
+        "terminal-wait-running",
+    )?)));
+    assert!(
+        super::wait_for_terminal_summary(&waiting_summary, Duration::ZERO)
+            .await
+            .is_none()
+    );
+    waiting_summary.lock().await.status = TerminalTaskStatus::Cancelled;
+    assert!(
+        super::wait_for_terminal_summary(&waiting_summary, Duration::ZERO)
+            .await
+            .is_some()
+    );
+
+    let pty_cancel_summary = Arc::new(Mutex::new(test_entry(TerminalTaskId::new(
+        "terminal-pty-cancel-helper",
+    )?)));
+    let pty_cancel_artifacts =
+        manager.artifacts_for(&TerminalTaskId::new("terminal-pty-cancel-helper")?)?;
+    tokio::fs::create_dir_all(&pty_cancel_artifacts.absolute_dir).await?;
+    super::create_empty_log_files(&pty_cancel_artifacts).await?;
+    let cancelled = super::cancel_pty_task(
+        &pty_cancel_summary,
+        Arc::new(StdMutex::new(
+            Box::new(SuccessfulKiller) as Box<dyn portable_pty::ChildKiller + Send + Sync>
+        )),
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Duration::ZERO,
+        Arc::new(pty_cancel_artifacts),
+        8,
+    )
+    .await?;
+    assert!(matches!(cancelled.status, TerminalTaskStatus::Cancelled));
+
+    let pty_cancel_error_summary = Arc::new(Mutex::new(test_entry(TerminalTaskId::new(
+        "terminal-pty-cancel-helper-error",
+    )?)));
+    let pty_cancel_error_artifacts =
+        manager.artifacts_for(&TerminalTaskId::new("terminal-pty-cancel-helper-error")?)?;
+    let cancel_error = super::cancel_pty_task(
+        &pty_cancel_error_summary,
+        Arc::new(StdMutex::new(
+            Box::new(FailingKiller) as Box<dyn portable_pty::ChildKiller + Send + Sync>
+        )),
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Duration::ZERO,
+        Arc::new(pty_cancel_error_artifacts),
+        8,
+    )
+    .await
+    .expect_err("failing pty killer should be reported");
+    assert!(
+        cancel_error
+            .to_string()
+            .contains("failed to kill terminal pty child")
+    );
     Ok(())
 }
 
@@ -485,6 +698,31 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
             .unwrap_or_default()
             .contains("failed to summarize")
     );
+
+    let worker_task_id = TerminalTaskId::new("terminal-pty-worker-abort")?;
+    let worker_artifacts = manager.artifacts_for(&worker_task_id)?;
+    tokio::fs::create_dir_all(&worker_artifacts.absolute_dir).await?;
+    super::create_empty_log_files(&worker_artifacts).await?;
+    let worker_summary = Arc::new(Mutex::new(test_entry(worker_task_id)));
+    let aborted_wait_task = tokio::spawn(async {
+        sleep(Duration::from_secs(60)).await;
+        super::PtyWaitOutcome {
+            status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+            capture_error: None,
+        }
+    });
+    aborted_wait_task.abort();
+    super::run_pty_worker(super::PtyWorker {
+        summary: Arc::clone(&worker_summary),
+        artifacts: worker_artifacts,
+        wait_task: aborted_wait_task,
+        preview_limit_bytes: 8,
+    })
+    .await;
+    assert!(matches!(
+        worker_summary.lock().await.status,
+        TerminalTaskStatus::Failed { .. }
+    ));
     Ok(())
 }
 
@@ -519,6 +757,40 @@ fn test_entry(task_id: TerminalTaskId) -> TerminalTaskEntry {
         output_hash: None,
         output_truncated: false,
         updated_at_ms: 1,
+    }
+}
+
+struct ErrorReader;
+
+impl Read for ErrorReader {
+    fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("pty read failed"))
+    }
+}
+
+#[derive(Debug)]
+struct FailingKiller;
+
+#[derive(Debug)]
+struct SuccessfulKiller;
+
+impl portable_pty::ChildKiller for SuccessfulKiller {
+    fn kill(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(Self)
+    }
+}
+
+impl portable_pty::ChildKiller for FailingKiller {
+    fn kill(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("kill failed"))
+    }
+
+    fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+        Box::new(Self)
     }
 }
 

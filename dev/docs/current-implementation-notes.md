@@ -117,7 +117,7 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 - tool approval、execution lifecycle 和 reasoning delta 会追加到 control log。
 - task run、plan、step、child-session 和 subagent approval-route 摘要会追加到 control log，并通过 `Session::task_state_projection` 投影。
 - terminal task handle/status/output preview 摘要有独立 control entry 和 `Session::terminal_task_projection`；terminal tool metadata 会被同步成 append-only `TerminalTask` control entry，TUI 会把它们恢复成 activity card，在 info rail 展示 running terminal count，并支持对 focused running terminal card 通过 `Alt-X` 二次确认走 worker `terminal_cancel` 路径取消，同时保留 execution audit entry。
-- `sigil-tools-builtin` 已有 non-PTY terminal process manager：输出写入 `.sigil/tasks/<task-id>/{meta.json,output.log,stdout.log,stderr.log}`，支持 bounded read、status 和 cooperative cancel；`terminal_start`、`terminal_read`、`terminal_cancel` 已注册为 model-facing 工具，`terminal_input` 先返回结构化 unsupported，等待后续 PTY/stdin backend 接入。
+- `sigil-tools-builtin` 已有 terminal process manager：默认 non-PTY 输出写入 `.sigil/tasks/<task-id>/{meta.json,output.log,stdout.log,stderr.log}`，支持 bounded read、status 和 cooperative cancel；显式 `terminal_start` `pty=true` 会走 `portable-pty` backend，专用 blocking read thread 写 combined artifact log，并支持有界队列 `terminal_input`、`terminal_resize` 和 cancel。单次 terminal input 上限为 8 KiB，permission/audit 只记录 task id 与 input bytes，不记录 stdin 原文；non-PTY task 的 input/resize 仍返回结构化 unsupported。
 - 已开始但没有终态的工具执行在恢复时标记为 `interrupted`。
 - 悬空 tool call 会投影为结构化 `interrupted` tool result。
 - 文件变更工具的历史结果卡片会随 session restore 恢复。
