@@ -5,9 +5,10 @@ use anyhow::Result;
 use crate::{
     ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk,
     CompactionRecord, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
-    ProviderContinuationState, ResponseHandle, ToolEgressEntry, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
-    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats, provider::ModelMessage,
+    ProviderContinuationState, ResponseHandle, TerminalTaskEntry, TerminalTaskHandle,
+    TerminalTaskId, TerminalTaskStatus, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit,
+    ToolSubjectKind, ToolSubjectScope, UsageStats, provider::ModelMessage,
 };
 
 use super::{
@@ -223,6 +224,35 @@ fn session_changeset_projection_replays_control_entries() -> Result<()> {
         latest.result.as_ref(),
         Some(result) if result.status == ChangeSetResultStatus::Applied
     ));
+    Ok(())
+}
+
+#[test]
+fn session_terminal_task_projection_replays_control_entries() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let id = TerminalTaskId::new("terminal-1")?;
+    session.append_control(ControlEntry::TerminalTask(TerminalTaskEntry {
+        handle: TerminalTaskHandle {
+            task_id: id.clone(),
+            command: "cargo test".to_owned(),
+            cwd: ".".into(),
+            shell: "zsh".to_owned(),
+            log_path: ".sigil/terminal/terminal-1/output.log".into(),
+            created_at_ms: 100,
+        },
+        status: TerminalTaskStatus::Running,
+        output_preview: Some("running tests".to_owned()),
+        output_hash: Some("sha256:abc".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 120,
+    }))?;
+
+    let projection = session.terminal_task_projection();
+    let latest = projection.latest().expect("latest terminal task");
+
+    assert_eq!(projection.latest_task_id.as_ref(), Some(&id));
+    assert_eq!(projection.active_task_ids, vec![id]);
+    assert!(matches!(latest.status, TerminalTaskStatus::Running));
     Ok(())
 }
 

@@ -947,6 +947,23 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
                 message: None,
             },
         )),
+        SessionLogEntry::Control(ControlEntry::TerminalTask(
+            sigil_kernel::TerminalTaskEntry {
+                handle: sigil_kernel::TerminalTaskHandle {
+                    task_id: sigil_kernel::TerminalTaskId::new("terminal-1")?,
+                    command: "cargo test".to_owned(),
+                    cwd: ".".into(),
+                    shell: "zsh".to_owned(),
+                    log_path: ".sigil/terminal/terminal-1/output.log".into(),
+                    created_at_ms: 100,
+                },
+                status: sigil_kernel::TerminalTaskStatus::Running,
+                output_preview: Some("running tests".to_owned()),
+                output_hash: Some("sha256:abc".to_owned()),
+                output_truncated: false,
+                updated_at_ms: 120,
+            },
+        )),
         SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
             summary: "summary".to_owned(),
             compacted_message_count: 3,
@@ -973,6 +990,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
     assert!(rendered.contains("[ctl] preview call-write-1 write_file"));
     assert!(rendered.contains("[ctl] changeset change-1 proposed risk=low files=0 Update README"));
     assert!(rendered.contains("[ctl] changeset change-1 status=applied files=0"));
+    assert!(rendered.contains("[ctl] terminal terminal-1 status=running"));
     assert!(rendered.contains("[ctl] compacted=3 tail=2"));
     assert!(rendered.contains("[ctl] note checkpoint"));
     Ok(())

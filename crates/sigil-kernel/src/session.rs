@@ -22,6 +22,7 @@ use crate::{
         TaskChildSessionEntry, TaskPlanEntry, TaskRunEntry, TaskStateProjection, TaskStepEntry,
         TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
     },
+    terminal_task::{TerminalTaskEntry, TerminalTaskProjection},
     tool::{
         ToolAccess, ToolError, ToolErrorKind, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
         ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
@@ -102,6 +103,8 @@ pub enum ControlEntry {
     ChangeSetProposed(ChangeSet),
     #[serde(alias = "ChangeSetApplied")]
     ChangeSetApplied(ChangeSetResult),
+    #[serde(alias = "TerminalTask")]
+    TerminalTask(TerminalTaskEntry),
     #[serde(alias = "CompactionApplied")]
     CompactionApplied(CompactionRecord),
     #[serde(alias = "TaskRun")]
@@ -491,6 +494,11 @@ impl Session {
     /// Returns a durable change set projection reconstructed from append-only control entries.
     pub fn changeset_projection(&self) -> ChangeSetProjection {
         ChangeSetProjection::from_entries(&self.entries)
+    }
+
+    /// Returns a durable terminal task projection reconstructed from append-only control entries.
+    pub fn terminal_task_projection(&self) -> TerminalTaskProjection {
+        TerminalTaskProjection::from_entries(&self.entries)
     }
 
     /// Builds one provider request from stable system memory, projected session history, and tools.

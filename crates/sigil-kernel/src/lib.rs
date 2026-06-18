@@ -10,6 +10,7 @@ pub mod secret;
 pub mod session;
 pub mod task;
 pub mod task_orchestrator;
+pub mod terminal_task;
 pub mod tool;
 
 pub use agent::{
@@ -64,6 +65,10 @@ pub use task::{
 pub use task_orchestrator::{
     SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,
     SequentialTaskStepOutput,
+};
+pub use terminal_task::{
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection,
+    TerminalTaskStatus, TerminalTaskSummary,
 };
 pub use tool::{
     ScopedToolRegistry, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats,

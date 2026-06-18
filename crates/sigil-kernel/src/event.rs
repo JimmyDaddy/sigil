@@ -249,6 +249,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ToolPreviewCaptured(_) => "tool_preview_captured",
         ControlEntry::ChangeSetProposed(_) => "change_set_proposed",
         ControlEntry::ChangeSetApplied(_) => "change_set_applied",
+        ControlEntry::TerminalTask(_) => "terminal_task",
         ControlEntry::CompactionApplied(_) => "compaction_applied",
         ControlEntry::TaskRun(_) => "task_run",
         ControlEntry::TaskPlan(_) => "task_plan",

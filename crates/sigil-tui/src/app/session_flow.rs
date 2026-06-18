@@ -742,6 +742,12 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 result.status.as_str(),
                 result.file_results.len()
             ),
+            ControlEntry::TerminalTask(task) => format!(
+                "[ctl] terminal {} status={} log={}",
+                task.handle.task_id.as_str(),
+                task.status.as_str(),
+                truncate_session_view_text(&task.handle.log_path.display().to_string(), 48)
+            ),
             ControlEntry::CompactionApplied(record) => format!(
                 "[ctl] compacted={} tail={}",
                 record.compacted_message_count, record.retained_tail_message_count

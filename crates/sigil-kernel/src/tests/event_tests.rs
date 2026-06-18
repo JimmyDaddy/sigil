@@ -8,7 +8,8 @@ use crate::{
     PublicRunEvent, PublicRunEventKind, ResponseHandle, RunEvent, SessionRef,
     TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
     TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolAccess,
+    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
     ToolApprovalAuditAction, ToolApprovalEntry, ToolCall, ToolCategory, ToolEgressEntry,
     ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
     ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
@@ -347,6 +348,24 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 message: None,
             }),
             "change_set_applied",
+        ),
+        (
+            ControlEntry::TerminalTask(TerminalTaskEntry {
+                handle: TerminalTaskHandle {
+                    task_id: TerminalTaskId::new("terminal-1").expect("valid terminal task id"),
+                    command: "cargo test".to_owned(),
+                    cwd: ".".into(),
+                    shell: "zsh".to_owned(),
+                    log_path: ".sigil/terminal/terminal-1/output.log".into(),
+                    created_at_ms: 100,
+                },
+                status: TerminalTaskStatus::Running,
+                output_preview: Some("running".to_owned()),
+                output_hash: Some("sha256:abc".to_owned()),
+                output_truncated: false,
+                updated_at_ms: 120,
+            }),
+            "terminal_task",
         ),
         (
             ControlEntry::CompactionApplied(CompactionRecord {
