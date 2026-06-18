@@ -1468,12 +1468,13 @@ fn terminal_entry_details(entry: &TerminalTaskEntry) -> Value {
         "task_id": entry.handle.task_id.as_str(),
         "status": entry.status.as_str(),
         "status_detail": &entry.status,
-        "command": command_permission_subject(&entry.handle.command),
+        "command": &entry.handle.command,
         "cwd": &entry.handle.cwd,
         "shell": &entry.handle.shell,
         "log_path": &entry.handle.log_path,
         "created_at_ms": entry.handle.created_at_ms,
         "updated_at_ms": entry.updated_at_ms,
+        "output_preview": &entry.output_preview,
         "output_hash": &entry.output_hash,
         "output_truncated": entry.output_truncated
     })

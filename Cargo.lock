@@ -2305,6 +2305,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "serde_json",
+ "sha2",
  "sigil-kernel",
  "sigil-provider-anthropic",
  "sigil-provider-deepseek",

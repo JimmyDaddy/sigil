@@ -1,10 +1,10 @@
 use super::super::{
-    build_model_picker_options, char_to_byte_index, format_token_compact, format_token_count,
-    format_tool_content_block_redacted_for_restore, format_tool_result_block_redacted,
-    hash_timeline_line, human_file_size, line_has_visible_content, non_empty_or,
-    normalize_command_prefix_character, normalize_runtime_model, parse_reasoning_effort,
-    persisted_root_config, plain_line_text, ratio_to_percent, sidebar_width_for_terminal,
-    summarize_error,
+    build_model_picker_options, char_to_byte_index, format_terminal_task_block_redacted,
+    format_token_compact, format_token_count, format_tool_content_block_redacted_for_restore,
+    format_tool_result_block_redacted, hash_timeline_line, human_file_size,
+    line_has_visible_content, non_empty_or, normalize_command_prefix_character,
+    normalize_runtime_model, parse_reasoning_effort, persisted_root_config, plain_line_text,
+    ratio_to_percent, sidebar_width_for_terminal, summarize_error,
 };
 use super::*;
 use ratatui::text::{Line, Span};
@@ -205,6 +205,53 @@ fn read_file_results_use_markdown_preview_kind() -> Result<()> {
 }
 
 #[test]
+fn format_terminal_task_block_redacted_summarizes_failed_and_exited_statuses() -> Result<()> {
+    let failed: serde_json::Value = serde_json::from_str(&format_terminal_task_block_redacted(
+        &format_terminal_entry(
+            "terminal-failed",
+            sigil_kernel::TerminalTaskStatus::Failed {
+                reason: "command failed after waiting for child process".to_owned(),
+            },
+        )?,
+        &SecretRedactor::empty(),
+    ))?;
+    let exited: serde_json::Value = serde_json::from_str(&format_terminal_task_block_redacted(
+        &format_terminal_entry(
+            "terminal-exited",
+            sigil_kernel::TerminalTaskStatus::Exited { exit_code: Some(7) },
+        )?,
+        &SecretRedactor::empty(),
+    ))?;
+
+    assert_eq!(failed["status"], "error");
+    assert_eq!(
+        failed["metadata"]["details"]["terminal_task"]["status"],
+        "failed"
+    );
+    assert!(
+        failed["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("failed command failed"))
+    );
+    assert_eq!(
+        failed["metadata"]["details"]["terminal_task"]["status_detail"]["reason"],
+        "command failed after waiting for child process"
+    );
+
+    assert_eq!(exited["status"], "ok");
+    assert!(
+        exited["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("exited 7"))
+    );
+    assert_eq!(
+        exited["metadata"]["details"]["terminal_task"]["status_detail"]["exit_code"],
+        7
+    );
+    Ok(())
+}
+
+#[test]
 fn build_model_picker_options_uses_known_models_and_appends_custom_current() {
     let options = build_model_picker_options(" custom-model ", Vec::new());
 
@@ -234,4 +281,27 @@ fn utility_formatters_cover_threshold_and_unicode_edges() {
     assert_eq!(normalize_command_prefix_character('x'), None);
     assert_eq!(char_to_byte_index("a中b", 2), "a中".len());
     assert_eq!(non_empty_or("   ", "fallback"), "fallback");
+}
+
+fn format_terminal_entry(
+    task_id: &str,
+    status: sigil_kernel::TerminalTaskStatus,
+) -> Result<sigil_kernel::TerminalTaskEntry> {
+    Ok(sigil_kernel::TerminalTaskEntry {
+        handle: sigil_kernel::TerminalTaskHandle {
+            task_id: sigil_kernel::TerminalTaskId::new(task_id)?,
+            command: "cargo test".to_owned(),
+            cwd: std::path::Path::new(".").to_path_buf(),
+            shell: "sh".to_owned(),
+            log_path: std::path::Path::new(".sigil/tasks")
+                .join(task_id)
+                .join("output.log"),
+            created_at_ms: 10,
+        },
+        status,
+        output_preview: Some("line 1\nline 2".to_owned()),
+        output_hash: Some("hash".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 20,
+    })
 }

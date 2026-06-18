@@ -106,6 +106,38 @@ fn restored_tool_result_uses_execution_audit_for_user_facing_card() -> Result<()
 }
 
 #[test]
+fn restored_terminal_task_control_renders_user_facing_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![SessionLogEntry::Control(ControlEntry::TerminalTask(
+        session_terminal_entry("terminal-1", sigil_kernel::TerminalTaskStatus::Running)?,
+    ))];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let tool_entry = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("expected restored terminal task card");
+    let payload: serde_json::Value = serde_json::from_str(&tool_entry.text)?;
+    assert_eq!(payload["tool_name"], "terminal_task");
+    assert_eq!(
+        payload["metadata"]["details"]["terminal_task"]["task_id"],
+        "terminal-1"
+    );
+    assert!(app.events.iter().any(|event| {
+        event.label == "control:restore" && event.detail == "terminal terminal-1 status=running"
+    }));
+    Ok(())
+}
+
+#[test]
 fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();
@@ -1131,4 +1163,25 @@ fn restore_session_path_returns_false_for_invalid_log() -> Result<()> {
     ));
     assert_ne!(app.last_notice(), Some("restore failed"));
     Ok(())
+}
+
+fn session_terminal_entry(
+    task_id: &str,
+    status: sigil_kernel::TerminalTaskStatus,
+) -> Result<sigil_kernel::TerminalTaskEntry> {
+    Ok(sigil_kernel::TerminalTaskEntry {
+        handle: sigil_kernel::TerminalTaskHandle {
+            task_id: sigil_kernel::TerminalTaskId::new(task_id)?,
+            command: "cargo test".to_owned(),
+            cwd: Path::new(".").to_path_buf(),
+            shell: "sh".to_owned(),
+            log_path: Path::new(".sigil/tasks").join(task_id).join("output.log"),
+            created_at_ms: 10,
+        },
+        status,
+        output_preview: Some("running output".to_owned()),
+        output_hash: Some("hash".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 20,
+    })
 }

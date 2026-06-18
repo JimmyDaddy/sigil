@@ -22,6 +22,7 @@ use crate::{
         TASK_PLAN_UPDATE_TOOL_NAME, TaskPlanUpdateContext, task_plan_update_entry,
         task_plan_update_result_content, task_plan_update_tool_spec,
     },
+    terminal_task::TerminalTaskEntry,
     tool::{
         ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
         ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus,
@@ -804,6 +805,7 @@ where
                         duration_ms,
                         Some(&result),
                     )?;
+                    append_terminal_task_control_from_result(session, handler, &result)?;
                     record_tool_run_outcome(&mut outcome, &result);
                     session.append_tool_message(result.to_model_message())?;
                     handler.handle(RunEvent::ToolResult(result))?;
@@ -1153,6 +1155,19 @@ fn append_tool_execution_audit(
         error,
         model_content_hash,
     })))
+}
+
+fn append_terminal_task_control_from_result(
+    session: &mut Session,
+    handler: &mut impl EventHandler,
+    result: &ToolResult,
+) -> Result<()> {
+    let Some(entry) = TerminalTaskEntry::from_tool_result_details(&result.metadata.details)? else {
+        return Ok(());
+    };
+    let control = ControlEntry::TerminalTask(entry);
+    session.append_control(control.clone())?;
+    handler.handle(RunEvent::Control(control))
 }
 
 fn tool_egress_control_entry(

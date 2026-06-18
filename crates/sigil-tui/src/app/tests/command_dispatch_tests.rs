@@ -81,3 +81,61 @@ fn submit_plan_ui_command_is_not_handled_by_global_dispatch() {
 
     assert!(!app.handle_ui_command(crate::commands::UiCommand::SubmitPlan));
 }
+
+#[test]
+fn focused_terminal_task_cancel_rejects_missing_busy_and_inactive_tasks() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    let missing = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
+    assert!(missing.is_none());
+    assert_eq!(app.last_notice(), Some("focus a terminal task first"));
+
+    app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TerminalTask(
+        dispatch_terminal_entry("terminal-1", sigil_kernel::TerminalTaskStatus::Running)?,
+    ))]);
+    app.selected_tool_activity_key = Some("terminal_task:terminal-1".to_owned());
+    app.is_busy = true;
+    let busy = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
+    assert!(busy.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("wait for the active run before cancelling terminal task")
+    );
+
+    app.is_busy = false;
+    app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TerminalTask(
+        dispatch_terminal_entry(
+            "terminal-1",
+            sigil_kernel::TerminalTaskStatus::Exited { exit_code: Some(0) },
+        )?,
+    ))]);
+    let inactive = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
+    assert!(inactive.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("terminal task terminal-1 is not running")
+    );
+    assert!(!app.handle_ui_command(crate::commands::UiCommand::CancelFocusedTerminalTask));
+    Ok(())
+}
+
+fn dispatch_terminal_entry(
+    task_id: &str,
+    status: sigil_kernel::TerminalTaskStatus,
+) -> Result<sigil_kernel::TerminalTaskEntry> {
+    Ok(sigil_kernel::TerminalTaskEntry {
+        handle: sigil_kernel::TerminalTaskHandle {
+            task_id: sigil_kernel::TerminalTaskId::new(task_id)?,
+            command: "cargo test".to_owned(),
+            cwd: Path::new(".").to_path_buf(),
+            shell: "sh".to_owned(),
+            log_path: Path::new(".sigil/tasks").join(task_id).join("output.log"),
+            created_at_ms: 10,
+        },
+        status,
+        output_preview: Some("running output".to_owned()),
+        output_hash: Some("hash".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 20,
+    })
+}

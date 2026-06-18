@@ -3,8 +3,9 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::session::{ControlEntry, SessionLogEntry};
 
@@ -106,6 +107,54 @@ pub struct TerminalTaskEntry {
     #[serde(default)]
     pub output_truncated: bool,
     pub updated_at_ms: u64,
+}
+
+impl TerminalTaskEntry {
+    /// Projects a terminal task control entry from terminal tool metadata.
+    ///
+    /// Returns `Ok(None)` for non-terminal tool metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when terminal metadata is present but incomplete or malformed.
+    pub fn from_tool_result_details(details: &Value) -> Result<Option<Self>> {
+        let Some(object) = details.as_object() else {
+            return Ok(None);
+        };
+        if !object.contains_key("status_detail") {
+            return Ok(None);
+        }
+
+        let task_id = TerminalTaskId::new(required_string(details, "task_id")?.to_owned())?;
+        let status = serde_json::from_value::<TerminalTaskStatus>(
+            required_value(details, "status_detail")?.clone(),
+        )
+        .map_err(|error| anyhow!("invalid terminal task status_detail: {error}"))?;
+        let cwd = serde_json::from_value::<PathBuf>(required_value(details, "cwd")?.clone())
+            .map_err(|error| anyhow!("invalid terminal task cwd: {error}"))?;
+        let log_path =
+            serde_json::from_value::<PathBuf>(required_value(details, "log_path")?.clone())
+                .map_err(|error| anyhow!("invalid terminal task log_path: {error}"))?;
+
+        Ok(Some(Self {
+            handle: TerminalTaskHandle {
+                task_id,
+                command: required_string(details, "command")?.to_owned(),
+                cwd,
+                shell: required_string(details, "shell")?.to_owned(),
+                log_path,
+                created_at_ms: required_u64(details, "created_at_ms")?,
+            },
+            status,
+            output_preview: optional_string(details, "output_preview").map(str::to_owned),
+            output_hash: optional_string(details, "output_hash").map(str::to_owned),
+            output_truncated: details
+                .get("output_truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            updated_at_ms: required_u64(details, "updated_at_ms")?,
+        }))
+    }
 }
 
 /// Latest terminal task state reconstructed from append-only control entries.
@@ -240,6 +289,28 @@ fn should_interrupt_missing_process(
         | TerminalTaskStatus::Cancelled
         | TerminalTaskStatus::Interrupted => false,
     }
+}
+
+fn required_value<'a>(details: &'a Value, key: &str) -> Result<&'a Value> {
+    details
+        .get(key)
+        .ok_or_else(|| anyhow!("missing terminal task field {key}"))
+}
+
+fn required_string<'a>(details: &'a Value, key: &str) -> Result<&'a str> {
+    required_value(details, key)?
+        .as_str()
+        .ok_or_else(|| anyhow!("terminal task field {key} must be a string"))
+}
+
+fn optional_string<'a>(details: &'a Value, key: &str) -> Option<&'a str> {
+    details.get(key).and_then(Value::as_str)
+}
+
+fn required_u64(details: &Value, key: &str) -> Result<u64> {
+    required_value(details, key)?
+        .as_u64()
+        .ok_or_else(|| anyhow!("terminal task field {key} must be an unsigned integer"))
 }
 
 fn validate_stable_id(label: &str, value: &str) -> Result<()> {

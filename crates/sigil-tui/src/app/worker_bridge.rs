@@ -5,7 +5,9 @@ use anyhow::Result;
 use super::{
     AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary, McpServerRuntimeStatus,
     ModelPickerRefresh, PaneFocus, PendingApproval, RunPhase, TimelineRole,
-    formatting::{format_tool_result_block_redacted, summarize_error},
+    formatting::{
+        format_terminal_task_block_redacted, format_tool_result_block_redacted, summarize_error,
+    },
 };
 use crate::config_panel::{
     DEEPSEEK_PROVIDER_KEY, default_deepseek_provider_config, normalize_provider_name,
@@ -212,6 +214,27 @@ impl AppState {
                     "run cancelled; restored",
                 );
                 self.schedule_balance_refresh();
+            }
+            WorkerMessage::TerminalTaskUpdated { entry, entries } => {
+                self.pending_terminal_cancel_confirmation = None;
+                self.sync_current_session_state(entries);
+                self.last_notice = Some(format!(
+                    "terminal task {} {}",
+                    entry.handle.task_id.as_str(),
+                    entry.status.as_str()
+                ));
+                self.push_timeline(
+                    TimelineRole::Tool,
+                    format_terminal_task_block_redacted(&entry, &self.secret_redactor),
+                );
+                self.push_event(
+                    "terminal",
+                    format!(
+                        "{} status={}",
+                        entry.handle.task_id.as_str(),
+                        entry.status.as_str()
+                    ),
+                );
             }
             WorkerMessage::SessionSwitched {
                 session_log_path,
@@ -434,6 +457,9 @@ impl AppState {
                 WorkerCommand::ApprovalDecision { call_id, approved }
             }
             AppAction::CancelRun => WorkerCommand::CancelRun,
+            AppAction::CancelTerminalTask { task_id } => {
+                WorkerCommand::CancelTerminalTask { task_id }
+            }
             AppAction::CompactNow => WorkerCommand::CompactNow,
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
             AppAction::ActivateLazyMcp { server_name } => {
@@ -895,6 +921,21 @@ impl EventHandler for AppState {
                     self.tool_preview_snapshots
                         .insert(snapshot.call_id.clone(), snapshot);
                     self.append_current_session_control(control);
+                }
+                ControlEntry::TerminalTask(task) => {
+                    self.push_event(
+                        "terminal",
+                        format!(
+                            "{} status={}",
+                            task.handle.task_id.as_str(),
+                            task.status.as_str()
+                        ),
+                    );
+                    self.push_timeline(
+                        TimelineRole::Tool,
+                        format_terminal_task_block_redacted(&task, &self.secret_redactor),
+                    );
+                    self.append_current_session_control(ControlEntry::TerminalTask(task));
                 }
                 other => {
                     self.push_event("control", format!("{other:?}"));

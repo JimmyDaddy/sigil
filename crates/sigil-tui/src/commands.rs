@@ -18,6 +18,7 @@ pub(crate) enum UiCommand {
     SelectPreviousToolCard,
     ToggleSelectedToolCard,
     ClearToolCardFocus,
+    CancelFocusedTerminalTask,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +172,14 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         help: "Clear activity focus when the composer is empty.",
         surface: CommandSurface::ToolCard,
     },
+    UiCommandSpec {
+        command: UiCommand::CancelFocusedTerminalTask,
+        keys: &[KeyBinding { label: "Alt-X" }],
+        slash: None,
+        label: "Cancel terminal task",
+        help: "Cancel the focused running terminal task after confirmation.",
+        surface: CommandSurface::ToolCard,
+    },
 ];
 
 pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
@@ -190,6 +199,9 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         }
         KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::CheckChangedFilesDiagnostics)
+        }
+        KeyCode::Char('x') | KeyCode::Char('X') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::CancelFocusedTerminalTask)
         }
         _ => None,
     }

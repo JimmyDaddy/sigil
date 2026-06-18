@@ -53,6 +53,49 @@ fn terminal_capability_helpers_default_on_and_follow_config() {
 }
 
 #[test]
+fn terminal_task_sidebar_lines_project_running_count() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TerminalTask(test_terminal_entry(
+            "terminal-1",
+            sigil_kernel::TerminalTaskStatus::Running,
+        )?)),
+        SessionLogEntry::Control(ControlEntry::TerminalTask(test_terminal_entry(
+            "terminal-2",
+            sigil_kernel::TerminalTaskStatus::Exited { exit_code: Some(0) },
+        )?)),
+    ]);
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"terminal: 1 running".to_owned()));
+    assert!(lines.contains(&"terminal latest: terminal-1 running".to_owned()));
+    Ok(())
+}
+
+#[test]
+fn focused_terminal_task_cancel_requires_confirmation() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::Control(ControlEntry::TerminalTask(
+        test_terminal_entry("terminal-1", sigil_kernel::TerminalTaskStatus::Running)?,
+    )))?;
+
+    let first = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
+    assert!(first.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("Alt-X again to cancel terminal task terminal-1")
+    );
+
+    let second = app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT))?;
+    assert!(matches!(
+        second,
+        Some(AppAction::CancelTerminalTask { task_id }) if task_id == "terminal-1"
+    ));
+    Ok(())
+}
+
+#[test]
 fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let step_id = sigil_kernel::TaskStepId::new("step_1")?;
@@ -928,4 +971,25 @@ fn model_command_updates_openai_compat_provider_block() -> Result<()> {
         serde_json::Value::String("openai-key".to_owned())
     );
     Ok(())
+}
+
+fn test_terminal_entry(
+    task_id: &str,
+    status: sigil_kernel::TerminalTaskStatus,
+) -> Result<sigil_kernel::TerminalTaskEntry> {
+    Ok(sigil_kernel::TerminalTaskEntry {
+        handle: sigil_kernel::TerminalTaskHandle {
+            task_id: sigil_kernel::TerminalTaskId::new(task_id)?,
+            command: "cargo test".to_owned(),
+            cwd: Path::new(".").to_path_buf(),
+            shell: "sh".to_owned(),
+            log_path: Path::new(".sigil/tasks").join(task_id).join("output.log"),
+            created_at_ms: 10,
+        },
+        status,
+        output_preview: Some("running output".to_owned()),
+        output_hash: Some("hash".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 20,
+    })
 }

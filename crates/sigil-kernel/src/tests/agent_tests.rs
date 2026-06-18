@@ -20,9 +20,9 @@ use crate::{
     ModelMessage, PermissionConfig, PermissionDecision, Provider, ProviderCapabilities,
     ProviderChunk, ProviderContinuationState, ReasoningArtifact, ReasoningEffort,
     ReasoningStreamSupport, ResponseHandle, RunEvent, Session, SessionLogEntry,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext, Tool, ToolAccess,
-    ToolApproval, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory,
-    ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext, TerminalTaskStatus,
+    Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
+    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview,
     ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject,
     ToolSubjectScope, UsageStats,
 };
@@ -30,6 +30,7 @@ use crate::{
 use super::{Agent, AgentRunInput, AgentRunOptions, AgentRunTerminalReason};
 
 struct MockProvider;
+struct TerminalToolProvider;
 
 #[async_trait]
 impl Provider for MockProvider {
@@ -90,6 +91,50 @@ impl Provider for MockProvider {
     }
 }
 
+#[async_trait]
+impl Provider for TerminalToolProvider {
+    fn name(&self) -> &str {
+        "mock-terminal"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        if tool_used {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])))
+        } else {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-terminal-1".to_owned(),
+                    name: "terminal_start".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-terminal-1".to_owned(),
+                    delta: r#"{"command":"cargo test"}"#.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-terminal-1".to_owned(),
+                    name: "terminal_start".to_owned(),
+                    args_json: r#"{"command":"cargo test"}"#.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])))
+        }
+    }
+}
+
 struct CapturingTextProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
@@ -135,6 +180,7 @@ impl Provider for CapturingTextProvider {
 }
 
 struct EchoTool;
+struct TerminalStartAuditTool;
 struct WriteTool {
     executed: Arc<AtomicBool>,
 }
@@ -176,6 +222,58 @@ impl Tool for EchoTool {
             "echo",
             args["value"].as_str().unwrap_or_default(),
             ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalStartAuditTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "terminal_start".to_owned(),
+            description: "Start terminal task".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(Some(ApprovalMode::Allow))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "terminal_start",
+            "started terminal task terminal-1",
+            ToolResultMeta {
+                details: json!({
+                    "task_id": "terminal-1",
+                    "status": "running",
+                    "status_detail": { "state": "running" },
+                    "command": "cargo test",
+                    "cwd": ".",
+                    "shell": "sh",
+                    "log_path": ".sigil/terminal/terminal-1/output.log",
+                    "created_at_ms": 10,
+                    "updated_at_ms": 20,
+                    "output_preview": "running output",
+                    "output_hash": "sha256:abc",
+                    "output_truncated": false
+                }),
+                ..ToolResultMeta::default()
+            },
         ))
     }
 }
@@ -1206,6 +1304,55 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
                     && execution.status == ToolExecutionStatus::Completed
                     && execution.model_content_hash.is_some()
                     && execution.error.is_none()
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(TerminalStartAuditTool));
+    let agent = Agent::new(TerminalToolProvider, registry);
+    let mut session = Session::new("mock-terminal", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run(
+            &mut session,
+            "start terminal task",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if execution.call_id == "call-terminal-1"
+                    && execution.status == ToolExecutionStatus::Completed
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TerminalTask(task))
+                if task.handle.task_id.as_str() == "terminal-1"
+                    && task.handle.command == "cargo test"
+                    && matches!(task.status, TerminalTaskStatus::Running)
+                    && task.output_preview.as_deref() == Some("running output")
+                    && task.output_hash.as_deref() == Some("sha256:abc")
         )
     }));
     Ok(())

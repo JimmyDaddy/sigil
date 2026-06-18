@@ -17,8 +17,8 @@ use super::{
     AppState, PaneFocus, RunPhase, SESSION_HISTORY_TITLE_SCAN_LIMIT, SessionHistoryEntry,
     SessionHistoryRow, SessionViewMode, TimelineRole,
     formatting::{
-        format_tool_content_block_redacted_for_restore, human_file_size, relative_age_label,
-        truncate_session_view_text,
+        format_terminal_task_block_redacted, format_tool_content_block_redacted_for_restore,
+        human_file_size, relative_age_label, truncate_session_view_text,
     },
 };
 
@@ -491,6 +491,20 @@ impl AppState {
                             ),
                         );
                         self.push_event("control:restore", format!("{execution:?}"));
+                    }
+                    ControlEntry::TerminalTask(task) => {
+                        self.push_timeline(
+                            TimelineRole::Tool,
+                            format_terminal_task_block_redacted(&task, &self.secret_redactor),
+                        );
+                        self.push_event(
+                            "control:restore",
+                            format!(
+                                "terminal {} status={}",
+                                task.handle.task_id.as_str(),
+                                task.status.as_str()
+                            ),
+                        );
                     }
                     other => {
                         self.push_event("control:restore", format!("{other:?}"));

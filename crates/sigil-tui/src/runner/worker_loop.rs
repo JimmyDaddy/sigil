@@ -2,15 +2,18 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentRole, AgentRunOptions, AgentRunResult, ControlEntry, ProviderCapabilities,
     RootConfig, SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry,
     SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskRouteId,
     TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepStatus,
-    TaskSubagentElicitationRouteEntry, ToolApproval, ToolRegistry,
+    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
+    ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit,
 };
 
 use crate::{
@@ -498,6 +501,31 @@ pub(super) fn run_worker_loop<P>(
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "no active run to cancel".to_owned(),
                     ));
+                }
+            }
+            Ok(WorkerCommand::CancelTerminalTask { task_id }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before cancelling terminal task".to_owned(),
+                    ));
+                    continue;
+                }
+                match cancel_terminal_task(
+                    &runtime,
+                    agent.tool_registry().clone(),
+                    &root_config,
+                    &options,
+                    &current_session_log_path,
+                    &mut current_session,
+                    task_id,
+                ) {
+                    Ok((entry, entries)) => {
+                        let _ =
+                            message_tx.send(WorkerMessage::TerminalTaskUpdated { entry, entries });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                    }
                 }
             }
             Ok(WorkerCommand::CompactNow) => {
@@ -1341,6 +1369,179 @@ fn stable_route_suffix(value: &str) -> String {
     } else {
         suffix
     }
+}
+
+pub(super) fn cancel_terminal_task(
+    runtime: &tokio::runtime::Runtime,
+    registry: ToolRegistry,
+    root_config: &RootConfig,
+    options: &AgentRunOptions,
+    current_session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    task_id: String,
+) -> std::result::Result<(TerminalTaskEntry, Vec<SessionLogEntry>), String> {
+    let mut session = load_session(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+        current_session_log_path,
+    )
+    .map_err(|error| format!("failed to load session before terminal cancel: {error:#}"))?;
+    let terminal_task_id = TerminalTaskId::new(task_id.clone())
+        .map_err(|error| format!("invalid terminal task id: {error:#}"))?;
+    let projection = session.terminal_task_projection();
+    let previous = projection
+        .tasks
+        .get(&terminal_task_id)
+        .cloned()
+        .ok_or_else(|| format!("terminal task {task_id} is not in the current session"))?;
+    if !previous.status.is_active() {
+        return Err(format!("terminal task {task_id} is not running"));
+    }
+
+    let tool_context = ToolContext {
+        workspace_root: options.workspace_root.clone(),
+        timeout_secs: options.tool_timeout_secs,
+    };
+    let call = ToolCall {
+        id: format!("tui-terminal-cancel-{task_id}"),
+        name: "terminal_cancel".to_owned(),
+        args_json: serde_json::json!({ "task_id": task_id }).to_string(),
+    };
+    let subjects = registry
+        .permission_subjects(&tool_context, &call)
+        .map_err(|error| format!("invalid terminal cancel arguments: {error:#}"))?;
+    append_terminal_cancel_execution_audit(
+        &mut session,
+        &call,
+        &subjects,
+        ToolExecutionStatus::Started,
+        None,
+        None,
+    )
+    .map_err(|error| format!("failed to append terminal cancel audit: {error:#}"))?;
+
+    let execution_started = Instant::now();
+    let result = match runtime.block_on(registry.execute(tool_context.clone(), call.clone())) {
+        Ok(result) => result,
+        Err(error) => ToolResult::error(
+            call.id.clone(),
+            call.name.clone(),
+            ToolErrorKind::Internal,
+            format!("terminal cancel failed: {error:#}"),
+        ),
+    };
+    let duration_ms = Some(elapsed_ms(execution_started));
+    let execution_status = if result.is_error() {
+        ToolExecutionStatus::Failed
+    } else {
+        ToolExecutionStatus::Completed
+    };
+    append_terminal_cancel_execution_audit(
+        &mut session,
+        &call,
+        &subjects,
+        execution_status,
+        duration_ms,
+        Some(&result),
+    )
+    .map_err(|error| format!("failed to append terminal cancel audit: {error:#}"))?;
+    if result.is_error() {
+        *current_session = Some(session);
+        return Err(format!("terminal cancel failed: {}", result.content));
+    }
+    let entry = terminal_cancel_entry_from_result(&previous, &result)?;
+    session
+        .append_control(ControlEntry::TerminalTask(entry.clone()))
+        .map_err(|error| format!("failed to append terminal task state: {error:#}"))?;
+    let entries = session.entries().to_vec();
+    *current_session = Some(session);
+    Ok((entry, entries))
+}
+
+fn terminal_cancel_entry_from_result(
+    previous: &sigil_kernel::TerminalTaskSummary,
+    result: &ToolResult,
+) -> std::result::Result<TerminalTaskEntry, String> {
+    let entry = TerminalTaskEntry::from_tool_result_details(&result.metadata.details)
+        .map_err(|error| format!("invalid terminal cancel result: {error:#}"))?
+        .ok_or_else(|| "terminal cancel result did not include terminal task state".to_owned())?;
+    if entry.handle.task_id != previous.handle.task_id {
+        return Err(format!(
+            "terminal cancel returned task {}, expected {}",
+            entry.handle.task_id.as_str(),
+            previous.handle.task_id.as_str()
+        ));
+    }
+    Ok(entry)
+}
+
+fn append_terminal_cancel_execution_audit(
+    session: &mut Session,
+    call: &ToolCall,
+    subjects: &[ToolSubject],
+    status: ToolExecutionStatus,
+    duration_ms: Option<u64>,
+    result: Option<&ToolResult>,
+) -> anyhow::Result<()> {
+    let (changed_files, metadata, error, model_content_hash) = if let Some(result) = result {
+        let error = match &result.status {
+            ToolResultStatus::Ok => None,
+            ToolResultStatus::Error(error) => Some(error.clone()),
+        };
+        (
+            result.metadata.changed_files.clone(),
+            result.metadata.clone(),
+            error,
+            Some(tool_result_model_content_hash(result)),
+        )
+    } else {
+        (
+            Vec::new(),
+            ToolResultMeta {
+                details: serde_json::json!({
+                    "call": {
+                        "summary": format!("task_id={}", terminal_cancel_task_id_from_call(call))
+                    }
+                }),
+                ..ToolResultMeta::default()
+            },
+            None,
+            None,
+        )
+    };
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        status,
+        duration_ms,
+        subjects: subjects.iter().map(ToolSubjectAudit::from).collect(),
+        changed_files,
+        metadata,
+        error,
+        model_content_hash,
+    })))
+}
+
+fn terminal_cancel_task_id_from_call(call: &ToolCall) -> String {
+    serde_json::from_str::<serde_json::Value>(&call.args_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn tool_result_model_content_hash(result: &ToolResult) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(result.to_model_content().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 pub(super) fn append_cancelled_task_state(

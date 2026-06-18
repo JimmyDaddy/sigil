@@ -798,6 +798,12 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         WorkerCommand::CancelRun
     ));
     assert!(matches!(
+        app.into_worker_command(AppAction::CancelTerminalTask {
+            task_id: "terminal-1".to_owned(),
+        }),
+        WorkerCommand::CancelTerminalTask { task_id } if task_id == "terminal-1"
+    ));
+    assert!(matches!(
         app.into_worker_command(AppAction::CompactNow),
         WorkerCommand::CompactNow
     ));
@@ -830,6 +836,40 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         })
     }));
     assert!(panic.is_err());
+}
+
+#[test]
+fn terminal_task_updated_syncs_session_and_pushes_tool_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.pending_terminal_cancel_confirmation = Some("terminal-1".to_owned());
+    let entry = worker_terminal_entry("terminal-1", sigil_kernel::TerminalTaskStatus::Cancelled)?;
+    let entries = vec![SessionLogEntry::Control(ControlEntry::TerminalTask(
+        entry.clone(),
+    ))];
+
+    app.handle_worker_message(WorkerMessage::TerminalTaskUpdated { entry, entries })?;
+
+    assert!(app.pending_terminal_cancel_confirmation.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("terminal task terminal-1 cancelled")
+    );
+    assert!(app.task_sidebar_lines().is_empty());
+    let tool_entry = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Tool)
+        .expect("expected terminal task card");
+    let payload: serde_json::Value = serde_json::from_str(&tool_entry.text)?;
+    assert_eq!(payload["tool_name"], "terminal_task");
+    assert_eq!(
+        payload["metadata"]["details"]["terminal_task"]["status"],
+        "cancelled"
+    );
+    assert!(app.events.iter().any(|event| {
+        event.label == "terminal" && event.detail == "terminal-1 status=cancelled"
+    }));
+    Ok(())
 }
 
 #[test]
@@ -1077,4 +1117,25 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
             .any(|event| event.label == "run:finish" && event.detail.contains("tool_calls=1"))
     );
     Ok(())
+}
+
+fn worker_terminal_entry(
+    task_id: &str,
+    status: sigil_kernel::TerminalTaskStatus,
+) -> Result<sigil_kernel::TerminalTaskEntry> {
+    Ok(sigil_kernel::TerminalTaskEntry {
+        handle: sigil_kernel::TerminalTaskHandle {
+            task_id: sigil_kernel::TerminalTaskId::new(task_id)?,
+            command: "cargo test".to_owned(),
+            cwd: Path::new(".").to_path_buf(),
+            shell: "sh".to_owned(),
+            log_path: Path::new(".sigil/tasks").join(task_id).join("output.log"),
+            created_at_ms: 10,
+        },
+        status,
+        output_preview: Some("cancelled output".to_owned()),
+        output_hash: Some("hash".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 20,
+    })
 }

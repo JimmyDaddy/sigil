@@ -116,7 +116,7 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 - response handle、provider continuation state、prefix snapshot、compaction record 和 usage snapshot 都写入 append-only control log。
 - tool approval、execution lifecycle 和 reasoning delta 会追加到 control log。
 - task run、plan、step、child-session 和 subagent approval-route 摘要会追加到 control log，并通过 `Session::task_state_projection` 投影。
-- terminal task handle/status/output preview 摘要有独立 control entry 和 `Session::terminal_task_projection`；当前这是 durable 契约层，process/PTY backend 后续接入。
+- terminal task handle/status/output preview 摘要有独立 control entry 和 `Session::terminal_task_projection`；terminal tool metadata 会被同步成 append-only `TerminalTask` control entry，TUI 会把它们恢复成 activity card，在 info rail 展示 running terminal count，并支持对 focused running terminal card 通过 `Alt-X` 二次确认走 worker `terminal_cancel` 路径取消，同时保留 execution audit entry。
 - `sigil-tools-builtin` 已有 non-PTY terminal process manager：输出写入 `.sigil/tasks/<task-id>/{meta.json,output.log,stdout.log,stderr.log}`，支持 bounded read、status 和 cooperative cancel；`terminal_start`、`terminal_read`、`terminal_cancel` 已注册为 model-facing 工具，`terminal_input` 先返回结构化 unsupported，等待后续 PTY/stdin backend 接入。
 - 已开始但没有终态的工具执行在恢复时标记为 `interrupted`。
 - 悬空 tool call 会投影为结构化 `interrupted` tool result。

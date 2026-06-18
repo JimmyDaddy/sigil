@@ -121,6 +121,7 @@ pub struct AppState {
     selected_tool_activity_key: Option<String>,
     expanded_tool_activity_keys: BTreeSet<String>,
     collapsed_tool_activity_keys: BTreeSet<String>,
+    pending_terminal_cancel_confirmation: Option<String>,
     pending_mouse_slash_confirmation: Option<ResolvedSlashCommand>,
     mouse_hover_target: Option<crate::mouse::HitTarget>,
     pending_mouse_left_down: bool,
@@ -177,6 +178,9 @@ pub enum AppAction {
         approved: bool,
     },
     CancelRun,
+    CancelTerminalTask {
+        task_id: String,
+    },
     CopyToClipboard {
         text: String,
     },
@@ -272,6 +276,7 @@ impl AppState {
             selected_tool_activity_key: None,
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
+            pending_terminal_cancel_confirmation: None,
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
             pending_mouse_left_down: false,
@@ -386,6 +391,7 @@ impl AppState {
             selected_tool_activity_key: None,
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
+            pending_terminal_cancel_confirmation: None,
             pending_mouse_slash_confirmation: None,
             mouse_hover_target: None,
             pending_mouse_left_down: false,
@@ -568,6 +574,7 @@ impl AppState {
         self.selected_tool_activity_key = None;
         self.expanded_tool_activity_keys.clear();
         self.collapsed_tool_activity_keys.clear();
+        self.pending_terminal_cancel_confirmation = None;
         self.pending_mouse_slash_confirmation = None;
         self.mouse_hover_target = None;
         self.pending_mouse_left_down = false;
@@ -689,6 +696,9 @@ impl AppState {
         if let Some(command) = command_for_key_event(key) {
             if command == UiCommand::CheckChangedFilesDiagnostics {
                 return Ok(self.request_changed_files_diagnostics());
+            }
+            if command == UiCommand::CancelFocusedTerminalTask {
+                return Ok(self.request_focused_terminal_task_cancel());
             }
             self.handle_ui_command(command);
             return Ok(None);

@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Result;
+use serde_json::json;
 
 use super::{
     TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection,
@@ -183,6 +184,52 @@ fn terminal_task_status_labels_and_terminal_state_are_stable() {
     assert_eq!(TerminalTaskStatus::Interrupted.as_str(), "interrupted");
     assert!(TerminalTaskStatus::Running.is_active());
     assert!(TerminalTaskStatus::Exited { exit_code: None }.is_terminal());
+}
+
+#[test]
+fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
+    let details = json!({
+        "task_id": "terminal-1",
+        "status": "cancelled",
+        "status_detail": { "state": "cancelled" },
+        "command": "cargo test -- --ignored",
+        "cwd": ".",
+        "shell": "zsh",
+        "log_path": ".sigil/terminal/terminal-1/output.log",
+        "created_at_ms": 100,
+        "updated_at_ms": 140,
+        "output_preview": "final tail",
+        "output_hash": "sha256:def",
+        "output_truncated": true
+    });
+
+    let entry = TerminalTaskEntry::from_tool_result_details(&details)?
+        .expect("terminal metadata should project to an entry");
+
+    assert_eq!(entry.handle.task_id.as_str(), "terminal-1");
+    assert_eq!(entry.handle.command, "cargo test -- --ignored");
+    assert!(matches!(entry.status, TerminalTaskStatus::Cancelled));
+    assert_eq!(entry.output_preview.as_deref(), Some("final tail"));
+    assert_eq!(entry.output_hash.as_deref(), Some("sha256:def"));
+    assert!(entry.output_truncated);
+    assert_eq!(entry.updated_at_ms, 140);
+    Ok(())
+}
+
+#[test]
+fn terminal_task_entry_ignores_non_terminal_tool_details_and_rejects_partial_metadata() {
+    assert!(
+        TerminalTaskEntry::from_tool_result_details(&json!({"task_id": "terminal-1"}))
+            .expect("non-terminal metadata should not fail")
+            .is_none()
+    );
+    assert!(
+        TerminalTaskEntry::from_tool_result_details(&json!({
+            "task_id": "terminal-1",
+            "status_detail": { "state": "running" }
+        }))
+        .is_err()
+    );
 }
 
 fn terminal_task_id() -> TerminalTaskId {

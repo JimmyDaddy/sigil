@@ -386,6 +386,124 @@ fn tool_card_render_entry_lines_styles_hovered_header() {
 }
 
 #[test]
+fn tool_card_renders_terminal_task_status_and_preview() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: json!({
+            "tool_name": "terminal_task",
+            "status": "ok",
+            "summary": "running · cargo test",
+            "preview_kind": "text",
+            "preview_lines": ["running tests", "test result: ok"],
+            "hidden_lines": 1,
+            "metadata": {
+                "details": {
+                    "terminal_task": {
+                        "task_id": "terminal-1",
+                        "status": "running",
+                        "status_detail": { "state": "running" },
+                        "command": "cargo test",
+                        "cwd": ".",
+                        "shell": "sh",
+                        "log_path": ".sigil/tasks/terminal-1/output.log",
+                        "created_at_ms": 10,
+                        "updated_at_ms": 20,
+                        "output_hash": "hash",
+                        "output_truncated": true
+                    }
+                }
+            }
+        })
+        .to_string(),
+    };
+    let activity = tool_activity_view(&entry, 0).expect("terminal card activity");
+    let options = TimelineRenderOptions {
+        expand_tool_previews: true,
+        selected_tool_activity_key: Some(activity.key.clone()),
+        max_content_width: 96,
+        ..TimelineRenderOptions::default()
+    };
+
+    let lines = render_tool_entry_lines(&entry, &options, 0);
+    let text = plain_text(&lines);
+
+    assert_eq!(activity.key, "terminal_task:terminal-1");
+    assert_eq!(activity.title, "Terminal terminal-1 cargo test");
+    assert!(activity.defaults_expanded);
+    assert!(text.contains("Terminal terminal-1 cargo test"));
+    assert!(text.contains("RUNNING"));
+    assert!(text.contains("terminal"));
+    assert!(text.contains("log"));
+    assert!(text.contains("running tests"));
+    assert!(text.contains("1 more lines hidden"));
+}
+
+#[test]
+fn tool_card_renders_terminal_task_failure_and_exit_details() {
+    let failed = parsed_summary(json!({
+        "tool_name": "terminal_task",
+        "status": "error",
+        "summary": "failed child process",
+        "preview_kind": "text",
+        "preview_lines": [],
+        "hidden_lines": 0,
+        "metadata": {
+            "details": {
+                "terminal_task": {
+                    "task_id": "terminal-failed",
+                    "status": "failed",
+                    "status_detail": {
+                        "state": "failed",
+                        "reason": "child process could not be interrupted cleanly"
+                    },
+                    "command": "cargo test",
+                    "log_path": ".sigil/tasks/terminal-failed/output.log"
+                }
+            }
+        }
+    }));
+    let exited_from_top_level_details = parsed_summary(json!({
+        "tool_name": "terminal_cancel",
+        "status": "ok",
+        "preview_kind": "text",
+        "preview_lines": [],
+        "hidden_lines": 0,
+        "metadata": {
+            "details": {
+                "task_id": "terminal-exited",
+                "status": "exited",
+                "status_detail": {"state": "exited", "exit_code": 7},
+                "command": "cargo test"
+            }
+        }
+    }));
+
+    let failed_display = build_tool_card_display(&failed);
+    let failed_lines = render_tool_preview_body(&failed, accent_rose(), 96);
+    let exited_display = build_tool_card_display(&exited_from_top_level_details);
+    let exited_activity = build_tool_activity_view(
+        &exited_from_top_level_details,
+        &json!({"tool_name": "terminal_cancel"}).to_string(),
+    );
+
+    assert_eq!(failed_display.status.label, "FAILED");
+    assert!(failed_display.status.is_error);
+    assert!(
+        failed_display
+            .status
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("could not be interrupted"))
+    );
+    assert!(plain_text(&failed_lines).contains("(no output preview)"));
+
+    assert_eq!(exited_display.status.label, "EXITED");
+    assert_eq!(exited_display.status.detail.as_deref(), Some("exit 7"));
+    assert_eq!(exited_activity.key, "terminal_task:terminal-exited");
+    assert_eq!(exited_activity.title, "Terminal terminal-exited cargo test");
+}
+
+#[test]
 fn tool_card_activity_view_uses_stable_hash_without_call_id() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,

@@ -94,7 +94,10 @@ pub(crate) fn render_tool_entry_lines(
 }
 
 fn tool_has_preview(summary: &ToolCardRender) -> bool {
-    !summary.preview_lines.is_empty() || summary.preview_value.is_some() || summary.diff.is_some()
+    terminal_task_tool(summary)
+        || !summary.preview_lines.is_empty()
+        || summary.preview_value.is_some()
+        || summary.diff.is_some()
 }
 
 fn render_tool_collapsed_preview_body(
@@ -210,6 +213,9 @@ fn render_tool_preview_body(
     }
     if tool_name_matches(&summary.tool_name, "bash") {
         return render_bash_preview(summary, accent);
+    }
+    if terminal_task_tool(summary) {
+        return render_terminal_task_preview(summary, accent);
     }
     if file_change_tool(summary)
         && let Some(lines) = render_file_change_preview(summary, accent)
@@ -398,6 +404,49 @@ fn render_bash_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'sta
     lines
 }
 
+fn render_terminal_task_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'static>> {
+    let subtitle = summary
+        .metadata
+        .terminal_command
+        .as_deref()
+        .map(|command| truncate_inline_text(command, 120))
+        .or_else(|| summary.metadata.terminal_log_path.clone())
+        .unwrap_or_else(|| "terminal task".to_owned());
+    let mut lines = vec![timeline_section_line(
+        accent,
+        "terminal",
+        accent_gold(),
+        vec![Span::styled(subtitle, Style::default().fg(dim()))],
+    )];
+    if let Some(log_path) = &summary.metadata.terminal_log_path {
+        lines.push(timeline_content_line(
+            accent,
+            vec![
+                section_badge("log", accent_teal()),
+                Span::raw(" "),
+                Span::styled(log_path.clone(), Style::default().fg(dim())),
+            ],
+        ));
+    }
+    if summary.preview_lines.is_empty() {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                "(no output preview)".to_owned(),
+                Style::default().fg(dim()),
+            )],
+        ));
+    } else {
+        lines.extend(render_code_preview_lines(
+            accent,
+            &summary.preview_lines,
+            Color::Rgb(33, 24, 28),
+        ));
+    }
+    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    lines
+}
+
 fn bash_preview_section_label(summary: &ToolCardRender) -> &'static str {
     if summary.is_error {
         if summary.metadata.stderr_bytes.unwrap_or(0) > 0 {
@@ -408,6 +457,49 @@ fn bash_preview_section_label(summary: &ToolCardRender) -> &'static str {
         }
     }
     "output"
+}
+
+fn terminal_task_tool(summary: &ToolCardRender) -> bool {
+    tool_name_matches(&summary.tool_name, "terminal_task")
+        || summary.metadata.terminal_task_id.is_some()
+}
+
+fn terminal_task_is_active(summary: &ToolCardRender) -> bool {
+    matches!(
+        summary.metadata.terminal_status.as_deref(),
+        Some("starting" | "running")
+    )
+}
+
+fn terminal_task_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
+    let label = match summary.metadata.terminal_status.as_deref() {
+        Some("starting") => "STARTING",
+        Some("running") => "RUNNING",
+        Some("exited") => "EXITED",
+        Some("failed") => "FAILED",
+        Some("cancelled") => "CANCELLED",
+        Some("interrupted") => "INTERRUPTED",
+        _ if summary.is_error => "ERROR",
+        _ => "OK",
+    };
+    let detail = match summary.metadata.terminal_status.as_deref() {
+        Some("exited") => summary
+            .metadata
+            .terminal_exit_code
+            .map(|code| format!("exit {code}")),
+        Some("failed") => summary
+            .metadata
+            .terminal_failed_reason
+            .as_deref()
+            .map(|reason| truncate_inline_text(reason, 80)),
+        _ => None,
+    };
+    ToolCardDisplayStatus {
+        label,
+        detail,
+        is_error: summary.is_error
+            || matches!(summary.metadata.terminal_status.as_deref(), Some("failed")),
+    }
 }
 
 fn render_file_change_preview(
@@ -1241,6 +1333,12 @@ struct ToolCardMetadata {
     code_capability: Option<String>,
     returned_entries: Option<u64>,
     total_entries: Option<u64>,
+    terminal_task_id: Option<String>,
+    terminal_status: Option<String>,
+    terminal_command: Option<String>,
+    terminal_log_path: Option<String>,
+    terminal_exit_code: Option<i64>,
+    terminal_failed_reason: Option<String>,
 }
 
 struct ToolCardDisplay {
@@ -1294,11 +1392,14 @@ fn build_tool_activity_view(summary: &ToolCardRender, source: &str) -> ToolActiv
         key: tool_activity_key(summary, source),
         title: display.title.plain(),
         is_inspection: tool_activity_is_inspection_summary(summary),
-        defaults_expanded: summary.diff.is_some(),
+        defaults_expanded: summary.diff.is_some() || terminal_task_is_active(summary),
     }
 }
 
 fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
+    if terminal_task_tool(summary) {
+        return terminal_task_display_status(summary);
+    }
     let label = if summary.is_error {
         match summary.error_kind.as_deref() {
             Some("approval_denied") | Some("permission_denied") => "DENIED",
@@ -1343,6 +1444,21 @@ fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {
 }
 
 fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
+    if terminal_task_tool(summary) {
+        return ToolCardTitle::new(
+            "Terminal",
+            summary
+                .metadata
+                .terminal_task_id
+                .clone()
+                .unwrap_or_else(|| "task".to_owned()),
+            summary
+                .metadata
+                .terminal_command
+                .as_deref()
+                .map(|command| truncate_inline_text(command, 96)),
+        );
+    }
     if tool_name_matches(&summary.tool_name, "bash") {
         let command = call_argument(summary, "command")
             .or_else(|| summary.metadata.call_summary.clone())
@@ -1655,6 +1771,11 @@ fn tool_activity_is_inspection_summary(summary: &ToolCardRender) -> bool {
 }
 
 fn tool_activity_key(summary: &ToolCardRender, source: &str) -> String {
+    if terminal_task_tool(summary)
+        && let Some(task_id) = &summary.metadata.terminal_task_id
+    {
+        return format!("terminal_task:{task_id}");
+    }
     summary
         .call_id
         .as_ref()
@@ -2026,6 +2147,9 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
     let call_context = details.and_then(|details| details.get("call"));
     let (subject_mcp_server, subject_mcp_tool, subject_mcp_trust_class) =
         parse_mcp_call_subjects(call_context);
+    let terminal_context = details
+        .and_then(|details| details.get("terminal_task"))
+        .or(details);
     ToolCardMetadata {
         exit_code: object.get("exit_code").and_then(Value::as_i64),
         stdout_bytes: object.get("stdout_bytes").and_then(Value::as_u64),
@@ -2105,6 +2229,31 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
                     .and_then(|details| details.get("total"))
                     .and_then(Value::as_u64)
             }),
+        terminal_task_id: terminal_context
+            .and_then(|details| details.get("task_id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        terminal_status: terminal_context
+            .and_then(|details| details.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        terminal_command: terminal_context
+            .and_then(|details| details.get("command"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        terminal_log_path: terminal_context
+            .and_then(|details| details.get("log_path"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        terminal_exit_code: terminal_context
+            .and_then(|details| details.get("status_detail"))
+            .and_then(|status| status.get("exit_code"))
+            .and_then(Value::as_i64),
+        terminal_failed_reason: terminal_context
+            .and_then(|details| details.get("status_detail"))
+            .and_then(|status| status.get("reason"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     }
 }
 

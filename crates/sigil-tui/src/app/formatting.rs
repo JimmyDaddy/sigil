@@ -5,8 +5,9 @@ use std::{
 
 use ratatui::text::Line;
 use sigil_kernel::{
-    ReasoningEffort, RootConfig, SecretRedactor, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolResultStatus,
+    ReasoningEffort, RootConfig, SecretRedactor, TerminalTaskEntry, TerminalTaskStatus,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
+    ToolResultStatus,
 };
 
 use crate::slash::KNOWN_MODEL_IDS;
@@ -183,6 +184,69 @@ pub(super) fn format_tool_result_block_redacted(
     )
 }
 
+pub(super) fn format_terminal_task_block_redacted(
+    entry: &TerminalTaskEntry,
+    redactor: &SecretRedactor,
+) -> String {
+    let output_preview = entry
+        .output_preview
+        .as_deref()
+        .map(|preview| redactor.redact_text(preview));
+    let preview_lines = output_preview
+        .as_deref()
+        .map(|preview| {
+            preview
+                .lines()
+                .take(12)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let hidden_lines = output_preview
+        .as_deref()
+        .map(|preview| preview.lines().count().saturating_sub(preview_lines.len()))
+        .unwrap_or(0)
+        .saturating_add(usize::from(entry.output_truncated));
+    let details = serde_json::json!({
+        "terminal_task": {
+            "task_id": entry.handle.task_id.as_str(),
+            "status": entry.status.as_str(),
+            "status_detail": &entry.status,
+            "command": &entry.handle.command,
+            "cwd": &entry.handle.cwd,
+            "shell": &entry.handle.shell,
+            "log_path": &entry.handle.log_path,
+            "created_at_ms": entry.handle.created_at_ms,
+            "updated_at_ms": entry.updated_at_ms,
+            "output_hash": &entry.output_hash,
+            "output_truncated": entry.output_truncated
+        }
+    });
+    let status = if matches!(entry.status, TerminalTaskStatus::Failed { .. }) {
+        "error"
+    } else {
+        "ok"
+    };
+    let summary = format!(
+        "{} · {}",
+        terminal_task_summary_status(&entry.status),
+        redactor.redact_text(&entry.handle.command)
+    );
+    let object = serde_json::json!({
+        "tool_name": "terminal_task",
+        "status": status,
+        "summary": summary,
+        "preview_kind": "text",
+        "preview_lines": preview_lines,
+        "hidden_lines": hidden_lines,
+        "metadata": {
+            "truncated": entry.output_truncated,
+            "details": redactor.redact_value(&details)
+        }
+    });
+    serde_json::to_string(&object).expect("terminal task payload should serialize")
+}
+
 pub(super) fn format_tool_content_block_redacted_for_restore(
     call_id: Option<&str>,
     content: &str,
@@ -218,6 +282,18 @@ pub(super) fn format_tool_content_block_redacted_for_restore(
         error_kind.as_deref(),
         redactor,
     )
+}
+
+fn terminal_task_summary_status(status: &TerminalTaskStatus) -> String {
+    match status {
+        TerminalTaskStatus::Exited {
+            exit_code: Some(code),
+        } => format!("exited {code}"),
+        TerminalTaskStatus::Failed { reason } => {
+            format!("failed {}", truncate_session_view_text(reason, 48))
+        }
+        other => other.as_str().to_owned(),
+    }
 }
 
 fn format_tool_preview_payload(

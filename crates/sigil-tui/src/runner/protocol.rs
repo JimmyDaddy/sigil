@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use sigil_kernel::{
     AgentRunResult, CompactionRecord, ReasoningEffort, RunEvent, SessionLogEntry, TaskRunStatus,
+    TerminalTaskEntry,
 };
 use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::{
@@ -32,6 +33,9 @@ pub enum WorkerCommand {
         approved: bool,
     },
     CancelRun,
+    CancelTerminalTask {
+        task_id: String,
+    },
     CompactNow,
     CheckChangedFilesDiagnostics,
     RefreshProviderBalance {
@@ -81,6 +85,10 @@ pub enum WorkerMessage {
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
+        entries: Vec<SessionLogEntry>,
+    },
+    TerminalTaskUpdated {
+        entry: TerminalTaskEntry,
         entries: Vec<SessionLogEntry>,
     },
     SessionSwitched {

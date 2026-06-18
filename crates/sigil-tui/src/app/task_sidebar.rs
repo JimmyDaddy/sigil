@@ -1,6 +1,6 @@
 use sigil_kernel::{
     SessionLogEntry, TaskPlanProjection, TaskRunProjection, TaskRunStatus, TaskStateProjection,
-    TaskStepId, TaskStepSpec, TaskStepStatus,
+    TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskProjection,
 };
 
 use super::formatting::truncate_session_view_text;
@@ -8,9 +8,10 @@ use super::formatting::truncate_session_view_text;
 const TASK_SIDEBAR_STEP_LIMIT: usize = 6;
 
 pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
+    let terminal_lines = terminal_task_sidebar_lines(entries);
     let projection = TaskStateProjection::from_entries(entries);
     let Some(task) = projection.latest_task() else {
-        return Vec::new();
+        return terminal_lines;
     };
     let mut lines = vec![
         format!("task: {}", task.task_id.as_str()),
@@ -77,6 +78,34 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     }
     if task.child_unavailable {
         lines.push("child: unavailable".to_owned());
+    }
+    lines.extend(terminal_lines);
+    lines
+}
+
+fn terminal_task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
+    let projection = TerminalTaskProjection::from_entries(entries);
+    let running_count = projection.active_task_ids.len();
+    if running_count == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("terminal: {running_count} running")];
+    let latest_active = projection
+        .latest()
+        .filter(|summary| summary.status.is_active())
+        .or_else(|| {
+            projection
+                .active_task_ids
+                .iter()
+                .rev()
+                .find_map(|task_id| projection.tasks.get(task_id))
+        });
+    if let Some(latest) = latest_active {
+        lines.push(format!(
+            "terminal latest: {} {}",
+            latest.handle.task_id.as_str(),
+            latest.status.as_str()
+        ));
     }
     lines
 }
