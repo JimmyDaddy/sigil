@@ -13,9 +13,10 @@ use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig,
     InteractionMode, LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig,
-    PermissionConfig, ReasoningEffort, RoleModelConfig, RootConfig, SessionConfig, TaskConfig,
-    Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    PermissionConfig, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport,
+    RoleModelConfig, RootConfig, SessionConfig, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig,
+    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
@@ -457,6 +458,25 @@ fn provider_capability_view_uses_provider_neutral_rows() {
 
     assert_eq!(view.provider_name, "anthropic");
     assert_eq!(alias_view.provider_name, "anthropic");
+    assert_eq!(
+        view.rows.iter().map(|row| row.key).collect::<Vec<_>>(),
+        vec![
+            "text_stream",
+            "tool_calls",
+            "tool_args_stream",
+            "reasoning_stream",
+            "reasoning_effort",
+            "reasoning_artifacts",
+            "structured_output",
+            "assistant_prefix_seed",
+            "background_tasks",
+            "response_handles",
+            "cache_reporting",
+            "system_fingerprint",
+            "infill",
+            "tool_name_limit",
+        ]
+    );
     assert!(
         view.rows
             .iter()
@@ -468,6 +488,43 @@ fn provider_capability_view_uses_provider_neutral_rows() {
             .any(|row| { row.key == "reasoning_effort" && row.status.as_str() == "unsupported" })
     );
     assert!(provider_capabilities_for_name("unknown").is_none());
+}
+
+#[test]
+fn provider_capability_view_projects_every_capability_field() {
+    let view = provider_capability_view(
+        "custom",
+        &ProviderCapabilities {
+            exact_prefix_cache: true,
+            reports_cache_tokens: true,
+            reasoning_stream: ReasoningStreamSupport::Native,
+            supports_reasoning_effort: true,
+            supports_tool_stream: true,
+            supports_background_tasks: true,
+            supports_response_handles: true,
+            supports_reasoning_artifacts: true,
+            supports_structured_output: true,
+            supports_assistant_prefix_seed: true,
+            supports_schema_constrained_tools: true,
+            supports_infill_completion: true,
+            supports_system_fingerprint: true,
+            tool_name_max_chars: 48,
+        },
+    );
+    let row = |key: &str| {
+        view.rows
+            .iter()
+            .find(|row| row.key == key)
+            .expect("capability row should exist")
+    };
+
+    assert_eq!(row("reasoning_stream").detail, "native");
+    assert_eq!(row("reasoning_artifacts").status.as_str(), "supported");
+    assert_eq!(row("assistant_prefix_seed").status.as_str(), "supported");
+    assert_eq!(row("system_fingerprint").status.as_str(), "supported");
+    assert_eq!(row("infill").detail, "provider-native infill completion");
+    assert_eq!(row("tool_name_limit").status.as_str(), "supported");
+    assert!(row("tool_name_limit").detail.contains("48 chars"));
 }
 
 #[test]

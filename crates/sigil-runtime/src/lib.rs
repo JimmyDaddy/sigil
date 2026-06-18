@@ -157,10 +157,22 @@ pub fn provider_capability_view(
         "generic low/medium/high/max control",
     ));
     rows.push(capability_row(
+        "reasoning_artifacts",
+        "Reasoning artifacts",
+        status_for_bool(capabilities.supports_reasoning_artifacts),
+        "durable reasoning artifact handles",
+    ));
+    rows.push(capability_row(
         "structured_output",
         "Structured output",
         status_for_bool(capabilities.supports_structured_output),
         "provider-native structured response mode",
+    ));
+    rows.push(capability_row(
+        "assistant_prefix_seed",
+        "Assistant prefix seed",
+        status_for_bool(capabilities.supports_assistant_prefix_seed),
+        "assistant-prefix seed accepted",
     ));
     rows.push(capability_row(
         "background_tasks",
@@ -193,10 +205,25 @@ pub fn provider_capability_view(
         },
     ));
     rows.push(capability_row(
+        "system_fingerprint",
+        "System fingerprint",
+        status_for_bool(capabilities.supports_system_fingerprint),
+        "system fingerprint telemetry",
+    ));
+    rows.push(capability_row(
         "infill",
         "Infill completion",
         status_for_bool(capabilities.supports_infill_completion),
-        "provider-native FIM/prefix editing",
+        "provider-native infill completion",
+    ));
+    rows.push(capability_row(
+        "tool_name_limit",
+        "Tool name budget",
+        status_for_bool(capabilities.tool_name_max_chars > 0),
+        format!(
+            "provider-visible tool names up to {} chars",
+            capabilities.tool_name_max_chars
+        ),
     ));
 
     ProviderCapabilityView {
