@@ -32,7 +32,7 @@ sigil/
 - `sigil-runtime` 统一装配 provider、内置工具、MCP 工具、run options 和 role-scoped task agents。
 - `sigil-provider-deepseek` 支持 DeepSeek 流式对话、工具调用、reasoning replay、usage、pricing、Beta endpoint、prefix 和 FIM 专项入口。
 - `sigil-provider-openai-compat` 支持 OpenAI-compatible Chat Completions 流式对话、工具调用、usage、base URL、organization/project header 和模型配置。
-- `sigil-tools-builtin` 提供文件读写、编辑、删除、搜索、目录枚举和 shell 执行。
+- `sigil-tools-builtin` 提供文件读写、编辑、删除、多文件 change set apply、搜索、目录枚举和 shell 执行。
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用、诊断、code action 查询，以及需要审批 diff 的 code action / rename edit 工具。
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
 - `sigil` 提供 `sigil` binary：无子命令时直接启动 TUI；`run` 自动化入口和 `doctor` 本地诊断入口保留为显式子命令；`prefix` / `fim` 保留为隐藏调试或 provider 专项入口，不作为普通用户主心智。
@@ -98,7 +98,9 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 
 `write_file`、`edit_file` 和 `delete_file` 的结果 activity 默认展开执行时捕获的 bounded unified diff。diff 行显示旧/新行号，activity 正文跳过重复 hunk header，并在文件头汇总 hunk 数。大 diff 会提示 `diff truncated` 和隐藏行数。
 
-审批卡片固定为 `Summary / Files / Diff / Actions` 四区。`write_file`、`edit_file` 和 `delete_file` 的 diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换。
+`apply_changeset` 支持一次审批后的多文件 create / update / delete。执行前会统一校验 workspace path、hash、mtime、snippet、symlink 和 binary 文本边界；validation 失败时不写任何文件。执行成功或 partial failure 时会写 `.sigil/changesets/<id>/preview.diff` 与 `reverse.diff` artifact，并在结构化结果中返回 artifact path、hash、stats 和 apply status；model-visible content 只返回摘要，不直接返回完整 diff。
+
+审批卡片固定为 `Summary / Files / Diff / Actions` 四区。`write_file`、`edit_file`、`delete_file` 和 `apply_changeset` 的 diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换。
 
 ## Session 与 Control State
 

@@ -32,7 +32,7 @@ sigil/
 - `sigil-runtime` assembles providers, built-in tools, MCP tools, run options, and role-scoped task agents.
 - `sigil-provider-deepseek` supports DeepSeek streaming chat, tool calls, reasoning replay, usage, pricing, Beta endpoints, prefix completion, and FIM-specific entrypoints.
 - `sigil-provider-openai-compat` supports OpenAI-compatible Chat Completions streaming chat, tool calls, usage, base URL, organization/project headers, and model configuration.
-- `sigil-tools-builtin` provides file read/write/edit/delete, search, directory listing, and shell execution.
+- `sigil-tools-builtin` provides file read/write/edit/delete, multi-file change set apply, search, directory listing, and shell execution.
 - `sigil-code-intel` provides optional LSP / Tree-sitter code intelligence, including read-only symbol, definition, reference, diagnostic, and code action query tools, plus code action / rename edit tools with approval diff previews.
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
 - `sigil` provides the `sigil` binary: no subcommand starts the TUI directly; `run` and `doctor` remain explicit automation and diagnostics subcommands; `prefix` and `fim` remain hidden debugging or provider-specific entrypoints rather than normal user concepts.
@@ -98,7 +98,9 @@ Simple read-only `rg / grep / fd / find` bash commands are recognized as `Search
 
 `write_file`, `edit_file`, and `delete_file` result activities expand the bounded unified diff captured at execution time by default. Diff lines include old/new line numbers; activity bodies skip repeated hunk headers and summarize hunk counts in the file header. Large diffs show `diff truncated` and the number of hidden lines.
 
-Approval cards use fixed `Summary / Files / Diff / Actions` sections. Diff previews for `write_file`, `edit_file`, and `delete_file` support file switching, hunk navigation, and diff mode switching.
+`apply_changeset` supports multi-file create / update / delete after one approval. Before writing, it validates workspace paths, hashes, mtimes, snippets, symlinks, and binary text boundaries; validation failures write no files. Successful or partial executions write `.sigil/changesets/<id>/preview.diff` and `reverse.diff` artifacts, and return structured artifact path, hash, stats, and apply status metadata. Model-visible content stays summary-only and does not include the full diff.
+
+Approval cards use fixed `Summary / Files / Diff / Actions` sections. Diff previews for `write_file`, `edit_file`, `delete_file`, and `apply_changeset` support file switching, hunk navigation, and diff mode switching.
 
 ## Session and Control State
 

@@ -8,8 +8,8 @@ use sigil_kernel::{
 };
 
 use super::{
-    BashTool, ChangeSetArtifactStore, DeleteFileTool, EditFileTool, GlobTool, GrepTool, ListTool,
-    ReadFileTool, WriteFileTool, register_builtin_tools,
+    ApplyChangeSetTool, BashTool, ChangeSetArtifactStore, DeleteFileTool, EditFileTool, GlobTool,
+    GrepTool, ListTool, ReadFileTool, WriteFileTool, register_builtin_tools,
 };
 
 #[cfg(unix)]
@@ -233,12 +233,17 @@ async fn delete_file_errors_for_directory_path() -> Result<()> {
 fn register_builtin_tools_registers_multiple_tools() {
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
-    assert!(registry.specs().len() >= 8);
+    assert!(registry.specs().len() >= 9);
     let spec = registry
         .spec_for("delete_file")
         .expect("delete_file should be registered");
     assert_eq!(spec.access, ToolAccess::Write);
     assert_eq!(spec.preview, ToolPreviewCapability::Required);
+    let apply_spec = registry
+        .spec_for("apply_changeset")
+        .expect("apply_changeset should be registered");
+    assert_eq!(apply_spec.access, ToolAccess::Write);
+    assert_eq!(apply_spec.preview, ToolPreviewCapability::Required);
 }
 
 #[tokio::test]
@@ -857,6 +862,15 @@ async fn tool_permission_subjects_validate_required_paths() -> Result<()> {
         );
     }
 
+    let empty_apply = ApplyChangeSetTool
+        .permission_subjects(&ctx, &json!({ "id": "change-empty", "files": [] }))
+        .expect_err("apply_changeset should require at least one file");
+    assert!(
+        empty_apply
+            .to_string()
+            .contains("apply_changeset requires at least one file")
+    );
+
     Ok(())
 }
 
@@ -1089,6 +1103,667 @@ fn changeset_artifact_store_rejects_sigil_symlink_escape() -> Result<()> {
             .join("changesets/change-1/preview.diff")
             .exists()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_tool_previews_and_applies_multi_file_changes() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("note.txt"), "old\n")?;
+    fs::write(workspace.path().join("doomed.txt"), "remove me\n")?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let args = json!({
+        "id": "change-apply-1",
+        "title": "Apply sample changes",
+        "risk": "medium",
+        "files": [
+            { "path": "new.txt", "action": "create", "content": "created\n" },
+            {
+                "path": "note.txt",
+                "action": "update",
+                "old_text": "old",
+                "new_text": "new",
+                "before_hash": super::sha256_hex("old\n".as_bytes())
+            },
+            { "path": "doomed.txt", "action": "delete" }
+        ]
+    });
+
+    let subjects = ApplyChangeSetTool.permission_subjects(&ctx, &args)?;
+    assert_eq!(subjects.len(), 3);
+    assert_eq!(subjects[0].normalized, "new.txt");
+
+    let preview = ApplyChangeSetTool
+        .preview(ctx.clone(), args.clone())
+        .await?
+        .expect("apply_changeset should preview");
+    assert!(preview.body.contains("--- current/new.txt"));
+    assert!(preview.body.contains("+created"));
+    assert_eq!(preview.file_diffs.len(), 3);
+    assert!(
+        !workspace
+            .path()
+            .join(".sigil/changesets/change-apply-1/preview.diff")
+            .exists()
+    );
+
+    let result = ApplyChangeSetTool
+        .execute(ctx, "apply".to_owned(), args)
+        .await?;
+
+    assert!(!result.is_error());
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("new.txt"))?,
+        "created\n"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("note.txt"))?,
+        "new\n"
+    );
+    assert!(!workspace.path().join("doomed.txt").exists());
+    assert_eq!(
+        result.metadata.changed_files,
+        vec![
+            "new.txt".to_owned(),
+            "note.txt".to_owned(),
+            "doomed.txt".to_owned()
+        ]
+    );
+    assert_eq!(
+        result.metadata.details["apply_result"]["status"],
+        json!("applied")
+    );
+
+    let reverse_path = result.metadata.details["artifacts"]["reverse"]["path"]
+        .as_str()
+        .expect("reverse artifact path");
+    let reverse_diff = fs::read_to_string(workspace.path().join(reverse_path))?;
+    assert!(reverse_diff.contains("rollback/note.txt"));
+    assert!(reverse_diff.contains("+old"));
+    assert_eq!(
+        result.metadata.details["artifacts"]["reverse"]["sha256"],
+        json!(super::sha256_hex(reverse_diff.as_bytes()))
+    );
+    assert!(!result.to_model_content().contains("--- current/note.txt"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_hash_mismatch_does_not_write() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("note.txt"), "original\n")?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let result = ApplyChangeSetTool
+        .execute(
+            ctx,
+            "apply".to_owned(),
+            json!({
+                "id": "change-mismatch",
+                "files": [{
+                    "path": "note.txt",
+                    "action": "update",
+                    "content": "changed\n",
+                    "before_hash": "not-the-current-hash"
+                }]
+            }),
+        )
+        .await?;
+
+    assert!(result.is_error());
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("note.txt"))?,
+        "original\n"
+    );
+    assert!(
+        !workspace
+            .path()
+            .join(".sigil/changesets/change-mismatch/preview.diff")
+            .exists()
+    );
+    assert_eq!(
+        result.metadata.details["apply_result"]["status"],
+        json!("failed")
+    );
+    assert!(result.to_model_content().contains("hash_mismatch"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_rejects_empty_file_list() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let args = json!({ "id": "change-empty", "files": [] });
+
+    let preview_error = ApplyChangeSetTool
+        .preview(ctx.clone(), args.clone())
+        .await
+        .expect_err("empty change set should fail preview");
+    assert!(
+        preview_error
+            .to_string()
+            .contains("apply_changeset requires at least one file")
+    );
+
+    let execute_error = ApplyChangeSetTool
+        .execute(ctx, "apply".to_owned(), args)
+        .await
+        .expect_err("empty change set should fail execute");
+    assert!(
+        execute_error
+            .to_string()
+            .contains("apply_changeset requires at least one file")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_full_update_accepts_matching_mtime() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let file = workspace.path().join("note.txt");
+    fs::write(&file, "old\n")?;
+    let before_mtime_ms = super::metadata_mtime_ms(&fs::metadata(&file)?)
+        .expect("regular file metadata should include mtime");
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let args = json!({
+        "id": "change-full-update",
+        "summary": "Replace note contents",
+        "files": [{
+            "path": "note.txt",
+            "action": "update",
+            "risk": "low",
+            "content": "new\n",
+            "before_mtime_ms": before_mtime_ms
+        }]
+    });
+
+    let preview = ApplyChangeSetTool
+        .preview(ctx.clone(), args.clone())
+        .await?
+        .expect("full replacement should preview");
+    assert!(preview.body.contains("+new"));
+
+    let result = ApplyChangeSetTool
+        .execute(ctx, "apply".to_owned(), args)
+        .await?;
+
+    assert!(!result.is_error());
+    assert_eq!(fs::read_to_string(file)?, "new\n");
+    assert_eq!(
+        result.metadata.details["change_set"]["files"][0]["after_hash"],
+        json!(super::sha256_hex("new\n".as_bytes()))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_validation_reports_conflict_kinds_without_writes() -> Result<()> {
+    let outside = tempfile::tempdir()?;
+    let cases = vec![
+        (
+            "missing_content",
+            json!({
+                "id": "change-missing-content",
+                "files": [{ "path": "new.txt", "action": "create" }]
+            }),
+            Vec::<(&str, &[u8])>::new(),
+        ),
+        (
+            "duplicate_path",
+            json!({
+                "id": "change-duplicate",
+                "files": [
+                    { "path": "same.txt", "action": "create", "content": "one\n" },
+                    { "path": "same.txt", "action": "create", "content": "two\n" }
+                ]
+            }),
+            Vec::<(&str, &[u8])>::new(),
+        ),
+        (
+            "target_exists",
+            json!({
+                "id": "change-create-existing",
+                "files": [{ "path": "exists.txt", "action": "create", "content": "new\n" }]
+            }),
+            vec![("exists.txt", b"old\n".as_slice())],
+        ),
+        (
+            "missing_file",
+            json!({
+                "id": "change-update-missing",
+                "files": [{ "path": "missing.txt", "action": "update", "content": "new\n" }]
+            }),
+            Vec::<(&str, &[u8])>::new(),
+        ),
+        (
+            "ambiguous_update",
+            json!({
+                "id": "change-ambiguous-update",
+                "files": [{
+                    "path": "note.txt",
+                    "action": "update",
+                    "content": "new\n",
+                    "old_text": "old",
+                    "new_text": "new"
+                }]
+            }),
+            vec![("note.txt", b"old\n".as_slice())],
+        ),
+        (
+            "missing_snippet",
+            json!({
+                "id": "change-missing-old-text",
+                "files": [{
+                    "path": "note.txt",
+                    "action": "update",
+                    "new_text": "new"
+                }]
+            }),
+            vec![("note.txt", b"old\n".as_slice())],
+        ),
+        (
+            "missing_snippet",
+            json!({
+                "id": "change-missing-new-text",
+                "files": [{
+                    "path": "note.txt",
+                    "action": "update",
+                    "old_text": "old"
+                }]
+            }),
+            vec![("note.txt", b"old\n".as_slice())],
+        ),
+        (
+            "snippet_missing",
+            json!({
+                "id": "change-snippet-missing",
+                "files": [{
+                    "path": "note.txt",
+                    "action": "update",
+                    "old_text": "absent",
+                    "new_text": "new"
+                }]
+            }),
+            vec![("note.txt", b"old\n".as_slice())],
+        ),
+        (
+            "binary_file",
+            json!({
+                "id": "change-binary-snippet",
+                "files": [{
+                    "path": "note.txt",
+                    "action": "update",
+                    "old_text": "old",
+                    "new_text": "a\0b"
+                }]
+            }),
+            vec![("note.txt", b"old\n".as_slice())],
+        ),
+        (
+            "snippet_ambiguous",
+            json!({
+                "id": "change-snippet-ambiguous",
+                "files": [{
+                    "path": "note.txt",
+                    "action": "update",
+                    "old_text": "old",
+                    "new_text": "new"
+                }]
+            }),
+            vec![("note.txt", b"old old\n".as_slice())],
+        ),
+        (
+            "invalid_delete_payload",
+            json!({
+                "id": "change-delete-payload",
+                "files": [{ "path": "delete.txt", "action": "delete", "content": "bad\n" }]
+            }),
+            vec![("delete.txt", b"old\n".as_slice())],
+        ),
+        (
+            "missing_file",
+            json!({
+                "id": "change-delete-missing",
+                "files": [{ "path": "missing-delete.txt", "action": "delete" }]
+            }),
+            Vec::<(&str, &[u8])>::new(),
+        ),
+        (
+            "binary_file",
+            json!({
+                "id": "change-binary-content",
+                "files": [{ "path": "binary.txt", "action": "create", "content": "a\0b" }]
+            }),
+            Vec::<(&str, &[u8])>::new(),
+        ),
+        (
+            "binary_file",
+            json!({
+                "id": "change-binary-update-content",
+                "files": [{ "path": "note.txt", "action": "update", "content": "a\0b" }]
+            }),
+            vec![("note.txt", b"old\n".as_slice())],
+        ),
+        (
+            "hash_mismatch",
+            json!({
+                "id": "change-create-before-hash",
+                "files": [{
+                    "path": "new.txt",
+                    "action": "create",
+                    "content": "new\n",
+                    "before_hash": "expected-existing-hash"
+                }]
+            }),
+            Vec::<(&str, &[u8])>::new(),
+        ),
+        (
+            "mtime_changed",
+            json!({
+                "id": "change-mtime",
+                "files": [{
+                    "path": "mtime.txt",
+                    "action": "update",
+                    "content": "new\n",
+                    "before_mtime_ms": 0
+                }]
+            }),
+            vec![("mtime.txt", b"old\n".as_slice())],
+        ),
+        (
+            "path_outside_workspace",
+            json!({
+                "id": "change-outside",
+                "files": [{
+                    "path": outside.path().join("outside.txt").to_string_lossy().to_string(),
+                    "action": "create",
+                    "content": "new\n"
+                }]
+            }),
+            Vec::<(&str, &[u8])>::new(),
+        ),
+        (
+            "unsupported_action",
+            json!({
+                "id": "change-rename",
+                "files": [{ "path": "old.txt", "action": "rename", "content": "new\n" }]
+            }),
+            Vec::<(&str, &[u8])>::new(),
+        ),
+    ];
+
+    for (expected, args, files) in cases {
+        let workspace = tempfile::tempdir()?;
+        for (path, content) in files {
+            fs::write(workspace.path().join(path), content)?;
+        }
+        let ctx = ToolContext {
+            workspace_root: workspace.path().to_path_buf(),
+            timeout_secs: 5,
+        };
+        let preview_error = ApplyChangeSetTool
+            .preview(ctx.clone(), args.clone())
+            .await
+            .expect_err("invalid changeset should fail preview");
+        assert!(
+            preview_error
+                .to_string()
+                .contains("change set validation failed"),
+            "{expected} should fail preview with validation error"
+        );
+        let result = ApplyChangeSetTool
+            .execute(ctx, "apply".to_owned(), args)
+            .await?;
+        assert!(result.is_error(), "{expected} should return a tool error");
+        assert!(
+            result.to_model_content().contains(expected),
+            "{expected} should be present in structured error content"
+        );
+        assert_eq!(
+            result.metadata.details["apply_result"]["status"],
+            json!("failed")
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_first_apply_failure_reports_failed_without_artifacts() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("blocked"), "not a directory\n")?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    let result = ApplyChangeSetTool
+        .execute(
+            ctx,
+            "apply".to_owned(),
+            json!({
+                "id": "change-first-failure",
+                "files": [{ "path": "blocked/child.txt", "action": "create", "content": "child\n" }]
+            }),
+        )
+        .await?;
+
+    assert!(result.is_error());
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("blocked"))?,
+        "not a directory\n"
+    );
+    assert_eq!(result.metadata.changed_files, Vec::<String>::new());
+    assert_eq!(
+        result.metadata.details["apply_result"]["status"],
+        json!("failed")
+    );
+    assert_eq!(
+        result.metadata.details["apply_result"]["file_results"][0]["status"],
+        json!("failed")
+    );
+    assert!(result.metadata.details.get("artifacts").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_binary_existing_file_does_not_write() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(workspace.path().join("binary.txt"), b"a\0b")?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let result = ApplyChangeSetTool
+        .execute(
+            ctx,
+            "apply".to_owned(),
+            json!({
+                "id": "change-binary-existing",
+                "files": [{ "path": "binary.txt", "action": "update", "content": "text\n" }]
+            }),
+        )
+        .await?;
+
+    assert!(result.is_error());
+    assert!(result.to_model_content().contains("binary_file"));
+    assert_eq!(fs::read(workspace.path().join("binary.txt"))?, b"a\0b");
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_rejects_unreadable_text_and_directories() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    fs::write(
+        workspace.path().join("invalid-utf8.txt"),
+        [0xff_u8, 0xfe, 0xfd],
+    )?;
+    fs::create_dir(workspace.path().join("dir"))?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    let invalid_utf8 = ApplyChangeSetTool
+        .execute(
+            ctx.clone(),
+            "apply-invalid-utf8".to_owned(),
+            json!({
+                "id": "change-invalid-utf8",
+                "files": [{ "path": "invalid-utf8.txt", "action": "update", "content": "text\n" }]
+            }),
+        )
+        .await?;
+    assert!(invalid_utf8.is_error());
+    assert!(invalid_utf8.to_model_content().contains("binary_file"));
+    assert_eq!(
+        fs::read(workspace.path().join("invalid-utf8.txt"))?,
+        [0xff_u8, 0xfe, 0xfd]
+    );
+
+    let directory_target = ApplyChangeSetTool
+        .execute(
+            ctx,
+            "apply-directory".to_owned(),
+            json!({
+                "id": "change-directory",
+                "files": [{ "path": "dir", "action": "update", "content": "text\n" }]
+            }),
+        )
+        .await?;
+    assert!(directory_target.is_error());
+    assert!(
+        directory_target
+            .to_model_content()
+            .contains("not_regular_file")
+    );
+    assert!(workspace.path().join("dir").is_dir());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn apply_changeset_rejects_symlink_escape_and_reports_artifact_failure() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    fs::write(outside.path().join("target.txt"), "outside\n")?;
+    symlink(
+        outside.path().join("target.txt"),
+        workspace.path().join("link.txt"),
+    )?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    let symlink_result = ApplyChangeSetTool
+        .execute(
+            ctx.clone(),
+            "apply".to_owned(),
+            json!({
+                "id": "change-symlink",
+                "files": [{ "path": "link.txt", "action": "update", "content": "new\n" }]
+            }),
+        )
+        .await?;
+    assert!(symlink_result.is_error());
+    assert!(
+        symlink_result
+            .to_model_content()
+            .contains("path_outside_workspace")
+    );
+    assert_eq!(
+        fs::read_to_string(outside.path().join("target.txt"))?,
+        "outside\n"
+    );
+
+    symlink(outside.path(), workspace.path().join(".sigil"))?;
+    let artifact_failure = ApplyChangeSetTool
+        .execute(
+            ctx,
+            "apply".to_owned(),
+            json!({
+                "id": "change-artifact-fail",
+                "files": [{ "path": "ok.txt", "action": "create", "content": "ok\n" }]
+            }),
+        )
+        .await?;
+    assert!(artifact_failure.is_error());
+    assert_eq!(fs::read_to_string(workspace.path().join("ok.txt"))?, "ok\n");
+    assert!(
+        artifact_failure
+            .to_model_content()
+            .contains("artifact_write_failed")
+    );
+    assert_eq!(
+        artifact_failure.metadata.details["apply_result"]["status"],
+        json!("partially_applied")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_partial_apply_reports_applied_and_skipped_files() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let ctx = ToolContext {
+        workspace_root: workspace.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let result = ApplyChangeSetTool
+        .execute(
+            ctx,
+            "apply".to_owned(),
+            json!({
+                "id": "change-partial",
+                "files": [
+                    { "path": "blocked", "action": "create", "content": "file\n" },
+                    { "path": "blocked/child.txt", "action": "create", "content": "child\n" },
+                    { "path": "after.txt", "action": "create", "content": "after\n" }
+                ]
+            }),
+        )
+        .await?;
+
+    assert!(result.is_error());
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("blocked"))?,
+        "file\n"
+    );
+    assert!(!workspace.path().join("blocked/child.txt").exists());
+    assert!(!workspace.path().join("after.txt").exists());
+    assert_eq!(result.metadata.changed_files, vec!["blocked".to_owned()]);
+    assert_eq!(
+        result.metadata.details["apply_result"]["status"],
+        json!("partially_applied")
+    );
+    assert_eq!(
+        result.metadata.details["apply_result"]["file_results"][0]["status"],
+        json!("applied")
+    );
+    assert_eq!(
+        result.metadata.details["apply_result"]["file_results"][1]["status"],
+        json!("failed")
+    );
+    assert_eq!(
+        result.metadata.details["apply_result"]["file_results"][2]["status"],
+        json!("skipped")
+    );
+    let reverse_path = result.metadata.details["artifacts"]["reverse"]["path"]
+        .as_str()
+        .expect("reverse artifact path");
+    let reverse_diff = fs::read_to_string(workspace.path().join(reverse_path))?;
+    assert!(reverse_diff.contains("rollback/blocked"));
+    assert!(!reverse_diff.contains("after.txt"));
     Ok(())
 }
 
