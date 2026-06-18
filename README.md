@@ -1,7 +1,7 @@
 # Sigil
 
 <p align="center">
-  <img src="assets/logo/sigil-full.png" alt="Sigil logo" width="560">
+  <img src="assets/logo/sigil-full-on-white.png" alt="Sigil logo" width="560">
 </p>
 
 English | [简体中文](README.zh-CN.md)
@@ -9,11 +9,11 @@ English | [简体中文](README.zh-CN.md)
 [![CI](https://github.com/JimmyDaddy/sigil/actions/workflows/ci.yml/badge.svg)](https://github.com/JimmyDaddy/sigil/actions/workflows/ci.yml)
 [![Pages](https://github.com/JimmyDaddy/sigil/actions/workflows/pages.yml/badge.svg)](https://github.com/JimmyDaddy/sigil/actions/workflows/pages.yml)
 
-Sigil is a TUI-first Rust coding agent for working inside a real repository. It keeps chat, tool calls, approvals, diffs, diagnostics, planning, and session recovery in one terminal interface, while keeping the CLI as a thin automation surface.
+Sigil is a TUI-first Rust coding agent for real repository work. It keeps chat, tool calls, approvals, diffs, diagnostics, planning, and session recovery inside one terminal interface, while keeping the CLI as a thin automation surface.
 
-Project site source lives in [site](site). After GitHub Pages is enabled for this repository, it publishes to [jimmydaddy.github.io/sigil](https://jimmydaddy.github.io/sigil/).
+[Website](https://jimmydaddy.github.io/sigil/) · [Docs](docs/en/README.md) · [Quickstart](docs/en/quickstart.md) · [Visual tour](docs/en/visual-tour.md) · [Provider guide](docs/en/providers.md)
 
-Sigil is still validated through local development workflows. The recommended path today is to install it from a checkout and launch the `sigil` binary from the workspace you want it to operate on.
+Sigil is currently best installed from a checkout. Package-manager distribution and self-update remain future packaging work.
 
 ## Quickstart
 
@@ -23,133 +23,97 @@ Prerequisites:
 - A Rust toolchain compatible with this repository.
 - A model provider credential. Quick Setup can collect it on first launch.
 
-Install from the repository root:
+Install Sigil:
 
 ```bash
+git clone https://github.com/JimmyDaddy/sigil.git
+cd sigil
 cargo install --path crates/sigil --locked
 ```
 
-Start Sigil in the project you want to work on:
+Start Sigil in the repository you want it to work on:
 
 ```bash
 cd /path/to/your/project
 sigil
 ```
 
-If Sigil cannot find a usable config, it opens Quick Setup. Confirm the workspace, choose a provider/model, and enter authentication there. For environment-variable and `sigil.toml` setups, see [configuration](docs/en/configuration.md).
+If Sigil cannot find a usable config, it opens Quick Setup. Confirm the workspace, choose a provider/model, and enter authentication there. For repeatable config files and environment variables, see [Configuration](docs/en/configuration.md).
 
-Check the installed binary:
+Check local setup:
 
 ```bash
 sigil --version
 sigil doctor
 ```
 
-## What Sigil Is Built For
+## What Sigil Does
 
-Sigil is designed for coding sessions where you want the agent to understand the current repository, make tool-backed changes, and keep you in control before risky actions happen.
+- Keeps coding work in the TUI: transcript, composer, live tool activity, approvals, status, usage, and controls.
+- Lets the agent read, search, edit, and run commands through structured tools.
+- Shows risky write operations through approval cards, affected files, and bounded diffs.
+- Restores sessions from append-only JSONL records under `.sigil/sessions/`.
+- Supports `/plan` for durable multi-step work with planner, executor, and optional subagent roles.
+- Connects stdio MCP servers under explicit trust, approval, and secret-egress policy.
+- Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
 
-- Ask questions about the codebase and inspect streamed reasoning/output in the TUI.
-- Let the agent read, search, edit, and run commands through structured tools.
-- Review write operations with approval cards, affected files, and bounded diffs.
-- Resume work from append-only session logs after restarting the TUI.
-- Use `/plan` for durable multi-step tasks with planner, executor, and optional subagent roles.
-- Connect stdio MCP servers under explicit trust, approval, and secret-egress policies.
-- Optionally enable code intelligence for symbols, references, diagnostics, code actions, and rename previews.
+## Daily Workflow
 
-## TUI Workflow
+Run `sigil` with no subcommand for normal work. Common TUI entry points:
 
-Run `sigil` with no subcommand to open the main interface. The default screen is chat-first: a transcript, a composer, live tool activity, and an info rail for session, permissions, agents, LSP, usage, and controls.
-
-Common entry points:
-
-- Type normally in the composer for ordinary chat or coding work.
-- Use `/plan <task>` when a larger task should be planned before execution.
-- Use `/new` to start a fresh session, `/resume` to switch sessions, and `/config` to update common settings.
-- Use `/doctor` to render local diagnostics inside the transcript.
-- Use `Shift-Tab` to cycle the default permission mode.
-- Use `Ctrl-C` or `Esc` to cancel the current run or close an overlay.
+| Need | Use |
+| --- | --- |
+| Ask or edit normally | Type in the composer |
+| Plan a larger task | `/plan <task>` |
+| Start or switch sessions | `/new`, `/resume` |
+| Change common settings | `/config` |
+| Diagnose setup/auth/MCP/LSP | `/doctor` |
+| Cycle default permission mode | `Shift-Tab` |
+| Cancel a run or close an overlay | `Ctrl-C` or `Esc` |
 
 The full keyboard, mouse, transcript selection, and OSC52 clipboard behavior is covered in the [TUI user guide](docs/en/user-guide.md) and [terminal compatibility checklist](docs/en/terminal-compatibility.md).
 
 ## Safety And State
 
-Sigil treats tool execution as auditable state, not as hidden side effects.
+Sigil treats tool execution as auditable state, not hidden side effects.
 
 - File writes, edits, deletes, command execution, MCP calls, and external data access go through the permission model.
-- Write tools are designed to provide previews and diffs before approval.
-- Session and control records are append-only JSONL under `.sigil/sessions/`.
+- Write tools are designed around previews and diff approval.
 - Interrupted tool executions are restored as interrupted results instead of being replayed silently.
 - Provider-specific behavior stays in provider crates; `sigil-kernel` keeps generic agent, tool, session, approval, and event contracts.
 
-## Automation
-
-The CLI exists for scripts, CI, and diagnostics. It is not the primary product surface.
-
-```bash
-sigil run "summarize this repository"
-sigil doctor
-```
-
-For local development without installing:
-
-```bash
-cargo run -p sigil
-cargo run -p sigil -- doctor
-```
-
 ## Providers And Integrations
 
-Sigil currently supports:
+| Capability | Config surface | Best for | Details |
+| --- | --- | --- | --- |
+| DeepSeek | `[providers.deepseek]` | Default Quick Setup path and DeepSeek-specific options. | [DeepSeek guide](docs/en/provider-deepseek.md) |
+| OpenAI-compatible | `[providers.openai_compat]` | Chat Completions-compatible `/v1` endpoints. | [OpenAI-compatible guide](docs/en/provider-openai-compatible.md) |
+| Anthropic | `[providers.anthropic]` | Claude models through Anthropic Messages streaming. | [Anthropic guide](docs/en/provider-anthropic.md) |
+| Gemini | `[providers.gemini]` | Gemini models through `streamGenerateContent`. | [Gemini guide](docs/en/provider-gemini.md) |
+| MCP servers | `[[mcp_servers]]` | External stdio tools with explicit trust policy. | [MCP guide](docs/en/mcp.md) |
+| Code intelligence | `[code_intelligence]` | LSP-backed symbols, references, diagnostics, actions, and rename previews. | [Configuration](docs/en/configuration.md) |
 
-- DeepSeek through `[providers.deepseek]`
-- OpenAI-compatible Chat Completions through `[providers.openai_compat]`
-- Anthropic Messages through `[providers.anthropic]`
-- Gemini GenerateContent through `[providers.gemini]`
-- stdio MCP servers through `[[mcp_servers]]`
-- optional code intelligence through `[code_intelligence]`
+## Find The Right Doc
 
-DeepSeek remains the default Quick Setup path. Other providers are selected with `[agent].provider` and configured in their matching `[providers.*]` block.
-See the [Provider guide](docs/en/providers.md) for provider-specific setup, key priority, and troubleshooting.
+| I want to... | Read |
+| --- | --- |
+| Try Sigil for the first time | [Quickstart](docs/en/quickstart.md) |
+| See what the product looks like | [Visual tour](docs/en/visual-tour.md) |
+| Learn the TUI, commands, keys, sessions, and approvals | [TUI user guide](docs/en/user-guide.md) |
+| Configure providers, permissions, memory, planning, terminal, or LSP | [Configuration](docs/en/configuration.md) |
+| Choose or troubleshoot a model provider | [Provider guide](docs/en/providers.md) |
+| Understand approval, workspace, MCP, and data boundaries | [Safety](docs/en/safety.md) and [Privacy](docs/en/privacy.md) |
+| Fix setup, auth, terminal, MCP, or LSP issues | [Troubleshooting](docs/en/troubleshooting.md) |
+| Look up every command, key, path, and environment variable | [Reference](docs/en/reference.md) |
+| Work on Sigil itself | [Code standards](dev/governance/code-standards.md), [engineering standards](dev/governance/engineering-standards.md), and [core technical solution](dev/docs/sigil-rust-agent-core-technical-solution.md) |
 
-## Documentation
+## Project Maintenance
 
-User documentation:
+Project site source lives in [site](site). The generated Pages site is validated by:
 
-- [User docs home](docs/en/README.md) / [中文](docs/zh-CN/README.md)
-- [Quickstart](docs/en/quickstart.md) / [中文](docs/zh-CN/quickstart.md)
-- [Installation](docs/en/installation.md) / [中文](docs/zh-CN/installation.md)
-- [Visual tour](docs/en/visual-tour.md) / [中文](docs/zh-CN/visual-tour.md)
-- [Common workflows](docs/en/workflows.md) / [中文](docs/zh-CN/workflows.md)
-- [Cookbook](docs/en/cookbook.md) / [中文](docs/zh-CN/cookbook.md)
-- [TUI user guide](docs/en/user-guide.md) / [中文](docs/zh-CN/user-guide.md)
-- [Safety and permissions](docs/en/safety.md) / [中文](docs/zh-CN/safety.md)
-- [Configuration](docs/en/configuration.md) / [中文](docs/zh-CN/configuration.md)
-- [Provider guide](docs/en/providers.md) / [中文](docs/zh-CN/providers.md)
-- [Privacy and data handling](docs/en/privacy.md) / [中文](docs/zh-CN/privacy.md)
-- [Troubleshooting](docs/en/troubleshooting.md) / [中文](docs/zh-CN/troubleshooting.md)
-- [Command and key reference](docs/en/reference.md) / [中文](docs/zh-CN/reference.md)
-- [MCP guide](docs/en/mcp.md) / [中文](docs/zh-CN/mcp.md)
-- [Terminal compatibility](docs/en/terminal-compatibility.md) / [中文](docs/zh-CN/terminal-compatibility.md)
-- [Supported today and future work](docs/en/status.md) / [中文](docs/zh-CN/status.md)
-- [User changelog](docs/en/changelog.md) / [中文](docs/zh-CN/changelog.md)
-- [Config examples](docs/examples/config)
-
-Developer documentation:
-
-- [Code standards](dev/governance/code-standards.md)
-- [Engineering standards](dev/governance/engineering-standards.md)
-- [Core technical solution](dev/docs/sigil-rust-agent-core-technical-solution.md)
-- [Current implementation notes](dev/docs/current-implementation-notes.en.md) / [中文](dev/docs/current-implementation-notes.md)
-- [Capability roadmap](dev/docs/sigil-capability-roadmap.md)
-- [Release process](dev/docs/release-process.md)
-- [Agent collaboration instructions](AGENTS.md)
-
-## Brand Assets
-
-Logo files live in [assets/logo](assets/logo). Use transparent `sigil-full.png` for README, release pages, and the website hero; use `sigil-mark-square-1024.png` for square package or social previews; use `*-on-white.png` variants when the target does not preserve transparency.
-
-## Development
+```bash
+scripts/check-pages-site.sh
+```
 
 Code changes should run the relevant repository gates:
 
@@ -161,10 +125,4 @@ cargo clippy --all-targets -- -D warnings
 ./scripts/coverage.sh
 ```
 
-Docs-only changes do not need the full Rust gate, but links, paths, and example commands should still be checked.
-
-Build a local release archive when validating distribution artifacts:
-
-```bash
-scripts/build-release-archive.sh
-```
+Docs-only changes do not need the full Rust gate, but links, paths, and example commands should still be checked. Logo files live in [assets/logo](assets/logo).

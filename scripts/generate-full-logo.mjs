@@ -9,6 +9,7 @@ const markPath = path.join(logoDir, "sigil-mark-transparent.png");
 const wordmarkPath = path.join(logoDir, "sigil-wordmark-transparent.png");
 const headerWordmarkPath = path.join(logoDir, "sigil-wordmark-header.png");
 const outPath = path.join(logoDir, "sigil-full.png");
+const onWhitePath = path.join(logoDir, "sigil-full-on-white.png");
 
 const layout = {
   width: 1094,
@@ -258,7 +259,11 @@ const canvas = Buffer.alloc(layout.width * layout.height * 4);
 alphaBlend(canvas, layout.width, mark, layout.mark.x, layout.mark.y);
 alphaBlend(canvas, layout.width, wordmark, layout.wordmark.x, layout.wordmark.y);
 writePng(outPath, layout.width, layout.height, canvas);
+const whiteCanvas = Buffer.alloc(layout.width * layout.height * 4, 255);
+alphaBlend(whiteCanvas, layout.width, { width: layout.width, height: layout.height, pixels: canvas }, 0, 0);
+writePng(onWhitePath, layout.width, layout.height, whiteCanvas);
 const headerWordmark = cropToAlpha(wordmark);
 writePng(headerWordmarkPath, headerWordmark.width, headerWordmark.height, headerWordmark.pixels);
 console.log(`generated ${path.relative(repoRoot, outPath)}`);
+console.log(`generated ${path.relative(repoRoot, onWhitePath)}`);
 console.log(`generated ${path.relative(repoRoot, headerWordmarkPath)}`);
