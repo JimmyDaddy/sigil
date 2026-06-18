@@ -3,13 +3,13 @@ use std::{fs, path::Path};
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    Tool, ToolAccess, ToolContext, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
+    ChangeSetId, Tool, ToolAccess, ToolContext, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
     ToolResultStatus, ToolSubjectScope,
 };
 
 use super::{
-    BashTool, DeleteFileTool, EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool,
-    WriteFileTool, register_builtin_tools,
+    BashTool, ChangeSetArtifactStore, DeleteFileTool, EditFileTool, GlobTool, GrepTool, ListTool,
+    ReadFileTool, WriteFileTool, register_builtin_tools,
 };
 
 #[cfg(unix)]
@@ -998,6 +998,98 @@ fn diff_and_text_limit_helpers_handle_noop_and_head_limits() {
     assert!(!unchanged.truncated);
     assert_eq!(unchanged.content, "short");
     assert_eq!(unchanged.omitted_bytes, 0);
+}
+
+#[test]
+fn changeset_artifact_store_writes_diff_artifacts_and_hash_metadata() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let preview_diff =
+        "--- current/note.txt\n+++ proposed/note.txt\n@@ -1 +1,2 @@\n-old\n+new\n+line\n";
+    let reverse_diff =
+        "--- proposed/note.txt\n+++ current/note.txt\n@@ -1,2 +1 @@\n-new\n-line\n+old\n";
+    let store = ChangeSetArtifactStore::new(workspace.path())?;
+
+    let record =
+        store.write_diff_artifacts(ChangeSetId::new("change-1")?, preview_diff, reverse_diff)?;
+
+    assert_eq!(record.artifact_dir, ".sigil/changesets/change-1");
+    assert_eq!(
+        record.preview.path,
+        ".sigil/changesets/change-1/preview.diff"
+    );
+    assert_eq!(
+        record.reverse.path,
+        ".sigil/changesets/change-1/reverse.diff"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(&record.preview.path))?,
+        preview_diff
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(&record.reverse.path))?,
+        reverse_diff
+    );
+    assert_eq!(record.preview.stats.added, 2);
+    assert_eq!(record.preview.stats.removed, 1);
+    assert_eq!(record.reverse.stats.added, 1);
+    assert_eq!(record.reverse.stats.removed, 2);
+    assert!(store.verify_diff_artifact(&record.preview)?);
+    assert!(store.verify_diff_artifact(&record.reverse)?);
+
+    fs::write(workspace.path().join(&record.preview.path), "tampered")?;
+    assert!(!store.verify_diff_artifact(&record.preview)?);
+    Ok(())
+}
+
+#[test]
+fn changeset_artifact_store_bounds_large_diff_summary() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let preview_diff = (0..200)
+        .map(|index| format!("+line-{index}\n"))
+        .collect::<String>();
+    let reverse_diff = preview_diff.replace("+line", "-line");
+    let store = ChangeSetArtifactStore::new(workspace.path())?.with_summary_limit_bytes(96);
+
+    let record = store.write_diff_artifacts(
+        ChangeSetId::new("change-long")?,
+        &preview_diff,
+        &reverse_diff,
+    )?;
+    let serialized = serde_json::to_string(&record)?;
+
+    assert!(record.summary.truncated);
+    assert!(record.summary.omitted_bytes > 0);
+    assert!(record.summary.text.contains("output truncated"));
+    assert_eq!(record.summary.total_bytes, preview_diff.len() as u64);
+    assert_eq!(
+        fs::read_to_string(workspace.path().join(&record.preview.path))?,
+        preview_diff
+    );
+    assert!(!serialized.contains("line-100"));
+    assert!(serialized.contains(".sigil/changesets/change-long/preview.diff"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn changeset_artifact_store_rejects_sigil_symlink_escape() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    symlink(outside.path(), workspace.path().join(".sigil"))?;
+    let store = ChangeSetArtifactStore::new(workspace.path())?;
+
+    let error = store
+        .write_diff_artifacts(ChangeSetId::new("change-1")?, "+new\n", "-old\n")
+        .expect_err("symlinked artifact root should be rejected");
+
+    assert!(error.to_string().contains("outside workspace"));
+    assert!(
+        !outside
+            .path()
+            .join("changesets/change-1/preview.diff")
+            .exists()
+    );
+    Ok(())
 }
 
 #[tokio::test]

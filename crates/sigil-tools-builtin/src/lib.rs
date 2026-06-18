@@ -11,11 +11,13 @@ use async_trait::async_trait;
 use globset::{Glob, GlobSetBuilder};
 use ignore::WalkBuilder;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Tool, ToolAccess, ToolCategory, ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    ToolSubjectScope,
+    ChangeSetId, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolSpec, ToolSubject, ToolSubjectScope,
 };
 use similar::TextDiff;
 use tokio::{process::Command, task, time::Duration};
@@ -53,6 +55,170 @@ const DEFAULT_GLOB_LIMIT: usize = 100;
 const HARD_GLOB_LIMIT: usize = 1000;
 const DEFAULT_GREP_LIMIT: usize = 100;
 const HARD_GREP_LIMIT: usize = 1000;
+const CHANGESET_ARTIFACT_ROOT: &str = ".sigil/changesets";
+const CHANGESET_PREVIEW_DIFF_FILE: &str = "preview.diff";
+const CHANGESET_REVERSE_DIFF_FILE: &str = "reverse.diff";
+const DEFAULT_CHANGESET_SUMMARY_LIMIT_BYTES: usize = 16 * 1024;
+
+/// Workspace-local artifact writer for durable change set diffs.
+#[derive(Debug, Clone)]
+pub struct ChangeSetArtifactStore {
+    workspace_root: PathBuf,
+    summary_limit_bytes: usize,
+}
+
+/// Durable metadata for one stored change set artifact set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ChangeSetArtifactRecord {
+    pub change_set_id: ChangeSetId,
+    pub artifact_dir: String,
+    pub preview: ChangeSetDiffArtifact,
+    pub reverse: ChangeSetDiffArtifact,
+    pub summary: ChangeSetArtifactSummary,
+}
+
+/// Bounded metadata for one diff artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ChangeSetDiffArtifact {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub line_count: u64,
+    pub stats: ToolDiffStats,
+}
+
+/// Bounded preview summary suitable for append-only control entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ChangeSetArtifactSummary {
+    pub text: String,
+    pub truncated: bool,
+    pub returned_bytes: u64,
+    pub omitted_bytes: u64,
+    pub total_bytes: u64,
+    pub total_lines: u64,
+    pub limit_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ChangeSetArtifactPaths {
+    relative_dir: String,
+    relative_preview: String,
+    relative_reverse: String,
+    absolute_dir: PathBuf,
+    absolute_preview: PathBuf,
+    absolute_reverse: PathBuf,
+}
+
+impl ChangeSetArtifactStore {
+    /// Creates a store rooted at `<workspace>/.sigil/changesets`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `workspace_root` cannot be canonicalized.
+    pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            workspace_root: canonical_workspace_root(workspace_root.as_ref())?,
+            summary_limit_bytes: DEFAULT_CHANGESET_SUMMARY_LIMIT_BYTES,
+        })
+    }
+
+    /// Overrides the bounded summary byte budget.
+    pub fn with_summary_limit_bytes(mut self, summary_limit_bytes: usize) -> Self {
+        self.summary_limit_bytes = summary_limit_bytes.max(1);
+        self
+    }
+
+    /// Writes preview and reverse diffs using the stable change set artifact layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the artifact path would leave the workspace or when files cannot be
+    /// written.
+    pub fn write_diff_artifacts(
+        &self,
+        change_set_id: ChangeSetId,
+        preview_diff: &str,
+        reverse_diff: &str,
+    ) -> Result<ChangeSetArtifactRecord> {
+        let paths = self.artifact_paths(&change_set_id)?;
+        fs::create_dir_all(&paths.absolute_dir)
+            .with_context(|| format!("failed to create {}", paths.absolute_dir.display()))?;
+        fs::write(&paths.absolute_preview, preview_diff.as_bytes())
+            .with_context(|| format!("failed to write {}", paths.absolute_preview.display()))?;
+        fs::write(&paths.absolute_reverse, reverse_diff.as_bytes())
+            .with_context(|| format!("failed to write {}", paths.absolute_reverse.display()))?;
+
+        let preview = ChangeSetDiffArtifact {
+            path: paths.relative_preview,
+            sha256: sha256_hex(preview_diff.as_bytes()),
+            bytes: preview_diff.len() as u64,
+            line_count: preview_diff.lines().count() as u64,
+            stats: ToolDiffStats::from_unified_diff(preview_diff),
+        };
+        let reverse = ChangeSetDiffArtifact {
+            path: paths.relative_reverse,
+            sha256: sha256_hex(reverse_diff.as_bytes()),
+            bytes: reverse_diff.len() as u64,
+            line_count: reverse_diff.lines().count() as u64,
+            stats: ToolDiffStats::from_unified_diff(reverse_diff),
+        };
+        let limited = limit_text_head_tail(preview_diff, self.summary_limit_bytes);
+
+        Ok(ChangeSetArtifactRecord {
+            change_set_id,
+            artifact_dir: paths.relative_dir,
+            preview,
+            reverse,
+            summary: ChangeSetArtifactSummary {
+                text: limited.content,
+                truncated: limited.truncated,
+                returned_bytes: limited.returned_bytes,
+                omitted_bytes: limited.omitted_bytes,
+                total_bytes: limited.total_bytes,
+                total_lines: limited.total_lines,
+                limit_bytes: self.summary_limit_bytes as u64,
+            },
+        })
+    }
+
+    /// Verifies that a recorded diff artifact still matches its hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recorded path is outside the workspace or cannot be read.
+    pub fn verify_diff_artifact(&self, artifact: &ChangeSetDiffArtifact) -> Result<bool> {
+        let path = self.workspace_artifact_path(&artifact.path)?;
+        let bytes =
+            fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        Ok(sha256_hex(&bytes) == artifact.sha256)
+    }
+
+    fn artifact_paths(&self, change_set_id: &ChangeSetId) -> Result<ChangeSetArtifactPaths> {
+        let relative_dir = format!("{CHANGESET_ARTIFACT_ROOT}/{}", change_set_id.as_str());
+        let relative_preview = format!("{relative_dir}/{CHANGESET_PREVIEW_DIFF_FILE}");
+        let relative_reverse = format!("{relative_dir}/{CHANGESET_REVERSE_DIFF_FILE}");
+        Ok(ChangeSetArtifactPaths {
+            absolute_dir: self.workspace_artifact_path(&relative_dir)?,
+            absolute_preview: self.workspace_artifact_path(&relative_preview)?,
+            absolute_reverse: self.workspace_artifact_path(&relative_reverse)?,
+            relative_dir,
+            relative_preview,
+            relative_reverse,
+        })
+    }
+
+    fn workspace_artifact_path(&self, relative_path: &str) -> Result<PathBuf> {
+        let lexical = lexically_normalize_path(&self.workspace_root.join(relative_path))?;
+        let resolved_prefix = resolve_existing_prefix(&lexical)?;
+        if !resolved_prefix.starts_with(&self.workspace_root) {
+            bail!("change set artifact path is outside workspace: {relative_path}");
+        }
+        Ok(lexical)
+    }
+}
 
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -1370,6 +1536,17 @@ fn render_unified_diff(
     } else {
         diff
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 async fn run_blocking_io<T, F>(label: &'static str, job: F) -> Result<T>

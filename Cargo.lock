@@ -2285,6 +2285,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "sigil-kernel",
  "similar",
  "tempfile",
