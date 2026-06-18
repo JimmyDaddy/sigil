@@ -100,7 +100,7 @@ Simple read-only `rg / grep / fd / find` bash commands are recognized as `Search
 
 `apply_changeset` supports multi-file create / update / delete after one approval. Before writing, it validates workspace paths, hashes, mtimes, snippets, symlinks, and binary text boundaries; validation failures write no files. Successful or partial executions write `.sigil/changesets/<id>/preview.diff` and `reverse.diff` artifacts, and return structured artifact path, hash, stats, and apply status metadata. Model-visible content stays summary-only and does not include the full diff.
 
-Approval cards use fixed `Summary / Files / Diff / Actions` sections. Diff previews for `write_file`, `edit_file`, `delete_file`, and `apply_changeset` support file switching, hunk navigation, and diff mode switching.
+Approval cards use fixed `Summary / Files / Diff / Actions` sections. Diff previews for `write_file`, `edit_file`, `delete_file`, and `apply_changeset` support file switching, hunk navigation, and diff mode switching. `apply_changeset` approvals also show the change set id, overall risk, per-file action/risk, and file-type-based formatting guidance.
 
 ## Session and Control State
 

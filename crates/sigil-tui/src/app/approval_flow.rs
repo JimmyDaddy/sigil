@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde_json::Value;
 
 use super::{
-    AppAction, AppState, ApprovalDiagnosticSummary, ApprovalDiffLine, ApprovalDiffLineKind,
-    ApprovalDiffMode, ApprovalFileRow, ApprovalModalView, PaneFocus,
+    AppAction, AppState, ApprovalChangeSetSummary, ApprovalDiagnosticSummary, ApprovalDiffLine,
+    ApprovalDiffLineKind, ApprovalDiffMode, ApprovalFileRow, ApprovalModalView, PaneFocus,
     formatting::normalize_command_prefix_character,
 };
 
@@ -222,6 +225,7 @@ impl AppState {
                 preview_title: format!("Run {}", pending.call.name),
                 preview_summary: approval_subject_summary(&pending.subjects)
                     .unwrap_or_else(|| "Tool preview unavailable for this call.".to_owned()),
+                change_set: None,
                 metadata_collapsed: self.approval_metadata_collapsed,
                 file_rows: Vec::new(),
                 changed_files: Vec::new(),
@@ -238,6 +242,9 @@ impl AppState {
             });
         };
 
+        let change_set = approval_changeset_summary(&pending.call.name, &pending.call.args_json);
+        let change_set_files =
+            approval_changeset_file_metadata(&pending.call.name, &pending.call.args_json);
         let raw_diff = self
             .selected_approval_diff()
             .unwrap_or(preview.body.as_str());
@@ -285,6 +292,12 @@ impl AppState {
                 .iter()
                 .enumerate()
                 .map(|(index, file)| ApprovalFileRow {
+                    action: change_set_files
+                        .get(&normalize_approval_diagnostic_path(&file.path))
+                        .map(|metadata| metadata.action.clone()),
+                    risk: change_set_files
+                        .get(&normalize_approval_diagnostic_path(&file.path))
+                        .map(|metadata| metadata.risk.clone()),
                     path: file.path.clone(),
                     selected: index == self.approval_selected_file_index,
                     diagnostics: self.approval_diagnostics_for_path(&file.path),
@@ -296,6 +309,12 @@ impl AppState {
                 .iter()
                 .enumerate()
                 .map(|(index, path)| ApprovalFileRow {
+                    action: change_set_files
+                        .get(&normalize_approval_diagnostic_path(path))
+                        .map(|metadata| metadata.action.clone()),
+                    risk: change_set_files
+                        .get(&normalize_approval_diagnostic_path(path))
+                        .map(|metadata| metadata.risk.clone()),
                     path: path.clone(),
                     selected: index == self.approval_selected_file_index,
                     diagnostics: self.approval_diagnostics_for_path(path),
@@ -316,6 +335,7 @@ impl AppState {
             access_label,
             preview_title: preview.title.clone(),
             preview_summary: preview.summary.clone(),
+            change_set,
             metadata_collapsed: self.approval_metadata_collapsed,
             file_rows,
             changed_files: preview.changed_files.clone(),
@@ -503,6 +523,109 @@ fn approval_subject_label(subject: &sigil_kernel::ToolSubject) -> String {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| subject.normalized.clone());
     format!("{scope}:{}:{target}", subject.kind.as_str())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalChangeSetFileMetadata {
+    action: String,
+    risk: String,
+}
+
+fn approval_changeset_summary(
+    tool_name: &str,
+    args_json: &str,
+) -> Option<ApprovalChangeSetSummary> {
+    if tool_name != "apply_changeset" {
+        return None;
+    }
+    let args: Value = serde_json::from_str(args_json).ok()?;
+    let files = args.get("files").and_then(Value::as_array)?;
+    let paths = files
+        .iter()
+        .filter_map(|file| file.get("path").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
+    Some(ApprovalChangeSetSummary {
+        id: args
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+        risk: normalize_changeset_label(
+            args.get("risk").and_then(Value::as_str).unwrap_or("medium"),
+        ),
+        format_hint: approval_format_hint(&paths),
+    })
+}
+
+fn approval_changeset_file_metadata(
+    tool_name: &str,
+    args_json: &str,
+) -> BTreeMap<String, ApprovalChangeSetFileMetadata> {
+    if tool_name != "apply_changeset" {
+        return BTreeMap::new();
+    }
+    let Ok(args) = serde_json::from_str::<Value>(args_json) else {
+        return BTreeMap::new();
+    };
+    let default_risk =
+        normalize_changeset_label(args.get("risk").and_then(Value::as_str).unwrap_or("medium"));
+    let Some(files) = args.get("files").and_then(Value::as_array) else {
+        return BTreeMap::new();
+    };
+
+    files
+        .iter()
+        .filter_map(|file| {
+            let path = file.get("path").and_then(Value::as_str)?;
+            let action = file
+                .get("action")
+                .and_then(Value::as_str)
+                .map(normalize_changeset_label)
+                .unwrap_or_else(|| "change".to_owned());
+            let risk = file
+                .get("risk")
+                .and_then(Value::as_str)
+                .map(normalize_changeset_label)
+                .unwrap_or_else(|| default_risk.clone());
+            Some((
+                normalize_approval_diagnostic_path(path),
+                ApprovalChangeSetFileMetadata { action, risk },
+            ))
+        })
+        .collect()
+}
+
+fn normalize_changeset_label(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn approval_format_hint(paths: &[String]) -> String {
+    let has_rust = paths.iter().any(|path| path.ends_with(".rs"));
+    let has_json = paths.iter().any(|path| path.ends_with(".json"));
+    let has_markdown = paths
+        .iter()
+        .any(|path| path.ends_with(".md") || path.ends_with(".markdown"));
+    let has_yaml = paths
+        .iter()
+        .any(|path| path.ends_with(".yml") || path.ends_with(".yaml"));
+
+    let mut hints = Vec::new();
+    if has_rust {
+        hints.push("cargo fmt --all");
+    }
+    if has_json {
+        hints.push("validate JSON formatting");
+    }
+    if has_yaml {
+        hints.push("validate YAML formatting");
+    }
+    if has_markdown {
+        hints.push("review Markdown rendering");
+    }
+    if hints.is_empty() {
+        hints.push("run the relevant formatter before commit");
+    }
+    hints.join("; ")
 }
 
 fn approval_diff_line_kind(line: &str) -> ApprovalDiffLineKind {

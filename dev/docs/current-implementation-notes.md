@@ -100,7 +100,7 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 
 `apply_changeset` 支持一次审批后的多文件 create / update / delete。执行前会统一校验 workspace path、hash、mtime、snippet、symlink 和 binary 文本边界；validation 失败时不写任何文件。执行成功或 partial failure 时会写 `.sigil/changesets/<id>/preview.diff` 与 `reverse.diff` artifact，并在结构化结果中返回 artifact path、hash、stats 和 apply status；model-visible content 只返回摘要，不直接返回完整 diff。
 
-审批卡片固定为 `Summary / Files / Diff / Actions` 四区。`write_file`、`edit_file`、`delete_file` 和 `apply_changeset` 的 diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换。
+审批卡片固定为 `Summary / Files / Diff / Actions` 四区。`write_file`、`edit_file`、`delete_file` 和 `apply_changeset` 的 diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换。`apply_changeset` 审批会额外显示 change set id、整体 risk、每文件 action/risk，以及基于文件类型的格式化建议。
 
 ## Session 与 Control State
 

@@ -52,6 +52,15 @@ pub(crate) struct ApprovalFileRow {
     pub path: String,
     pub selected: bool,
     pub diagnostics: Option<ApprovalDiagnosticSummary>,
+    pub action: Option<String>,
+    pub risk: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ApprovalChangeSetSummary {
+    pub id: String,
+    pub risk: String,
+    pub format_hint: String,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +70,7 @@ pub(crate) struct ApprovalModalView {
     pub access_label: String,
     pub preview_title: String,
     pub preview_summary: String,
+    pub change_set: Option<ApprovalChangeSetSummary>,
     pub metadata_collapsed: bool,
     pub file_rows: Vec<ApprovalFileRow>,
     pub changed_files: Vec<String>,

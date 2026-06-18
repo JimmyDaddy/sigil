@@ -91,6 +91,78 @@ fn approval_modal_view_includes_affected_diagnostics_summary() -> Result<()> {
 }
 
 #[test]
+fn approval_modal_view_projects_apply_changeset_metadata() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-change-set".to_owned(),
+            name: "apply_changeset".to_owned(),
+            args_json: json!({
+                "id": "change-123",
+                "risk": "high",
+                "files": [
+                    {
+                        "path": "src/lib.rs",
+                        "action": "update",
+                        "risk": "high",
+                        "content": "pub fn changed() {}\n"
+                    },
+                    {
+                        "path": "README.md",
+                        "action": "create",
+                        "content": "# Docs\n"
+                    }
+                ]
+            })
+            .to_string(),
+        },
+        spec: ToolSpec {
+            name: "apply_changeset".to_owned(),
+            description: "Apply change set".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        preview: Some(ToolPreview {
+            title: "Apply change set change-123".to_owned(),
+            summary: "2 files, risk=high".to_owned(),
+            body: String::new(),
+            changed_files: vec!["src/lib.rs".to_owned(), "README.md".to_owned()],
+            file_diffs: vec![
+                sigil_kernel::ToolPreviewFile {
+                    path: "src/lib.rs".to_owned(),
+                    diff:
+                        "--- current/src/lib.rs\n+++ proposed/src/lib.rs\n@@ -1 +1 @@\n-old\n+new"
+                            .to_owned(),
+                },
+                sigil_kernel::ToolPreviewFile {
+                    path: "README.md".to_owned(),
+                    diff: "--- current/README.md\n+++ proposed/README.md\n@@ -0,0 +1 @@\n+# Docs"
+                        .to_owned(),
+                },
+            ],
+        }),
+    })?;
+
+    let view = app
+        .approval_modal_view()
+        .expect("approval modal view should exist");
+    let change_set = view.change_set.expect("change set metadata should exist");
+
+    assert_eq!(change_set.id, "change-123");
+    assert_eq!(change_set.risk, "high");
+    assert!(change_set.format_hint.contains("cargo fmt --all"));
+    assert!(change_set.format_hint.contains("Markdown"));
+    assert_eq!(view.file_rows[0].action.as_deref(), Some("update"));
+    assert_eq!(view.file_rows[0].risk.as_deref(), Some("high"));
+    assert_eq!(view.file_rows[1].action.as_deref(), Some("create"));
+    assert_eq!(view.file_rows[1].risk.as_deref(), Some("high"));
+    Ok(())
+}
+
+#[test]
 fn approval_diff_mode_cycles_to_changed_only() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;

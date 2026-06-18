@@ -825,7 +825,9 @@ fn approval_header_line_count(view: &ApprovalModalView) -> u16 {
     } else {
         view.preview_summary.lines().take(2).count().max(1) as u16
     };
+    let change_set_lines = if view.change_set.is_some() { 2 } else { 0 };
     3u16.saturating_add(summary_lines)
+        .saturating_add(change_set_lines)
 }
 
 fn approval_file_row_hit_areas(

@@ -32,8 +32,8 @@ use sigil_kernel::{
 use uuid::Uuid;
 
 pub(crate) use crate::approval::{
-    ApprovalAction, ApprovalDiagnosticSummary, ApprovalDiffLine, ApprovalDiffLineKind,
-    ApprovalFileRow, ApprovalModalView,
+    ApprovalAction, ApprovalChangeSetSummary, ApprovalDiagnosticSummary, ApprovalDiffLine,
+    ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
 };
 pub use crate::approval::{ApprovalDiffMode, PendingApproval};
 use crate::commands::{UiCommand, command_for_key_event};

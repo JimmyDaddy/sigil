@@ -22,6 +22,8 @@ fn render_approval_file_row_includes_diagnostic_summary() {
             errors: 1,
             warnings: 2,
         }),
+        action: None,
+        risk: None,
     };
 
     let line = render_approval_file_row(0, &row);
@@ -32,6 +34,24 @@ fn render_approval_file_row_includes_diagnostic_summary() {
 }
 
 #[test]
+fn render_approval_file_row_includes_changeset_action_and_risk() {
+    let row = ApprovalFileRow {
+        path: "src/lib.rs".to_owned(),
+        selected: false,
+        diagnostics: None,
+        action: Some("update".to_owned()),
+        risk: Some("high".to_owned()),
+    };
+
+    let line = render_approval_file_row(0, &row);
+    let text = plain_line_text(&line);
+
+    assert!(text.contains("src/lib.rs"));
+    assert!(text.contains("update"));
+    assert!(text.contains("risk high"));
+}
+
+#[test]
 fn approval_diff_status_line_includes_selected_file_diagnostics() {
     let view = ApprovalModalView {
         tool_name: "edit_file".to_owned(),
@@ -39,6 +59,7 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
         access_label: "file write".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),
+        change_set: None,
         metadata_collapsed: false,
         file_rows: vec![
             ApprovalFileRow {
@@ -48,6 +69,8 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
                     errors: 3,
                     warnings: 0,
                 }),
+                action: None,
+                risk: None,
             },
             ApprovalFileRow {
                 path: "src/lib.rs".to_owned(),
@@ -56,6 +79,8 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
                     errors: 0,
                     warnings: 1,
                 }),
+                action: None,
+                risk: None,
             },
         ],
         changed_files: vec!["src/lib.rs".to_owned()],
@@ -81,6 +106,7 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
         access_label: "file write".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),
+        change_set: None,
         metadata_collapsed: false,
         file_rows: Vec::new(),
         changed_files: vec!["src/lib.rs".to_owned()],
@@ -127,6 +153,27 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
 }
 
 #[test]
+fn approval_header_lines_render_changeset_risk_and_format_hint() {
+    let lines = approval_header_lines(
+        &ApprovalModalView {
+            change_set: Some(ApprovalChangeSetSummary {
+                id: "change-123".to_owned(),
+                risk: "high".to_owned(),
+                format_hint: "cargo fmt --all".to_owned(),
+            }),
+            ..modal_view("file write")
+        },
+        80,
+    );
+    let text = plain_lines_text(&lines);
+
+    assert!(text.contains("change set"));
+    assert!(text.contains("change-123"));
+    assert!(text.contains("risk high"));
+    assert!(text.contains("format cargo fmt --all"));
+}
+
+#[test]
 fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() {
     let single = ApprovalModalView {
         tool_name: "edit_file".to_owned(),
@@ -134,11 +181,14 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
         access_label: "file write".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: String::new(),
+        change_set: None,
         metadata_collapsed: false,
         file_rows: vec![ApprovalFileRow {
             path: "src/lib.rs".to_owned(),
             selected: true,
             diagnostics: None,
+            action: None,
+            risk: None,
         }],
         changed_files: vec!["src/lib.rs".to_owned()],
         diff_mode_label: "full",
@@ -154,11 +204,15 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
                 path: "src/lib.rs".to_owned(),
                 selected: true,
                 diagnostics: None,
+                action: None,
+                risk: None,
             },
             ApprovalFileRow {
                 path: "src/main.rs".to_owned(),
                 selected: false,
                 diagnostics: None,
+                action: None,
+                risk: None,
             },
         ],
         ..single.clone()
@@ -301,11 +355,15 @@ fn approval_footer_lines_only_show_file_navigation_for_multiple_files() {
                 path: "src/lib.rs".to_owned(),
                 selected: true,
                 diagnostics: None,
+                action: None,
+                risk: None,
             },
             ApprovalFileRow {
                 path: "src/main.rs".to_owned(),
                 selected: false,
                 diagnostics: None,
+                action: None,
+                risk: None,
             },
         ],
         ..modal_view("file read")
@@ -337,6 +395,8 @@ fn approval_diff_status_line_handles_empty_hunks_without_diagnostics() {
                 errors: 2,
                 warnings: 0,
             }),
+            action: None,
+            risk: None,
         }],
         hunk_total: 0,
         active_hunk_index: 9,
@@ -365,6 +425,11 @@ fn approval_diagnostics_helpers_cover_clean_warning_and_error_states() {
     assert_eq!(approval_diagnostics_style(clean).fg, Some(Color::Green));
     assert_eq!(approval_diagnostics_style(warnings).fg, Some(Color::Yellow));
     assert_eq!(approval_diagnostics_style(errors).fg, Some(Color::LightRed));
+    assert_eq!(approval_risk_color("low"), Color::Green);
+    assert_eq!(approval_risk_color("unknown"), Color::DarkGray);
+    let selected = approval_file_meta_style("create", true);
+    assert_eq!(selected.fg, Some(Color::Black));
+    assert_eq!(selected.bg, Some(Color::Green));
 }
 
 #[test]
@@ -527,11 +592,14 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
         access_label: access_label.to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),
+        change_set: None,
         metadata_collapsed: false,
         file_rows: vec![ApprovalFileRow {
             path: "src/lib.rs".to_owned(),
             selected: true,
             diagnostics: None,
+            action: None,
+            risk: None,
         }],
         changed_files: vec!["src/lib.rs".to_owned()],
         diff_mode_label: "full",

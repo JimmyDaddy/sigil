@@ -7,8 +7,8 @@ use ratatui::{
 };
 
 use crate::app::{
-    AppState, ApprovalAction, ApprovalDiagnosticSummary, ApprovalDiffLine, ApprovalDiffLineKind,
-    ApprovalFileRow, ApprovalModalView,
+    AppState, ApprovalAction, ApprovalChangeSetSummary, ApprovalDiagnosticSummary,
+    ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
 };
 
 use super::{
@@ -226,6 +226,11 @@ fn approval_header_lines(view: &ApprovalModalView, max_content_width: usize) -> 
         )]),
     ];
 
+    if let Some(change_set) = &view.change_set {
+        lines.push(approval_change_set_line(change_set));
+        lines.push(approval_format_hint_line(change_set));
+    }
+
     if view.metadata_collapsed {
         lines.push(Line::from(vec![
             approval_badge("meta hidden", Color::DarkGray),
@@ -266,6 +271,30 @@ fn approval_header_lines(view: &ApprovalModalView, max_content_width: usize) -> 
         Span::styled(view.diff_mode_label, Style::default().fg(Color::Cyan)),
     ]));
     lines
+}
+
+fn approval_change_set_line(change_set: &ApprovalChangeSetSummary) -> Line<'static> {
+    Line::from(vec![
+        approval_badge("change set", Color::Cyan),
+        Span::raw(" "),
+        Span::styled(change_set.id.clone(), Style::default().fg(Color::White)),
+        Span::raw("  "),
+        approval_badge(
+            &format!("risk {}", change_set.risk),
+            approval_risk_color(&change_set.risk),
+        ),
+    ])
+}
+
+fn approval_format_hint_line(change_set: &ApprovalChangeSetSummary) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("format", Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled(
+            change_set.format_hint.clone(),
+            Style::default().fg(Color::Gray),
+        ),
+    ])
 }
 
 fn approval_footer_lines(view: &ApprovalModalView) -> Vec<Line<'static>> {
@@ -326,6 +355,24 @@ fn render_approval_file_row(index: usize, row: &ApprovalFileRow) -> Line<'static
         Span::styled(format!("{marker}{} ", index + 1), style),
         Span::styled(row.path.clone(), style),
     ];
+    if let Some(action) = &row.action {
+        spans.extend([
+            Span::raw("  "),
+            Span::styled(
+                action.clone(),
+                approval_file_meta_style(action, row.selected),
+            ),
+        ]);
+    }
+    if let Some(risk) = &row.risk {
+        spans.extend([
+            Span::raw(" "),
+            Span::styled(
+                format!("risk {risk}"),
+                approval_file_meta_style(risk, row.selected),
+            ),
+        ]);
+    }
     if let Some(diagnostics) = row.diagnostics {
         spans.extend([
             Span::raw("  "),
@@ -336,6 +383,18 @@ fn render_approval_file_row(index: usize, row: &ApprovalFileRow) -> Line<'static
         ]);
     }
     Line::from(spans)
+}
+
+fn approval_file_meta_style(label: &str, selected: bool) -> Style {
+    if selected {
+        return Style::default()
+            .fg(Color::Black)
+            .bg(approval_risk_color(label))
+            .add_modifier(Modifier::BOLD);
+    }
+    Style::default()
+        .fg(approval_risk_color(label))
+        .add_modifier(Modifier::BOLD)
 }
 
 fn approval_diff_status_line(view: &ApprovalModalView) -> Line<'static> {
@@ -411,6 +470,15 @@ fn approval_diagnostics_style(summary: ApprovalDiagnosticSummary) -> Style {
         Style::default().fg(Color::Yellow)
     } else {
         Style::default().fg(Color::Green)
+    }
+}
+
+fn approval_risk_color(label: &str) -> Color {
+    match label {
+        "high" | "delete" => Color::LightRed,
+        "medium" | "update" => Color::Yellow,
+        "low" | "create" => Color::Green,
+        _ => Color::DarkGray,
     }
 }
 

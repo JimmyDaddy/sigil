@@ -11,8 +11,8 @@ use sigil_kernel::{
 use crate::{
     app::AppState,
     approval::{
-        ApprovalAction, ApprovalDiffLine, ApprovalDiffLineKind, ApprovalFileRow, ApprovalModalView,
-        PendingApproval,
+        ApprovalAction, ApprovalChangeSetSummary, ApprovalDiffLine, ApprovalDiffLineKind,
+        ApprovalFileRow, ApprovalModalView, PendingApproval,
     },
     config_panel::ConfigSection,
     mouse::HitTarget,
@@ -273,6 +273,7 @@ fn approval_modal_area_uses_widest_content_with_screen_cap() {
         access_label: "write".to_owned(),
         preview_title: "Extremely wide preview title for approval layout sizing".to_owned(),
         preview_summary: "summary".to_owned(),
+        change_set: None,
         metadata_collapsed: false,
         file_rows: Vec::new(),
         changed_files: Vec::new(),
@@ -479,11 +480,14 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
         access_label: "write".to_owned(),
         preview_title: "Title".to_owned(),
         preview_summary: "summary".to_owned(),
+        change_set: None,
         metadata_collapsed: true,
         file_rows: vec![ApprovalFileRow {
             path: "note.txt".to_owned(),
             selected: true,
             diagnostics: None,
+            action: None,
+            risk: None,
         }],
         changed_files: Vec::new(),
         diff_mode_label: "full",
@@ -499,6 +503,17 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
     };
 
     assert_eq!(approval_header_line_count(&view), 4);
+    assert_eq!(
+        approval_header_line_count(&ApprovalModalView {
+            change_set: Some(ApprovalChangeSetSummary {
+                id: "change-1".to_owned(),
+                risk: "medium".to_owned(),
+                format_hint: "cargo fmt --all".to_owned(),
+            }),
+            ..view.clone()
+        }),
+        6
+    );
     assert!(approval_file_row_hit_areas(Rect::new(0, 0, 20, 1), &view).is_empty());
     assert_eq!(
         approval_action_hit_areas(Rect::new(0, 0, 0, 0), ApprovalAction::Allow),

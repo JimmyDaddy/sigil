@@ -54,6 +54,24 @@ fn approval_helper_functions_format_subjects_and_diff_lines() {
         normalize_approval_diagnostic_path(".\\src\\main.rs"),
         "src/main.rs"
     );
+    assert!(
+        approval_changeset_file_metadata("write_file", "{}").is_empty(),
+        "non-change-set tools should not get change set file metadata"
+    );
+    assert!(
+        approval_changeset_file_metadata("apply_changeset", "not json").is_empty(),
+        "malformed change set args should be ignored"
+    );
+    assert!(
+        approval_changeset_file_metadata("apply_changeset", r#"{"id":"change-1"}"#).is_empty(),
+        "change set args without files should be ignored"
+    );
+    assert!(approval_format_hint(&["package.json".to_owned()]).contains("JSON"));
+    assert!(approval_format_hint(&["ci.yaml".to_owned()]).contains("YAML"));
+    assert_eq!(
+        approval_format_hint(&["Makefile".to_owned()]),
+        "run the relevant formatter before commit"
+    );
 }
 
 #[test]
