@@ -76,6 +76,24 @@ fn alt_d_does_not_request_diagnostics_with_pending_approval() -> Result<()> {
 }
 
 #[test]
+fn pending_approval_blocks_agent_cycle_commands() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    assert!(!app.handle_ui_command(crate::commands::UiCommand::CycleAgentView));
+    assert_eq!(
+        app.last_notice(),
+        Some("finish the pending approval before switching agents")
+    );
+    assert!(!app.handle_ui_command(crate::commands::UiCommand::CycleAgentViewPrevious));
+    assert_eq!(
+        app.last_notice(),
+        Some("finish the pending approval before switching agents")
+    );
+    Ok(())
+}
+
+#[test]
 fn submit_plan_ui_command_is_not_handled_by_global_dispatch() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 

@@ -1334,6 +1334,116 @@ fn mouse_click_infotrack_focuses_activity() -> Result<()> {
 }
 
 #[test]
+fn mouse_click_info_rail_agent_row_switches_visible_agent() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(140, 32);
+    app.active_pane = PaneFocus::Composer;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "让子 agent 检查仓库".to_owned(),
+                display_name: Some("仓库审查".to_owned()),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/task_1/step_1-child_1.jsonl",
+                )?,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Completed,
+                summary_hash: None,
+            },
+        )),
+    ]);
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 140, 32), &app);
+    let child_row = layout.info_rail_agent_rows[1];
+    assert_eq!(
+        layout.hit_target(child_row.area.x, child_row.area.y),
+        HitTarget::InfoRailAgentRow { index: 1 }
+    );
+
+    let outcome = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, child_row.area.x, child_row.area.y),
+        &layout,
+    )?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert_eq!(app.active_agent_label(), "仓库审查");
+    assert_eq!(
+        app.last_notice(),
+        Some("agent focus: agent 仓库审查 · completed · subagent_read · v1:step_1")
+    );
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 140, 32), &app);
+    let main_row = layout.info_rail_agent_rows[0];
+    let outcome = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, main_row.area.x, main_row.area.y),
+        &layout,
+    )?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Redraw));
+    assert_eq!(app.active_agent_label(), "main");
+    Ok(())
+}
+
+#[test]
+fn mouse_agent_row_left_up_and_scroll_cover_fallback_edges() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.active_pane = PaneFocus::Composer;
+    let mut invalid_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let unavailable_row = invalid_layout.info_rail_agent_rows[0];
+    invalid_layout.info_rail_agent_rows[0].index = 99;
+
+    let unavailable = app.handle_mouse_event(
+        mouse(
+            MouseInputKind::LeftUp,
+            unavailable_row.area.x,
+            unavailable_row.area.y,
+        ),
+        &invalid_layout,
+    )?;
+
+    assert!(matches!(unavailable, AppMouseOutcome::Noop));
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert_eq!(app.last_notice(), Some("no agent selected"));
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let main_row = layout.info_rail_agent_rows[0];
+    let scrolled = app.handle_mouse_event(
+        mouse(MouseInputKind::ScrollDown, main_row.area.x, main_row.area.y),
+        &layout,
+    )?;
+
+    assert!(matches!(scrolled, AppMouseOutcome::Redraw));
+    assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert_eq!(app.sidebar_selected_card.label(), "agents");
+    Ok(())
+}
+
+#[test]
 fn mouse_click_unknown_tool_card_is_noop() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
@@ -1385,11 +1495,13 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
         mode: LayoutMode::Main,
         live_panel: Rect::new(0, 0, 80, 12),
         composer: Rect::new(0, 12, 80, 4),
+        agent_panel: Rect::default(),
         composer_input: Rect::default(),
         footer: Rect::new(0, 16, 80, 4),
         info_rail: Rect::new(60, 0, 20, 12),
         live_text_rows: Vec::new(),
         tool_cards: Vec::new(),
+        info_rail_agent_rows: Vec::new(),
         slash_overlay: None,
         approval_modal: Some(Rect::new(10, 2, 20, 6)),
         approval_modal_hit_areas: None,
@@ -1414,11 +1526,13 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
         mode: LayoutMode::Main,
         live_panel: Rect::new(0, 0, 80, 12),
         composer: Rect::new(0, 12, 80, 4),
+        agent_panel: Rect::default(),
         composer_input: Rect::default(),
         footer: Rect::new(0, 16, 80, 4),
         info_rail: Rect::new(60, 0, 20, 12),
         live_text_rows: Vec::new(),
         tool_cards: Vec::new(),
+        info_rail_agent_rows: Vec::new(),
         slash_overlay: None,
         approval_modal: None,
         approval_modal_hit_areas: None,

@@ -64,13 +64,14 @@ pub use skill::{
     SkillStateProjection, SkillTrustState,
 };
 pub use task::{
-    AgentRole, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanProjection, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection,
-    TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepProjection,
-    TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
-    TaskSubagentElicitationRouteEntry, child_session_ref, task_plan_update_entry,
-    task_plan_update_result_content, task_plan_update_tool_spec,
+    AgentRole, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskPlanEntry, TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId,
+    TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStateProjection,
+    TaskStepEntry, TaskStepId, TaskStepProjection, TaskStepSpec, TaskStepStatus,
+    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, child_session_ref,
+    normalize_task_agent_display_name, task_plan_update_entry, task_plan_update_result_content,
+    task_plan_update_tool_spec,
 };
 pub use task_orchestrator::{
     SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,

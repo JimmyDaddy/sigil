@@ -54,8 +54,11 @@ fn config_context_status_uses_state_chip() {
         .sum::<usize>();
 
     assert!(text.chars().count() <= 28);
-    assert!(text.contains("state status:"));
-    assert_eq!(highlighted_width, "state ".chars().count());
+    assert!(text.starts_with("✕ "));
+    assert!(text.contains("confirm"));
+    assert!(!text.contains("state"));
+    assert!(!text.contains("status:"));
+    assert_eq!(highlighted_width, 0);
 }
 
 #[test]
@@ -64,9 +67,9 @@ fn config_context_selected_field_uses_focus_chip() {
     let text = line_text(&line);
     let highlighted_width = highlighted_width(&line);
 
-    assert!(text.contains("focus Model"));
+    assert!(text.contains("▸ Model"));
     assert!(!text.contains("selected:"));
-    assert_eq!(highlighted_width, "focus ".chars().count());
+    assert_eq!(highlighted_width, 0);
 }
 
 #[test]
@@ -146,9 +149,9 @@ fn footer_status_spans_strip_status_prefix_and_handle_tight_widths() {
         Style::default().fg(theme::config_warning()),
     ));
 
-    assert_eq!(line_text(&marker_only), "sta");
-    assert_eq!(line_text(&full), "state dirty");
-    assert_eq!(highlighted_width(&full), "state ".chars().count());
+    assert_eq!(line_text(&marker_only), "△ d");
+    assert_eq!(line_text(&full), "△ dirty");
+    assert_eq!(highlighted_width(&full), 0);
 }
 
 fn line_text(line: &Line<'_>) -> String {
@@ -278,6 +281,12 @@ fn footer_helpers_cover_compact_toolbar_and_status_prefix_stripping() {
 #[test]
 fn footer_status_spans_handle_zero_and_marker_only_widths() {
     assert!(footer_status_spans("status: saved", 0, Style::default()).is_empty());
+    assert_eq!(
+        Line::from(footer_status_spans("status: running", 1, Style::default()))
+            .spans
+            .len(),
+        1
+    );
 
     let marker_only = Line::from(footer_status_spans("status: saved", 3, Style::default()));
     let full = Line::from(footer_status_spans(
@@ -286,9 +295,46 @@ fn footer_status_spans_handle_zero_and_marker_only_widths() {
         Style::default().fg(theme::config_warning()),
     ));
 
-    assert_eq!(line_text(&marker_only), "sta");
-    assert!(line_text(&full).contains("state "));
+    assert_eq!(line_text(&marker_only), "✓ s");
+    assert!(line_text(&full).contains("△ unsaved"));
     assert!(!line_text(&full).contains("status: "));
+}
+
+#[test]
+fn config_status_helpers_cover_empty_numeric_and_tight_widths() {
+    assert_eq!(
+        config_status_kind_for_value("status", "running"),
+        Some(StatusKind::Running)
+    );
+    assert_eq!(
+        config_status_kind_for_value("warnings", "no"),
+        Some(StatusKind::Success)
+    );
+    assert_eq!(config_status_kind_for_value("status", ""), None);
+    assert_eq!(
+        config_status_kind_for_value("warnings", "1 warning"),
+        Some(StatusKind::Warning)
+    );
+    assert_eq!(
+        config_status_kind_for_value("warnings", "0 warnings"),
+        Some(StatusKind::Success)
+    );
+    assert_eq!(config_status_kind_for_value("status", "404"), None);
+    assert!(config_status_value_spans("status", "running", 0, Style::default()).is_empty());
+    assert_eq!(
+        config_status_value_spans("status", "running", 1, Style::default()).len(),
+        1
+    );
+    assert_eq!(
+        line_text(&Line::from(config_status_value_spans(
+            "owner",
+            "custom value",
+            12,
+            Style::default()
+        ))),
+        "custom value"
+    );
+    assert!(line_text(&render_config_status_line("saved", 0)).is_empty());
 }
 
 #[test]
@@ -301,12 +347,13 @@ fn render_config_context_pair_handles_special_and_default_labels() {
     let status = render_config_context_pair("status", "unsaved - save before close", 28);
     let other = render_config_context_pair("owner", "workspace", 24);
 
-    assert!(line_text(&selected).contains("focus Model"));
+    assert!(line_text(&selected).contains("▸ Model"));
     assert!(line_text(&actions).contains("actions Enter save"));
     assert!(line_text(&mcp).contains("mcp Ctrl-N"));
     assert!(line_text(&advanced).contains("advanced provider.beta"));
     assert!(line_text(&override_line).contains("source env"));
-    assert!(line_text(&status).contains("state status:"));
+    assert!(line_text(&status).contains("△ unsaved"));
+    assert!(!line_text(&status).contains("status:"));
     assert!(line_text(&other).contains("owner: workspace"));
 }
 
@@ -373,7 +420,7 @@ fn readonly_and_hint_helpers_return_none_for_unmatched_lines() {
     let readonly = render_readonly_line("- Documents: 3", 32).expect("readonly row should render");
     let hint = render_hint_line("i Press Enter").expect("hint row should render");
 
-    assert!(line_text(&readonly).contains("read Documents"));
+    assert!(line_text(&readonly).contains("◇ Documents"));
     assert!(line_text(&hint).contains("i Press Enter"));
 }
 

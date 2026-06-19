@@ -485,6 +485,15 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
         &exited_from_top_level_details,
         &json!({"tool_name": "terminal_cancel"}).to_string(),
     );
+    let generic_error = ToolCardRender {
+        is_error: true,
+        ..base_summary("terminal_task")
+    };
+    let generic_error_display = build_tool_card_display(&generic_error);
+    let generic_ok = ToolCardRender {
+        ..base_summary("terminal_task")
+    };
+    let generic_ok_display = build_tool_card_display(&generic_ok);
 
     assert_eq!(failed_display.status.label, "FAILED");
     assert!(failed_display.status.is_error);
@@ -501,6 +510,10 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
     assert_eq!(exited_display.status.detail.as_deref(), Some("exit 7"));
     assert_eq!(exited_activity.key, "terminal_task:terminal-exited");
     assert_eq!(exited_activity.title, "Terminal terminal-exited cargo test");
+    assert_eq!(generic_error_display.status.label, "ERROR");
+    assert_eq!(generic_error_display.status.kind, StatusKind::Error);
+    assert_eq!(generic_ok_display.status.label, "OK");
+    assert_eq!(generic_ok_display.status.kind, StatusKind::Success);
 }
 
 #[test]

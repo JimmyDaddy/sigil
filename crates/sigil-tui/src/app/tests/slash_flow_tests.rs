@@ -58,6 +58,24 @@ fn plan_command_dispatches_task_action_when_idle() -> Result<()> {
 }
 
 #[test]
+fn plan_command_body_hides_slash_selector_after_command_boundary() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/plan implement task mode".to_owned();
+    app.reset_slash_selector();
+
+    assert!(!app.has_slash_selector());
+    assert!(app.slash_selector_rows().is_empty());
+    assert!(app.slash_selector_empty_message().is_none());
+
+    app.input = "/agent ".to_owned();
+    app.reset_slash_selector();
+
+    assert!(app.has_slash_selector());
+    assert_eq!(app.slash_selector_title(), Some("Agent"));
+    assert!(!app.slash_selector_rows().is_empty());
+}
+
+#[test]
 fn plan_continue_command_dispatches_continue_action() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/plan continue".to_owned();
@@ -72,6 +90,259 @@ fn plan_continue_command_dispatches_continue_action() -> Result<()> {
         })
     ));
     assert!(app.is_busy);
+    Ok(())
+}
+
+#[test]
+fn agent_command_switches_visible_agent_view() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "让子 agent 检查仓库".to_owned(),
+                display_name: Some("仓库审查".to_owned()),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: child_ref,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Completed,
+                summary_hash: None,
+            },
+        )),
+    ]);
+
+    app.input = "/agent child_1".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "仓库审查");
+
+    app.input = "/agent main".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "main");
+
+    app.input = "/agent 仓库审查".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "仓库审查");
+
+    app.input = "/agent main".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "main");
+
+    app.input = "/agent next".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "仓库审查");
+    Ok(())
+}
+
+#[test]
+fn agent_rename_command_persists_child_display_name() -> Result<()> {
+    let temp = tempdir()?;
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let mut app = AppState::from_root_config(
+        temp.path().join("sigil.toml").as_path(),
+        &config_for_workspace(temp.path()),
+    );
+    app.session_log_path = temp.path().join(".sigil/sessions/current.jsonl");
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "让子 agent 检查仓库".to_owned(),
+                display_name: Some("仓库审查".to_owned()),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/task_1/step_1-child_1.jsonl",
+                )?,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Completed,
+                summary_hash: None,
+            },
+        )),
+    ]);
+
+    app.input = "/agent rename child_1 德语译员".to_owned();
+    assert!(app.submit_input()?.is_none());
+    app.input = "/agent 德语译员".to_owned();
+    assert!(app.submit_input()?.is_none());
+
+    assert_eq!(app.active_agent_label(), "德语译员");
+    let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
+    assert!(persisted.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
+                if rename.child_task_id.as_str() == "child_1"
+                    && rename.display_name == "德语译员"
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn agent_label_falls_back_to_role_ordinal_without_display_name() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("translate_german")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "translate".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "让子 agent 翻译为德语".to_owned(),
+                display_name: None,
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/task_1/translate_german-child_1.jsonl",
+                )?,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Completed,
+                summary_hash: None,
+            },
+        )),
+    ]);
+
+    app.input = "/agent ".to_owned();
+    let rows = app.slash_selector_rows();
+    assert!(rows.iter().any(|(label, _)| label == "read 1"));
+    assert!(!rows.iter().any(|(label, _)| label == "德语译员"));
+
+    app.input = "/agent read 1".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "read 1");
+    Ok(())
+}
+
+#[test]
+fn agent_command_selector_lists_main_child_and_navigation() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "让子 agent 检查仓库".to_owned(),
+                display_name: Some("仓库审查".to_owned()),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/task_1/step_1-child_1.jsonl",
+                )?,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Started,
+                summary_hash: None,
+            },
+        )),
+    ]);
+    app.input = "/agent ".to_owned();
+
+    let rows = app.slash_selector_rows();
+
+    assert!(
+        rows.iter()
+            .any(|(label, description)| label == "main" && description == "◉ current session")
+    );
+    assert!(
+        rows.iter().any(|(label, description)| label == "仓库审查"
+            && description == "◐ subagent_read · v1:step_1")
+    );
+    assert!(!rows.iter().any(|(label, _)| label == "next"));
+    assert!(!rows.iter().any(|(label, _)| label == "prev"));
+    assert_eq!(app.slash_selector_title(), Some("Agent"));
+
+    app.input = "/agent rename ".to_owned();
+    app.reset_slash_selector();
+    let rename_rows = app.slash_selector_rows();
+    assert!(
+        rename_rows
+            .iter()
+            .any(|(label, description)| label == "仓库审查" && description.contains("rename"))
+    );
+
+    app.input = "/agent rename child_1 德语译员".to_owned();
+    app.reset_slash_selector();
+    assert!(!app.has_slash_selector());
     Ok(())
 }
 
@@ -308,6 +579,10 @@ run-as: child-session
     let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
     app.input = "/repo-audit --depth full".to_owned();
 
+    let rows = app.slash_selector_rows();
+    assert!(rows.iter().any(|(label, description)| {
+        label == "/repo-audit" && description.contains("agent · child_session")
+    }));
     let action = app.submit_input()?;
 
     assert!(matches!(
@@ -316,10 +591,7 @@ run-as: child-session
             if skill_id == "repo-audit" && arguments == "--depth full"
     ));
     assert!(app.is_busy);
-    assert_eq!(
-        app.last_notice(),
-        Some("invoking skill repo-audit in child session")
-    );
+    assert_eq!(app.last_notice(), Some("invoking agent repo-audit"));
     Ok(())
 }
 

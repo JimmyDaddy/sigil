@@ -259,6 +259,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskPlan(_) => "task_plan",
         ControlEntry::TaskStep(_) => "task_step",
         ControlEntry::TaskChildSession(_) => "task_child_session",
+        ControlEntry::TaskChildSessionDisplayName(_) => "task_child_session_display_name",
         ControlEntry::TaskSubagentApprovalRoute(_) => "task_subagent_approval_route",
         ControlEntry::TaskSubagentElicitationRoute(_) => "task_subagent_elicitation_route",
         ControlEntry::Note { .. } => "note",

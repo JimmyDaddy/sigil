@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, path::Path};
 use ratatui::layout::Rect;
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, RunEvent,
-    SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolResult,
-    ToolResultMeta, ToolSpec, WorkspaceConfig,
+    AgentConfig, CompactionConfig, ControlEntry, EventHandler, MemoryConfig, PermissionConfig,
+    RootConfig, RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability,
+    ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use crate::{
@@ -185,6 +185,52 @@ fn layout_snapshot_exposes_live_text_rows() {
             column: 3
         })
     );
+}
+
+#[test]
+fn layout_snapshot_exposes_info_rail_agent_rows() -> anyhow::Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(140, 32);
+    app.handle(RunEvent::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        },
+    )))?;
+    app.handle(RunEvent::Control(ControlEntry::TaskChildSession(
+        sigil_kernel::TaskChildSessionEntry {
+            task_id,
+            plan_version: 1,
+            step_id,
+            child_task_id: sigil_kernel::TaskId::new("child_1")?,
+            child_session_ref: sigil_kernel::SessionRef::new_relative(
+                "children/task_1/step_1-child_1.jsonl",
+            )?,
+            role: sigil_kernel::AgentRole::SubagentRead,
+            status: sigil_kernel::TaskChildSessionStatus::Started,
+            summary_hash: None,
+        },
+    )))?;
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 140, 32), &app);
+
+    assert_eq!(layout.info_rail_agent_rows.len(), 2);
+    let main = layout.info_rail_agent_rows[0];
+    assert_eq!(
+        layout.hit_target(main.area.x, main.area.y),
+        HitTarget::InfoRailAgentRow { index: 0 }
+    );
+    let child = layout.info_rail_agent_rows[1];
+    assert_eq!(
+        layout.hit_target(child.area.x, child.area.y),
+        HitTarget::InfoRailAgentRow { index: 1 }
+    );
+    Ok(())
 }
 
 #[test]
@@ -445,7 +491,7 @@ fn config_hit_area_helpers_cover_scroll_and_clipping_edges() -> anyhow::Result<(
 }
 
 #[test]
-fn visible_timeline_rows_returns_none_when_progress_consumes_capacity() -> anyhow::Result<()> {
+fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
     app.handle_worker_message(WorkerMessage::Event(Box::new(RunEvent::AssistantMessage(
@@ -469,7 +515,10 @@ fn visible_timeline_rows_returns_none_when_progress_consumes_capacity() -> anyho
         preview: None,
     });
 
-    assert_eq!(visible_timeline_rows(Rect::new(0, 0, 80, 2), &app), None);
+    let rows = visible_timeline_rows(Rect::new(0, 0, 80, 2), &app)
+        .expect("status band should leave one transcript row");
+    assert_eq!(rows.content_frame.height, 1);
+    assert!(rows.visible_start < rows.visible_end);
     Ok(())
 }
 

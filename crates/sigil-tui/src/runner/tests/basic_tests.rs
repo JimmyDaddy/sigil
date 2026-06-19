@@ -274,7 +274,9 @@ run-as: child-session
     match failure {
         WorkerMessage::RunFailed(error) => {
             assert!(
-                error.contains("child_session mode, not inline mode"),
+                error.contains(
+                    "agent child-only is configured for child_session mode, not inline skill mode"
+                ),
                 "{error}"
             );
         }

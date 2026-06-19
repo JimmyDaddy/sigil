@@ -86,6 +86,6 @@ pub(crate) fn halo_rect(area: Rect, bounds: Rect, x_pad: u16, y_pad: u16) -> Rec
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/geometry_tests.rs"]
 mod tests;

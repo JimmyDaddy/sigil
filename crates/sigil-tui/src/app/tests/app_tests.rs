@@ -95,6 +95,197 @@ fn focused_terminal_task_cancel_requires_confirmation() -> Result<()> {
     Ok(())
 }
 
+fn sync_agent_task(
+    app: &mut AppState,
+    display_name: Option<&str>,
+    child_status: sigil_kernel::TaskChildSessionStatus,
+    child_session_ref: sigil_kernel::SessionRef,
+) -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Inspect repository".to_owned(),
+                display_name: display_name.map(ToOwned::to_owned),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: child_status,
+                summary_hash: None,
+            },
+        )),
+    ]);
+    Ok(())
+}
+
+#[test]
+fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.activate_agent_from_command("")?;
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /agent <main|next|prev|child-id|rename target name>")
+    );
+    app.activate_agent_from_command("rename")?;
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /agent rename <child-id|current> <name>")
+    );
+    app.activate_agent_from_command("missing")?;
+    assert_eq!(app.last_notice(), Some("agent not found: missing"));
+    app.activate_agent_from_command("next")?;
+    assert_eq!(app.last_notice(), Some("no child agents to switch"));
+
+    app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        },
+    ))]);
+    let rows = app.agent_sidebar_rows();
+    assert!(
+        rows.iter()
+            .any(|row| row.label == "agents" && row.detail == "no child sessions recorded")
+    );
+    app.active_pane = PaneFocus::Activity;
+    app.sidebar_selected_card = SidebarCard::Agents;
+    app.sidebar_agent_selected = 1;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.last_notice(),
+        Some("agent focus unavailable: no child sessions recorded")
+    );
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.text == "agent focus unavailable: no child sessions recorded")
+    );
+    Ok(())
+}
+
+#[test]
+fn agent_rename_filters_and_persists_display_name() -> Result<()> {
+    let temp = tempdir()?;
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join(".sigil/sessions/session-parent.jsonl");
+    sync_agent_task(
+        &mut app,
+        None,
+        sigil_kernel::TaskChildSessionStatus::Completed,
+        child_ref,
+    )?;
+
+    assert!(
+        app.agent_slash_entries("rename child")
+            .iter()
+            .any(|entry| entry.fill == "/agent rename child_1 ")
+    );
+    assert!(app.agent_slash_entries("rename no-match").is_empty());
+    assert!(!app.agent_selector_allows_popup("rename child_1 Repo Audit"));
+    app.activate_agent_from_command("read 1")?;
+    assert_eq!(app.active_agent_label(), "read 1");
+
+    app.activate_agent_from_command("rename current ")?;
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /agent rename <child-id|current> <name>")
+    );
+    app.activate_agent_from_command("rename current bad\nname")?;
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.starts_with("agent rename failed:"))
+    );
+    app.activate_agent_from_command("rename current Repo Audit")?;
+    assert_eq!(
+        app.last_notice(),
+        Some("agent renamed: child_1 -> Repo Audit")
+    );
+    assert_eq!(app.active_agent_label(), "Repo Audit");
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
+            if rename.display_name == "Repo Audit"
+    )));
+    Ok(())
+}
+
+#[test]
+fn agent_flow_selection_refresh_and_rename_edges_cover_private_guards() -> Result<()> {
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+    let mut empty_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    assert!(empty_app.agent_slash_entries("rename ").is_empty());
+    empty_app.activate_agent_from_command("rename main Main Agent")?;
+    assert_eq!(empty_app.last_notice(), Some("agent not found: main"));
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_agent_task(
+        &mut app,
+        Some("Repo Read"),
+        sigil_kernel::TaskChildSessionStatus::Started,
+        child_ref.clone(),
+    )?;
+    app.activate_agent_from_command("child_1")?;
+    assert_eq!(app.active_agent_label(), "Repo Read");
+
+    app.sidebar_agent_selected = 99;
+    assert!(app.move_composer_agent_selection(false));
+    assert_eq!(app.sidebar_agent_selected, 0);
+
+    app.sidebar_agent_selected = 1;
+    assert!(app.move_composer_agent_selection(false));
+    assert_eq!(app.sidebar_agent_selected, 0);
+
+    app.activate_agent_from_command("prev")?;
+    assert_eq!(app.active_agent_label(), "main");
+    assert!(
+        app.agent_slash_entries("rename child_1 Repo Read")
+            .is_empty()
+    );
+    assert!(!app.agent_selector_allows_popup("rename child_1 Repo Read"));
+
+    app.sidebar_agent_selected = 99;
+    app.refresh_active_agent_view_after_parent_sync();
+    assert!(app.sidebar_agent_selected < app.agent_sidebar_rows().len());
+
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: "missing_child".to_owned(),
+        child_session_ref: child_ref,
+    };
+    app.sync_current_session_state(Vec::new());
+    app.refresh_active_agent_view_after_parent_sync();
+    assert_eq!(app.active_agent_label(), "main");
+    Ok(())
+}
+
 #[test]
 fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
@@ -104,8 +295,24 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
 
     let rows = app.agent_sidebar_rows();
     assert!(rows.iter().any(|row| {
-        row.label == "subagents" && row.detail == "available via /plan" && !row.muted
+        row.label == "main" && row.detail == "idle in current session" && row.active
     }));
+    assert!(rows.iter().any(|row| {
+        row.label == "agents" && row.detail == "available via /plan" && !row.active && row.muted
+    }));
+    let temp = tempdir()?;
+    let session_dir = temp.path().join(".sigil/sessions");
+    app.session_log_path = session_dir.join("session-parent.jsonl");
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+    let child_store = JsonlSessionStore::new(child_ref.resolve(&session_dir))?;
+    child_store.append(&SessionLogEntry::User(ModelMessage::user(
+        "child delegated prompt",
+    )))?;
+    child_store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("CHILD_TRANSCRIPT_DONE".to_owned()),
+        Vec::new(),
+    )))?;
+    app.push_timeline(TimelineRole::Assistant, "PARENT_MAIN_TRANSCRIPT");
 
     app.sync_current_session_state(vec![
         SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
@@ -115,15 +322,26 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
             status: sigil_kernel::TaskRunStatus::Running,
             reason: None,
         })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "让子 agent 检查仓库".to_owned(),
+                display_name: Some("仓库审查".to_owned()),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
         SessionLogEntry::Control(ControlEntry::TaskChildSession(
             sigil_kernel::TaskChildSessionEntry {
                 task_id: task_id.clone(),
                 plan_version: 1,
                 step_id: step_id.clone(),
                 child_task_id,
-                child_session_ref: sigil_kernel::SessionRef::new_relative(
-                    "children/task_1/step_1-child_1.jsonl",
-                )?,
+                child_session_ref: child_ref,
                 role: sigil_kernel::AgentRole::SubagentRead,
                 status: sigil_kernel::TaskChildSessionStatus::Started,
                 summary_hash: None,
@@ -134,8 +352,59 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
     let rows = app.agent_sidebar_rows();
 
     assert!(rows.iter().any(|row| {
-        row.label == "subagents" && row.detail == "1 child session active" && !row.muted
+        row.label == "agent 仓库审查"
+            && row.detail == "started · subagent_read · v1:step_1"
+            && !row.muted
     }));
+    app.active_pane = PaneFocus::Activity;
+    app.sidebar_selected_card = SidebarCard::Agents;
+    app.sidebar_agent_selected = 1;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let focus_lines = app
+        .transcript_lines(8)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        focus_lines
+            .iter()
+            .any(|line| line == "agent view: 仓库审查 · child session")
+    );
+    assert!(
+        focus_lines
+            .iter()
+            .any(|line| line == "status: started · subagent_read · v1:step_1")
+    );
+    assert!(
+        focus_lines
+            .iter()
+            .any(|line| line.contains("CHILD_TRANSCRIPT_DONE"))
+    );
+    assert!(
+        !focus_lines
+            .iter()
+            .any(|line| line.contains("PARENT_MAIN_TRANSCRIPT"))
+    );
+    app.sidebar_agent_selected = 0;
+    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let main_lines = app
+        .transcript_lines(8)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(main_lines.contains("PARENT_MAIN_TRANSCRIPT"));
+    assert!(!main_lines.contains("CHILD_TRANSCRIPT_DONE"));
 
     app.sync_current_session_state(vec![
         SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
@@ -143,6 +412,19 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
             parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
             objective: "review workspace".to_owned(),
             status: sigil_kernel::TaskRunStatus::Completed,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "让子 agent 检查仓库".to_owned(),
+                display_name: Some("仓库审查".to_owned()),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
             reason: None,
         })),
         SessionLogEntry::Control(ControlEntry::TaskChildSession(
@@ -164,8 +446,77 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
     let rows = app.agent_sidebar_rows();
 
     assert!(rows.iter().any(|row| {
-        row.label == "subagents" && row.detail == "1 child session recorded" && !row.muted
+        row.label == "agent 仓库审查"
+            && row.detail == "completed · subagent_read · v1:step_1"
+            && !row.muted
     }));
+    Ok(())
+}
+
+#[test]
+fn alt_a_cycles_agent_view_without_activity_focus() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    let child_ref = sigil_kernel::SessionRef::new_relative("children/task_1/step_1-child_1.jsonl")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "让子 agent 检查仓库".to_owned(),
+                display_name: Some("仓库审查".to_owned()),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: child_ref,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Started,
+                summary_hash: None,
+            },
+        )),
+    ]);
+
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT))?;
+
+    assert_eq!(app.active_agent_label(), "仓库审查");
+    assert_eq!(
+        app.last_notice(),
+        Some("agent focus: agent 仓库审查 · started · subagent_read · v1:step_1")
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT))?;
+
+    assert_eq!(app.active_agent_label(), "main");
+    assert_eq!(
+        app.last_notice(),
+        Some("agent focus: main · idle in current session")
+    );
+
+    app.handle_key_event(KeyEvent::new(
+        KeyCode::Char('A'),
+        KeyModifiers::ALT | KeyModifiers::SHIFT,
+    ))?;
+
+    assert_eq!(app.active_agent_label(), "仓库审查");
     Ok(())
 }
 
@@ -199,6 +550,24 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
                 .contains(&format!("status: {label}"))
         );
     }
+    assert_eq!(
+        super::super::task_sidebar::task_child_session_status_label(
+            sigil_kernel::TaskChildSessionStatus::Failed
+        ),
+        "failed"
+    );
+    assert_eq!(
+        super::super::task_sidebar::task_child_session_status_label(
+            sigil_kernel::TaskChildSessionStatus::Cancelled
+        ),
+        "cancelled"
+    );
+    assert_eq!(
+        super::super::task_sidebar::task_child_session_status_label(
+            sigil_kernel::TaskChildSessionStatus::Interrupted
+        ),
+        "interrupted"
+    );
 
     app.sync_current_session_state(vec![
         SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
@@ -215,6 +584,7 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
             steps: vec![sigil_kernel::TaskStepSpec {
                 step_id: step_id.clone(),
                 title: "inspect".to_owned(),
+                display_name: None,
                 detail: None,
                 role: sigil_kernel::AgentRole::Executor,
             }],
@@ -264,7 +634,7 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
     assert!(lines.contains(&"plan: v1".to_owned()));
     assert!(lines.contains(&"progress: 0/1 done".to_owned()));
     assert!(lines.contains(&"current: v1:step_1 running".to_owned()));
-    assert!(lines.contains(&"▶ 1. running step_1 · inspect".to_owned()));
+    assert!(lines.contains(&"◐ 1. running step_1 · inspect".to_owned()));
     assert!(lines.contains(&"routes: unverified".to_owned()));
     assert!(lines.contains(&"child: unavailable".to_owned()));
     Ok(())
@@ -291,12 +661,14 @@ fn task_sidebar_lines_show_failed_step_and_remaining_plan() -> Result<()> {
                 sigil_kernel::TaskStepSpec {
                     step_id: sigil_kernel::TaskStepId::new("gate_check")?,
                     title: "跑门禁".to_owned(),
+                    display_name: None,
                     detail: None,
                     role: sigil_kernel::AgentRole::Executor,
                 },
                 sigil_kernel::TaskStepSpec {
                     step_id: sigil_kernel::TaskStepId::new("overview")?,
                     title: "扫描项目整体结构".to_owned(),
+                    display_name: None,
                     detail: None,
                     role: sigil_kernel::AgentRole::Executor,
                 },
@@ -321,8 +693,8 @@ fn task_sidebar_lines_show_failed_step_and_remaining_plan() -> Result<()> {
     assert!(lines.contains(&"progress: 0/2 done".to_owned()));
     assert!(lines.contains(&"last: v1:gate_check failed".to_owned()));
     assert!(lines.contains(&"reason: step gate_check failed".to_owned()));
-    assert!(lines.contains(&"! 1. failed gate_check · 跑门禁".to_owned()));
-    assert!(lines.contains(&"· 2. pending overview · 扫描项目整体结构".to_owned()));
+    assert!(lines.contains(&"✕ 1. failed gate_check · 跑门禁".to_owned()));
+    assert!(lines.contains(&"◇ 2. pending overview · 扫描项目整体结构".to_owned()));
     Ok(())
 }
 
@@ -349,12 +721,14 @@ fn task_sidebar_lines_distinguish_cancelled_and_interrupted_steps() -> Result<()
                 sigil_kernel::TaskStepSpec {
                     step_id: cancelled_step.clone(),
                     title: "cancel setup".to_owned(),
+                    display_name: None,
                     detail: None,
                     role: sigil_kernel::AgentRole::Executor,
                 },
                 sigil_kernel::TaskStepSpec {
                     step_id: interrupted_step.clone(),
                     title: "review interrupted".to_owned(),
+                    display_name: None,
                     detail: None,
                     role: sigil_kernel::AgentRole::Executor,
                 },
@@ -385,8 +759,8 @@ fn task_sidebar_lines_distinguish_cancelled_and_interrupted_steps() -> Result<()
 
     let lines = app.task_sidebar_lines();
 
-    assert!(lines.contains(&"× 1. cancelled cancel_setup · cancel setup".to_owned()));
-    assert!(lines.contains(&"⏸ 2. interrupted interrupt_review · review interrupted".to_owned()));
+    assert!(lines.contains(&"✕ 1. cancelled cancel_setup · cancel setup".to_owned()));
+    assert!(lines.contains(&"✕ 2. interrupted interrupt_review · review interrupted".to_owned()));
     Ok(())
 }
 
@@ -399,6 +773,7 @@ fn task_sidebar_lines_keeps_hidden_current_step_visible() -> Result<()> {
             Ok(sigil_kernel::TaskStepSpec {
                 step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
                 title: format!("step {index}"),
+                display_name: None,
                 detail: None,
                 role: sigil_kernel::AgentRole::Executor,
             })
@@ -456,8 +831,8 @@ fn task_sidebar_lines_keeps_hidden_current_step_visible() -> Result<()> {
 
     assert!(lines.contains(&"progress: 1/8 done".to_owned()));
     assert!(lines.contains(&"✓ 1. completed step_1 · step 1".to_owned()));
-    assert!(lines.contains(&"! 2. blocked step_2 · step 2".to_owned()));
-    assert!(lines.contains(&"▶ 8. running step_8 · step 8".to_owned()));
+    assert!(lines.contains(&"✕ 2. blocked step_2 · step 2".to_owned()));
+    assert!(lines.contains(&"◐ 8. running step_8 · step 8".to_owned()));
     assert!(lines.contains(&"+2 more steps · 2 pending".to_owned()));
     Ok(())
 }
@@ -471,6 +846,7 @@ fn task_sidebar_lines_completed_long_plan_shows_final_step_and_hidden_summary() 
             Ok(sigil_kernel::TaskStepSpec {
                 step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
                 title: format!("step {index}"),
+                display_name: None,
                 detail: None,
                 role: sigil_kernel::AgentRole::Executor,
             })
@@ -536,6 +912,7 @@ fn task_sidebar_lines_summarizes_hidden_non_pending_statuses() -> Result<()> {
             Ok(sigil_kernel::TaskStepSpec {
                 step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
                 title: format!("step {index}"),
+                display_name: None,
                 detail: None,
                 role: sigil_kernel::AgentRole::Executor,
             })
@@ -583,7 +960,7 @@ fn task_sidebar_lines_summarizes_hidden_non_pending_statuses() -> Result<()> {
     app.sync_current_session_state(entries);
     let lines = app.task_sidebar_lines();
 
-    assert!(lines.contains(&"▶ 1. running step_1 · step 1".to_owned()));
+    assert!(lines.contains(&"◐ 1. running step_1 · step 1".to_owned()));
     assert!(lines.contains(
         &"+6 more steps · 1 running, 1 failed, 1 blocked, 1 cancelled, 1 interrupted, 1 completed"
             .to_owned()
@@ -612,12 +989,14 @@ fn task_sidebar_lines_focuses_first_pending_without_problem_step() -> Result<()>
                 sigil_kernel::TaskStepSpec {
                     step_id: sigil_kernel::TaskStepId::new("step_1")?,
                     title: "step 1".to_owned(),
+                    display_name: None,
                     detail: None,
                     role: sigil_kernel::AgentRole::Executor,
                 },
                 sigil_kernel::TaskStepSpec {
                     step_id: sigil_kernel::TaskStepId::new("step_2")?,
                     title: "step 2".to_owned(),
+                    display_name: None,
                     detail: None,
                     role: sigil_kernel::AgentRole::Executor,
                 },
@@ -639,8 +1018,122 @@ fn task_sidebar_lines_focuses_first_pending_without_problem_step() -> Result<()>
     let lines = app.task_sidebar_lines();
 
     assert!(lines.contains(&"✓ 1. completed step_1 · step 1".to_owned()));
-    assert!(lines.contains(&"· 2. pending step_2 · step 2".to_owned()));
+    assert!(lines.contains(&"◇ 2. pending step_2 · step 2".to_owned()));
     assert!(!lines.iter().any(|line| line.starts_with("last: ")));
+    Ok(())
+}
+
+#[test]
+fn task_strip_view_projects_focus_hidden_summary_and_fallback_row() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let steps = (1..=6)
+        .map(|index| {
+            Ok(sigil_kernel::TaskStepSpec {
+                step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
+                title: format!("step {index}"),
+                display_name: None,
+                detail: None,
+                role: sigil_kernel::AgentRole::Executor,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps,
+            reason: None,
+        })),
+    ];
+    for (index, status) in [
+        (1, sigil_kernel::TaskStepStatus::Completed),
+        (2, sigil_kernel::TaskStepStatus::Completed),
+        (3, sigil_kernel::TaskStepStatus::Blocked),
+        (6, sigil_kernel::TaskStepStatus::Running),
+    ] {
+        entries.push(SessionLogEntry::Control(ControlEntry::TaskStep(
+            sigil_kernel::TaskStepEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: sigil_kernel::TaskStepId::new(format!("step_{index}"))?,
+                role: sigil_kernel::AgentRole::Executor,
+                status,
+                title: Some(format!("step {index}")),
+                summary: None,
+                reason: None,
+            },
+        )));
+    }
+
+    app.sync_current_session_state(entries);
+
+    let strip = app.task_strip_view().expect("task strip should render");
+    assert_eq!(strip.title, "Task task_1");
+    assert_eq!(strip.detail, "running · v1 · 2/6 done");
+    assert_eq!(strip.rows.len(), 5);
+    assert_eq!(strip.rows[0].label, "1. step 1");
+    assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Success);
+    assert_eq!(strip.rows[2].label, "3. step 3");
+    assert_eq!(strip.rows[2].kind, crate::ui::StatusKind::Error);
+    assert_eq!(strip.rows[3].label, "6. step 6");
+    assert!(strip.rows[3].active);
+    assert_eq!(strip.rows[4].label, "+2 more steps");
+    assert_eq!(strip.rows[4].detail, "2 pending");
+
+    app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "fallback task".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Paused,
+            reason: None,
+        },
+    ))]);
+    let fallback = app
+        .task_strip_view()
+        .expect("task strip should render run-only task");
+    assert_eq!(fallback.rows[0].label, "fallback task");
+    assert_eq!(fallback.rows[0].kind, crate::ui::StatusKind::Warning);
+    assert!(fallback.rows[0].active);
+
+    app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id: sigil_kernel::TaskId::new("task_completed")?,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "completed fallback".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Completed,
+            reason: None,
+        },
+    ))]);
+    let completed = app
+        .task_strip_view()
+        .expect("task strip should render completed run-only task");
+    assert_eq!(completed.rows[0].kind, crate::ui::StatusKind::Success);
+    assert!(!completed.rows[0].active);
+
+    app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
+        sigil_kernel::TaskRunEntry {
+            task_id: sigil_kernel::TaskId::new("task_failed")?,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "failed fallback".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Failed,
+            reason: None,
+        },
+    ))]);
+    let failed = app
+        .task_strip_view()
+        .expect("task strip should render failed run-only task");
+    assert_eq!(failed.rows[0].kind, crate::ui::StatusKind::Error);
+    assert!(!failed.rows[0].active);
     Ok(())
 }
 

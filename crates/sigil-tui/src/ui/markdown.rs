@@ -1195,6 +1195,6 @@ fn line_looks_like_code(line: &str) -> bool {
         || trimmed.starts_with(']')
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/markdown_tests.rs"]
 mod tests;

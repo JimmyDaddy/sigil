@@ -8,7 +8,7 @@ use crate::slash::{
     SlashArgumentOption, SlashCommandSpec, SlashSelectorEntry,
 };
 use anyhow::Result;
-use sigil_kernel::{SkillDescriptor, SkillTrustState, default_user_config_dir};
+use sigil_kernel::{SkillDescriptor, SkillRunMode, SkillTrustState, default_user_config_dir};
 
 impl AppState {
     fn slash_query(prompt: &str) -> Option<(&str, String)> {
@@ -26,6 +26,11 @@ impl AppState {
         }
 
         (prompt, String::new())
+    }
+
+    fn slash_has_argument_boundary(prompt: &str) -> bool {
+        let trimmed = prompt.trim_start();
+        trimmed.chars().any(char::is_whitespace)
     }
 
     fn slash_command_matches(token: &str) -> Vec<&'static SlashCommandSpec> {
@@ -97,6 +102,7 @@ impl AppState {
         arg: &str,
     ) -> Option<Vec<SlashSelectorEntry>> {
         match spec.canonical {
+            "/agent" => Some(self.agent_slash_entries(arg)),
             "/effort" => Some(self.effort_selector_entries(arg)),
             "/model" => Some(self.model_selector_entries(arg)),
             "/resume" => Some(self.resume_selector_entries(arg)),
@@ -261,11 +267,12 @@ impl AppState {
                 } else {
                     format!("/{} {arg}", descriptor.id)
                 };
+                let item_kind = slash_skill_display_kind(&descriptor);
                 let description = if descriptor.description.trim().is_empty() {
-                    format!("skill · {}", descriptor.run_as.as_str())
+                    format!("{item_kind} · {}", descriptor.run_as.as_str())
                 } else {
                     format!(
-                        "skill · {} · {}",
+                        "{item_kind} · {} · {}",
                         descriptor.run_as.as_str(),
                         descriptor.description.trim()
                     )
@@ -284,6 +291,9 @@ impl AppState {
     }
 
     fn slash_selector_entries(&self) -> Vec<SlashSelectorEntry> {
+        if !self.slash_selector_context_allows_popup() {
+            return Vec::new();
+        }
         let Some((token, arg)) = Self::slash_query(&self.input) else {
             return Vec::new();
         };
@@ -302,6 +312,24 @@ impl AppState {
 
         self.decorate_pending_mouse_confirmation(&mut entries);
         entries
+    }
+
+    fn slash_selector_context_allows_popup(&self) -> bool {
+        let Some((token, arg)) = Self::slash_query(&self.input) else {
+            return false;
+        };
+        if !Self::slash_has_argument_boundary(&self.input) {
+            return true;
+        }
+
+        if let Some(spec) = Self::exact_slash_command(token) {
+            if spec.canonical == "/agent" && !self.agent_selector_allows_popup(&arg) {
+                return false;
+            }
+            return self.slash_argument_entries(spec, &arg).is_some();
+        }
+
+        true
     }
 
     fn decorate_pending_mouse_confirmation(&self, entries: &mut [SlashSelectorEntry]) {
@@ -464,7 +492,7 @@ impl AppState {
     }
 
     pub fn has_slash_selector(&self) -> bool {
-        Self::slash_query(&self.input).is_some()
+        self.slash_selector_context_allows_popup()
     }
 
     pub fn slash_selector_selected_index(&self) -> Option<usize> {
@@ -484,12 +512,16 @@ impl AppState {
     }
 
     pub fn slash_selector_empty_message(&self) -> Option<&'static str> {
+        if !self.slash_selector_context_allows_popup() {
+            return None;
+        }
         let (token, _) = Self::slash_query(&self.input)?;
         if !self.slash_selector_entries().is_empty() {
             return None;
         }
 
         match Self::exact_slash_command(token).map(|spec| spec.canonical) {
+            Some("/agent") => Some("no matching agent"),
             Some("/effort") => Some("pick effort: low | medium | high | max"),
             Some("/resume") if self.session_history.is_empty() => Some("no saved sessions"),
             Some("/resume") => Some("no matching session"),
@@ -523,8 +555,17 @@ impl AppState {
     pub(crate) fn slash_selector_title(&self) -> Option<&'static str> {
         let (token, _) = Self::slash_query(&self.input)?;
         match Self::exact_slash_command(token).map(|spec| spec.canonical) {
+            Some("/agent") => Some("Agent"),
             Some("/resume") => Some("Resume session"),
             _ => None,
         }
+    }
+}
+
+fn slash_skill_display_kind(skill: &SkillDescriptor) -> &'static str {
+    if matches!(skill.run_as, SkillRunMode::ChildSession) {
+        "agent"
+    } else {
+        "skill"
     }
 }

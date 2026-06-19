@@ -8,13 +8,14 @@ use crate::{
     PluginTrustEntry, PrefixSnapshot, ProviderContinuationState, PublicControlEvent,
     PublicRunEvent, PublicRunEventKind, ResponseHandle, RunEvent, SessionRef, SkillDescriptor,
     SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolCall, ToolCategory, ToolEgressEntry,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolCall,
+    ToolCategory, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
+    ToolSpec, ToolSubject, UsageStats,
 };
 
 #[test]
@@ -459,6 +460,16 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 summary_hash: None,
             }),
             "task_child_session",
+        ),
+        (
+            ControlEntry::TaskChildSessionDisplayName(TaskChildSessionDisplayNameEntry {
+                task_id: task_id(),
+                plan_version: 1,
+                step_id: step_id(),
+                child_task_id: TaskId::new("child-task").expect("valid task id"),
+                display_name: "repo audit".to_owned(),
+            }),
+            "task_child_session_display_name",
         ),
         (
             ControlEntry::TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry {

@@ -83,6 +83,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "choose a saved session",
         completes_with_space: true,
     },
+    SlashCommandSpec {
+        canonical: "/agent",
+        aliases: &[],
+        description: "switch or rename visible agent",
+        completes_with_space: true,
+    },
 ];
 
 pub(crate) const KNOWN_MODEL_IDS: &[&str] = &["deepseek-v4-flash", "deepseek-v4-pro"];

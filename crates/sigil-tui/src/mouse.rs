@@ -50,6 +50,7 @@ pub enum HitTarget {
     ToolCard { entry_index: usize },
     Composer,
     LivePanel,
+    InfoRailAgentRow { index: usize },
     InfoRail,
     Background,
 }
@@ -80,6 +81,6 @@ impl From<MouseEventKind> for MouseInputKind {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/mouse_tests.rs"]
 mod tests;

@@ -827,6 +827,6 @@ pub(super) fn persisted_root_config(root_config: &RootConfig) -> RootConfig {
     root_config.clone()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/formatting_detail_tests.rs"]
 mod tests;

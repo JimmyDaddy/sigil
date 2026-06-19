@@ -86,6 +86,6 @@ pub(crate) fn wrapped_line_rows(line: &str, width: usize) -> usize {
     display_width.div_ceil(width)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/text_tests.rs"]
 mod tests;

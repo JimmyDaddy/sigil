@@ -595,6 +595,7 @@ fn worker_control_events_update_task_sidebar_immediately() -> Result<()> {
             steps: vec![sigil_kernel::TaskStepSpec {
                 step_id: step_id.clone(),
                 title: "scan workspace".to_owned(),
+                display_name: None,
                 detail: None,
                 role: sigil_kernel::AgentRole::Executor,
             }],
@@ -618,7 +619,7 @@ fn worker_control_events_update_task_sidebar_immediately() -> Result<()> {
 
     assert!(lines.contains(&"status: running".to_owned()));
     assert!(lines.contains(&"current: v1:overview running".to_owned()));
-    assert!(lines.contains(&"▶ 1. running overview · scan workspace".to_owned()));
+    assert!(lines.contains(&"◐ 1. running overview · scan workspace".to_owned()));
     Ok(())
 }
 

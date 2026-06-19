@@ -11,11 +11,23 @@ pub(crate) fn rail_bg() -> Color {
 }
 
 pub(crate) fn composer_bg() -> Color {
-    Color::Rgb(24, 26, 31)
+    Color::Rgb(27, 30, 37)
 }
 
 pub(crate) fn composer_input_bg() -> Color {
-    Color::Rgb(18, 20, 25)
+    Color::Rgb(14, 16, 21)
+}
+
+pub(crate) fn agent_panel_bg() -> Color {
+    Color::Rgb(10, 12, 17)
+}
+
+pub(crate) fn status_band_bg() -> Color {
+    Color::Rgb(13, 16, 22)
+}
+
+pub(crate) fn dock_edge() -> Color {
+    Color::Rgb(62, 72, 86)
 }
 
 pub(crate) fn selector_bg() -> Color {

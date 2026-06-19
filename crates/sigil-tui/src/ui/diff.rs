@@ -177,6 +177,6 @@ fn is_no_newline_marker(line: &str) -> bool {
     line.starts_with("\\ No newline at end of file")
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/diff_tests.rs"]
 mod tests;

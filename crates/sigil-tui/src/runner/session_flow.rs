@@ -48,6 +48,6 @@ pub(super) fn session_compacted_message(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/session_flow_tests.rs"]
 mod tests;

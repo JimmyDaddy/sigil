@@ -8,11 +8,13 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase, ThinkingBlockMode,
+    AgentView, AppState, EventEntry, LiveActivitySummary, PaneFocus, RunPhase, ThinkingBlockMode,
     TimelineEntry, TimelineRole, TimelineTextSelection,
     formatting::{
         hash_timeline_line, line_has_visible_content, plain_line_text, sidebar_width_for_terminal,
+        truncate_session_view_text,
     },
+    task_sidebar::task_child_session_status_label,
 };
 
 impl AppState {
@@ -25,8 +27,32 @@ impl AppState {
 
     pub(super) fn timeline_viewport_rows(&self) -> usize {
         self.live_panel_height()
-            .saturating_sub(u16::from(self.live_activity_summary().is_some()))
+            .saturating_sub(self.live_status_band_rows())
             .max(1) as usize
+    }
+
+    fn live_status_band_rows(&self) -> u16 {
+        let progress_rows: u16 = if self.live_activity_summary().is_some() {
+            2
+        } else {
+            0
+        };
+        let task_rows = self
+            .task_strip_view()
+            .map(|view| {
+                if view.rows.is_empty() {
+                    0
+                } else {
+                    1 + view.rows.len().min(4) as u16
+                }
+            })
+            .unwrap_or(0);
+        let content_rows = progress_rows.saturating_add(task_rows);
+        if content_rows == 0 {
+            0
+        } else {
+            content_rows.saturating_add(1)
+        }
     }
 
     pub(super) fn max_timeline_scroll_back(&self) -> usize {
@@ -36,6 +62,14 @@ impl AppState {
     }
 
     pub(super) fn effective_timeline_render_len(&self) -> usize {
+        if matches!(self.active_agent_view, AgentView::Child { .. }) {
+            return self
+                .render_child_agent_transcript_lines()
+                .iter()
+                .rposition(line_has_visible_content)
+                .map(|index| index + 1)
+                .unwrap_or(0);
+        }
         self.timeline_render_cache
             .iter()
             .rposition(line_has_visible_content)
@@ -152,6 +186,12 @@ impl AppState {
         self.rebuild_timeline_render_cache();
         self.last_notice = Some(format!("thinking {}", self.thinking_block_mode.as_str()));
         self.push_event("thinking:view", self.thinking_block_mode.as_str());
+    }
+
+    pub(super) fn has_thinking_blocks(&self) -> bool {
+        self.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Thinking && !entry.text.trim().is_empty())
     }
 
     pub(super) fn rebuild_timeline_render_cache(&mut self) {
@@ -470,6 +510,14 @@ impl AppState {
     }
 
     pub(crate) fn transcript_lines(&self, max_lines: usize) -> Vec<Line<'static>> {
+        if max_lines == 0 {
+            return Vec::new();
+        }
+
+        if matches!(self.active_agent_view, AgentView::Child { .. }) {
+            return self.child_agent_transcript_lines(max_lines);
+        }
+
         let visible_range = self.visible_timeline_render_range(max_lines);
         if visible_range.is_empty() {
             return vec![
@@ -495,6 +543,107 @@ impl AppState {
                 }
             })
             .collect()
+    }
+
+    fn child_agent_transcript_lines(&self, max_lines: usize) -> Vec<Line<'static>> {
+        let (header, body) = self.render_child_agent_transcript_sections();
+        if max_lines <= header.len() {
+            return header.into_iter().take(max_lines).collect();
+        }
+        let body_budget = max_lines.saturating_sub(header.len());
+        let effective_len = body
+            .iter()
+            .rposition(line_has_visible_content)
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        if effective_len == 0 {
+            return header;
+        }
+        let viewport = body_budget.max(1);
+        let scroll_back = self
+            .timeline_scroll_back
+            .min(effective_len.saturating_sub(viewport));
+        let end = effective_len.saturating_sub(scroll_back);
+        let start = end.saturating_sub(viewport);
+        header
+            .into_iter()
+            .chain(body[start..end].iter().cloned())
+            .collect()
+    }
+
+    fn render_child_agent_transcript_lines(&self) -> Vec<Line<'static>> {
+        let (header, body) = self.render_child_agent_transcript_sections();
+        header.into_iter().chain(body).collect()
+    }
+
+    fn render_child_agent_transcript_sections(&self) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+        let AgentView::Child {
+            child_session_ref, ..
+        } = &self.active_agent_view
+        else {
+            return (Vec::new(), Vec::new());
+        };
+        let child = self.active_agent_child_entry();
+        let active_label = self.active_agent_label();
+        let mut header = vec![Line::from(vec![
+            Span::styled("agent view", Style::default().fg(Color::Cyan)),
+            Span::raw(format!(": {active_label}")),
+            Span::raw(" · child session"),
+        ])];
+        if let Some(child) = child.as_ref() {
+            header.push(Line::from(format!(
+                "status: {} · {} · v{}:{}",
+                task_child_session_status_label(child.status),
+                child.role.as_str(),
+                child.plan_version,
+                child.step_id.as_str()
+            )));
+        }
+        header.push(Line::from(format!(
+            "session: {}",
+            truncate_session_view_text(&child_session_ref.as_path().display().to_string(), 96)
+        )));
+        let mut body = Vec::new();
+        let Some(transcript) = self.active_agent_child_transcript.as_ref() else {
+            body.push(Line::from("child session not loaded"));
+            return (header, body);
+        };
+        if let Some(error) = transcript.load_error.as_ref() {
+            body.push(Line::from(format!(
+                "load error: {}",
+                truncate_session_view_text(error, 120)
+            )));
+            body.push(Line::from(format!(
+                "path: {}",
+                truncate_session_view_text(&transcript.path.display().to_string(), 120)
+            )));
+            return (header, body);
+        }
+        let timeline_entries =
+            self.restored_timeline_entries_from_session_entries(&transcript.entries);
+        if timeline_entries.is_empty() {
+            body.push(Line::from("child session has no transcript messages yet"));
+            return (header, body);
+        }
+        let mut options = self.timeline_render_options();
+        options.selected_tool_activity_key = None;
+        options.hovered_tool_activity_key = None;
+        options.streaming_assistant_index = None;
+        for (index, entry) in timeline_entries.iter().enumerate() {
+            let rendered =
+                crate::ui::render_timeline_entry_lines_with_options(entry, &options, index);
+            if !rendered.is_empty() && !body.is_empty() {
+                body.push(Line::raw(String::new()));
+            }
+            body.extend(rendered);
+        }
+        while body
+            .last()
+            .is_some_and(|line| !line_has_visible_content(line))
+        {
+            let _ = body.pop();
+        }
+        (header, body)
     }
 
     pub(crate) fn selected_timeline_line_range(&self) -> Option<Range<usize>> {

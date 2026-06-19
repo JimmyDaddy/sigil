@@ -1122,6 +1122,6 @@ fn elicitation_content_from_fields(
     Ok(serde_json::Value::Object(object))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/modal_flow_detail_tests.rs"]
 mod tests;

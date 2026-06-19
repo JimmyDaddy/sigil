@@ -14,6 +14,8 @@ use crate::{
 };
 
 pub const TASK_PLAN_UPDATE_TOOL_NAME: &str = "task_plan_update";
+/// Maximum number of Unicode scalar values allowed in a user-facing task agent display name.
+pub const TASK_AGENT_DISPLAY_NAME_MAX_CHARS: usize = 32;
 
 /// Stable identifier for one durable task run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -252,6 +254,9 @@ pub enum TaskRouteStatus {
 pub struct TaskStepSpec {
     pub step_id: TaskStepId,
     pub title: String,
+    /// Optional presentation-only child agent name for this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub role: AgentRole,
@@ -292,6 +297,10 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                                 "description": "Stable id using only letters, digits, dash, or underscore."
                             },
                             "title": {"type": "string"},
+                            "display_name": {
+                                "type": "string",
+                                "description": "Optional short presentation-only name for a child agent spawned from this step. Prefer explicit configured agent or nickname names; do not use this as an identifier."
+                            },
                             "detail": {"type": "string"},
                             "role": {
                                 "type": "string",
@@ -345,9 +354,18 @@ pub fn task_plan_update_entry(
         .steps
         .into_iter()
         .map(|step| {
+            let display_name = match step.display_name.as_deref() {
+                Some(display_name) => Some(
+                    normalize_task_agent_display_name(display_name).map_err(|error| {
+                        anyhow!("invalid display_name for step {}: {error}", step.step_id)
+                    })?,
+                ),
+                None => None,
+            };
             Ok(TaskStepSpec {
                 step_id: TaskStepId::new(step.step_id)?,
                 title: step.title,
+                display_name,
                 detail: step.detail,
                 role: step.role,
             })
@@ -405,6 +423,8 @@ struct RawTaskPlanUpdateArgs {
 struct RawTaskStepSpec {
     pub step_id: String,
     pub title: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     #[serde(default)]
     pub detail: Option<String>,
     pub role: AgentRole,
@@ -465,6 +485,17 @@ pub struct TaskChildSessionEntry {
     pub status: TaskChildSessionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_hash: Option<String>,
+}
+
+/// Append-only user-facing display name for a child agent session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TaskChildSessionDisplayNameEntry {
+    pub task_id: TaskId,
+    pub plan_version: u32,
+    pub step_id: TaskStepId,
+    pub child_task_id: TaskId,
+    pub display_name: String,
 }
 
 /// Append-only parent record for a subagent approval route.
@@ -544,6 +575,9 @@ impl TaskStateProjection {
             ControlEntry::TaskPlan(entry) => self.apply_plan(entry),
             ControlEntry::TaskStep(entry) => self.apply_step(entry),
             ControlEntry::TaskChildSession(entry) => self.apply_child_session(entry),
+            ControlEntry::TaskChildSessionDisplayName(entry) => {
+                self.apply_child_display_name(entry)
+            }
             ControlEntry::TaskSubagentApprovalRoute(entry) => self.apply_approval_route(entry),
             ControlEntry::TaskSubagentElicitationRoute(entry) => {
                 self.apply_elicitation_route(entry);
@@ -643,6 +677,21 @@ impl TaskStateProjection {
         );
     }
 
+    fn apply_child_display_name(&mut self, entry: &TaskChildSessionDisplayNameEntry) {
+        self.record_task_replay(&entry.task_id);
+        let task = self.ensure_task(&entry.task_id);
+        if let Ok(display_name) = normalize_task_agent_display_name(&entry.display_name) {
+            task.child_display_names.insert(
+                child_session_projection_key(
+                    entry.plan_version,
+                    &entry.step_id,
+                    &entry.child_task_id,
+                ),
+                display_name,
+            );
+        }
+    }
+
     fn apply_approval_route(&mut self, entry: &TaskSubagentApprovalRouteEntry) {
         self.record_task_replay(&entry.task_id);
         let task = self.ensure_task(&entry.task_id);
@@ -698,6 +747,7 @@ pub struct TaskRunProjection {
     pub steps: BTreeMap<(u32, TaskStepId), TaskStepProjection>,
     pub current_step: Option<(u32, TaskStepId)>,
     pub child_sessions: BTreeMap<(u32, TaskStepId, TaskId), TaskChildSessionEntry>,
+    pub child_display_names: BTreeMap<(u32, TaskStepId, TaskId), String>,
     pub approval_routes: BTreeMap<TaskRouteId, TaskSubagentApprovalRouteEntry>,
     pub elicitation_routes: BTreeMap<TaskRouteId, TaskSubagentElicitationRouteEntry>,
     pub duplicate_terminal_entries: usize,
@@ -719,6 +769,7 @@ impl TaskRunProjection {
             steps: BTreeMap::new(),
             current_step: None,
             child_sessions: BTreeMap::new(),
+            child_display_names: BTreeMap::new(),
             approval_routes: BTreeMap::new(),
             elicitation_routes: BTreeMap::new(),
             duplicate_terminal_entries: 0,
@@ -742,6 +793,7 @@ impl TaskRunProjection {
             steps: BTreeMap::new(),
             current_step: None,
             child_sessions: BTreeMap::new(),
+            child_display_names: BTreeMap::new(),
             approval_routes: BTreeMap::new(),
             elicitation_routes: BTreeMap::new(),
             duplicate_terminal_entries: 0,
@@ -749,6 +801,17 @@ impl TaskRunProjection {
             route_unverified: false,
             child_unavailable: false,
         }
+    }
+
+    /// Returns the latest persisted display name for a child session, if one was recorded.
+    pub fn display_name_for_child_session(&self, child: &TaskChildSessionEntry) -> Option<&str> {
+        self.child_display_names
+            .get(&child_session_projection_key(
+                child.plan_version,
+                &child.step_id,
+                &child.child_task_id,
+            ))
+            .map(String::as_str)
     }
 }
 
@@ -803,6 +866,34 @@ fn validate_stable_id(label: &str, value: &str) -> Result<()> {
         bail!("{label} contains unsupported characters");
     }
     Ok(())
+}
+
+/// Normalizes and validates a user-facing task agent display name.
+///
+/// # Errors
+///
+/// Returns an error when the name is empty after trimming, too long, or contains control
+/// characters that would make persisted TUI state hard to render safely.
+pub fn normalize_task_agent_display_name(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("agent display name cannot be empty");
+    }
+    if value.chars().count() > TASK_AGENT_DISPLAY_NAME_MAX_CHARS {
+        bail!("agent display name is too long");
+    }
+    if value.chars().any(char::is_control) {
+        bail!("agent display name contains control characters");
+    }
+    Ok(value.to_owned())
+}
+
+fn child_session_projection_key(
+    plan_version: u32,
+    step_id: &TaskStepId,
+    child_task_id: &TaskId,
+) -> (u32, TaskStepId, TaskId) {
+    (plan_version, step_id.clone(), child_task_id.clone())
 }
 
 fn validate_relative_session_path(path: &Path) -> Result<()> {

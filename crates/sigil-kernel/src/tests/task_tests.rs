@@ -1,12 +1,14 @@
 use anyhow::Result;
 
 use crate::{
-    AgentRole, ControlEntry, Session, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
-    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
-    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
-    task_plan_update_entry, task_plan_update_result_content, task_plan_update_tool_spec,
+    AgentRole, ControlEntry, Session, SessionLogEntry, SessionRef,
+    TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus,
+    TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepSpec,
+    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall,
+    child_session_ref, normalize_task_agent_display_name, task_plan_update_entry,
+    task_plan_update_result_content, task_plan_update_tool_spec,
 };
 
 fn task_id(value: &str) -> Result<TaskId> {
@@ -98,6 +100,22 @@ fn child_session_ref_uses_stable_relative_layout() -> Result<()> {
 }
 
 #[test]
+fn task_agent_display_name_normalization_rejects_unsafe_values() -> Result<()> {
+    assert_eq!(
+        normalize_task_agent_display_name("  德语译员  ")?,
+        "德语译员"
+    );
+    assert!(normalize_task_agent_display_name("").is_err());
+    assert!(normalize_task_agent_display_name(" \t ").is_err());
+    assert!(normalize_task_agent_display_name("bad\nname").is_err());
+    assert!(
+        normalize_task_agent_display_name(&"a".repeat(TASK_AGENT_DISPLAY_NAME_MAX_CHARS + 1))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn task_control_entries_roundtrip() -> Result<()> {
     let entries = vec![
         run_entry(TaskRunStatus::Started)?,
@@ -108,6 +126,7 @@ fn task_control_entries_roundtrip() -> Result<()> {
             steps: vec![TaskStepSpec {
                 step_id: step_id("step_1")?,
                 title: "inspect".to_owned(),
+                display_name: None,
                 detail: Some("read code".to_owned()),
                 role: AgentRole::Planner,
             }],
@@ -122,6 +141,13 @@ fn task_control_entries_roundtrip() -> Result<()> {
             title: Some("inspect".to_owned()),
             summary: Some("done".to_owned()),
             reason: None,
+        }),
+        ControlEntry::TaskChildSessionDisplayName(TaskChildSessionDisplayNameEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 1,
+            step_id: step_id("step_1")?,
+            child_task_id: task_id("child_1")?,
+            display_name: "德语译员".to_owned(),
         }),
     ];
 
@@ -143,7 +169,7 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
     let call = ToolCall {
         id: "call-1".to_owned(),
         name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
-        args_json: r#"{"plan_version":1,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","detail":"read first","role":"planner"}],"reason":"initial"}"#.to_owned(),
+        args_json: r#"{"plan_version":1,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","display_name":"Scout 1","detail":"read first","role":"planner"}],"reason":"initial"}"#.to_owned(),
     };
 
     let entry = task_plan_update_entry(&context, &call)?;
@@ -151,6 +177,7 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
     assert_eq!(entry.plan_version, 1);
     assert_eq!(entry.status, TaskPlanStatus::Accepted);
     assert_eq!(entry.steps[0].role, AgentRole::Planner);
+    assert_eq!(entry.steps[0].display_name.as_deref(), Some("Scout 1"));
     assert_eq!(entry.steps[0].detail.as_deref(), Some("read first"));
     assert!(task_plan_update_result_content(&entry).contains(r#""steps":1"#));
 
@@ -174,9 +201,15 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
 
     let unsupported_status = ToolCall {
         args_json: r#"{"plan_version":1,"status":"done","steps":[{"step_id":"step_1","title":"inspect","role":"executor"}]}"#.to_owned(),
-        ..call
+        ..call.clone()
     };
     assert!(task_plan_update_entry(&context, &unsupported_status).is_err());
+
+    let invalid_display_name = ToolCall {
+        args_json: r#"{"plan_version":1,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","display_name":"bad\nname","role":"executor"}]}"#.to_owned(),
+        ..call
+    };
+    assert!(task_plan_update_entry(&context, &invalid_display_name).is_err());
     Ok(())
 }
 
@@ -187,6 +220,7 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
     assert!(spec.description.contains("Do not call task"));
     assert!(spec.description.contains("subagent_read"));
     assert!(spec.description.contains("subagent_write"));
+    assert!(spec.input_schema.to_string().contains("display_name"));
     assert!(
         spec.input_schema
             .to_string()
@@ -205,6 +239,7 @@ fn task_projection_replays_run_plan_and_step_state() -> Result<()> {
             steps: vec![TaskStepSpec {
                 step_id: step_id("step_1")?,
                 title: "implement".to_owned(),
+                display_name: None,
                 detail: None,
                 role: AgentRole::Executor,
             }],
@@ -604,5 +639,42 @@ fn task_projection_keeps_verified_subagent_routes_clean() -> Result<()> {
 
     assert!(!task.route_unverified);
     assert_eq!(task.approval_routes.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn task_projection_replays_child_session_display_name_entries() -> Result<()> {
+    let child = TaskChildSessionEntry {
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        step_id: step_id("step_1")?,
+        child_task_id: task_id("child_1")?,
+        child_session_ref: session_ref("children/task_1/step_1-child_1.jsonl")?,
+        role: AgentRole::SubagentWrite,
+        status: TaskChildSessionStatus::Completed,
+        summary_hash: None,
+    };
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(child.clone())),
+        SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(
+            TaskChildSessionDisplayNameEntry {
+                task_id: task_id("task_1")?,
+                plan_version: 1,
+                step_id: step_id("step_1")?,
+                child_task_id: task_id("child_1")?,
+                display_name: "  德语译员  ".to_owned(),
+            },
+        )),
+    ]);
+    let task = projection
+        .tasks
+        .get(&task_id("task_1")?)
+        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
+
+    assert_eq!(
+        task.display_name_for_child_session(&child),
+        Some("德语译员")
+    );
     Ok(())
 }

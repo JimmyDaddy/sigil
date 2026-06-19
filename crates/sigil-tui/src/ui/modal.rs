@@ -352,6 +352,6 @@ fn modal_visual(app: &AppState) -> ModalVisual {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/modal_tests.rs"]
 mod tests;

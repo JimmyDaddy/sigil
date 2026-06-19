@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig,
-    PluginManifestSnapshot, RootConfig, SkillDescriptor,
+    PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode,
 };
 use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
@@ -73,7 +73,7 @@ impl ConfigSection {
             Self::Compaction => "context and thresholds",
             Self::CodeIntelligence => "LSP readiness",
             Self::Terminal => "terminal integration",
-            Self::Skills => "skill browser",
+            Self::Skills => "skills and agents",
             Self::Plugins => "plugin trust review",
             Self::Mcp => "MCP servers",
         }
@@ -314,10 +314,10 @@ impl ConfigField {
                 "Mouse wheel rows per tick for transcript and approval diff scrolling."
             }
             Self::SkillId => {
-                "Selected reusable skill. PgUp/PgDn switches skills; footer actions load or invoke it."
+                "Selected reusable skill. Up/Down moves through skills; footer actions load or invoke it."
             }
             Self::PluginId => {
-                "Selected plugin manifest. PgUp/PgDn switches plugins; footer actions approve or deny the manifest hash."
+                "Selected plugin manifest. Up/Down moves through plugins; footer actions approve or deny the manifest hash."
             }
             Self::McpName => "Stable local name for this MCP server.",
             Self::McpCommand => "Executable used to start the MCP server process.",
@@ -1066,6 +1066,9 @@ impl ConfigState {
     ) {
         self.skill_descriptors = descriptors;
         self.skill_warnings = warnings;
+        if let Some(first_index) = skill_display_order(&self.skill_descriptors).first() {
+            self.selected_skill_index = *first_index;
+        }
         self.sync_skill_selection();
         if self.selected_section == ConfigSection::Skills {
             self.selected_field = self.first_field_for_section(ConfigSection::Skills);
@@ -1116,18 +1119,48 @@ impl ConfigState {
     }
 
     pub(crate) fn cycle_skill(&mut self, forward: bool) -> bool {
-        if self.skill_descriptors.is_empty() {
+        let order = skill_display_order(&self.skill_descriptors);
+        if order.is_empty() {
             return false;
         }
-        let len = self.skill_descriptors.len();
-        if forward {
-            self.selected_skill_index = (self.selected_skill_index + 1) % len;
-        } else if self.selected_skill_index == 0 {
-            self.selected_skill_index = len - 1;
+        let current_position = order
+            .iter()
+            .position(|index| *index == self.selected_skill_index)
+            .unwrap_or(0);
+        let next_position = if forward {
+            (current_position + 1) % order.len()
+        } else if current_position == 0 {
+            order.len() - 1
         } else {
-            self.selected_skill_index -= 1;
-        }
+            current_position - 1
+        };
+        self.selected_skill_index = order[next_position];
         true
+    }
+
+    pub(crate) fn move_skill(&mut self, forward: bool) -> ConfigFieldMove {
+        let order = skill_display_order(&self.skill_descriptors);
+        if order.is_empty() {
+            return ConfigFieldMove::Unavailable;
+        }
+        let current_position = order
+            .iter()
+            .position(|index| *index == self.selected_skill_index)
+            .unwrap_or(0);
+        if forward {
+            if current_position + 1 >= order.len() {
+                return ConfigFieldMove::Boundary;
+            }
+            self.selected_skill_index = order[current_position + 1];
+        } else {
+            if current_position == 0 {
+                return ConfigFieldMove::Boundary;
+            }
+            self.selected_skill_index = order[current_position - 1];
+        }
+        self.selected_field = Some(ConfigField::SkillId);
+        self.footer_selected = false;
+        ConfigFieldMove::Moved
     }
 
     pub(crate) fn selected_plugin(&self) -> Option<&PluginManifestSnapshot> {
@@ -1151,6 +1184,26 @@ impl ConfigState {
             self.selected_plugin_index -= 1;
         }
         true
+    }
+
+    pub(crate) fn move_plugin(&mut self, forward: bool) -> ConfigFieldMove {
+        if self.plugin_manifests.is_empty() {
+            return ConfigFieldMove::Unavailable;
+        }
+        if forward {
+            if self.selected_plugin_index + 1 >= self.plugin_manifests.len() {
+                return ConfigFieldMove::Boundary;
+            }
+            self.selected_plugin_index += 1;
+        } else {
+            if self.selected_plugin_index == 0 {
+                return ConfigFieldMove::Boundary;
+            }
+            self.selected_plugin_index -= 1;
+        }
+        self.selected_field = Some(ConfigField::PluginId);
+        self.footer_selected = false;
+        ConfigFieldMove::Moved
     }
 
     pub(crate) fn selected_mcp_server(&self) -> Option<&McpServerDraft> {
@@ -1582,6 +1635,20 @@ fn display_ratio(value: &str) -> String {
     }
 }
 
-#[cfg(test)]
+fn skill_display_order(descriptors: &[SkillDescriptor]) -> Vec<usize> {
+    let mut agents = Vec::new();
+    let mut skills = Vec::new();
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        if matches!(descriptor.run_as, SkillRunMode::ChildSession) {
+            agents.push(index);
+        } else {
+            skills.push(index);
+        }
+    }
+    agents.extend(skills);
+    agents
+}
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/config_panel_tests.rs"]
 mod tests;

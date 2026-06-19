@@ -81,6 +81,6 @@ fn push_doctor_attention_section(report: &DoctorReport, lines: &mut Vec<String>)
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/diagnostics_flow_tests.rs"]
 mod tests;

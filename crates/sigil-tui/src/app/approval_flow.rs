@@ -650,6 +650,6 @@ fn normalize_approval_diagnostic_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_owned()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/approval_flow_detail_tests.rs"]
 mod tests;

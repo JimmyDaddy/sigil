@@ -439,6 +439,6 @@ fn render_notice_body_spans(line: &str, accent: Color) -> Vec<Span<'static>> {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/timeline_tests.rs"]
 mod tests;

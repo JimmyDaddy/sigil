@@ -13,7 +13,7 @@ use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, ControlEntry, JsonlSessionStore, McpServerConfig,
     McpServerStartup, PluginCapability, PluginManifestSnapshot, PluginStateProjection,
     PluginTrustDecision, PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor,
-    SkillSource, SkillTrustState, ToolRegistryScope, default_user_config_dir,
+    SkillRunMode, SkillSource, SkillTrustState, ToolRegistryScope, default_user_config_dir,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -159,10 +159,12 @@ impl AppState {
             lines.push("MCP: PgUp/PgDn switch".to_owned());
             lines.push("MCP: footer activate lazy".to_owned());
         } else if state.selected_section == ConfigSection::Skills {
-            lines.push("Skills: PgUp/PgDn switch".to_owned());
+            lines.push("Skills/agents: Up/Down select".to_owned());
+            lines.push("Skills/agents: PgUp/PgDn wrap".to_owned());
             lines.push("Skills: footer load/invoke".to_owned());
         } else if state.selected_section == ConfigSection::Plugins {
-            lines.push("Plugins: PgUp/PgDn switch".to_owned());
+            lines.push("Plugins: Up/Down select".to_owned());
+            lines.push("Plugins: PgUp/PgDn wrap".to_owned());
             lines.push("Plugins: footer approve/deny".to_owned());
         }
         lines
@@ -348,6 +350,7 @@ impl AppState {
                 lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Skills => {
+                let (skill_count, agent_count) = skill_config_counts(config_state);
                 lines.push("[discovery]".to_owned());
                 lines.push(render_config_readonly_row(
                     "Enabled",
@@ -355,30 +358,31 @@ impl AppState {
                 ));
                 lines.push(render_config_readonly_row(
                     "Configured",
-                    &format!("{} skills", config_state.skill_descriptors.len()),
+                    &skill_agent_count_summary(skill_count, agent_count),
                 ));
                 lines.push(render_config_readonly_row(
                     "Warnings",
                     &format!("{} warnings", config_state.skill_warnings.len()),
                 ));
                 if config_state.skill_descriptors.is_empty() {
-                    lines.push(render_config_hint_row("No skills discovered"));
+                    lines.push(render_config_hint_row("No skills or agents discovered"));
                     lines.push(render_config_hint_row(
-                        "Workspace skills live under the configured skills.workspace_dir",
+                        "Workspace skills and agents live under the configured skills.workspace_dir",
                     ));
                 } else {
                     lines.push(render_config_readonly_row(
                         "Selected",
-                        &format!(
-                            "{} of {}",
-                            config_state.selected_skill_index + 1,
-                            config_state.skill_descriptors.len()
-                        ),
+                        &selected_skill_summary(config_state),
                     ));
+                    lines.push(String::new());
+                    lines.extend(render_skill_group_lines(config_state));
                     if let Some(skill) = config_state.selected_skill() {
                         lines.push(String::new());
-                        lines.push("[skill]".to_owned());
-                        lines.push(render_config_value_row(config_state, ConfigField::SkillId));
+                        lines.push(format!("[{}]", skill_display_noun(skill)));
+                        lines.push(render_config_readonly_row(
+                            skill_display_title(skill),
+                            &skill.id,
+                        ));
                         lines.extend(render_skill_detail_lines(skill));
                     }
                 }
@@ -396,7 +400,7 @@ impl AppState {
                     }
                 }
                 lines.push(String::new());
-                lines.push("PgUp/PgDn skill  footer load/invoke".to_owned());
+                lines.push("Up/Down item  PgUp/PgDn wrap  footer load/invoke".to_owned());
                 lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Plugins => {
@@ -423,10 +427,13 @@ impl AppState {
                             config_state.plugin_manifests.len()
                         ),
                     ));
+                    lines.push(String::new());
+                    lines.push("[plugins]".to_owned());
+                    lines.extend(render_plugin_index_lines(config_state));
                     if let Some(plugin) = config_state.selected_plugin() {
                         lines.push(String::new());
                         lines.push("[plugin]".to_owned());
-                        lines.push(render_config_value_row(config_state, ConfigField::PluginId));
+                        lines.push(render_config_readonly_row("Plugin", &plugin.plugin_id));
                         lines.extend(render_plugin_detail_lines(plugin));
                     }
                 }
@@ -444,7 +451,7 @@ impl AppState {
                     }
                 }
                 lines.push(String::new());
-                lines.push("PgUp/PgDn plugin  footer approve/deny".to_owned());
+                lines.push("Up/Down plugin  PgUp/PgDn wrap  footer approve/deny".to_owned());
                 lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Mcp => {
@@ -731,7 +738,8 @@ impl AppState {
                         if config_state.focus_last_field()
                             && let Some(field) = config_state.selected_field
                         {
-                            self.last_notice = Some(format!("config field {}", field.label()));
+                            self.last_notice = config_collection_selection_notice(config_state)
+                                .or_else(|| Some(format!("config field {}", field.label())));
                         } else {
                             config_state.footer_selected = false;
                             self.last_notice = Some(format!(
@@ -739,10 +747,21 @@ impl AppState {
                                 config_state.selected_section.title().to_lowercase()
                             ));
                         }
-                    } else if let ConfigFieldMove::Moved = config_state.move_field(false)
-                        && let Some(field) = config_state.selected_field
-                    {
-                        self.last_notice = Some(format!("config field {}", field.label()));
+                    } else {
+                        match move_config_collection_selection(config_state, false) {
+                            Some(ConfigFieldMove::Moved) => {
+                                self.last_notice = config_collection_selection_notice(config_state);
+                            }
+                            Some(ConfigFieldMove::Boundary | ConfigFieldMove::Unavailable) => {}
+                            None => {
+                                if let ConfigFieldMove::Moved = config_state.move_field(false)
+                                    && let Some(field) = config_state.selected_field
+                                {
+                                    self.last_notice =
+                                        Some(format!("config field {}", field.label()));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -751,22 +770,26 @@ impl AppState {
                     if config_state.footer_selected {
                         return Ok(None);
                     }
-                    match config_state.move_field(true) {
-                        ConfigFieldMove::Moved => {
-                            if let Some(field) = config_state.selected_field {
-                                self.last_notice = Some(format!("config field {}", field.label()));
-                            }
+                    match move_config_collection_selection(config_state, true) {
+                        Some(ConfigFieldMove::Moved) => {
+                            self.last_notice = config_collection_selection_notice(config_state);
                         }
-                        ConfigFieldMove::Boundary | ConfigFieldMove::Unavailable => {
-                            let action = ConfigFooterAction::actions_for_section(
-                                config_state.selected_section,
-                            )
-                            .first()
-                            .copied()
-                            .unwrap_or(ConfigFooterAction::Close);
-                            config_state.focus_footer(action);
+                        Some(ConfigFieldMove::Boundary | ConfigFieldMove::Unavailable) => {
+                            let action = focus_first_config_footer_action(config_state);
                             self.last_notice = Some(format!("action {}", action.field_label()));
                         }
+                        None => match config_state.move_field(true) {
+                            ConfigFieldMove::Moved => {
+                                if let Some(field) = config_state.selected_field {
+                                    self.last_notice =
+                                        Some(format!("config field {}", field.label()));
+                                }
+                            }
+                            ConfigFieldMove::Boundary | ConfigFieldMove::Unavailable => {
+                                let action = focus_first_config_footer_action(config_state);
+                                self.last_notice = Some(format!("action {}", action.field_label()));
+                            }
+                        },
                     }
                 }
             }
@@ -1030,35 +1053,37 @@ impl AppState {
 
     fn load_selected_skill(&mut self) -> Result<Option<AppAction>> {
         if self.is_busy {
-            self.last_notice = Some("busy; load skill later".to_owned());
+            self.last_notice = Some("busy; load skill or agent later".to_owned());
             return Ok(None);
         }
         let Some(skill) = self.selected_config_skill() else {
             return Ok(None);
         };
+        let item_kind = skill_display_noun(&skill);
         if let Some(reason) = skill_load_unavailable_reason(&skill) {
-            self.last_notice = Some(format!("skill {} {reason}", skill.id));
+            self.last_notice = Some(format!("{item_kind} {} {reason}", skill.id));
             return Ok(None);
         }
 
         let prompt = skill_load_prompt(&skill);
         let skill_id = skill.id;
         self.config_state = None;
-        self.last_notice = Some(format!("loading skill {skill_id}"));
+        self.last_notice = Some(format!("loading {item_kind} {skill_id}"));
         self.push_event("skill", format!("load {skill_id}"));
         Ok(Some(AppAction::SubmitPrompt(prompt)))
     }
 
     fn open_selected_skill_arguments(&mut self) -> Result<Option<AppAction>> {
         if self.is_busy {
-            self.last_notice = Some("busy; invoke skill later".to_owned());
+            self.last_notice = Some("busy; invoke skill or agent later".to_owned());
             return Ok(None);
         }
         let Some(skill) = self.selected_config_skill() else {
             return Ok(None);
         };
+        let item_kind = skill_display_noun(&skill);
         if let Some(reason) = skill_invoke_unavailable_reason(&skill) {
-            self.last_notice = Some(format!("skill {} {reason}", skill.id));
+            self.last_notice = Some(format!("{item_kind} {} {reason}", skill.id));
             return Ok(None);
         }
         self.open_text_input(
@@ -1070,21 +1095,22 @@ impl AppState {
 
     fn submit_selected_skill_invocation(&mut self, arguments: String) -> Result<Option<AppAction>> {
         if self.is_busy {
-            self.last_notice = Some("busy; invoke skill later".to_owned());
+            self.last_notice = Some("busy; invoke skill or agent later".to_owned());
             return Ok(None);
         }
         let Some(skill) = self.selected_config_skill() else {
             return Ok(None);
         };
+        let item_kind = skill_display_noun(&skill);
         if let Some(reason) = skill_invoke_unavailable_reason(&skill) {
-            self.last_notice = Some(format!("skill {} {reason}", skill.id));
+            self.last_notice = Some(format!("{item_kind} {} {reason}", skill.id));
             return Ok(None);
         }
 
         let prompt = skill_invoke_prompt(&skill, &arguments);
         let skill_id = skill.id;
         self.config_state = None;
-        self.last_notice = Some(format!("invoking skill {skill_id}"));
+        self.last_notice = Some(format!("invoking {item_kind} {skill_id}"));
         self.push_event("skill", format!("invoke {skill_id}"));
         Ok(Some(AppAction::SubmitPrompt(prompt)))
     }
@@ -1095,11 +1121,12 @@ impl AppState {
             return None;
         };
         if config_state.selected_section != ConfigSection::Skills {
-            self.last_notice = Some("skill action is available in Skills config".to_owned());
+            self.last_notice =
+                Some("skill or agent action is available in Skills config".to_owned());
             return None;
         }
         let Some(skill) = config_state.selected_skill() else {
-            self.last_notice = Some("no skill selected".to_owned());
+            self.last_notice = Some("no skill or agent selected".to_owned());
             return None;
         };
         Some(skill.clone())
@@ -1222,7 +1249,10 @@ impl AppState {
         Ok(())
     }
 
-    fn append_control_to_current_session(&mut self, control: ControlEntry) -> Result<()> {
+    pub(super) fn append_control_to_current_session(
+        &mut self,
+        control: ControlEntry,
+    ) -> Result<()> {
         let entry = SessionLogEntry::Control(control.clone());
         let store = JsonlSessionStore::new(&self.session_log_path)?;
         store.append(&entry)?;
@@ -1487,6 +1517,68 @@ fn config_context_window_source_label(source: ContextWindowSource) -> &'static s
     }
 }
 
+fn move_config_collection_selection(
+    config_state: &mut ConfigState,
+    forward: bool,
+) -> Option<ConfigFieldMove> {
+    match config_state.selected_section {
+        ConfigSection::Skills => Some(config_state.move_skill(forward)),
+        ConfigSection::Plugins => Some(config_state.move_plugin(forward)),
+        _ => None,
+    }
+}
+
+fn config_collection_selection_notice(config_state: &ConfigState) -> Option<String> {
+    match config_state.selected_section {
+        ConfigSection::Skills if !config_state.skill_descriptors.is_empty() => {
+            Some(selected_skill_summary(config_state))
+        }
+        ConfigSection::Plugins if !config_state.plugin_manifests.is_empty() => Some(format!(
+            "plugin {}/{}",
+            config_state.selected_plugin_index + 1,
+            config_state.plugin_manifests.len()
+        )),
+        _ => None,
+    }
+}
+
+fn focus_first_config_footer_action(config_state: &mut ConfigState) -> ConfigFooterAction {
+    let action = ConfigFooterAction::actions_for_section(config_state.selected_section)
+        .first()
+        .copied()
+        .unwrap_or(ConfigFooterAction::Close);
+    config_state.focus_footer(action);
+    action
+}
+
+fn config_field_display_label(config_state: &ConfigState, field: ConfigField) -> &'static str {
+    if matches!(field, ConfigField::SkillId)
+        && let Some(skill) = config_state.selected_skill()
+    {
+        return skill_display_title(skill);
+    }
+    field.display_label()
+}
+
+fn config_field_key_label(config_state: &ConfigState, field: ConfigField) -> &'static str {
+    if matches!(field, ConfigField::SkillId)
+        && let Some(skill) = config_state.selected_skill()
+    {
+        return skill_display_noun(skill);
+    }
+    field.label()
+}
+
+fn config_field_help_text(config_state: &ConfigState, field: ConfigField) -> &'static str {
+    if matches!(field, ConfigField::SkillId)
+        && let Some(skill) = config_state.selected_skill()
+        && skill_is_agent(skill)
+    {
+        return "Selected child-session agent. Up/Down moves through agents and skills; footer actions load or invoke it.";
+    }
+    field.help_text()
+}
+
 fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     let Some(field) = config_state.selected_field else {
         let mut lines = vec![
@@ -1498,18 +1590,23 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
         if config_state.selected_section == ConfigSection::Mcp {
             lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
         } else if config_state.selected_section == ConfigSection::Skills {
-            lines.push("skills: PgUp/PgDn skill · footer load/invoke".to_owned());
+            lines.push(
+                "skills/agents: Up/Down item · PgUp/PgDn wrap · footer load/invoke".to_owned(),
+            );
         } else if config_state.selected_section == ConfigSection::Plugins {
-            lines.push("plugins: PgUp/PgDn plugin · footer approve/deny".to_owned());
+            lines.push("plugins: Up/Down plugin · PgUp/PgDn wrap · footer approve/deny".to_owned());
         }
         return lines;
     };
     let mut lines = vec![
         String::new(),
         "[details]".to_owned(),
-        format!("selected: {}", field.display_label()),
-        format!("key: {}", field.label()),
-        field.help_text().to_owned(),
+        format!(
+            "selected: {}",
+            config_field_display_label(config_state, field)
+        ),
+        format!("key: {}", config_field_key_label(config_state, field)),
+        config_field_help_text(config_state, field).to_owned(),
         String::new(),
         CONFIG_CONTROLS_HINT.to_owned(),
         CONFIG_ACTIONS_HINT.to_owned(),
@@ -1526,9 +1623,9 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     if config_state.selected_section == ConfigSection::Mcp {
         lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
     } else if config_state.selected_section == ConfigSection::Skills {
-        lines.push("skills: PgUp/PgDn skill · footer load/invoke".to_owned());
+        lines.push("skills/agents: Up/Down item · PgUp/PgDn wrap · footer load/invoke".to_owned());
     } else if config_state.selected_section == ConfigSection::Plugins {
-        lines.push("plugins: PgUp/PgDn plugin · footer approve/deny".to_owned());
+        lines.push("plugins: Up/Down plugin · PgUp/PgDn wrap · footer approve/deny".to_owned());
     }
 
     lines
@@ -1581,6 +1678,7 @@ fn render_skill_detail_lines(skill: &SkillDescriptor) -> Vec<String> {
     let argument_hint = skill.argument_hint.as_deref().unwrap_or("none");
 
     vec![
+        render_config_readonly_row("Type", skill_display_noun(skill)),
         render_config_readonly_row("Name", name),
         render_config_readonly_row("Description", description),
         render_config_readonly_row("Enabled", bool_summary(skill.enabled)),
@@ -1609,6 +1707,142 @@ fn render_skill_detail_lines(skill: &SkillDescriptor) -> Vec<String> {
             skill_action_label(skill_invoke_unavailable_reason(skill)),
         ),
     ]
+}
+
+fn render_skill_group_lines(config_state: &ConfigState) -> Vec<String> {
+    let mut lines = vec!["[agents]".to_owned()];
+    let agent_lines = render_skill_index_lines(config_state, true);
+    if agent_lines.is_empty() {
+        lines.push(render_config_hint_row("No agents discovered"));
+    } else {
+        lines.extend(agent_lines);
+    }
+    lines.push(String::new());
+    lines.push("[skills]".to_owned());
+    let skill_lines = render_skill_index_lines(config_state, false);
+    if skill_lines.is_empty() {
+        lines.push(render_config_hint_row("No skills discovered"));
+    } else {
+        lines.extend(skill_lines);
+    }
+    lines
+}
+
+fn render_skill_index_lines(config_state: &ConfigState, agents: bool) -> Vec<String> {
+    config_state
+        .skill_descriptors
+        .iter()
+        .enumerate()
+        .filter(|(_, skill)| skill_is_agent(skill) == agents)
+        .map(|(index, skill)| {
+            let marker = if index == config_state.selected_skill_index {
+                ">"
+            } else {
+                " "
+            };
+            format!(
+                "{marker} {}: {} · {} · {} · {}",
+                skill.id,
+                skill.trust.as_str(),
+                skill.run_as.as_str(),
+                skill_source_summary(&skill.source),
+                skill_slash_summary(skill)
+            )
+        })
+        .collect()
+}
+
+fn skill_config_counts(config_state: &ConfigState) -> (usize, usize) {
+    let agent_count = config_state
+        .skill_descriptors
+        .iter()
+        .filter(|skill| skill_is_agent(skill))
+        .count();
+    let skill_count = config_state
+        .skill_descriptors
+        .len()
+        .saturating_sub(agent_count);
+    (skill_count, agent_count)
+}
+
+fn skill_agent_count_summary(skill_count: usize, agent_count: usize) -> String {
+    format!(
+        "{} {}, {} {}",
+        skill_count,
+        pluralize("skill", skill_count),
+        agent_count,
+        pluralize("agent", agent_count)
+    )
+}
+
+fn selected_skill_summary(config_state: &ConfigState) -> String {
+    let Some(skill) = config_state.selected_skill() else {
+        return "none".to_owned();
+    };
+    let selected_is_agent = skill_is_agent(skill);
+    let total = config_state
+        .skill_descriptors
+        .iter()
+        .filter(|candidate| skill_is_agent(candidate) == selected_is_agent)
+        .count();
+    let position = config_state
+        .skill_descriptors
+        .iter()
+        .take(config_state.selected_skill_index + 1)
+        .filter(|candidate| skill_is_agent(candidate) == selected_is_agent)
+        .count();
+    format!("{} {position}/{total}", skill_display_noun(skill))
+}
+
+fn skill_is_agent(skill: &SkillDescriptor) -> bool {
+    matches!(skill.run_as, SkillRunMode::ChildSession)
+}
+
+fn skill_display_noun(skill: &SkillDescriptor) -> &'static str {
+    if skill_is_agent(skill) {
+        "agent"
+    } else {
+        "skill"
+    }
+}
+
+fn skill_display_title(skill: &SkillDescriptor) -> &'static str {
+    if skill_is_agent(skill) {
+        "Agent"
+    } else {
+        "Skill"
+    }
+}
+
+fn pluralize(noun: &'static str, count: usize) -> &'static str {
+    match (noun, count) {
+        ("skill", 1) => "skill",
+        ("agent", 1) => "agent",
+        ("skill", _) => "skills",
+        ("agent", _) => "agents",
+        _ => noun,
+    }
+}
+
+fn render_plugin_index_lines(config_state: &ConfigState) -> Vec<String> {
+    config_state
+        .plugin_manifests
+        .iter()
+        .enumerate()
+        .map(|(index, plugin)| {
+            let marker = if index == config_state.selected_plugin_index {
+                ">"
+            } else {
+                " "
+            };
+            format!(
+                "{marker} {}: {} · {}",
+                plugin.plugin_id,
+                plugin.trust.as_str(),
+                plugin.version
+            )
+        })
+        .collect()
 }
 
 fn plugin_implication_summary(capabilities: &[PluginCapability]) -> String {
@@ -2047,6 +2281,6 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/config_flow_detail_tests.rs"]
 mod tests;

@@ -1,18 +1,32 @@
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod app_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod approval_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod command_dispatch_tests;
 pub(crate) mod common;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod config_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod formatting_tests;
 mod input_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod modal_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod mouse_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod performance_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod session_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod setup_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod slash_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod timeline_flow_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod tool_card_interaction_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod worker_bridge_tests;
 
 use std::path::Path;

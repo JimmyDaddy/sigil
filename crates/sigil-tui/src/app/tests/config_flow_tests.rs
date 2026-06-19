@@ -632,12 +632,17 @@ paths: [crates/**]
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Skills 7/9 · skill browser"));
+    assert!(detail.contains("Skills 7/9 · skills and agents"));
     assert!(detail.contains("[discovery]"));
-    assert!(detail.contains("- Configured: 1 skills"));
-    assert!(detail.contains("- Selected: 1 of 1"));
-    assert!(detail.contains("[skill]"));
-    assert!(detail.contains("Skill: review"));
+    assert!(detail.contains("- Configured: 0 skills, 1 agent"));
+    assert!(detail.contains("- Selected: agent 1/1"));
+    assert!(detail.contains("[agents]"));
+    assert!(detail.contains("> review: trusted · child_session · workspace · /review"));
+    assert!(detail.contains("[skills]"));
+    assert!(detail.contains("i No skills discovered"));
+    assert!(detail.contains("[agent]"));
+    assert!(detail.contains("Agent: review"));
+    assert!(detail.contains("- Type: agent"));
     assert!(detail.contains("- Name: Repo Review"));
     assert!(detail.contains("- Description: Review this repository."));
     assert!(detail.contains("- Model: yes"));
@@ -653,10 +658,11 @@ paths: [crates/**]
     assert!(detail.contains("- Paths: crates/**"));
     assert!(detail.contains("- Load: available"));
     assert!(detail.contains("- Invoke: available"));
-    assert!(detail.contains("skills: PgUp/PgDn skill · footer load/invoke"));
+    assert!(detail.contains("skills/agents: Up/Down item · PgUp/PgDn wrap · footer load/invoke"));
 
     let nav = app.config_nav_lines().join("\n");
-    assert!(nav.contains("Skills: PgUp/PgDn switch"));
+    assert!(nav.contains("Skills/agents: Up/Down select"));
+    assert!(nav.contains("Skills/agents: PgUp/PgDn wrap"));
     assert!(nav.contains("Skills: footer load/invoke"));
     assert_eq!(
         app.config_footer_action_labels(),
@@ -689,8 +695,28 @@ trust: trusted
         .as_mut()
         .expect("config state should exist")
         .set_section(ConfigSection::Skills);
+    let initial_detail = app.config_detail_lines().join("\n");
+    assert!(initial_detail.contains("> alpha: trusted · inline · workspace · /alpha"));
+    assert!(initial_detail.contains("  beta: trusted · inline · workspace · /beta"));
 
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_skill_index,
+        1
+    );
+    assert_eq!(app.last_notice(), Some("skill 2/2"));
+    let next_detail = app.config_detail_lines().join("\n");
+    assert!(next_detail.contains("  alpha: trusted · inline · workspace · /alpha"));
+    assert!(next_detail.contains("> beta: trusted · inline · workspace · /beta"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_footer_action_label(), Some("load"));
+    assert_eq!(app.last_notice(), Some("action load_skill"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(
         app.config_state
             .as_ref()
@@ -700,7 +726,27 @@ trust: trusted
     );
     assert_eq!(app.last_notice(), Some("skill 2/2"));
 
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_skill_index,
+        0
+    );
+    assert_eq!(app.last_notice(), Some("skill 1/2"));
+
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_skill_index,
+        1
+    );
+    assert_eq!(app.last_notice(), Some("skill 2/2"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
     assert_eq!(
         app.config_state
             .as_ref()
@@ -761,13 +807,13 @@ fn config_skills_step_renders_empty_discovery_and_warnings() -> Result<()> {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("- Configured: 0 skills"));
+    assert!(detail.contains("- Configured: 0 skills, 0 agents"));
     assert!(detail.contains("- Warnings: 5 warnings"));
-    assert!(detail.contains("i No skills discovered"));
-    assert!(detail.contains("Workspace skills live under"));
+    assert!(detail.contains("i No skills or agents discovered"));
+    assert!(detail.contains("Workspace skills and agents live under"));
     assert!(detail.contains("[warnings]"));
     assert!(detail.contains("... 1 more warnings"));
-    assert!(detail.contains("skills: PgUp/PgDn skill · footer load/invoke"));
+    assert!(detail.contains("skills/agents: Up/Down item · PgUp/PgDn wrap · footer load/invoke"));
     Ok(())
 }
 
@@ -837,7 +883,7 @@ trust: trusted
     }
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; load skill later"));
+    assert_eq!(app.last_notice(), Some("busy; load skill or agent later"));
 
     app.is_busy = false;
     {
@@ -852,7 +898,7 @@ trust: trusted
     assert!(action.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("skill action is available in Skills config")
+        Some("skill or agent action is available in Skills config")
     );
 
     let empty_workspace = temp.path().join("empty-workspace");
@@ -872,7 +918,7 @@ trust: trusted
     }
     let action = empty_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(empty_app.last_notice(), Some("no skill selected"));
+    assert_eq!(empty_app.last_notice(), Some("no skill or agent selected"));
     Ok(())
 }
 
@@ -1063,6 +1109,8 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 1 plugins"));
     assert!(detail.contains("- Selected: 1 of 1"));
+    assert!(detail.contains("[plugins]"));
+    assert!(detail.contains("> repo-review: needs_review · 0.1.0"));
     assert!(detail.contains("[plugin]"));
     assert!(detail.contains("Plugin: repo-review"));
     assert!(detail.contains("- Name: Repository Review"));
@@ -1094,10 +1142,11 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     assert!(detail.contains("- MCP 1 required: no"));
     assert!(detail.contains("- Approve: trusts this manifest hash"));
     assert!(detail.contains("- Deny: disables this manifest hash"));
-    assert!(detail.contains("plugins: PgUp/PgDn plugin · footer approve/deny"));
+    assert!(detail.contains("plugins: Up/Down plugin · PgUp/PgDn wrap · footer approve/deny"));
 
     let nav = app.config_nav_lines().join("\n");
-    assert!(nav.contains("Plugins: PgUp/PgDn switch"));
+    assert!(nav.contains("Plugins: Up/Down select"));
+    assert!(nav.contains("Plugins: PgUp/PgDn wrap"));
     assert!(nav.contains("Plugins: footer approve/deny"));
     assert_eq!(
         app.config_footer_action_labels(),
@@ -1260,7 +1309,28 @@ fn config_plugins_page_keys_cycle_discovered_plugins() -> Result<()> {
         .expect("config state should exist")
         .set_section(ConfigSection::Plugins);
 
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    let initial_detail = app.config_detail_lines().join("\n");
+    assert!(initial_detail.contains("> alpha: needs_review · 0.1.0"));
+    assert!(initial_detail.contains("  beta: needs_review · 0.1.0"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_plugin_index,
+        1
+    );
+    assert_eq!(app.last_notice(), Some("plugin 2/2"));
+    let next_detail = app.config_detail_lines().join("\n");
+    assert!(next_detail.contains("  alpha: needs_review · 0.1.0"));
+    assert!(next_detail.contains("> beta: needs_review · 0.1.0"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.config_selected_footer_action_label(), Some("approve"));
+    assert_eq!(app.last_notice(), Some("action approve_plugin"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(
         app.config_state
             .as_ref()
@@ -1270,7 +1340,27 @@ fn config_plugins_page_keys_cycle_discovered_plugins() -> Result<()> {
     );
     assert_eq!(app.last_notice(), Some("plugin 2/2"));
 
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_plugin_index,
+        0
+    );
+    assert_eq!(app.last_notice(), Some("plugin 1/2"));
+
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_plugin_index,
+        1
+    );
+    assert_eq!(app.last_notice(), Some("plugin 2/2"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
     assert_eq!(
         app.config_state
             .as_ref()

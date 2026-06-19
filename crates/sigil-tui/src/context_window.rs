@@ -57,6 +57,6 @@ fn provider_context_window_tokens(provider_name: &str, model_name: &str) -> Opti
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/context_window_tests.rs"]
 mod tests;

@@ -84,6 +84,22 @@ impl AppState {
             self.open_keyboard_help();
             return true;
         }
+        if command == UiCommand::CycleAgentView {
+            if self.pending_approval.is_some() {
+                self.last_notice =
+                    Some("finish the pending approval before switching agents".to_owned());
+                return false;
+            }
+            return self.cycle_agent_view(false);
+        }
+        if command == UiCommand::CycleAgentViewPrevious {
+            if self.pending_approval.is_some() {
+                self.last_notice =
+                    Some("finish the pending approval before switching agents".to_owned());
+                return false;
+            }
+            return self.cycle_agent_view(true);
+        }
         if self.pending_approval.is_some() || !self.input.is_empty() {
             return false;
         }
@@ -105,6 +121,8 @@ impl AppState {
             | UiCommand::OpenDoctor
             | UiCommand::StartNewSession
             | UiCommand::CompactNow
+            | UiCommand::CycleAgentView
+            | UiCommand::CycleAgentViewPrevious
             | UiCommand::CheckChangedFilesDiagnostics => false,
         }
     }

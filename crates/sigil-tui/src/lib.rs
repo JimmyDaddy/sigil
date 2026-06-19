@@ -1,3 +1,8 @@
+#![cfg_attr(
+    all(test, sigil_tui_test_slice_app_input_flow),
+    allow(dead_code, unused_imports)
+)]
+
 pub mod app;
 pub(crate) mod approval;
 pub(crate) mod commands;

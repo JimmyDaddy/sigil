@@ -86,6 +86,7 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
         steps: vec![TaskStepSpec {
             step_id: TaskStepId::new("step_1")?,
             title: "retry".to_owned(),
+            display_name: None,
             detail: None,
             role: AgentRole::Executor,
         }],
@@ -125,6 +126,7 @@ fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
         steps: vec![TaskStepSpec {
             step_id: TaskStepId::new("step_1")?,
             title: "done".to_owned(),
+            display_name: None,
             detail: None,
             role: AgentRole::Executor,
         }],
@@ -159,6 +161,7 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
         steps: vec![TaskStepSpec {
             step_id: step_id.clone(),
             title: "running".to_owned(),
+            display_name: None,
             detail: None,
             role: AgentRole::SubagentWrite,
         }],
@@ -516,6 +519,7 @@ fn seed_running_subagent_task(
         steps: vec![TaskStepSpec {
             step_id: step_id.clone(),
             title: "child".to_owned(),
+            display_name: None,
             detail: None,
             role: AgentRole::SubagentWrite,
         }],

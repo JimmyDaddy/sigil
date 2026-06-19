@@ -541,32 +541,47 @@ fn config_state_handles_skill_collection_navigation() {
     state.set_section(ConfigSection::Skills);
     assert_eq!(state.selected_field, None);
     assert_eq!(state.move_field(true), ConfigFieldMove::Unavailable);
+    assert_eq!(state.move_skill(true), ConfigFieldMove::Unavailable);
     assert!(!state.focus_last_field());
     assert!(!state.cycle_skill(true));
 
+    let mut agent = test_skill("audit-agent");
+    agent.run_as = sigil_kernel::SkillRunMode::ChildSession;
     state.set_skill_discovery(
-        vec![test_skill("review"), test_skill("release")],
+        vec![test_skill("review"), agent, test_skill("release")],
         vec!["invalid skill ignored".to_owned()],
     );
     assert_eq!(state.selected_field, Some(ConfigField::SkillId));
-    assert_eq!(state.selected_skill_index, 0);
+    assert_eq!(state.selected_skill_index, 1);
     assert_eq!(
         state.skill_warnings,
         vec!["invalid skill ignored".to_owned()]
     );
-    assert_eq!(state.field_text_value(ConfigField::SkillId), Some("review"));
-    assert_eq!(state.display_value(ConfigField::SkillId), "review");
+    assert_eq!(
+        state.field_text_value(ConfigField::SkillId),
+        Some("audit-agent")
+    );
+    assert_eq!(state.display_value(ConfigField::SkillId), "audit-agent");
     assert!(state.field_text_value_mut(ConfigField::SkillId).is_none());
     assert!(!config_field_accepts_char(ConfigField::SkillId, 'x'));
 
+    assert_eq!(state.move_skill(true), ConfigFieldMove::Moved);
+    assert_eq!(state.selected_skill_index, 0);
+    assert_eq!(state.field_text_value(ConfigField::SkillId), Some("review"));
     assert!(state.cycle_skill(true));
-    assert_eq!(state.selected_skill_index, 1);
+    assert_eq!(state.selected_skill_index, 2);
     assert_eq!(
         state.field_text_value(ConfigField::SkillId),
         Some("release")
     );
     assert!(state.cycle_skill(false));
     assert_eq!(state.selected_skill_index, 0);
+    assert_eq!(state.move_skill(false), ConfigFieldMove::Moved);
+    assert_eq!(state.selected_skill_index, 1);
+    assert_eq!(state.move_skill(false), ConfigFieldMove::Boundary);
+    assert_eq!(state.move_skill(true), ConfigFieldMove::Moved);
+    assert_eq!(state.move_skill(true), ConfigFieldMove::Moved);
+    assert_eq!(state.move_skill(true), ConfigFieldMove::Boundary);
 }
 
 #[test]
@@ -576,6 +591,7 @@ fn config_state_handles_plugin_collection_navigation() {
     state.set_section(ConfigSection::Plugins);
     assert_eq!(state.selected_field, None);
     assert_eq!(state.move_field(true), ConfigFieldMove::Unavailable);
+    assert_eq!(state.move_plugin(true), ConfigFieldMove::Unavailable);
     assert!(!state.focus_last_field());
     assert!(!state.cycle_plugin(true));
 
@@ -597,6 +613,12 @@ fn config_state_handles_plugin_collection_navigation() {
     assert!(state.field_text_value_mut(ConfigField::PluginId).is_none());
     assert!(!config_field_accepts_char(ConfigField::PluginId, 'x'));
 
+    assert_eq!(state.move_plugin(true), ConfigFieldMove::Moved);
+    assert_eq!(state.selected_plugin_index, 1);
+    assert_eq!(state.move_plugin(true), ConfigFieldMove::Boundary);
+    assert_eq!(state.move_plugin(false), ConfigFieldMove::Moved);
+    assert_eq!(state.selected_plugin_index, 0);
+    assert_eq!(state.move_plugin(false), ConfigFieldMove::Boundary);
     assert!(state.cycle_plugin(true));
     assert_eq!(state.selected_plugin_index, 1);
     assert_eq!(

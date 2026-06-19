@@ -235,6 +235,7 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
                 steps: vec![sigil_kernel::TaskStepSpec {
                     step_id: step_id.clone(),
                     title: "inspect".to_owned(),
+                    display_name: None,
                     detail: None,
                     role: sigil_kernel::AgentRole::Executor,
                 }],
@@ -265,6 +266,17 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
                 summary_hash: None,
             },
         ))),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::TaskChildSessionDisplayName(
+                sigil_kernel::TaskChildSessionDisplayNameEntry {
+                    task_id: task_id.clone(),
+                    plan_version: 1,
+                    step_id: step_id.clone(),
+                    child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                    display_name: "Repository Reader".to_owned(),
+                },
+            ),
+        )),
         render_session_log_entry(&SessionLogEntry::Control(
             ControlEntry::TaskSubagentApprovalRoute(sigil_kernel::TaskSubagentApprovalRouteEntry {
                 route_id: route_id.clone(),
@@ -299,6 +311,7 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     assert!(rendered.contains("[ctl] plan task_1 v1 status=accepted steps=1"));
     assert!(rendered.contains("[ctl] step task_1 v1:step_1 status=running"));
     assert!(rendered.contains("[ctl] child task_1 v1:step_1 status=started"));
+    assert!(rendered.contains("[ctl] child name child_1 v1:step_1 Repository Reader"));
     assert!(rendered.contains("[ctl] subagent approval route_1 call=call-1 status=requested"));
     assert!(rendered.contains("[ctl] subagent elicitation route_1 server=mcp status=resolved"));
     Ok(())
@@ -405,6 +418,91 @@ fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
             .iter()
             .any(|line: &String| line.contains("[assistant] after"))
     );
+}
+
+#[test]
+fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result<()> {
+    let app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    let entries = vec![
+        SessionLogEntry::User(ModelMessage::user("child prompt")),
+        SessionLogEntry::Assistant(ModelMessage::assistant(Some(String::new()), Vec::new())),
+        SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some("child answer".to_owned()),
+            Vec::new(),
+        )),
+        SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "tool output")),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_delta".to_owned(),
+            data: json!({ "delta": "think 1\n" }),
+        }),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_delta".to_owned(),
+            data: json!({ "delta": "" }),
+        }),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_trace".to_owned(),
+            data: json!({ "text": "think 2" }),
+        }),
+        SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "call-2".to_owned(),
+            tool_name: "bash".to_owned(),
+            status: ToolExecutionStatus::Failed,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: Some(ToolError {
+                kind: ToolErrorKind::ExitStatus,
+                message: "command failed".to_owned(),
+                retryable: false,
+                details: serde_json::Value::Null,
+            }),
+            model_content_hash: None,
+        }))),
+        SessionLogEntry::Control(ControlEntry::TerminalTask(
+            sigil_kernel::TerminalTaskEntry {
+                handle: sigil_kernel::TerminalTaskHandle {
+                    task_id: sigil_kernel::TerminalTaskId::new("terminal-1")?,
+                    command: "cargo test".to_owned(),
+                    cwd: std::path::PathBuf::from("."),
+                    shell: "sh".to_owned(),
+                    log_path: std::path::PathBuf::from(".sigil/tasks/terminal-1/output.log"),
+                    created_at_ms: 1,
+                },
+                status: sigil_kernel::TerminalTaskStatus::Running,
+                output_preview: Some("running output".to_owned()),
+                output_hash: Some("hash".to_owned()),
+                output_truncated: false,
+                updated_at_ms: 2,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "other".to_owned(),
+            data: json!({}),
+        }),
+    ];
+
+    let restored = app.restored_timeline_entries_from_session_entries(&entries);
+    let rendered = restored
+        .iter()
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        restored
+            .iter()
+            .any(|entry| entry.role == TimelineRole::User)
+    );
+    assert!(rendered.contains("child prompt"));
+    assert!(rendered.contains("child answer"));
+    assert!(rendered.contains("tool output"));
+    assert!(rendered.contains("think 1"));
+    assert!(rendered.contains("think 2"));
+    assert!(rendered.contains("command failed"));
+    assert!(rendered.contains("terminal_task"));
+    assert!(!rendered.contains("other"));
+    Ok(())
 }
 
 #[test]

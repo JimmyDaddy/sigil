@@ -9,6 +9,63 @@ use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
+use std::path::PathBuf;
+
+fn sync_child_agent_for_transcript_tests(app: &mut AppState) -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "inspect".to_owned(),
+                display_name: Some("repo read".to_owned()),
+                detail: None,
+                role: sigil_kernel::AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id,
+                plan_version: 1,
+                step_id,
+                child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                child_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/task_1/step_1-child_1.jsonl",
+                )?,
+                role: sigil_kernel::AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Started,
+                summary_hash: None,
+            },
+        )),
+    ]);
+    app.activate_agent_from_command("child_1")?;
+    Ok(())
+}
+
+fn transcript_plain(lines: Vec<Line<'static>>) -> String {
+    lines
+        .into_iter()
+        .flat_map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 #[test]
 fn column_selection_helpers_cover_empty_and_zero_width_edges() {
@@ -157,6 +214,55 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
             .any(|span| span.content.as_ref().contains("planning step 4"))
     }));
     assert_eq!(app.last_notice(), Some("thinking collapsed"));
+    Ok(())
+}
+
+#[test]
+fn ctrl_t_expands_thinking_when_tool_selection_is_stale_in_composer() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.push_timeline(
+        TimelineRole::Tool,
+        r##"{
+  "call_id": "call-first",
+  "tool_name": "ls",
+  "status": "ok",
+  "preview_kind": "json",
+  "summary": "first 1/1 lines · 8 B",
+  "preview_lines": ["[\".git\"]"],
+  "preview_value": [".git"],
+  "hidden_lines": 0
+}"##,
+    );
+    let tool_key = "call:call-first".to_owned();
+    assert_eq!(app.selected_tool_activity_key, Some(tool_key.clone()));
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+
+    app.handle(RunEvent::ReasoningDelta("planning step 1".to_owned()))?;
+    app.handle(RunEvent::ReasoningDelta(
+        "\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
+    let collapsed = app.transcript_lines(20);
+    assert!(collapsed.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("Ctrl-T expand"))
+    }));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+
+    assert_eq!(app.last_notice(), Some("thinking expanded"));
+    assert!(!app.expanded_tool_activity_keys.contains(&tool_key));
+    let expanded = app.transcript_lines(20);
+    assert!(expanded.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("Ctrl-T collapse"))
+    }));
+    assert!(expanded.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("planning step 4"))
+    }));
     Ok(())
 }
 
@@ -449,6 +555,54 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
     app.streaming_assistant_index = Some(0);
     app.is_busy = true;
     assert_eq!(app.scrollback_cutoff_line(), 0);
+    Ok(())
+}
+
+#[test]
+fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent_for_transcript_tests(&mut app)?;
+
+    let header_only = transcript_plain(app.transcript_lines(1));
+    assert!(header_only.contains("agent view"));
+    assert!(!header_only.contains("session:"));
+
+    app.active_agent_child_transcript = None;
+    let unloaded = transcript_plain(app.transcript_lines(8));
+    assert!(unloaded.contains("repo read"));
+    assert!(unloaded.contains("child session not loaded"));
+
+    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        entries: Vec::new(),
+        load_error: Some("permission denied opening child session".to_owned()),
+    });
+    let load_error = transcript_plain(app.transcript_lines(8));
+    assert!(load_error.contains("load error: permission denied"));
+    assert!(load_error.contains("path: children/task_1/step_1-child_1.jsonl"));
+
+    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        entries: Vec::new(),
+        load_error: None,
+    });
+    let empty = transcript_plain(app.transcript_lines(8));
+    assert!(empty.contains("child session has no transcript messages yet"));
+
+    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        entries: vec![
+            SessionLogEntry::User(ModelMessage::user("child prompt")),
+            SessionLogEntry::Assistant(ModelMessage::assistant(
+                Some("child answer".to_owned()),
+                Vec::new(),
+            )),
+        ],
+        load_error: None,
+    });
+    let restored = transcript_plain(app.transcript_lines(12));
+    assert!(restored.contains("child prompt"));
+    assert!(restored.contains("child answer"));
     Ok(())
 }
 
@@ -1208,13 +1362,24 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     let rows = app.agent_sidebar_rows();
-    assert!(
-        rows.iter()
-            .any(|row| row.label == "subagents" && row.selected)
-    );
+    assert!(rows.iter().any(|row| row.label == "agents" && row.selected));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert_eq!(app.last_notice(), Some("available via /plan"));
+    assert_eq!(
+        app.last_notice(),
+        Some("agent focus unavailable: available via /plan")
+    );
+    let transcript = app
+        .transcript_lines(8)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(!transcript.iter().any(|line| line.contains("agent view:")));
 
     app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;

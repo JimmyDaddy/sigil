@@ -145,6 +145,6 @@ fn selector_title_line(title: &str) -> Line<'static> {
     ])
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/slash_overlay_tests.rs"]
 mod tests;

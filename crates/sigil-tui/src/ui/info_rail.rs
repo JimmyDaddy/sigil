@@ -11,10 +11,9 @@ use crate::view_model::InfoRailViewModel;
 use super::{
     geometry::inset_rect,
     primitives::section_badge,
+    status_indicator::{indicator_styles, render_marker_symbol},
     text::truncate_display_width,
-    theme::{
-        accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink, muted, rail_bg,
-    },
+    theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink, rail_bg},
 };
 
 pub(crate) fn render_info_rail(frame: &mut Frame, area: Rect, view_model: &InfoRailViewModel) {
@@ -129,21 +128,40 @@ fn push_info_section<I>(
 
 fn render_info_line(value: &str, width: usize) -> Line<'static> {
     let clipped = truncate_display_width(value, width.saturating_sub(2).max(1));
+    if let Some((marker, after_marker)) = clipped.split_once(' ')
+        && let Some((marker_style, _)) = indicator_styles(marker)
+        && let Some((label, rest)) = after_marker.split_once(": ")
+    {
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled(format!("{} ", render_marker_symbol(marker)), marker_style),
+            Span::styled(
+                format!("{label}:"),
+                Style::default().fg(dim()).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+        ];
+        spans.extend(render_info_value_spans(rest));
+        return Line::from(spans);
+    }
+
     if let Some((label, rest)) = clipped.split_once(": ") {
-        return Line::from(vec![
+        let mut spans = vec![
             Span::raw("  "),
             Span::styled(
                 format!("{label}:"),
                 Style::default().fg(dim()).add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
-            Span::styled(rest.to_owned(), Style::default().fg(ink())),
-        ]);
+        ];
+        spans.extend(render_info_value_spans(rest));
+        return Line::from(spans);
     }
 
     if let Some((marker, rest)) = clipped.split_once(' ')
-        && let Some((marker_style, rest_style)) = marker_styles(marker)
+        && let Some((marker_style, rest_style)) = indicator_styles(marker)
     {
+        let marker = render_marker_symbol(marker);
         return Line::from(vec![
             Span::raw("  "),
             Span::styled(format!("{marker} "), marker_style),
@@ -157,51 +175,19 @@ fn render_info_line(value: &str, width: usize) -> Line<'static> {
     ])
 }
 
-fn marker_styles(marker: &str) -> Option<(Style, Style)> {
-    match marker {
-        ">" => Some((
-            Style::default()
-                .fg(accent_blue())
-                .add_modifier(Modifier::BOLD),
-            Style::default().fg(ink()),
-        )),
-        "-" | "·" => Some((Style::default().fg(dim()), Style::default().fg(muted()))),
-        "▶" => Some((
-            Style::default()
-                .fg(accent_blue())
-                .add_modifier(Modifier::BOLD),
-            Style::default()
-                .fg(accent_blue())
-                .add_modifier(Modifier::BOLD),
-        )),
-        "✓" => Some((
-            Style::default().fg(accent_lime()),
-            Style::default().fg(accent_lime()),
-        )),
-        "!" => Some((
-            Style::default()
-                .fg(accent_rose())
-                .add_modifier(Modifier::BOLD),
-            Style::default()
-                .fg(accent_rose())
-                .add_modifier(Modifier::BOLD),
-        )),
-        "×" => Some((
-            Style::default().fg(accent_gold()),
-            Style::default().fg(accent_gold()),
-        )),
-        "⏸" => Some((
-            Style::default()
-                .fg(accent_gold())
-                .add_modifier(Modifier::BOLD),
-            Style::default()
-                .fg(accent_gold())
-                .add_modifier(Modifier::BOLD),
-        )),
-        _ => None,
+fn render_info_value_spans(value: &str) -> Vec<Span<'static>> {
+    if let Some((marker, rest)) = value.split_once(' ')
+        && let Some((marker_style, rest_style)) = indicator_styles(marker)
+    {
+        return vec![
+            Span::styled(render_marker_symbol(marker).to_owned(), marker_style),
+            Span::raw(" "),
+            Span::styled(rest.to_owned(), rest_style),
+        ];
     }
+    vec![Span::styled(value.to_owned(), Style::default().fg(ink()))]
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/info_rail_tests.rs"]
 mod tests;

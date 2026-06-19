@@ -9,7 +9,13 @@ use ratatui::{
 use crate::app::AppState;
 use crate::config_panel::CONFIG_HEADER_NOTICE;
 
-use super::{modal::render_modal, shell::render_status, theme};
+use super::{
+    StatusKind,
+    modal::render_modal,
+    shell::render_status,
+    status_indicator::{FocusKind, StatusIndicator, focus_style, focus_symbol, status_rest_style},
+    theme,
+};
 
 pub(super) const CONFIG_DETAIL_SPLIT_MIN_WIDTH: u16 = 128;
 pub(super) const CONFIG_DETAIL_PANEL_WIDTH: u16 = 52;
@@ -21,6 +27,7 @@ const CONFIG_FORM_ACTION_CHIP_WIDTH: usize = 14;
 const CONFIG_FOOTER_BUTTON_WIDTH: usize = 14;
 pub(super) const CONFIG_FOOTER_COMPACT_WIDTH: u16 = 76;
 const CONFIG_SCROLL_MARKER_WIDTH: u16 = 8;
+const CONFIG_STATUS_MARKER_WIDTH: usize = 2;
 
 pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
     let panel_bg = Color::Rgb(24, 22, 13);
@@ -139,10 +146,10 @@ pub(super) fn centered_config_area(area: Rect) -> Rect {
 fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg: Color) {
     let content_width = area.width as usize;
     let section = app.config_section_title().unwrap_or("Config");
-    let state = if app.config_is_dirty() {
-        "unsaved"
+    let (state, state_kind) = if app.config_is_dirty() {
+        ("unsaved", StatusKind::Warning)
     } else {
-        "saved"
+        ("saved", StatusKind::Success)
     };
     let state_style = if app.config_is_dirty() {
         Style::default()
@@ -183,7 +190,10 @@ fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
     push_config_header_span(
         &mut summary_spans,
         &mut remaining,
-        &format!(" {state} "),
+        &format!(
+            " {} {state} ",
+            StatusIndicator::static_kind(state_kind).symbol()
+        ),
         state_style,
     );
     push_config_header_pair(&mut summary_spans, &mut remaining, "field", field);
@@ -631,34 +641,112 @@ fn footer_action_text(label: &'static str, selected: bool, compact: bool) -> Str
 }
 
 fn footer_status_width(value: &str) -> usize {
-    "state ".chars().count() + footer_status_value(value).chars().count()
+    CONFIG_STATUS_MARKER_WIDTH + footer_status_value(value).chars().count()
 }
 
 fn footer_status_spans(value: &str, width: usize, value_style: Style) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
     }
-    let marker = "state ";
-    let marker_width = marker.chars().count();
-    let marker_style = Style::default()
-        .fg(theme::dim())
-        .bg(theme::config_tab_bg())
-        .add_modifier(Modifier::BOLD);
-    if width <= marker_width {
-        return vec![Span::styled(fit_config_value(marker, width), marker_style)];
+    let status_value = footer_status_value(value);
+    let kind = config_status_kind_for_value("status", status_value).unwrap_or(StatusKind::Unknown);
+    let indicator = StatusIndicator::static_kind(kind);
+    if width == 1 {
+        return vec![indicator.span()];
     }
     let value = fit_config_value(
-        footer_status_value(value),
-        width.saturating_sub(marker_width),
+        status_value,
+        width.saturating_sub(CONFIG_STATUS_MARKER_WIDTH),
     );
     vec![
-        Span::styled(marker, marker_style),
-        Span::styled(value, value_style),
+        indicator.span(),
+        Span::raw(" "),
+        Span::styled(value, config_status_value_style(kind, value_style)),
     ]
 }
 
 fn footer_status_value(value: &str) -> &str {
     value.strip_prefix("status: ").unwrap_or(value)
+}
+
+fn config_status_kind_for_value(label: &str, value: &str) -> Option<StatusKind> {
+    let normalized_label = label.trim().to_ascii_lowercase();
+    let normalized = config_status_key(value)?;
+    match normalized.as_str() {
+        "yes" | "enabled" | "configured" | "trusted" | "approved" | "ok" | "ready" | "saved"
+        | "available" | "valid" | "active" | "loaded" | "completed" => Some(StatusKind::Success),
+        "running" | "started" | "starting" | "loading" | "activating" | "checking" => {
+            Some(StatusKind::Running)
+        }
+        "pending" | "none" | "off" | "disabled" | "unavailable" => Some(StatusKind::Unknown),
+        "no" => match normalized_label.as_str() {
+            "warnings" => Some(StatusKind::Success),
+            _ => Some(StatusKind::Unknown),
+        },
+        "dirty" | "unsaved" | "needs_review" | "warning" | "warnings" | "warn" | "paused"
+        | "deferred" | "lazy" | "missing" | "shadowed" => Some(StatusKind::Warning),
+        "confirm" | "failed" | "error" | "invalid" | "untrusted" | "denied" | "blocked"
+        | "cancelled" | "interrupted" | "timeout" | "timed" => Some(StatusKind::Error),
+        "not" | "is" => Some(StatusKind::Unknown),
+        _ => None,
+    }
+}
+
+fn config_status_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(first) = trimmed.split_whitespace().next()
+        && first.chars().all(|character| character.is_ascii_digit())
+    {
+        if trimmed.contains(" warning") {
+            return if first == "0" {
+                Some("yes".to_owned())
+            } else {
+                Some("warning".to_owned())
+            };
+        }
+        return None;
+    }
+    let first = trimmed
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(character, ':' | ',' | ';' | '(' | ')' | '[' | ']')
+        })
+        .find(|token| !token.is_empty())?;
+    Some(first.to_ascii_lowercase().replace('-', "_"))
+}
+
+fn config_status_value_style(kind: StatusKind, fallback: Style) -> Style {
+    match kind {
+        StatusKind::Unknown | StatusKind::Pending => fallback,
+        _ => status_rest_style(kind),
+    }
+}
+
+fn config_status_value_spans(
+    label: &str,
+    value: &str,
+    width: usize,
+    fallback_style: Style,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let Some(kind) = config_status_kind_for_value(label, value) else {
+        return vec![Span::styled(fit_config_value(value, width), fallback_style)];
+    };
+    let indicator = StatusIndicator::animated(kind);
+    if width == 1 {
+        return vec![indicator.span()];
+    }
+    let value = fit_config_value(value, width.saturating_sub(CONFIG_STATUS_MARKER_WIDTH));
+    vec![
+        indicator.span(),
+        Span::raw(" "),
+        Span::styled(value, config_status_value_style(kind, fallback_style)),
+    ]
 }
 
 fn render_config_line(index: usize, line: &str, content_width: usize) -> Line<'static> {
@@ -717,7 +805,7 @@ fn render_config_context_line(line: &str, content_width: usize) -> Line<'static>
 fn render_config_context_pair(label: &str, value: &str, content_width: usize) -> Line<'static> {
     match label {
         "selected" => {
-            let marker = "focus ";
+            let marker = format!("{} ", focus_symbol(FocusKind::Selected));
             let value = fit_config_value(
                 value,
                 available_config_value_width(content_width, marker.chars().count(), 0),
@@ -725,10 +813,7 @@ fn render_config_context_pair(label: &str, value: &str, content_width: usize) ->
             Line::from(vec![
                 Span::styled(
                     marker,
-                    Style::default()
-                        .fg(theme::dim())
-                        .bg(theme::config_tab_bg())
-                        .add_modifier(Modifier::BOLD),
+                    focus_style(FocusKind::Selected).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     value,
@@ -747,19 +832,21 @@ fn render_config_context_pair(label: &str, value: &str, content_width: usize) ->
         "key" | "advanced" | "override" => render_config_metadata_line(label, value, content_width),
         _ => {
             let label_text = format!("{label}: ");
-            let value = fit_config_value(
+            let value_width =
+                available_config_value_width(content_width, label_text.chars().count(), 0);
+            let mut spans = vec![Span::styled(
+                label_text,
+                Style::default()
+                    .fg(theme::config_detail())
+                    .add_modifier(Modifier::BOLD),
+            )];
+            spans.extend(config_status_value_spans(
+                label,
                 value,
-                available_config_value_width(content_width, label_text.chars().count(), 0),
-            );
-            Line::from(vec![
-                Span::styled(
-                    label_text,
-                    Style::default()
-                        .fg(theme::config_detail())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(value, Style::default().fg(theme::ink())),
-            ])
+                value_width,
+                Style::default().fg(theme::ink()),
+            ));
+            Line::from(spans)
         }
     }
 }
@@ -902,6 +989,14 @@ fn config_metadata_marker(label: &str) -> &'static str {
 }
 
 fn render_config_status_line(value: &str, content_width: usize) -> Line<'static> {
+    if content_width == 0 {
+        return Line::raw(String::new());
+    }
+    let kind = if value.contains("confirm close") {
+        StatusKind::Error
+    } else {
+        config_status_kind_for_value("status", value).unwrap_or(StatusKind::Unknown)
+    };
     let value_style = if value.contains("confirm close") {
         Style::default()
             .fg(theme::config_danger())
@@ -913,25 +1008,14 @@ fn render_config_status_line(value: &str, content_width: usize) -> Line<'static>
     } else {
         Style::default().fg(theme::config_primary())
     };
-    let marker = "state ";
-    let label = "status: ";
+    let indicator = StatusIndicator::static_kind(kind);
     let value = fit_config_value(
         value,
-        available_config_value_width(
-            content_width,
-            marker.chars().count() + label.chars().count(),
-            0,
-        ),
+        content_width.saturating_sub(CONFIG_STATUS_MARKER_WIDTH),
     );
     Line::from(vec![
-        Span::styled(
-            marker,
-            Style::default()
-                .fg(theme::dim())
-                .bg(theme::config_tab_bg())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(label, Style::default().fg(theme::dim())),
+        indicator.span(),
+        Span::raw(" "),
         Span::styled(value, value_style),
     ])
 }
@@ -941,24 +1025,27 @@ fn render_readonly_line(line: &str, content_width: usize) -> Option<Line<'static
     let (label, value) = rest.split_once(':')?;
     let label_width = config_form_label_width(content_width, label);
     let padded_label = format!("{label:<label_width$}");
-    let marker = "read ";
-    let value = fit_config_value(
-        value.trim_start(),
-        available_config_value_width(content_width, marker.chars().count() + label_width + 2, 0),
-    );
+    let value = value.trim_start();
+    let marker_width = CONFIG_STATUS_MARKER_WIDTH;
+    let value_width =
+        available_config_value_width(content_width, marker_width + label_width + 2, 0);
+    let marker_kind = config_status_kind_for_value(label, value).unwrap_or(StatusKind::Unknown);
+    let indicator = StatusIndicator::animated(marker_kind);
 
-    Some(Line::from(vec![
-        Span::styled(
-            marker,
-            Style::default()
-                .fg(theme::dim())
-                .bg(theme::config_tab_bg())
-                .add_modifier(Modifier::BOLD),
-        ),
+    let mut spans = vec![
+        indicator.span(),
+        Span::raw(" "),
         Span::styled(padded_label, Style::default().fg(theme::muted())),
         Span::styled(": ", Style::default().fg(theme::dim())),
-        Span::styled(value, Style::default().fg(theme::muted())),
-    ]))
+    ];
+    spans.extend(config_status_value_spans(
+        label,
+        value,
+        value_width,
+        Style::default().fg(theme::muted()),
+    ));
+
+    Some(Line::from(spans))
 }
 
 fn render_hint_line(line: &str) -> Option<Line<'static>> {
@@ -1098,15 +1185,18 @@ fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<L
     let action_width = action_display.map_or(0, |action| 2 + config_action_chip_width(action));
     let value_width =
         available_config_value_width(content_width, 2 + label_width + 2, action_width);
-    let value = fit_config_value(value, value_width);
-    let value_len = value.chars().count();
+    let mut value_spans = config_status_value_spans(label, value, value_width, value_style);
+    if selected {
+        apply_span_background(&mut value_spans, row_bg);
+    }
+    let value_len = spans_width(&value_spans);
 
     let mut spans = vec![
         Span::styled(if selected { "> " } else { "  " }, marker_style),
         Span::styled(padded_label, label_style),
         Span::styled(": ", colon_style),
-        Span::styled(value, value_style),
     ];
+    spans.extend(value_spans);
     if let Some(action) = action_display {
         let action_gap = value_width.saturating_sub(value_len).saturating_add(2);
         spans.push(if selected {
@@ -1190,6 +1280,16 @@ fn finish_form_line(spans: Vec<Span<'static>>, selected: bool, row_bg: Color) ->
     } else {
         line
     }
+}
+
+fn apply_span_background(spans: &mut [Span<'static>], background: Color) {
+    for span in spans {
+        span.style = span.style.bg(background);
+    }
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|span| span.content.chars().count()).sum()
 }
 
 fn render_config_title_line(line: &str) -> Line<'static> {
@@ -1328,6 +1428,6 @@ fn config_line_looks_like_field(line: &str) -> bool {
     matches!(line.chars().next(), Some(' ' | '>' | '*'))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/setup_config_tests.rs"]
 mod tests;

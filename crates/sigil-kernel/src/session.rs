@@ -21,8 +21,9 @@ use crate::{
     },
     skill::{SkillIndexSnapshot, SkillLoadEntry, SkillStateProjection},
     task::{
-        TaskChildSessionEntry, TaskPlanEntry, TaskRunEntry, TaskStateProjection, TaskStepEntry,
-        TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
+        TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskPlanEntry, TaskRunEntry,
+        TaskStateProjection, TaskStepEntry, TaskSubagentApprovalRouteEntry,
+        TaskSubagentElicitationRouteEntry,
     },
     terminal_task::{TerminalTaskEntry, TerminalTaskProjection},
     tool::{
@@ -125,6 +126,8 @@ pub enum ControlEntry {
     TaskStep(TaskStepEntry),
     #[serde(alias = "TaskChildSession")]
     TaskChildSession(TaskChildSessionEntry),
+    #[serde(alias = "TaskChildSessionDisplayName")]
+    TaskChildSessionDisplayName(TaskChildSessionDisplayNameEntry),
     #[serde(alias = "TaskSubagentApprovalRoute")]
     TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry),
     #[serde(alias = "TaskSubagentElicitationRoute")]

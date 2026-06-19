@@ -231,7 +231,7 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
     app.is_busy = true;
     let action = app.open_selected_skill_arguments()?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
+    assert_eq!(app.last_notice(), Some("busy; invoke skill or agent later"));
 
     app.is_busy = false;
     let action = app.open_selected_skill_arguments()?;
@@ -241,7 +241,7 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
     app.is_busy = true;
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
+    assert_eq!(app.last_notice(), Some("busy; invoke skill or agent later"));
 
     app.is_busy = false;
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
@@ -255,11 +255,11 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
 
     let action = app.open_selected_skill_arguments()?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("no skill selected"));
+    assert_eq!(app.last_notice(), Some("no skill or agent selected"));
 
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("no skill selected"));
+    assert_eq!(app.last_notice(), Some("no skill or agent selected"));
     Ok(())
 }
 

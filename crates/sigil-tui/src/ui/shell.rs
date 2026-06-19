@@ -14,11 +14,11 @@ use crate::view_model::{FooterViewModel, LivePanelViewModel, UiViewModel};
 
 use super::{
     approval::render_approval_modal,
-    composer::{composer_cursor_origin, render_input},
+    composer::{composer_cursor_origin, render_agent_panel, render_input},
     geometry::inset_rect,
     info_rail::render_info_rail,
     layout_snapshot::shell_layout,
-    live_panel::{LIVE_PROGRESS_ROWS, render_live_panel},
+    live_panel::{LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app, render_live_panel},
     modal::render_modal,
     setup_config::{render_config, render_setup},
     slash_overlay::render_slash_selector_overlay,
@@ -41,22 +41,24 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         frame.area(),
     );
 
-    let shell = shell_layout(frame.area(), app.footer_strip_height());
+    let shell = shell_layout(
+        frame.area(),
+        app.footer_strip_height(),
+        app.composer_height(),
+    );
 
     let view_model = UiViewModel::from_app(app);
     let live_inner = inset_rect(shell.live_panel, 1, 0);
     let live_transcript_rows = live_inner
         .height
-        .saturating_sub(if app.live_activity_summary().is_some() {
-            LIVE_PROGRESS_ROWS
-        } else {
-            0
-        })
+        .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
+        .saturating_sub(live_status_rows_for_app(app))
         .max(1) as usize;
     let live_view_model = LivePanelViewModel::from_app(app, live_transcript_rows);
 
     render_live_panel(frame, shell.live_panel, &live_view_model);
     render_input(frame, shell.composer, &view_model.composer);
+    render_agent_panel(frame, shell.agent_panel, &view_model.composer);
     render_footer_status(frame, shell.footer, &view_model.footer);
     render_slash_selector_overlay(frame, shell.live_panel, shell.composer, app);
     if shell.info_rail.width > 0 {
@@ -67,7 +69,10 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         render_approval_modal(frame, app);
     }
 
-    if app.active_pane == PaneFocus::Composer && !app.has_modal() {
+    if app.active_pane == PaneFocus::Composer
+        && !app.has_modal()
+        && !app.is_composer_agent_panel_focused()
+    {
         let (cursor_col, _) = view_model.composer.cursor_position;
         if let Some((cursor_x, cursor_y)) =
             composer_cursor_origin(shell.composer, &view_model.composer)
@@ -83,6 +88,12 @@ fn render_footer_status(frame: &mut Frame, area: Rect, footer: &FooterViewModel)
     if area.width == 0 || area.height == 0 {
         return;
     }
+    let _ = (
+        &footer.phase,
+        footer.is_busy,
+        &footer.run_label,
+        &footer.hints,
+    );
     frame.render_widget(
         Block::default().style(Style::default().bg(shell_bg())),
         area,
@@ -91,31 +102,7 @@ fn render_footer_status(frame: &mut Frame, area: Rect, footer: &FooterViewModel)
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    let run_prefix = if footer.is_busy {
-        super::live_panel::live_spinner_frame().to_owned()
-    } else {
-        footer.run_label.clone()
-    };
     let context_width = footer_context_width(footer, inner.width);
-    let left_width = inner
-        .width
-        .saturating_sub(context_width.saturating_add(u16::from(context_width > 0)));
-    let line = footer_left_line(&run_prefix, &footer.hints, left_width as usize);
-    let left_area = Rect::new(inner.x, inner.y, left_width, inner.height);
-    frame.render_widget(
-        Paragraph::new(Text::from(vec![Line::from(vec![Span::styled(
-            line,
-            Style::default().fg(if footer.is_busy {
-                super::theme::phase_accent(&footer.phase)
-            } else {
-                muted()
-            }),
-        )])]))
-        .style(Style::default().bg(shell_bg()))
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: false }),
-        left_area,
-    );
     if context_width > 0 {
         let context_area = Rect::new(
             inner.x + inner.width.saturating_sub(context_width),
@@ -135,15 +122,6 @@ fn render_footer_status(frame: &mut Frame, area: Rect, footer: &FooterViewModel)
             context_area,
         );
     }
-}
-
-fn footer_left_line(run_prefix: &str, hints: &str, width: usize) -> String {
-    let line = if hints.is_empty() {
-        run_prefix.to_owned()
-    } else {
-        format!("{run_prefix}    {hints}")
-    };
-    truncate_display_width(&line, width)
 }
 
 fn footer_context_width(footer: &FooterViewModel, available_width: u16) -> u16 {
@@ -249,6 +227,6 @@ fn memory_badge(app: &AppState) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/shell_tests.rs"]
 mod tests;

@@ -5,7 +5,8 @@ use ratatui::text::Line;
 use crate::{
     app::{AppState, PaneFocus},
     commands::{global_control_hints, tool_card_control_hints},
-    timeline::RunPhase,
+    timeline::{RunPhase, SidebarAgentRow},
+    ui::StatusKind,
 };
 
 #[derive(Debug, Clone)]
@@ -68,16 +69,11 @@ impl InfoRailViewModel {
                 .into_iter()
                 .map(|row| {
                     format!(
-                        "{} {}: {}",
-                        if row.selected {
-                            ">"
-                        } else if row.muted {
-                            "~"
-                        } else {
-                            "-"
-                        },
+                        "{} {}: {} {}",
+                        row.focus_symbol(true),
                         row.label,
-                        row.detail
+                        row.status_symbol(),
+                        row.compact_detail()
                     )
                 })
                 .collect(),
@@ -97,6 +93,8 @@ pub(crate) struct ComposerViewModel {
     pub provider_name: String,
     pub model_name: String,
     pub reasoning_effort_label: String,
+    pub agent_rows: Vec<SidebarAgentRow>,
+    pub agent_panel_focused: bool,
     pub input: String,
     pub input_rows: u16,
     pub cursor_position: (u16, u16),
@@ -105,16 +103,50 @@ pub(crate) struct ComposerViewModel {
 impl ComposerViewModel {
     fn from_app(app: &AppState) -> Self {
         Self {
-            mode_label: "Build".to_owned(),
+            mode_label: format!("Build · agent: {}", app.active_agent_label()),
             phase: app.run_phase(),
             provider_name: app.provider_name.clone(),
             model_name: app.model_name.clone(),
             reasoning_effort_label: app.reasoning_effort_label().to_owned(),
+            agent_rows: app.composer_agent_rows(),
+            agent_panel_focused: app.is_composer_agent_panel_focused(),
             input: app.input.clone(),
             input_rows: app.composer_input_rows(),
             cursor_position: app.input_cursor_visual_position(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TaskStripViewModel {
+    pub title: String,
+    pub detail: String,
+    pub rows: Vec<TaskStripRowViewModel>,
+}
+
+impl TaskStripViewModel {
+    pub(crate) fn from_task_strip_view(view: crate::app::task_sidebar::TaskStripView) -> Self {
+        Self {
+            title: view.title,
+            detail: view.detail,
+            rows: view
+                .rows
+                .into_iter()
+                .map(|row| TaskStripRowViewModel {
+                    kind: row.kind,
+                    label: row.label,
+                    active: row.active,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TaskStripRowViewModel {
+    pub kind: StatusKind,
+    pub label: String,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -146,22 +178,27 @@ fn footer_run_label(app: &AppState) -> String {
 }
 
 fn footer_hints(app: &AppState) -> String {
+    let agent = format!("agent: {}", app.active_agent_label());
     if app.pending_approval.is_some() {
-        return "Y allow · N deny · V diff".to_owned();
+        return format!("{agent} · Y allow · N deny · V diff");
     }
     if app.is_busy {
-        return "Esc interrupt · Ctrl-T details".to_owned();
+        return format!("{agent} · Esc interrupt · Ctrl-T details");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
-        return "↑↓ choose · Tab accept · Enter run · Esc close".to_owned();
+        return format!("{agent} · ↑↓ choose · Tab accept · Enter run · Esc close");
     }
-    "Enter send · Shift-Enter newline · / commands".to_owned()
+    if app.is_composer_agent_panel_focused() {
+        return format!("{agent} · Up/Down choose agent · Enter switch · Esc input");
+    }
+    format!("{agent} · Enter send · Shift-Enter newline · Alt-A agent · / commands")
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LivePanelViewModel {
     pub phase: RunPhase,
     pub progress: Option<LiveProgressViewModel>,
+    pub task_strip: Option<TaskStripViewModel>,
     pub transcript_lines: Vec<Line<'static>>,
 }
 
@@ -172,6 +209,9 @@ impl LivePanelViewModel {
             progress: app
                 .live_activity_summary()
                 .map(|summary| LiveProgressViewModel::from_parts(&summary.label, &summary.detail)),
+            task_strip: app
+                .task_strip_view()
+                .map(TaskStripViewModel::from_task_strip_view),
             transcript_lines: app.transcript_lines(transcript_rows),
         }
     }
@@ -250,6 +290,6 @@ fn display_path_label(path: &Path) -> String {
     display
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/view_model_tests.rs"]
 mod tests;

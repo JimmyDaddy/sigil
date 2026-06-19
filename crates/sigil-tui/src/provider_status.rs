@@ -147,6 +147,6 @@ pub(crate) fn resolve_provider_api_key(config: &DeepSeekProviderConfig) -> Optio
     resolve_deepseek_api_key(config).map(|secret| secret.value)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/provider_status_tests.rs"]
 mod tests;

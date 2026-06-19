@@ -23,6 +23,17 @@ fn maps_tool_card_key_events_to_commands() {
         Some(UiCommand::CheckChangedFilesDiagnostics)
     );
     assert_eq!(
+        command_for_key_event(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::ALT)),
+        Some(UiCommand::CycleAgentView)
+    );
+    assert_eq!(
+        command_for_key_event(KeyEvent::new(
+            KeyCode::Char('A'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )),
+        Some(UiCommand::CycleAgentViewPrevious)
+    );
+    assert_eq!(
         command_for_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
         None
     );
@@ -42,6 +53,12 @@ fn command_metadata_generates_help_and_control_hints() {
     let global = global_control_hints(false);
     assert!(global.iter().any(|hint| hint == "F1: keyboard help"));
     assert!(global.iter().any(|hint| hint == "Ctrl-C: quit"));
+    assert!(global.iter().any(|hint| hint == "Alt-A: agent"));
+    assert!(
+        global
+            .iter()
+            .any(|hint| hint == "Shift-Alt-A: previous agent")
+    );
     assert!(global.iter().any(|hint| hint == "Alt-D: check changes"));
     assert!(
         global_control_hints(true)
@@ -62,6 +79,28 @@ fn command_metadata_generates_help_and_control_hints() {
 
     let help = keyboard_help_lines(true);
     assert!(help.iter().any(|line| line.contains("F1:")));
+    assert!(help.iter().any(|line| {
+        line == "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer."
+    }));
+    assert!(
+        help.iter().any(|line| {
+            line == "Ctrl-A/E: Move to the start/end of the current composer line."
+        })
+    );
+    assert!(
+        help.iter().any(|line| {
+            line == "Alt-B/F or Ctrl-Left/Right: Move the composer cursor by word."
+        })
+    );
+    assert!(
+        help.iter().any(|line| {
+            line == "Ctrl-K/Y: Kill to composer line end and yank the killed text."
+        })
+    );
+    assert!(
+        help.iter()
+            .any(|line| line == "Ctrl-Z: Restore the last draft cleared with Esc.")
+    );
     assert!(
         help.iter()
             .any(|line| line == "Up/Down or Ctrl-P/N: Navigate prompt history.")
@@ -74,6 +113,12 @@ fn command_metadata_generates_help_and_control_hints() {
         help.iter()
             .any(|line| line == "Alt-D: Run code diagnostics for changed source files.")
     );
+    assert!(help.iter().any(|line| {
+        line == "Alt-A: Switch the visible main chat between parent and child agents; /agent can rename child agents."
+    }));
+    assert!(help.iter().any(|line| {
+        line == "Shift-Alt-A: Switch the visible main chat to the previous parent or child agent."
+    }));
     assert!(help.iter().any(|line| line == "Activities"));
     assert!(help.iter().any(|line| line.contains("Ctrl-G:")));
     assert!(
@@ -86,6 +131,7 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(slash.iter().any(|line| line.starts_with("/new:")));
     assert!(slash.iter().any(|line| line.starts_with("/plan:")));
     assert!(metadata_slash_commands().any(|command| command == "/compact"));
+    assert!(metadata_slash_commands().any(|command| command == "/agent"));
     assert!(metadata_slash_commands().any(|command| command == "/doctor"));
     assert!(metadata_slash_commands().any(|command| command == "/new"));
     assert!(metadata_slash_commands().any(|command| command == "/plan"));

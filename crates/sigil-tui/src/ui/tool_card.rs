@@ -16,8 +16,9 @@ use super::{
         MarkdownRenderOptions, render_code_line_spans_with_bg, render_markdown_timeline_lines,
     },
     primitives::{section_badge, timeline_badge, timeline_content_line, timeline_section_line},
+    status_indicator::{StatusIndicator, StatusKind},
     text::truncate_inline_text,
-    theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, badge_bg, dim, ink},
+    theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink},
 };
 
 const COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS: usize = 4;
@@ -155,19 +156,22 @@ fn tool_card_header_line(
         tool_title_width(display, max_content_width),
     ));
     spans.push(Span::raw("  "));
+    let status_indicator = StatusIndicator::animated(display.status.kind);
     spans.push(Span::styled(
-        format!(" {} ", display.status.label),
-        tool_status_style(display.status.is_error),
+        format!(" {} {} ", status_indicator.symbol(), display.status.label),
+        tool_status_style(display.status.kind),
     ));
     if let Some(detail) = &display.status.detail {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
             detail.clone(),
-            Style::default().fg(if display.status.is_error {
-                accent_rose()
+            if display.status.is_error {
+                Style::default()
+                    .fg(accent_rose())
+                    .add_modifier(Modifier::BOLD)
             } else {
-                dim()
-            }),
+                Style::default().fg(dim())
+            },
         ));
     }
     if selected {
@@ -191,7 +195,7 @@ fn tool_title_width(display: &ToolCardDisplay, max_content_width: usize) -> usiz
         return 160;
     }
     max_content_width
-        .saturating_sub(display.status.label.chars().count() + 10)
+        .saturating_sub(display.status.label.chars().count() + 12)
         .clamp(32, 160)
 }
 
@@ -497,8 +501,19 @@ fn terminal_task_display_status(summary: &ToolCardRender) -> ToolCardDisplayStat
     ToolCardDisplayStatus {
         label,
         detail,
+        kind: terminal_task_status_kind(summary),
         is_error: summary.is_error
             || matches!(summary.metadata.terminal_status.as_deref(), Some("failed")),
+    }
+}
+
+fn terminal_task_status_kind(summary: &ToolCardRender) -> StatusKind {
+    match summary.metadata.terminal_status.as_deref() {
+        Some("starting" | "running") => StatusKind::Running,
+        Some("exited") => StatusKind::Success,
+        Some("failed" | "cancelled" | "interrupted") => StatusKind::Error,
+        _ if summary.is_error => StatusKind::Error,
+        _ => StatusKind::Success,
     }
 }
 
@@ -1375,6 +1390,7 @@ impl ToolCardTitle {
 struct ToolCardDisplayStatus {
     label: &'static str,
     detail: Option<String>,
+    kind: StatusKind,
     is_error: bool,
 }
 
@@ -1424,6 +1440,11 @@ fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
     ToolCardDisplayStatus {
         label,
         detail,
+        kind: if summary.is_error {
+            StatusKind::Error
+        } else {
+            StatusKind::Success
+        },
         is_error: summary.is_error,
     }
 }
@@ -2296,20 +2317,10 @@ fn parse_mcp_call_subjects(
     (mcp_server, mcp_tool, mcp_trust_class)
 }
 
-fn tool_status_style(is_error: bool) -> Style {
-    if is_error {
-        Style::default()
-            .fg(accent_rose())
-            .bg(badge_bg())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(accent_lime())
-            .bg(badge_bg())
-            .add_modifier(Modifier::BOLD)
-    }
+fn tool_status_style(kind: StatusKind) -> Style {
+    StatusIndicator::static_kind(kind).badge_style()
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/tool_card_tests.rs"]
 mod tests;

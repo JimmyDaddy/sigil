@@ -9,7 +9,7 @@ use crate::{
 use super::{
     composer::composer_input_area,
     geometry::{centered_rect, inset_rect, sidebar_width_for_terminal},
-    live_panel::{LIVE_PANEL_BOTTOM_PADDING, LIVE_PROGRESS_ROWS},
+    live_panel::{LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app},
     setup_config::{
         CONFIG_DETAIL_PANEL_WIDTH, CONFIG_DETAIL_SPLIT_MIN_WIDTH, CONFIG_FOOTER_COMPACT_WIDTH,
         centered_config_area, config_panel_height, config_scroll_offset, footer_action_width,
@@ -30,11 +30,13 @@ pub struct LayoutSnapshot {
     pub mode: LayoutMode,
     pub live_panel: Rect,
     pub composer: Rect,
+    pub agent_panel: Rect,
     pub composer_input: Rect,
     pub footer: Rect,
     pub info_rail: Rect,
     pub live_text_rows: Vec<LiveTextRowHitArea>,
     pub tool_cards: Vec<ToolCardHitArea>,
+    pub info_rail_agent_rows: Vec<InfoRailAgentRowHitArea>,
     pub slash_overlay: Option<SlashOverlayHitAreas>,
     pub approval_modal: Option<Rect>,
     pub approval_modal_hit_areas: Option<ApprovalModalHitAreas>,
@@ -53,6 +55,12 @@ pub struct ToolCardHitArea {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveTextRowHitArea {
     pub line_index: usize,
+    pub area: Rect,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InfoRailAgentRowHitArea {
+    pub index: usize,
     pub area: Rect,
 }
 
@@ -136,6 +144,7 @@ pub struct ConfigFooterActionHitArea {
 pub(super) struct ShellLayout {
     pub live_panel: Rect,
     pub composer: Rect,
+    pub agent_panel: Rect,
     pub footer: Rect,
     pub info_rail: Rect,
 }
@@ -153,17 +162,19 @@ impl LayoutSnapshot {
             return snapshot;
         }
 
-        let shell = shell_layout(screen, app.footer_strip_height());
+        let shell = shell_layout(screen, app.footer_strip_height(), app.composer_height());
         Self {
             screen,
             mode: LayoutMode::Main,
             live_panel: shell.live_panel,
             composer: shell.composer,
+            agent_panel: shell.agent_panel,
             composer_input: composer_input_area(shell.composer, app.composer_input_rows()),
             footer: shell.footer,
             info_rail: shell.info_rail,
             live_text_rows: live_text_row_hit_areas(shell.live_panel, app),
             tool_cards: tool_card_hit_areas(shell.live_panel, app),
+            info_rail_agent_rows: info_rail_agent_row_hit_areas(shell.info_rail, app),
             slash_overlay: slash_overlay_hit_areas(shell.live_panel, shell.composer, app),
             approval_modal: app
                 .approval_modal_view()
@@ -182,11 +193,13 @@ impl LayoutSnapshot {
             mode,
             live_panel: Rect::default(),
             composer: Rect::default(),
+            agent_panel: Rect::default(),
             composer_input: Rect::default(),
             footer: Rect::default(),
             info_rail: Rect::default(),
             live_text_rows: Vec::new(),
             tool_cards: Vec::new(),
+            info_rail_agent_rows: Vec::new(),
             slash_overlay: None,
             approval_modal: None,
             approval_modal_hit_areas: None,
@@ -275,7 +288,7 @@ impl LayoutSnapshot {
         if self.mode != LayoutMode::Main {
             return HitTarget::Background;
         }
-        if contains(self.composer, column, row) {
+        if contains(self.composer, column, row) || contains(self.agent_panel, column, row) {
             return HitTarget::Composer;
         }
         for tool_card in &self.tool_cards {
@@ -301,6 +314,13 @@ impl LayoutSnapshot {
         }
         if contains(self.live_panel, column, row) {
             return HitTarget::LivePanel;
+        }
+        for row_area in &self.info_rail_agent_rows {
+            if contains(row_area.area, column, row) {
+                return HitTarget::InfoRailAgentRow {
+                    index: row_area.index,
+                };
+            }
         }
         if contains(self.info_rail, column, row) {
             return HitTarget::InfoRail;
@@ -683,6 +703,40 @@ fn live_text_row_hit_areas(live_area: Rect, app: &AppState) -> Vec<LiveTextRowHi
         .collect()
 }
 
+fn info_rail_agent_row_hit_areas(info_rail: Rect, app: &AppState) -> Vec<InfoRailAgentRowHitArea> {
+    let inner = inset_rect(info_rail, 3, 1);
+    if inner.width == 0 || inner.height == 0 {
+        return Vec::new();
+    }
+
+    let session_line_count = app.session_sidebar_lines().len().saturating_add(1);
+    let permission_line_count = app.permission_card_lines().len();
+    let agent_row_start = 3usize
+        .saturating_add(info_section_row_count(session_line_count))
+        .saturating_add(info_section_row_count(permission_line_count))
+        .saturating_add(1);
+
+    app.agent_sidebar_rows()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, _)| {
+            let relative_row = agent_row_start.saturating_add(index);
+            if relative_row >= inner.height as usize {
+                return None;
+            }
+            let y_offset = u16::try_from(relative_row).ok()?;
+            Some(InfoRailAgentRowHitArea {
+                index,
+                area: Rect::new(inner.x, inner.y.saturating_add(y_offset), inner.width, 1),
+            })
+        })
+        .collect()
+}
+
+fn info_section_row_count(value_count: usize) -> usize {
+    value_count.saturating_add(2)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VisibleTimelineRows {
     content_frame: Rect,
@@ -709,26 +763,13 @@ fn visible_timeline_rows(live_area: Rect, app: &AppState) -> Option<VisibleTimel
             .saturating_sub(LIVE_PANEL_BOTTOM_PADDING)
             .max(1),
     );
-    let progress_rows = if app.live_activity_summary().is_some() {
-        LIVE_PROGRESS_ROWS as usize
-    } else {
-        0
-    };
-    let transcript_rows = inner
-        .height
-        .saturating_sub(if progress_rows > 0 {
-            LIVE_PROGRESS_ROWS
-        } else {
-            0
-        })
-        .max(1) as usize;
+    let status_rows = live_status_rows_for_app(app).min(content_frame.height.saturating_sub(1));
+    let transcript_rows = content_frame.height.saturating_sub(status_rows).max(1) as usize;
     let requested_timeline_range = app.visible_timeline_render_range(transcript_rows);
 
     let requested_timeline_rows = requested_timeline_range.end - requested_timeline_range.start;
-    let total_rows = requested_timeline_rows.saturating_add(progress_rows);
-    let content_capacity = content_frame.height as usize;
-    let dropped_rows = total_rows.saturating_sub(content_capacity);
-    let dropped_timeline_rows = dropped_rows.min(requested_timeline_rows);
+    let content_capacity = transcript_rows;
+    let dropped_timeline_rows = requested_timeline_rows.saturating_sub(content_capacity);
     let visible_timeline_start = requested_timeline_range
         .start
         .saturating_add(dropped_timeline_rows);
@@ -737,10 +778,13 @@ fn visible_timeline_rows(live_area: Rect, app: &AppState) -> Option<VisibleTimel
         return None;
     }
 
-    let rendered_rows = total_rows.min(content_capacity);
-    let content_y = content_frame
-        .y
-        .saturating_add(content_frame.height.saturating_sub(rendered_rows as u16));
+    let rendered_rows = requested_timeline_rows.min(content_capacity);
+    let content_y = content_frame.y.saturating_add(
+        content_frame
+            .height
+            .saturating_sub(status_rows)
+            .saturating_sub(rendered_rows as u16),
+    );
 
     Some(VisibleTimelineRows {
         content_frame,
@@ -996,7 +1040,7 @@ fn approval_action_badge_width(label: &str, selected: bool) -> u16 {
     }
 }
 
-pub(super) fn shell_layout(screen: Rect, footer_height: u16) -> ShellLayout {
+pub(super) fn shell_layout(screen: Rect, footer_height: u16, composer_height: u16) -> ShellLayout {
     let sidebar_width = sidebar_width_for_terminal(screen.width as usize) as u16;
     let shell = Layout::default()
         .direction(Direction::Horizontal)
@@ -1012,9 +1056,16 @@ pub(super) fn shell_layout(screen: Rect, footer_height: u16) -> ShellLayout {
         ])
         .split(shell[0]);
 
+    let composer_height = composer_height.min(main[1].height);
+    let interactive = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(composer_height), Constraint::Min(0)])
+        .split(main[1]);
+
     ShellLayout {
         live_panel: main[0],
-        composer: main[1],
+        composer: interactive[0],
+        agent_panel: interactive[1],
         footer: main[2],
         info_rail: shell[1],
     }
@@ -1095,6 +1146,6 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/layout_snapshot_tests.rs"]
 mod tests;

@@ -45,7 +45,7 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     let app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     let view_model = UiViewModel::from_app(&app);
 
-    assert_eq!(view_model.composer.mode_label, "Build");
+    assert_eq!(view_model.composer.mode_label, "Build · agent: main");
     assert_eq!(view_model.composer.provider_name, "deepseek");
     assert_eq!(view_model.composer.model_name, "deepseek-v4-flash");
     assert_eq!(view_model.composer.input_rows, 1);
@@ -102,6 +102,7 @@ fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()
             steps: vec![TaskStepSpec {
                 step_id: step_id.clone(),
                 title: "implement".to_owned(),
+                display_name: None,
                 detail: None,
                 role: AgentRole::Executor,
             }],
@@ -167,9 +168,42 @@ fn ui_view_model_projects_task_lines_from_durable_entries() -> anyhow::Result<()
         view_model
             .info_rail
             .task_lines
-            .contains(&"▶ 1. running step_1 · implement".to_owned())
+            .contains(&"◐ 1. running step_1 · implement".to_owned())
     );
     Ok(())
+}
+
+#[test]
+fn task_strip_view_model_preserves_task_strip_rows() {
+    let view_model =
+        TaskStripViewModel::from_task_strip_view(crate::app::task_sidebar::TaskStripView {
+            title: "Task task_1".to_owned(),
+            detail: "running · v1 · 1/2 done".to_owned(),
+            rows: vec![
+                crate::app::task_sidebar::TaskStripRow {
+                    kind: crate::ui::StatusKind::Success,
+                    label: "1. inspect".to_owned(),
+                    detail: "completed · step_1".to_owned(),
+                    active: false,
+                },
+                crate::app::task_sidebar::TaskStripRow {
+                    kind: crate::ui::StatusKind::Running,
+                    label: "2. implement".to_owned(),
+                    detail: "running · step_2".to_owned(),
+                    active: true,
+                },
+            ],
+        });
+
+    assert_eq!(view_model.title, "Task task_1");
+    assert_eq!(view_model.detail, "running · v1 · 1/2 done");
+    assert_eq!(view_model.rows.len(), 2);
+    assert_eq!(view_model.rows[0].kind, crate::ui::StatusKind::Success);
+    assert_eq!(view_model.rows[0].label, "1. inspect");
+    assert!(!view_model.rows[0].active);
+    assert_eq!(view_model.rows[1].kind, crate::ui::StatusKind::Running);
+    assert_eq!(view_model.rows[1].label, "2. implement");
+    assert!(view_model.rows[1].active);
 }
 
 #[test]
@@ -567,14 +601,14 @@ fn info_rail_projects_memory_off_and_agent_rows() {
             .info_rail
             .agent_lines
             .iter()
-            .any(|line| line == "> main: idle in current session")
+            .any(|line| line == "◉ main: ○ current session")
     );
     assert!(
         view_model
             .info_rail
             .agent_lines
             .iter()
-            .any(|line| line == "- subagents: available via /plan")
+            .any(|line| line == "  agents: ◇ available via /plan")
     );
 }
 
@@ -592,7 +626,10 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
         view_model.footer.run_label,
         "thinking · reasoning with deepseek-v4-flash"
     );
-    assert_eq!(view_model.footer.hints, "Esc interrupt · Ctrl-T details");
+    assert_eq!(
+        view_model.footer.hints,
+        "agent: main · Esc interrupt · Ctrl-T details"
+    );
     assert_eq!(view_model.composer.phase, RunPhase::Thinking);
     assert_eq!(view_model.composer.reasoning_effort_label, "max");
     Ok(())
@@ -627,7 +664,10 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
         view_model.footer.run_label,
         "approval · waiting for decision on write_file"
     );
-    assert_eq!(view_model.footer.hints, "Y allow · N deny · V diff");
+    assert_eq!(
+        view_model.footer.hints,
+        "agent: main · Y allow · N deny · V diff"
+    );
     Ok(())
 }
 

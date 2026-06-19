@@ -221,6 +221,7 @@ impl AppState {
         self.latest_compaction_record = latest_compaction_record(&entries);
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
         self.current_session_entries = entries;
+        self.refresh_active_agent_view_after_parent_sync();
         self.refresh_usage_sidebar_cache();
     }
 
@@ -231,6 +232,7 @@ impl AppState {
         self.latest_compaction_record = latest_compaction_record(&self.current_session_entries);
         self.tool_preview_snapshots =
             restored_tool_preview_snapshot_index(&self.current_session_entries);
+        self.refresh_active_agent_view_after_parent_sync();
         self.refresh_usage_sidebar_cache();
     }
 
@@ -390,6 +392,8 @@ impl AppState {
         self.model_name = model_name;
         self.session_id = session_id_from_path(&self.session_log_path)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        self.active_agent_view = super::AgentView::Main;
+        self.active_agent_child_transcript = None;
         self.sync_current_session_state(entries.clone());
         self.pending_approval = None;
         self.run_phase = RunPhase::Idle;
@@ -536,6 +540,13 @@ impl AppState {
         self.push_timeline(TimelineRole::Thinking, delta.to_owned());
     }
 
+    pub(super) fn restored_timeline_entries_from_session_entries(
+        &self,
+        entries: &[SessionLogEntry],
+    ) -> Vec<crate::timeline::TimelineEntry> {
+        restored_timeline_entries_from_session_entries(entries, &self.secret_redactor)
+    }
+
     pub(super) fn filtered_session_indices(&self) -> Vec<usize> {
         let filter = self.session_history_filter.to_ascii_lowercase();
         self.session_history
@@ -548,6 +559,113 @@ impl AppState {
             })
             .collect()
     }
+}
+
+fn restored_timeline_entries_from_session_entries(
+    entries: &[SessionLogEntry],
+    redactor: &sigil_kernel::SecretRedactor,
+) -> Vec<crate::timeline::TimelineEntry> {
+    let restored_tool_executions = restored_tool_execution_index(entries);
+    let restored_tool_previews = restored_tool_preview_snapshot_index(entries);
+    let restored_tool_result_call_ids = restored_tool_result_call_ids(entries);
+    let mut timeline = Vec::new();
+    for entry in entries {
+        match entry {
+            SessionLogEntry::User(message) => {
+                if let Some(content) = message.content.as_ref() {
+                    timeline.push(crate::timeline::TimelineEntry {
+                        role: TimelineRole::User,
+                        text: content.clone(),
+                    });
+                }
+            }
+            SessionLogEntry::Assistant(message) => {
+                if let Some(content) = message.content.as_ref()
+                    && !content.is_empty()
+                {
+                    timeline.push(crate::timeline::TimelineEntry {
+                        role: TimelineRole::Assistant,
+                        text: content.clone(),
+                    });
+                }
+            }
+            SessionLogEntry::ToolResult(message) => {
+                if let Some(content) = message.content.as_ref() {
+                    let execution = message
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|call_id| restored_tool_executions.get(call_id));
+                    let preview = message
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|call_id| restored_tool_previews.get(call_id));
+                    timeline.push(crate::timeline::TimelineEntry {
+                        role: TimelineRole::Tool,
+                        text: format_tool_content_block_redacted_for_restore(
+                            message.tool_call_id.as_deref(),
+                            content,
+                            execution,
+                            preview,
+                            redactor,
+                        ),
+                    });
+                }
+            }
+            SessionLogEntry::Control(ControlEntry::Note { kind, data })
+                if kind == "reasoning_delta" || kind == "reasoning_trace" =>
+            {
+                if let Some(delta) = restored_reasoning_note(kind, data) {
+                    push_restored_reasoning_timeline_entry(&mut timeline, &delta);
+                }
+            }
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+                if should_render_restored_tool_execution(
+                    execution.as_ref(),
+                    &restored_tool_result_call_ids,
+                ) =>
+            {
+                let preview = restored_tool_previews.get(&execution.call_id);
+                timeline.push(crate::timeline::TimelineEntry {
+                    role: TimelineRole::Tool,
+                    text: format_tool_content_block_redacted_for_restore(
+                        Some(execution.call_id.as_str()),
+                        &restored_tool_execution_content(execution.as_ref()),
+                        Some(execution.as_ref()),
+                        preview,
+                        redactor,
+                    ),
+                });
+            }
+            SessionLogEntry::Control(ControlEntry::TerminalTask(task)) => {
+                timeline.push(crate::timeline::TimelineEntry {
+                    role: TimelineRole::Tool,
+                    text: format_terminal_task_block_redacted(task, redactor),
+                });
+            }
+            SessionLogEntry::Control(_) => {}
+        }
+    }
+    timeline
+}
+
+fn push_restored_reasoning_timeline_entry(
+    timeline: &mut Vec<crate::timeline::TimelineEntry>,
+    delta: &str,
+) {
+    if delta.is_empty() {
+        return;
+    }
+    if let Some(entry) = timeline
+        .last_mut()
+        .filter(|entry| entry.role == TimelineRole::Thinking)
+    {
+        entry.text.push_str(delta);
+        return;
+    }
+    timeline.push(crate::timeline::TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: delta.to_owned(),
+    });
 }
 
 fn session_id_from_path(path: &Path) -> Option<String> {
@@ -816,6 +934,13 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 child.step_id.as_str(),
                 task_child_session_status_label(child.status)
             ),
+            ControlEntry::TaskChildSessionDisplayName(rename) => format!(
+                "[ctl] child name {} v{}:{} {}",
+                rename.child_task_id.as_str(),
+                rename.plan_version,
+                rename.step_id.as_str(),
+                truncate_session_view_text(&rename.display_name, 48)
+            ),
             ControlEntry::TaskSubagentApprovalRoute(route) => format!(
                 "[ctl] subagent approval {} call={} status={}",
                 route.route_id.as_str(),
@@ -1015,6 +1140,6 @@ fn render_compaction_preview_lines(preview: &CompactionPreview) -> Vec<String> {
     lines
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/session_flow_detail_tests.rs"]
 mod tests;

@@ -12,6 +12,8 @@ pub(crate) enum UiCommand {
     OpenDoctor,
     StartNewSession,
     CompactNow,
+    CycleAgentView,
+    CycleAgentViewPrevious,
     CheckChangedFilesDiagnostics,
     FocusLatestToolCard,
     SelectNextToolCard,
@@ -125,6 +127,24 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
+        command: UiCommand::CycleAgentView,
+        keys: &[KeyBinding { label: "Alt-A" }],
+        slash: Some("/agent"),
+        label: "Agent",
+        help: "Switch the visible main chat between parent and child agents; /agent can rename child agents.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
+        command: UiCommand::CycleAgentViewPrevious,
+        keys: &[KeyBinding {
+            label: "Shift-Alt-A",
+        }],
+        slash: None,
+        label: "Previous agent",
+        help: "Switch the visible main chat to the previous parent or child agent.",
+        surface: CommandSurface::Global,
+    },
+    UiCommandSpec {
         command: UiCommand::CheckChangedFilesDiagnostics,
         keys: &[KeyBinding { label: "Alt-D" }],
         slash: None,
@@ -200,6 +220,14 @@ pub(crate) fn command_for_key_event(key: KeyEvent) -> Option<UiCommand> {
         KeyCode::Char('d') | KeyCode::Char('D') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::CheckChangedFilesDiagnostics)
         }
+        KeyCode::Char('a') | KeyCode::Char('A') if key.modifiers == KeyModifiers::ALT => {
+            Some(UiCommand::CycleAgentView)
+        }
+        KeyCode::Char('a') | KeyCode::Char('A')
+            if key.modifiers == KeyModifiers::ALT | KeyModifiers::SHIFT =>
+        {
+            Some(UiCommand::CycleAgentViewPrevious)
+        }
         KeyCode::Char('x') | KeyCode::Char('X') if key.modifiers == KeyModifiers::ALT => {
             Some(UiCommand::CancelFocusedTerminalTask)
         }
@@ -218,6 +246,8 @@ pub(crate) fn global_control_hints(is_busy: bool) -> Vec<String> {
             "Ctrl-C: quit".to_owned()
         },
         control_hint(UiCommand::ToggleThinking).expect("thinking metadata exists"),
+        control_hint(UiCommand::CycleAgentView).expect("agent metadata exists"),
+        control_hint(UiCommand::CycleAgentViewPrevious).expect("previous agent metadata exists"),
         control_hint(UiCommand::CheckChangedFilesDiagnostics)
             .expect("check changes metadata exists"),
     ];
@@ -249,7 +279,13 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
             .filter_map(command_spec_help_line),
     );
     lines.extend([
-        "Shift-Enter: Insert a newline in the composer.".to_owned(),
+        "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer.".to_owned(),
+        "Ctrl-A/E: Move to the start/end of the current composer line.".to_owned(),
+        "Ctrl-B/F or Left/Right: Move the composer cursor by character.".to_owned(),
+        "Alt-B/F or Ctrl-Left/Right: Move the composer cursor by word.".to_owned(),
+        "Backspace/Delete, Ctrl-H, Ctrl-W, Ctrl/Alt-Backspace, or Ctrl/Alt-Delete: Delete composer text.".to_owned(),
+        "Ctrl-K/Y: Kill to composer line end and yank the killed text.".to_owned(),
+        "Ctrl-Z: Restore the last draft cleared with Esc.".to_owned(),
         "Up/Down or Ctrl-P/N: Navigate prompt history.".to_owned(),
         "PageUp/PageDown or Ctrl-U/D: Scroll transcript by page.".to_owned(),
         String::new(),
@@ -296,6 +332,6 @@ fn command_spec_help_line(spec: &UiCommandSpec) -> Option<String> {
     Some(format!("{trigger}: {}", spec.help))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/commands_tests.rs"]
 mod tests;

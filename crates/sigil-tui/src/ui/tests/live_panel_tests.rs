@@ -7,7 +7,12 @@ use sigil_kernel::{
     WorkspaceConfig,
 };
 
-use crate::{app::AppState, view_model::LivePanelViewModel};
+use crate::{
+    app::AppState,
+    view_model::{
+        LivePanelViewModel, LiveProgressViewModel, TaskStripRowViewModel, TaskStripViewModel,
+    },
+};
 
 use super::*;
 use crate::ui::theme::phase_accent;
@@ -71,6 +76,7 @@ fn render_live_panel_keeps_wrapped_tail_visible() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
         progress: None,
+        task_strip: None,
         transcript_lines: vec![Line::from(
             "prefix words that wrap across rows before visible TAIL",
         )],
@@ -96,6 +102,7 @@ fn render_live_panel_keeps_bottom_padding_clear() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
         progress: None,
+        task_strip: None,
         transcript_lines: vec![Line::from("visible tail")],
     };
     let backend = TestBackend::new(16, 4);
@@ -113,10 +120,83 @@ fn render_live_panel_keeps_bottom_padding_clear() -> anyhow::Result<()> {
 }
 
 #[test]
-fn live_spinner_frame_uses_visible_block_pulse() {
-    let frame = live_spinner_frame();
+fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> {
+    let view_model = LivePanelViewModel {
+        phase: crate::timeline::RunPhase::Thinking,
+        progress: Some(LiveProgressViewModel {
+            title: "Thinking".to_owned(),
+            detail: "reasoning with deepseek-v4-pro".to_owned(),
+        }),
+        task_strip: Some(TaskStripViewModel {
+            title: "Task task_1".to_owned(),
+            detail: "running · v1 · 1/2 done".to_owned(),
+            rows: vec![
+                TaskStripRowViewModel {
+                    kind: crate::ui::StatusKind::Success,
+                    label: "1. inspect layout".to_owned(),
+                    active: false,
+                },
+                TaskStripRowViewModel {
+                    kind: crate::ui::StatusKind::Pending,
+                    label: "2. update status band".to_owned(),
+                    active: true,
+                },
+            ],
+        }),
+        transcript_lines: vec![Line::from("visible tail")],
+    };
+    let backend = TestBackend::new(104, 8);
+    let mut terminal = Terminal::new(backend)?;
 
-    assert!(frame.chars().count() >= 4);
-    assert!(frame.contains('▰'));
-    assert!(frame.contains('▱'));
+    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("visible tail"));
+    assert!(rendered.contains("Thinking..."));
+    assert!(rendered.contains("Task task_1"));
+    assert!(rendered.contains("running · v1 · 1/2 done"));
+    assert!(rendered.contains("✓ 1. inspect layout"));
+    assert!(rendered.contains("◇ 2. update status band"));
+    assert!(rendered.contains("▌"));
+    assert!(!rendered.contains("status:"));
+    Ok(())
+}
+
+#[test]
+fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
+    let view_model = LivePanelViewModel {
+        phase: crate::timeline::RunPhase::Thinking,
+        progress: None,
+        task_strip: Some(TaskStripViewModel {
+            title: "Task task_3".to_owned(),
+            detail: "started".to_owned(),
+            rows: vec![TaskStripRowViewModel {
+                kind: crate::ui::StatusKind::Running,
+                label: "1. 输出一个冷笑话2、解释一下这个冷笑话为什么好笑".to_owned(),
+                active: true,
+            }],
+        }),
+        transcript_lines: vec![Line::from("visible tail")],
+    };
+    let backend = TestBackend::new(96, 6);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    let compact = rendered.replace(' ', "");
+    assert!(compact.contains("1.输出一个冷笑话2、解释一下这个冷笑话为什么好笑"));
+    Ok(())
 }

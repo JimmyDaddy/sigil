@@ -43,6 +43,7 @@ fn timeline_data_structures_preserve_projection_fields() {
         label: "deepseek".to_owned(),
         detail: "ready".to_owned(),
         selected: true,
+        active: true,
         muted: false,
     };
 
@@ -54,6 +55,54 @@ fn timeline_data_structures_preserve_projection_fields() {
     assert_eq!(summary.label, "tool");
     assert!(agent.selected);
     assert!(!agent.muted);
+    assert_eq!(agent.focus_symbol(true), "◉");
+    assert_eq!(agent.status_symbol(), "◇");
+    assert_eq!(agent.compact_detail(), "ready");
+}
+
+#[test]
+fn sidebar_agent_rows_compact_common_status_labels() {
+    let main = SidebarAgentRow {
+        label: "main".to_owned(),
+        detail: "idle in current session".to_owned(),
+        selected: true,
+        active: true,
+        muted: false,
+    };
+    let completed_child = SidebarAgentRow {
+        label: "agent child_1".to_owned(),
+        detail: "completed · subagent_read · v1:step_1".to_owned(),
+        selected: false,
+        active: false,
+        muted: false,
+    };
+    let running_child = SidebarAgentRow {
+        label: "agent child_2".to_owned(),
+        detail: "running · executor · v2:step_2".to_owned(),
+        selected: false,
+        active: false,
+        muted: false,
+    };
+    let failed_child = SidebarAgentRow {
+        label: "agent child_3".to_owned(),
+        detail: "failed · subagent_write · v3:step_3".to_owned(),
+        selected: false,
+        active: false,
+        muted: false,
+    };
+
+    assert_eq!(main.focus_symbol(true), "◉");
+    assert_eq!(main.status_symbol(), "○");
+    assert_eq!(main.compact_detail(), "current session");
+    assert_eq!(completed_child.status_symbol(), "✓");
+    assert_eq!(
+        completed_child.compact_detail(),
+        "subagent_read · v1:step_1"
+    );
+    assert_eq!(running_child.status_symbol(), "◐");
+    assert_eq!(running_child.compact_detail(), "executor · v2:step_2");
+    assert_eq!(failed_child.status_symbol(), "✕");
+    assert_eq!(failed_child.compact_detail(), "subagent_write · v3:step_3");
 }
 
 #[test]

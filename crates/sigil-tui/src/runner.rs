@@ -12,5 +12,5 @@ pub(crate) use protocol::McpElicitationResponseTx;
 pub use protocol::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 pub use spawn::spawn_agent_worker;
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 mod tests;

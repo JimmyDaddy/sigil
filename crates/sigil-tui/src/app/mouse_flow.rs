@@ -217,6 +217,11 @@ impl AppState {
             crate::mouse::HitTarget::Composer if self.pending_approval.is_none() => {
                 Ok(self.click_composer(input, layout))
             }
+            crate::mouse::HitTarget::InfoRailAgentRow { index }
+                if self.pending_approval.is_none() =>
+            {
+                Ok(self.click_info_rail_agent_row(index, target))
+            }
             crate::mouse::HitTarget::InfoRail if self.pending_approval.is_none() => {
                 Ok(self.click_info_rail(target))
             }
@@ -241,6 +246,9 @@ impl AppState {
                 self.click_tool_card_toggle_target(entry_index, input, layout, target)
             }
             crate::mouse::HitTarget::Composer => Ok(self.click_composer(input, layout)),
+            crate::mouse::HitTarget::InfoRailAgentRow { index } => {
+                Ok(self.click_info_rail_agent_row(index, target))
+            }
             crate::mouse::HitTarget::InfoRail => Ok(self.click_info_rail(target)),
             _ => {
                 self.cancel_tool_card_body_click();
@@ -254,6 +262,7 @@ impl AppState {
         self.set_mouse_hover_target(None);
         self.clear_timeline_text_selection();
         self.active_pane = PaneFocus::Composer;
+        self.blur_composer_agent_panel();
         match self.handle_mouse_slash_candidate(index)? {
             Some(action) => Ok(crate::mouse::AppMouseOutcome::Action(action)),
             None => Ok(crate::mouse::AppMouseOutcome::Redraw),
@@ -288,8 +297,26 @@ impl AppState {
         self.set_mouse_hover_target(Some(crate::mouse::HitTarget::Composer));
         self.clear_timeline_text_selection();
         self.active_pane = PaneFocus::Composer;
+        self.blur_composer_agent_panel();
         self.position_input_cursor_from_mouse(input.column, input.row, layout);
         crate::mouse::AppMouseOutcome::Redraw
+    }
+
+    fn click_info_rail_agent_row(
+        &mut self,
+        index: usize,
+        target: crate::mouse::HitTarget,
+    ) -> crate::mouse::AppMouseOutcome {
+        self.cancel_tool_card_body_click();
+        self.set_mouse_hover_target(Some(target));
+        self.clear_timeline_text_selection();
+        self.active_pane = PaneFocus::Activity;
+        self.blur_composer_agent_panel();
+        if self.activate_agent_view_at_index(index) {
+            crate::mouse::AppMouseOutcome::Redraw
+        } else {
+            crate::mouse::AppMouseOutcome::Noop
+        }
     }
 
     fn click_info_rail(
@@ -300,6 +327,7 @@ impl AppState {
         self.set_mouse_hover_target(Some(target));
         self.clear_timeline_text_selection();
         self.active_pane = PaneFocus::Activity;
+        self.blur_composer_agent_panel();
         crate::mouse::AppMouseOutcome::Redraw
     }
 
@@ -370,6 +398,11 @@ impl AppState {
                 Ok(crate::mouse::AppMouseOutcome::Noop)
             }
             crate::mouse::HitTarget::InfoRail => {
+                self.active_pane = PaneFocus::Activity;
+                self.move_sidebar_selection(!upward);
+                Ok(crate::mouse::AppMouseOutcome::Redraw)
+            }
+            crate::mouse::HitTarget::InfoRailAgentRow { .. } => {
                 self.active_pane = PaneFocus::Activity;
                 self.move_sidebar_selection(!upward);
                 Ok(crate::mouse::AppMouseOutcome::Redraw)

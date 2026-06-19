@@ -240,7 +240,7 @@ fn render_main_screen_shows_esc_interrupt_for_running_turn() -> anyhow::Result<(
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(rendered.contains("Esc interrupt"));
+    assert!(!rendered.contains("Esc interrupt"));
     assert!(rendered.contains("reasoning with deepseek-v4-flash"));
     Ok(())
 }
@@ -259,11 +259,11 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
     assert!(rendered.contains("Provider 1/9"));
-    assert!(rendered.contains("focus Model"));
+    assert!(rendered.contains("▸ Model"));
     assert!(rendered.contains("key model"));
     assert!(rendered.contains("keys Tab section"));
     assert!(rendered.contains("actions Down to actions"));
-    assert!(rendered.contains("state saved"));
+    assert!(rendered.contains("✓ saved"));
     assert!(!rendered.contains("Status"));
     assert!(!rendered.contains("Actions"));
     assert!(!rendered.contains("provider settings · Tab"));
@@ -275,9 +275,9 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/9", "focus Model"),
-            (2, "Memory 3/9", "focus Memory"),
-            (3, "Compaction 4/9", "focus Auto compact"),
+            (0, "Provider 1/9", "▸ Model"),
+            (2, "Memory 3/9", "▸ Memory"),
+            (3, "Compaction 4/9", "▸ Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.input = "/config".to_owned();
@@ -433,11 +433,11 @@ fn render_config_footer_uses_toolbar_layout_on_wide_terminals() -> anyhow::Resul
     let rows = rendered_rows(&terminal);
     let footer_y = rows
         .iter()
-        .position(|row| row.contains("[save]") && row.contains("state saved"))
+        .position(|row| row.contains("[save]") && row.contains("✓ saved"))
         .expect("config footer toolbar should render");
     let footer_row = &rows[footer_y];
     let close_x = char_index_of(footer_row, "[close]").expect("close action should render");
-    let status_x = char_index_of(footer_row, "state saved").expect("status should render");
+    let status_x = char_index_of(footer_row, "✓ saved").expect("status should render");
     let chip_bg_cells = (0..terminal.backend().buffer().area.width)
         .filter(|x| {
             terminal
@@ -451,7 +451,7 @@ fn render_config_footer_uses_toolbar_layout_on_wide_terminals() -> anyhow::Resul
         .count();
 
     assert!(status_x > close_x + 32);
-    assert!(footer_row.trim_end().ends_with("state saved"));
+    assert!(footer_row.trim_end().ends_with("✓ saved"));
     assert!(chip_bg_cells > 30);
     Ok(())
 }
@@ -547,7 +547,7 @@ fn render_config_form_rows_align_value_column() -> anyhow::Result<()> {
                     row.contains(label)
                         && row.contains(':')
                         && !row.contains("field:")
-                        && !row.contains("focus ")
+                        && !row.contains("▸ ")
                 })
                 .and_then(|row| char_index_of(row, ":"))
                 .unwrap_or_else(|| panic!("{label} row should render with a colon"))
@@ -617,7 +617,7 @@ fn render_config_readonly_rows_align_value_column() -> anyhow::Result<()> {
     let rows = rendered_rows(&terminal);
     let documents_row = rows
         .iter()
-        .position(|row| row.contains("read Documents"))
+        .position(|row| row.contains("◇ Documents"))
         .expect("documents readonly row should render");
     let value_columns = ["Documents", "Last scan", "Root files"]
         .into_iter()
@@ -644,12 +644,12 @@ fn render_config_readonly_rows_align_value_column() -> anyhow::Result<()> {
                 == config_tab_bg()
         })
         .count();
-    assert_eq!(readonly_chip_cells, "read ".chars().count());
+    assert_eq!(readonly_chip_cells, 0);
     Ok(())
 }
 
 #[test]
-fn shell_footer_helpers_cover_truncation_and_context_thresholds() {
+fn shell_footer_helpers_cover_context_thresholds() {
     let footer = FooterViewModel {
         run_label: "Run".to_owned(),
         hints: "hint".to_owned(),
@@ -658,8 +658,6 @@ fn shell_footer_helpers_cover_truncation_and_context_thresholds() {
         context_label: "ctx 42%".to_owned(),
     };
 
-    assert_eq!(footer_left_line("Run", "", 12), "Run");
-    assert!(footer_left_line("Run", "very long hint", 10).ends_with("..."));
     assert_eq!(footer_context_width(&footer, 20), 0);
     assert_eq!(footer_context_width(&footer, 40), 7);
 }
@@ -715,7 +713,7 @@ fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Re
     let rows = rendered_rows(&terminal);
     let selected_detail_row = rows
         .iter()
-        .position(|row| row.contains("focus Model"))
+        .position(|row| row.contains("▸ Model"))
         .expect("selected field detail should render");
     let controls_row = rows
         .iter()
@@ -929,7 +927,7 @@ fn render_config_screen_keeps_single_panel_on_narrow_terminals() -> anyhow::Resu
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("details"));
     assert!(!rendered.contains("Details"));
-    assert!(rendered.contains("focus Model"));
+    assert!(rendered.contains("▸ Model"));
     Ok(())
 }
 
@@ -965,7 +963,7 @@ fn render_config_narrow_screen_keeps_details_visual_hierarchy() -> anyhow::Resul
     let rows = rendered_rows(&terminal);
     let selected_detail_row = rows
         .iter()
-        .position(|row| row.contains("focus Model"))
+        .position(|row| row.contains("▸ Model"))
         .expect("narrow selected detail should render");
     let controls_row = rows
         .iter()
@@ -1103,7 +1101,7 @@ fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Resul
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("state unsaved - save before close"));
+    assert!(rendered.contains("△ unsaved - save before close"));
     assert!(rendered.contains("[save]"));
     assert!(rendered.contains("[save+close]"));
     assert!(rendered.contains("[close]"));
@@ -1112,7 +1110,7 @@ fn render_config_footer_tracks_dirty_and_confirm_close_states() -> anyhow::Resul
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("state confirm close - Esc discards"));
+    assert!(rendered.contains("✕ confirm"));
     assert!(rendered.contains("> save <"));
     Ok(())
 }
@@ -1135,7 +1133,7 @@ fn render_config_footer_compacts_on_narrow_terminals() -> anyhow::Result<()> {
     assert!(rendered.contains("[save+close]"));
     assert!(rendered.contains("[close]"));
     assert!(rendered.contains("..."));
-    assert!(!rendered.contains("state confirm close - Esc discards"));
+    assert!(rendered.contains("✕ confirm"));
     Ok(())
 }
 
@@ -1153,9 +1151,9 @@ fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
 
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Memory 3/9"));
-    assert!(rendered.contains("read Documents"));
-    assert!(rendered.contains("read Last scan"));
-    assert!(rendered.contains("read Root files"));
+    assert!(rendered.contains("◇ Documents"));
+    assert!(rendered.contains("Last scan"));
+    assert!(rendered.contains("Root files"));
     Ok(())
 }
 
@@ -1224,7 +1222,7 @@ fn render_setup_screen_shows_workspace_notice_and_panel() -> anyhow::Result<()> 
 }
 
 #[test]
-fn footer_left_line_and_context_width_cover_empty_and_bounded_states() {
+fn footer_context_width_covers_empty_and_bounded_states() {
     let footer = FooterViewModel {
         phase: RunPhase::Idle,
         is_busy: false,
@@ -1233,8 +1231,6 @@ fn footer_left_line_and_context_width_cover_empty_and_bounded_states() {
         context_label: "ctx 12%".to_owned(),
     };
 
-    assert_eq!(footer_left_line("ready", "", 32), "ready");
-    assert!(footer_left_line("ready", "Enter send", 10).chars().count() <= 10);
     assert_eq!(footer_context_width(&footer, 20), 0);
     assert_eq!(footer_context_width(&footer, 24), 7);
     assert_eq!(
@@ -1331,7 +1327,8 @@ fn render_footer_status_omits_context_when_width_is_small_or_label_is_empty() ->
     terminal.draw(|frame| render_footer_status(frame, Rect::new(0, 0, 24, 1), &footer))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("ready"));
+    assert!(!rendered.contains("ready"));
+    assert!(!rendered.contains("Enter send"));
     assert!(!rendered.contains("ctx"));
     Ok(())
 }

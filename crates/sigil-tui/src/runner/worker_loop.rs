@@ -302,7 +302,7 @@ pub(super) fn run_worker_loop<P>(
                     };
                 if loaded.descriptor.run_as != SkillRunMode::Inline {
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                        "skill {skill_id} is configured for {} mode, not inline mode",
+                        "agent {skill_id} is configured for {} mode, not inline skill mode",
                         loaded.descriptor.run_as.as_str()
                     )));
                     continue;
@@ -407,7 +407,7 @@ pub(super) fn run_worker_loop<P>(
                     };
                 if loaded.descriptor.run_as != SkillRunMode::ChildSession {
                     let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                        "skill {skill_id} is configured for {} mode, not child-session mode",
+                        "skill {skill_id} is configured for {} mode, not agent mode",
                         loaded.descriptor.run_as.as_str()
                     )));
                     continue;
@@ -1405,8 +1405,9 @@ async fn run_skill_child_orchestration(
             },
             TaskStepSpec {
                 step_id: TaskStepId::new("invoke_skill").map_err(|error| format!("{error:#}"))?,
-                title: format!("invoke skill {skill_id}"),
-                detail: Some("direct user-invoked child-session skill".to_owned()),
+                title: format!("invoke agent {skill_id}"),
+                display_name: Some(skill_id.clone()),
+                detail: Some("direct user-invoked agent".to_owned()),
                 role: child_role,
             },
             child_input,
@@ -1620,20 +1621,20 @@ fn skill_invocation_prompt(skill_id: &str, arguments: &str) -> String {
     let trimmed = arguments.trim();
     if trimmed.is_empty() {
         return format!(
-            "Apply the loaded Sigil skill `{skill_id}` to the current task. No additional arguments were provided."
+            "Apply the loaded Sigil agent `{skill_id}` to the current task. No additional arguments were provided."
         );
     }
     format!(
-        "Apply the loaded Sigil skill `{skill_id}` to the current task with these user-provided arguments:\n\n```text\n{trimmed}\n```"
+        "Apply the loaded Sigil agent `{skill_id}` to the current task with these user-provided arguments:\n\n```text\n{trimmed}\n```"
     )
 }
 
 fn skill_child_session_objective(skill_id: &str, arguments: &str) -> String {
     let trimmed = arguments.trim();
     if trimmed.is_empty() {
-        return format!("invoke child-session skill {skill_id}");
+        return format!("invoke agent {skill_id}");
     }
-    format!("invoke child-session skill {skill_id} with arguments: {trimmed}")
+    format!("invoke agent {skill_id} with arguments: {trimmed}")
 }
 
 fn send_task_result(

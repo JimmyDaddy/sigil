@@ -803,6 +803,7 @@ async fn subagent_step_runs_in_child_session_and_links_parent() -> Result<()> {
         steps: vec![TaskStepSpec {
             step_id: TaskStepId::new("step_1")?,
             title: "read in child".to_owned(),
+            display_name: None,
             detail: None,
             role: crate::AgentRole::SubagentRead,
         }],
@@ -897,6 +898,7 @@ async fn direct_child_session_keeps_skill_context_out_of_parent_history() -> Res
             TaskStepSpec {
                 step_id: TaskStepId::new("invoke_skill")?,
                 title: "invoke skill repo-review".to_owned(),
+                display_name: None,
                 detail: Some("direct user-invoked child-session skill".to_owned()),
                 role: crate::AgentRole::SubagentWrite,
             },
@@ -977,6 +979,7 @@ async fn direct_child_session_rejects_non_subagent_roles() -> Result<()> {
             TaskStepSpec {
                 step_id: TaskStepId::new("invoke_skill")?,
                 title: "invoke skill".to_owned(),
+                display_name: None,
                 detail: None,
                 role: crate::AgentRole::Executor,
             },
@@ -1033,6 +1036,7 @@ async fn direct_child_session_supports_subagent_read_role() -> Result<()> {
             TaskStepSpec {
                 step_id: TaskStepId::new("invoke_skill")?,
                 title: "invoke read skill".to_owned(),
+                display_name: None,
                 detail: None,
                 role: crate::AgentRole::SubagentRead,
             },
@@ -1096,6 +1100,7 @@ async fn direct_child_session_records_failed_child_provider() -> Result<()> {
             TaskStepSpec {
                 step_id: TaskStepId::new("invoke_skill")?,
                 title: "invoke failing skill".to_owned(),
+                display_name: None,
                 detail: None,
                 role: crate::AgentRole::SubagentWrite,
             },
@@ -1273,6 +1278,7 @@ async fn child_step_defensive_parent_role_fallback_uses_executor_agent() -> Resu
     let step = TaskStepSpec {
         step_id: TaskStepId::new("step_1")?,
         title: "fallback".to_owned(),
+        display_name: None,
         detail: None,
         role: crate::AgentRole::Executor,
     };
@@ -1336,6 +1342,7 @@ async fn subagent_step_error_marks_child_session_failed() -> Result<()> {
         steps: vec![TaskStepSpec {
             step_id: TaskStepId::new("step_1")?,
             title: "read in child".to_owned(),
+            display_name: None,
             detail: None,
             role: crate::AgentRole::SubagentRead,
         }],
@@ -1543,6 +1550,7 @@ async fn proposed_plan_is_not_executable() -> Result<()> {
         steps: vec![TaskStepSpec {
             step_id: TaskStepId::new("step_1")?,
             title: "proposed".to_owned(),
+            display_name: None,
             detail: None,
             role: crate::AgentRole::Executor,
         }],
@@ -1749,12 +1757,14 @@ fn seed_two_step_task(
             TaskStepSpec {
                 step_id: TaskStepId::new("step_1")?,
                 title: "already done".to_owned(),
+                display_name: None,
                 detail: None,
                 role: crate::AgentRole::Executor,
             },
             TaskStepSpec {
                 step_id: TaskStepId::new("step_2")?,
                 title: "remaining".to_owned(),
+                display_name: None,
                 detail: None,
                 role: crate::AgentRole::Executor,
             },
@@ -1791,6 +1801,7 @@ fn seed_single_step_task(session: &mut Session, role: crate::AgentRole) -> Resul
         steps: vec![TaskStepSpec {
             step_id: TaskStepId::new("step_1")?,
             title: "single step".to_owned(),
+            display_name: None,
             detail: Some("detail".to_owned()),
             role,
         }],

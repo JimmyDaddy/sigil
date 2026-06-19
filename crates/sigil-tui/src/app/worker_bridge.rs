@@ -988,6 +988,6 @@ impl EventHandler for AppState {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 #[path = "tests/worker_bridge_detail_tests.rs"]
 mod tests;

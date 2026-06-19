@@ -4,19 +4,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod agent_flow;
 mod approval_flow;
 mod command_dispatch;
 mod config_flow;
 mod diagnostics_flow;
 mod formatting;
 mod input_flow;
+mod input_history;
 mod modal_flow;
 mod mouse_flow;
 mod runtime_status;
 mod session_flow;
 mod setup_flow;
 mod slash_flow;
-mod task_sidebar;
+pub(crate) mod task_sidebar;
 mod timeline_flow;
 mod tool_card_interaction;
 mod worker_bridge;
@@ -54,8 +56,8 @@ pub(crate) use crate::setup::{SetupField, SetupState};
 use crate::slash::ResolvedSlashCommand;
 pub use crate::timeline::{EventEntry, TimelineEntry, TimelineRole};
 pub(crate) use crate::timeline::{
-    LiveActivitySummary, RunPhase, SessionHistoryRow, SidebarAgentRow, SidebarCard,
-    ThinkingBlockMode, ToolActivityCacheEntry,
+    LiveActivitySummary, RunPhase, SessionHistoryRow, SidebarCard, ThinkingBlockMode,
+    ToolActivityCacheEntry,
 };
 
 use self::config_flow::cycle_approval_mode;
@@ -63,12 +65,36 @@ use self::formatting::*;
 use self::modal_flow::{ModalState, ModelPickerRefresh, PendingModelPickerRefresh};
 use self::runtime_status::{McpProgressState, UsageCostCurrency};
 pub(crate) use self::runtime_status::{
-    McpServerRuntimeStatus, TimelineTextSelection, code_intelligence_config_status, count_label,
+    McpServerRuntimeStatus, TimelineTextSelection, code_intelligence_config_status,
     diagnostic_summary_label, initial_mcp_server_status, initial_mcp_server_statuses,
 };
 use self::session_flow::{current_focus_label, short_session_token};
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgentView {
+    Main,
+    Child {
+        child_task_id: String,
+        child_session_ref: sigil_kernel::SessionRef,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ActiveAgentChildTranscript {
+    path: PathBuf,
+    entries: Vec<SessionLogEntry>,
+    load_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct AgentSidebarItem {
+    label: String,
+    detail: String,
+    target: Option<AgentView>,
+    muted: bool,
+}
 
 #[derive(Debug)]
 pub struct AppState {
@@ -147,6 +173,9 @@ pub struct AppState {
     usage_sidebar_cache: Vec<String>,
     sidebar_selected_card: SidebarCard,
     sidebar_agent_selected: usize,
+    composer_agent_panel_focused: bool,
+    active_agent_view: AgentView,
+    active_agent_child_transcript: Option<ActiveAgentChildTranscript>,
     balance_snapshot: BalanceSnapshot,
     next_background_request_id: u64,
     pending_worker_commands: Vec<WorkerCommand>,
@@ -157,6 +186,8 @@ pub struct AppState {
     input_cursor: usize,
     input_history_index: Option<usize>,
     input_history_draft: Option<String>,
+    cleared_input_draft: Option<String>,
+    input_kill_buffer: Option<String>,
     approval_metadata_collapsed: bool,
     approval_selected_file_index: usize,
     approval_selected_hunk_index: usize,
@@ -310,6 +341,9 @@ impl AppState {
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
             sidebar_agent_selected: 0,
+            composer_agent_panel_focused: false,
+            active_agent_view: AgentView::Main,
+            active_agent_child_transcript: None,
             balance_snapshot: BalanceSnapshot {
                 status: "pending".to_owned(),
                 ..BalanceSnapshot::default()
@@ -323,6 +357,8 @@ impl AppState {
             input_cursor: 0,
             input_history_index: None,
             input_history_draft: None,
+            cleared_input_draft: None,
+            input_kill_buffer: None,
             approval_metadata_collapsed: false,
             approval_selected_file_index: 0,
             approval_selected_hunk_index: 0,
@@ -333,6 +369,7 @@ impl AppState {
         app.session_log_path = app
             .session_log_dir
             .join(format!("session-{}.jsonl", app.session_id));
+        app.load_input_history();
         app.refresh_memory_summary();
         app.recompute_compaction_status(false);
         app.refresh_session_history();
@@ -425,6 +462,9 @@ impl AppState {
             usage_sidebar_cache: Vec::new(),
             sidebar_selected_card: SidebarCard::Permission,
             sidebar_agent_selected: 0,
+            composer_agent_panel_focused: false,
+            active_agent_view: AgentView::Main,
+            active_agent_child_transcript: None,
             balance_snapshot: BalanceSnapshot {
                 status: "missing auth".to_owned(),
                 ..BalanceSnapshot::default()
@@ -438,6 +478,8 @@ impl AppState {
             input_cursor: 0,
             input_history_index: None,
             input_history_draft: None,
+            cleared_input_draft: None,
+            input_kill_buffer: None,
             approval_metadata_collapsed: false,
             approval_selected_file_index: 0,
             approval_selected_hunk_index: 0,
@@ -448,6 +490,7 @@ impl AppState {
         app.session_log_path = app
             .session_log_dir
             .join(format!("session-{}.jsonl", app.session_id));
+        app.load_input_history();
         app.bootstrap_setup();
         app.refresh_usage_sidebar_cache();
         app
@@ -587,6 +630,11 @@ impl AppState {
         self.mouse_hover_target = None;
         self.pending_mouse_left_down = false;
         self.pending_tool_card_body_click_entry = None;
+        self.active_agent_view = AgentView::Main;
+        self.active_agent_child_transcript = None;
+        self.composer_agent_panel_focused = false;
+        self.cleared_input_draft = None;
+        self.input_kill_buffer = None;
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
@@ -676,13 +724,7 @@ impl AppState {
                     return Ok(None);
                 }
                 KeyCode::Enter if self.sidebar_selected_card == SidebarCard::Agents => {
-                    let detail = self
-                        .agent_sidebar_rows()
-                        .get(self.sidebar_agent_selected)
-                        .map(|row| row.detail.clone())
-                        .unwrap_or_else(|| "no agent selected".to_owned());
-                    self.last_notice = Some(detail.clone());
-                    self.push_timeline(TimelineRole::Notice, detail);
+                    self.activate_selected_agent_view();
                     return Ok(None);
                 }
                 KeyCode::Esc => {
@@ -753,12 +795,90 @@ impl AppState {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.pending_approval.is_none() =>
             {
+                if self.active_pane != PaneFocus::Activity && self.has_thinking_blocks() {
+                    self.toggle_thinking_block_mode();
+                    return Ok(None);
+                }
                 if self.selected_tool_activity_key.is_some() && self.toggle_selected_tool_card() {
                     return Ok(None);
                 }
                 self.toggle_thinking_block_mode();
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+            KeyCode::Char('z') | KeyCode::Char('Z')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                if self.restore_cleared_input_draft() {
+                    self.reset_input_history_navigation();
+                    self.reset_slash_selector();
+                    self.last_notice = Some("draft restored".to_owned());
+                }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.move_input_cursor_line_start();
+            }
+            KeyCode::Char('e') | KeyCode::Char('E')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.move_input_cursor_line_end();
+            }
+            KeyCode::Char('b') | KeyCode::Char('B')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.move_input_cursor_left();
+            }
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.move_input_cursor_right();
+            }
+            KeyCode::Char('h') | KeyCode::Char('H')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.remove_input_character_before_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('w') | KeyCode::Char('W')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.remove_input_word_before_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('k') | KeyCode::Char('K')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.kill_input_to_line_end();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.yank_input_kill_buffer();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('j') | KeyCode::Char('J')
+                if self.active_pane == PaneFocus::Composer && has_control_without_alt(key) =>
+            {
+                self.insert_input_character('\n');
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Char('b') | KeyCode::Char('B')
+                if self.active_pane == PaneFocus::Composer && has_alt_without_control(key) =>
+            {
+                self.move_input_cursor_word_left();
+            }
+            KeyCode::Char('f') | KeyCode::Char('F')
+                if self.active_pane == PaneFocus::Composer && has_alt_without_control(key) =>
+            {
+                self.move_input_cursor_word_right();
+            }
             KeyCode::Tab
                 if self.active_pane == PaneFocus::Composer && self.has_slash_selector() =>
             {
@@ -772,6 +892,23 @@ impl AppState {
             KeyCode::Tab => {}
             KeyCode::BackTab if self.pending_approval.is_none() => {
                 return self.toggle_runtime_permission_mode();
+            }
+            KeyCode::Up if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
+                if self.selected_composer_agent_is_first() {
+                    self.blur_composer_agent_panel();
+                } else {
+                    self.move_composer_agent_selection(false);
+                }
+            }
+            KeyCode::Down if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
+                self.move_composer_agent_selection(true);
+            }
+            KeyCode::Esc if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
+                self.blur_composer_agent_panel();
+            }
+            KeyCode::Enter if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
+                self.activate_selected_agent_view();
+                self.blur_composer_agent_panel();
             }
             KeyCode::Up if self.active_pane == PaneFocus::Composer && self.has_slash_selector() => {
                 self.move_slash_selector(false)
@@ -790,7 +927,9 @@ impl AppState {
             }
             KeyCode::Down if self.active_pane == PaneFocus::Composer => {
                 if self.input_cursor_visual_row() == self.input_last_visual_row() {
-                    self.navigate_input_history(false);
+                    if self.input_history_index.is_some() || !self.focus_composer_agent_panel() {
+                        self.navigate_input_history(false);
+                    }
                 } else {
                     self.move_input_cursor_vertical(false);
                 }
@@ -799,6 +938,18 @@ impl AppState {
                 self.move_input_cursor_home()
             }
             KeyCode::End if self.active_pane == PaneFocus::Composer => self.move_input_cursor_end(),
+            KeyCode::Left
+                if self.active_pane == PaneFocus::Composer
+                    && (has_control_without_alt(key) || has_alt_without_control(key)) =>
+            {
+                self.move_input_cursor_word_left();
+            }
+            KeyCode::Right
+                if self.active_pane == PaneFocus::Composer
+                    && (has_control_without_alt(key) || has_alt_without_control(key)) =>
+            {
+                self.move_input_cursor_word_right();
+            }
             KeyCode::PageUp => self.scroll_timeline(self.transcript_page_step()),
             KeyCode::PageDown => self.unscroll_timeline(self.transcript_page_step()),
             KeyCode::Home => self.scroll_timeline_to_top(),
@@ -807,8 +958,8 @@ impl AppState {
                 if self.input.is_empty() && self.handle_ui_command(UiCommand::ClearToolCardFocus) {
                     return Ok(None);
                 }
-                self.input.clear();
-                self.input_cursor = 0;
+                self.blur_composer_agent_panel();
+                self.clear_input_preserving_draft();
                 self.reset_input_history_navigation();
                 self.reset_slash_selector();
                 self.active_pane = PaneFocus::Composer;
@@ -819,20 +970,44 @@ impl AppState {
             KeyCode::Right if self.active_pane == PaneFocus::Composer => {
                 self.move_input_cursor_right()
             }
+            KeyCode::Backspace
+                if self.active_pane == PaneFocus::Composer
+                    && (has_control_without_alt(key) || has_alt_without_control(key)) =>
+            {
+                self.remove_input_word_before_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
             KeyCode::Backspace => {
                 self.active_pane = PaneFocus::Composer;
+                self.blur_composer_agent_panel();
                 self.remove_input_character_before_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Delete
+                if self.active_pane == PaneFocus::Composer
+                    && (has_control_without_alt(key) || has_alt_without_control(key)) =>
+            {
+                self.remove_input_word_after_cursor();
+                self.reset_input_history_navigation();
+                self.reset_slash_selector();
+            }
+            KeyCode::Delete if self.active_pane == PaneFocus::Composer => {
+                self.remove_input_character_at_cursor();
                 self.reset_input_history_navigation();
                 self.reset_slash_selector();
             }
             _ if self.active_pane == PaneFocus::Composer && is_composer_newline_key(key) => {
                 self.active_pane = PaneFocus::Composer;
+                self.blur_composer_agent_panel();
                 self.insert_input_character('\n');
                 self.reset_input_history_navigation();
                 self.reset_slash_selector();
             }
             _ if is_composer_submit_key(key) => {
                 self.active_pane = PaneFocus::Composer;
+                self.blur_composer_agent_panel();
                 if self.should_accept_slash_selector_on_enter() {
                     self.accept_slash_selector();
                     return Ok(None);
@@ -841,6 +1016,7 @@ impl AppState {
             }
             KeyCode::Char(character) if is_composer_text_key(key) => {
                 self.active_pane = PaneFocus::Composer;
+                self.blur_composer_agent_panel();
                 let normalized = if normalize_command_prefix_character(character).is_some()
                     && self.input.trim().is_empty()
                 {
@@ -912,7 +1088,9 @@ impl AppState {
     }
 
     pub(crate) fn footer_strip_height(&self) -> u16 {
-        let desired = self.composer_height();
+        let desired = self
+            .composer_height()
+            .saturating_add(self.composer_agent_panel_rows());
         desired.min(self.terminal_height.saturating_sub(2).max(4))
     }
 
@@ -921,6 +1099,7 @@ impl AppState {
         if prompt.is_empty() {
             return Ok(None);
         }
+        self.discard_cleared_input_draft();
         self.record_input_history(prompt.clone());
         self.reset_input_history_navigation();
 
@@ -1009,6 +1188,10 @@ impl AppState {
             }
             "/doctor" => {
                 self.show_doctor_report();
+                Ok(None)
+            }
+            "/agent" => {
+                self.activate_agent_from_command(&command.arg)?;
                 Ok(None)
             }
             "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
@@ -1110,33 +1293,37 @@ impl AppState {
         let Some(skill) = self.exact_skill_descriptor(skill_id) else {
             return Ok(None);
         };
+        let item_kind = slash_skill_display_kind(&skill);
         if self.is_busy {
-            self.push_timeline(TimelineRole::Notice, "busy; invoke skill later");
-            self.last_notice = Some("busy; invoke skill later".to_owned());
+            self.push_timeline(
+                TimelineRole::Notice,
+                format!("busy; invoke {item_kind} later"),
+            );
+            self.last_notice = Some(format!("busy; invoke {item_kind} later"));
             return Ok(None);
         }
         if !skill.enabled {
             self.push_timeline(
                 TimelineRole::Notice,
-                format!("skill {skill_id} is disabled"),
+                format!("{item_kind} {skill_id} is disabled"),
             );
-            self.last_notice = Some(format!("skill {skill_id} is disabled"));
+            self.last_notice = Some(format!("{item_kind} {skill_id} is disabled"));
             return Ok(None);
         }
         if skill.trust != sigil_kernel::SkillTrustState::Trusted {
             self.push_timeline(
                 TimelineRole::Notice,
-                format!("skill {skill_id} is not trusted"),
+                format!("{item_kind} {skill_id} is not trusted"),
             );
-            self.last_notice = Some(format!("skill {skill_id} is not trusted"));
+            self.last_notice = Some(format!("{item_kind} {skill_id} is not trusted"));
             return Ok(None);
         }
         if !skill.user_invocable {
             self.push_timeline(
                 TimelineRole::Notice,
-                format!("skill {skill_id} is not user-invocable"),
+                format!("{item_kind} {skill_id} is not user-invocable"),
             );
-            self.last_notice = Some(format!("skill {skill_id} is not user-invocable"));
+            self.last_notice = Some(format!("{item_kind} {skill_id} is not user-invocable"));
             return Ok(None);
         }
 
@@ -1163,7 +1350,7 @@ impl AppState {
                 }))
             }
             sigil_kernel::SkillRunMode::ChildSession => {
-                self.last_notice = Some(format!("invoking skill {skill_id} in child session"));
+                self.last_notice = Some(format!("invoking agent {skill_id}"));
                 self.push_phase_marker(format!("task|{}", self.model_name));
                 Ok(Some(AppAction::InvokeChildSessionSkill {
                     skill_id: skill_id.to_owned(),
@@ -1245,6 +1432,10 @@ impl AppState {
         task_sidebar::task_sidebar_lines(&self.current_session_entries)
     }
 
+    pub(crate) fn task_strip_view(&self) -> Option<task_sidebar::TaskStripView> {
+        task_sidebar::task_strip_view(&self.current_session_entries)
+    }
+
     fn has_task_context_for_plain_prompt(&self) -> bool {
         sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries)
             .latest_unfinished_task()
@@ -1302,55 +1493,6 @@ impl AppState {
                 "scope: saved default".to_owned()
             },
         ]
-    }
-
-    pub(crate) fn agent_sidebar_rows(&self) -> Vec<SidebarAgentRow> {
-        let subagent_detail =
-            sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries)
-                .latest_task()
-                .and_then(|task| {
-                    let child_count = task.child_sessions.len();
-                    if child_count == 0 {
-                        return None;
-                    }
-                    let active = task
-                        .child_sessions
-                        .values()
-                        .any(|child| child.status == sigil_kernel::TaskChildSessionStatus::Started);
-                    Some(if active {
-                        format!(
-                            "{} active",
-                            count_label(child_count, "child session", "child sessions")
-                        )
-                    } else {
-                        format!(
-                            "{} recorded",
-                            count_label(child_count, "child session", "child sessions")
-                        )
-                    })
-                })
-                .unwrap_or_else(|| "available via /plan".to_owned());
-        let rows = [
-            (
-                "main".to_owned(),
-                if self.is_busy {
-                    "running in current session".to_owned()
-                } else {
-                    "idle in current session".to_owned()
-                },
-                false,
-            ),
-            ("subagents".to_owned(), subagent_detail, false),
-        ];
-        rows.into_iter()
-            .enumerate()
-            .map(|(index, (label, detail, muted))| SidebarAgentRow {
-                label,
-                detail,
-                selected: index == self.sidebar_agent_selected,
-                muted,
-            })
-            .collect()
     }
 
     fn refresh_usage_sidebar_cache(&mut self) {
@@ -1657,8 +1799,16 @@ impl AppState {
     }
 }
 
+fn slash_skill_display_kind(skill: &sigil_kernel::SkillDescriptor) -> &'static str {
+    if matches!(skill.run_as, sigil_kernel::SkillRunMode::ChildSession) {
+        "agent"
+    } else {
+        "skill"
+    }
+}
+
 fn is_composer_newline_key(key: KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::SHIFT)
+    (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT))
         && matches!(
             key.code,
             KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
@@ -1667,6 +1817,7 @@ fn is_composer_newline_key(key: KeyEvent) -> bool {
 
 fn is_composer_submit_key(key: KeyEvent) -> bool {
     !key.modifiers.contains(KeyModifiers::SHIFT)
+        && !key.modifiers.contains(KeyModifiers::ALT)
         && matches!(
             key.code,
             KeyCode::Enter | KeyCode::Char('\n') | KeyCode::Char('\r')
@@ -1675,6 +1826,14 @@ fn is_composer_submit_key(key: KeyEvent) -> bool {
 
 fn is_composer_text_key(key: KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) && !character.is_control())
+}
+
+fn has_control_without_alt(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT)
+}
+
+fn has_alt_without_control(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 #[cfg(test)]

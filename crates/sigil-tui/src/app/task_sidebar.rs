@@ -3,9 +3,27 @@ use sigil_kernel::{
     TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskProjection,
 };
 
+use crate::ui::{StatusKind, status_symbol};
+
 use super::formatting::truncate_session_view_text;
 
 const TASK_SIDEBAR_STEP_LIMIT: usize = 6;
+const TASK_STRIP_STEP_LIMIT: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskStripView {
+    pub(crate) title: String,
+    pub(crate) detail: String,
+    pub(crate) rows: Vec<TaskStripRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskStripRow {
+    pub(crate) kind: StatusKind,
+    pub(crate) label: String,
+    pub(crate) detail: String,
+    pub(crate) active: bool,
+}
 
 pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let terminal_lines = terminal_task_sidebar_lines(entries);
@@ -83,6 +101,54 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     lines
 }
 
+pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripView> {
+    let projection = TaskStateProjection::from_entries(entries);
+    let task = projection.latest_task()?;
+    let mut rows = Vec::new();
+    let mut detail = task_run_status_label(task.status).to_owned();
+
+    if let Some(plan_version) = task.latest_plan_version
+        && let Some(plan) = task.plans.get(&plan_version)
+    {
+        let completed_steps = plan
+            .steps
+            .iter()
+            .filter(|step| {
+                task.steps
+                    .get(&(plan_version, step.step_id.clone()))
+                    .is_some_and(|projected| projected.status == TaskStepStatus::Completed)
+            })
+            .count();
+        detail = format!(
+            "{} · v{plan_version} · {completed_steps}/{} done",
+            task_run_status_label(task.status),
+            plan.steps.len()
+        );
+        rows = task_strip_step_rows(task, plan_version, plan);
+    }
+
+    if rows.is_empty() {
+        rows.push(TaskStripRow {
+            kind: task_run_status_kind(task.status),
+            label: task.objective.clone(),
+            detail: task_run_status_label(task.status).to_owned(),
+            active: !matches!(
+                task.status,
+                TaskRunStatus::Completed
+                    | TaskRunStatus::Failed
+                    | TaskRunStatus::Cancelled
+                    | TaskRunStatus::Interrupted
+            ),
+        });
+    }
+
+    Some(TaskStripView {
+        title: format!("Task {}", task.task_id.as_str()),
+        detail,
+        rows,
+    })
+}
+
 fn terminal_task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let projection = TerminalTaskProjection::from_entries(entries);
     let running_count = projection.active_task_ids.len();
@@ -149,6 +215,52 @@ fn task_sidebar_focus_lines(
     lines
 }
 
+fn task_strip_step_rows(
+    task: &TaskRunProjection,
+    plan_version: u32,
+    plan: &TaskPlanProjection,
+) -> Vec<TaskStripRow> {
+    let focus_index = task_sidebar_focus_step_index(task, plan_version, plan);
+    let mut selected_indices: Vec<usize> =
+        (0..plan.steps.len().min(TASK_STRIP_STEP_LIMIT)).collect();
+    if let Some(focus_index) = focus_index
+        && focus_index >= selected_indices.len()
+        && !selected_indices.is_empty()
+    {
+        selected_indices.pop();
+        selected_indices.push(focus_index);
+    }
+
+    let mut rows = selected_indices
+        .iter()
+        .map(|index| {
+            let step = &plan.steps[*index];
+            let status = task_sidebar_step_status(task, plan_version, step);
+            TaskStripRow {
+                kind: task_step_status_kind(status),
+                label: format!("{}. {}", index + 1, step.title),
+                detail: format!(
+                    "{} · {}",
+                    task_step_status_label(status),
+                    step.step_id.as_str()
+                ),
+                active: focus_index == Some(*index),
+            }
+        })
+        .collect::<Vec<_>>();
+    let hidden_steps = plan.steps.len().saturating_sub(selected_indices.len());
+    if hidden_steps > 0 {
+        let summary = task_sidebar_hidden_step_summary(task, plan_version, plan, &selected_indices);
+        rows.push(TaskStripRow {
+            kind: StatusKind::Unknown,
+            label: format!("+{hidden_steps} more steps"),
+            detail: summary,
+            active: false,
+        });
+    }
+    rows
+}
+
 fn task_sidebar_hidden_step_summary(
     task: &TaskRunProjection,
     plan_version: u32,
@@ -194,13 +306,29 @@ fn task_sidebar_hidden_step_summary(
 }
 
 fn task_sidebar_step_marker(status: TaskStepStatus) -> &'static str {
+    status_symbol(task_step_status_kind(status))
+}
+
+fn task_step_status_kind(status: TaskStepStatus) -> StatusKind {
     match status {
-        TaskStepStatus::Running => "▶",
-        TaskStepStatus::Completed => "✓",
-        TaskStepStatus::Failed | TaskStepStatus::Blocked => "!",
-        TaskStepStatus::Cancelled => "×",
-        TaskStepStatus::Interrupted => "⏸",
-        TaskStepStatus::Pending => "·",
+        TaskStepStatus::Pending => StatusKind::Pending,
+        TaskStepStatus::Running => StatusKind::Running,
+        TaskStepStatus::Completed => StatusKind::Success,
+        TaskStepStatus::Failed
+        | TaskStepStatus::Blocked
+        | TaskStepStatus::Cancelled
+        | TaskStepStatus::Interrupted => StatusKind::Error,
+    }
+}
+
+fn task_run_status_kind(status: TaskRunStatus) -> StatusKind {
+    match status {
+        TaskRunStatus::Started | TaskRunStatus::Running => StatusKind::Running,
+        TaskRunStatus::Paused => StatusKind::Warning,
+        TaskRunStatus::Completed => StatusKind::Success,
+        TaskRunStatus::Failed | TaskRunStatus::Cancelled | TaskRunStatus::Interrupted => {
+            StatusKind::Error
+        }
     }
 }
 
@@ -284,7 +412,7 @@ fn task_sidebar_last_problem_step(
     })
 }
 
-fn task_run_status_label(status: TaskRunStatus) -> &'static str {
+pub(super) fn task_run_status_label(status: TaskRunStatus) -> &'static str {
     match status {
         TaskRunStatus::Started => "started",
         TaskRunStatus::Running => "running",
@@ -305,5 +433,18 @@ fn task_step_status_label(status: TaskStepStatus) -> &'static str {
         TaskStepStatus::Blocked => "blocked",
         TaskStepStatus::Cancelled => "cancelled",
         TaskStepStatus::Interrupted => "interrupted",
+    }
+}
+
+pub(super) fn task_child_session_status_label(
+    status: sigil_kernel::TaskChildSessionStatus,
+) -> &'static str {
+    match status {
+        sigil_kernel::TaskChildSessionStatus::Started => "started",
+        sigil_kernel::TaskChildSessionStatus::Completed => "completed",
+        sigil_kernel::TaskChildSessionStatus::Failed => "failed",
+        sigil_kernel::TaskChildSessionStatus::Cancelled => "cancelled",
+        sigil_kernel::TaskChildSessionStatus::Interrupted => "interrupted",
+        sigil_kernel::TaskChildSessionStatus::Unavailable => "unavailable",
     }
 }
