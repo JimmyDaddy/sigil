@@ -39,6 +39,131 @@ fn session_labels_and_identifiers_truncate_as_expected() {
 }
 
 #[test]
+fn local_ui_control_preservation_keeps_only_display_overrides() -> Result<()> {
+    let thread_id = sigil_kernel::AgentThreadId::new("thread_preserve")?;
+    let task_id = sigil_kernel::TaskId::new("task_preserve")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_preserve")?;
+    let local_entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
+            sigil_kernel::AgentThreadClosedEntry {
+                thread_id: thread_id.clone(),
+                reason: Some("closed".to_owned()),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(
+            sigil_kernel::AgentThreadDisplayNameEntry {
+                thread_id: thread_id.clone(),
+                display_name: "Reader".to_owned(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(
+            sigil_kernel::TaskChildSessionDisplayNameEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id: step_id.clone(),
+                child_task_id: sigil_kernel::TaskId::new("child_preserve")?,
+                display_name: "Legacy Reader".to_owned(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id: thread_id.clone(),
+                status: sigil_kernel::AgentThreadStatus::Running,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )),
+    ];
+    let incoming_entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
+            sigil_kernel::AgentThreadClosedEntry {
+                thread_id: thread_id.clone(),
+                reason: Some("closed".to_owned()),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id,
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "task".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Running,
+            reason: None,
+        })),
+    ];
+
+    let merged = preserve_local_ui_control_entries(&local_entries, incoming_entries);
+    let closed_count = merged
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentThreadClosed(_))
+            )
+        })
+        .count();
+    assert_eq!(closed_count, 1);
+    assert!(merged.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(rename))
+                if rename.display_name == "Reader"
+        )
+    }));
+    assert!(merged.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
+                if rename.step_id == step_id && rename.display_name == "Legacy Reader"
+        )
+    }));
+    assert!(!merged.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(status))
+                if status.thread_id == thread_id
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn local_ui_control_entry_equality_covers_task_child_display_identity() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_equal")?;
+    let step_id = sigil_kernel::TaskStepId::new("step_equal")?;
+    let child_task_id = sigil_kernel::TaskId::new("child_equal")?;
+    let entry = SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(
+        sigil_kernel::TaskChildSessionDisplayNameEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            child_task_id: child_task_id.clone(),
+            display_name: "Reader".to_owned(),
+        },
+    ));
+    let matching = SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(
+        sigil_kernel::TaskChildSessionDisplayNameEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            child_task_id: child_task_id.clone(),
+            display_name: "Reader".to_owned(),
+        },
+    ));
+    let different = SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(
+        sigil_kernel::TaskChildSessionDisplayNameEntry {
+            task_id,
+            plan_version: 1,
+            step_id,
+            child_task_id,
+            display_name: "Writer".to_owned(),
+        },
+    ));
+
+    assert!(local_ui_control_entries_equal(&entry, &matching));
+    assert!(!local_ui_control_entries_equal(&entry, &different));
+    Ok(())
+}
+
+#[test]
 fn bounded_line_reader_handles_short_long_and_eof_lines() -> Result<()> {
     let mut cursor = Cursor::new(b"short\nsecond line is long\nlast".to_vec());
     assert_eq!(

@@ -317,6 +317,7 @@ fn approval_modal_area_uses_widest_content_with_screen_cap() {
     let view = ApprovalModalView {
         tool_name: "write_file".to_owned(),
         call_id: "call-1".to_owned(),
+        source_agent: None,
         access_label: "write".to_owned(),
         preview_title: "Extremely wide preview title for approval layout sizing".to_owned(),
         preview_summary: "summary".to_owned(),
@@ -527,6 +528,7 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
     let mut view = ApprovalModalView {
         tool_name: "write_file".to_owned(),
         call_id: "call-1".to_owned(),
+        source_agent: None,
         access_label: "write".to_owned(),
         preview_title: "Title".to_owned(),
         preview_summary: "summary".to_owned(),
@@ -553,6 +555,13 @@ fn approval_hit_area_helpers_cover_compact_empty_and_selected_variants() {
     };
 
     assert_eq!(approval_header_line_count(&view), 4);
+    assert_eq!(
+        approval_header_line_count(&ApprovalModalView {
+            source_agent: Some("Kernel Mapper · thread_1".to_owned()),
+            ..view.clone()
+        }),
+        5
+    );
     assert_eq!(
         approval_header_line_count(&ApprovalModalView {
             change_set: Some(ApprovalChangeSetSummary {

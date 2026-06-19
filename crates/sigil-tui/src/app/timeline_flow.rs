@@ -645,13 +645,26 @@ impl AppState {
             return (Vec::new(), Vec::new());
         };
         let child = self.active_agent_child_entry();
+        let agent_thread = self.active_agent_thread_projection();
         let active_label = self.active_agent_label();
         let mut header = vec![Line::from(vec![
             Span::styled("agent view", Style::default().fg(Color::Cyan)),
             Span::raw(format!(": {active_label}")),
             Span::raw(" · child session"),
         ])];
-        if let Some(child) = child.as_ref() {
+        if let Some(thread) = agent_thread.as_ref().filter(|thread| !thread.legacy_task) {
+            let profile = thread
+                .profile_id
+                .as_ref()
+                .map(|profile_id| profile_id.as_str())
+                .unwrap_or("agent");
+            header.push(Line::from(format!(
+                "status: {} · {} · {}",
+                agent_thread_status_label(thread.status),
+                profile,
+                agent_thread_source_label(thread.invocation_source)
+            )));
+        } else if let Some(child) = child.as_ref() {
             header.push(Line::from(format!(
                 "status: {} · {} · v{}:{}",
                 task_child_session_status_label(child.status),
@@ -947,6 +960,33 @@ impl AppState {
     }
 }
 
+fn agent_thread_status_label(status: sigil_kernel::AgentThreadStatus) -> &'static str {
+    match status {
+        sigil_kernel::AgentThreadStatus::Started => "started",
+        sigil_kernel::AgentThreadStatus::Running => "running",
+        sigil_kernel::AgentThreadStatus::Blocked => "blocked",
+        sigil_kernel::AgentThreadStatus::Completed => "completed",
+        sigil_kernel::AgentThreadStatus::Failed => "failed",
+        sigil_kernel::AgentThreadStatus::Cancelled => "cancelled",
+        sigil_kernel::AgentThreadStatus::Interrupted => "interrupted",
+        sigil_kernel::AgentThreadStatus::Closed => "closed",
+        sigil_kernel::AgentThreadStatus::Unavailable => "unavailable",
+        sigil_kernel::AgentThreadStatus::Unknown => "unknown",
+    }
+}
+
+fn agent_thread_source_label(source: Option<sigil_kernel::AgentInvocationSource>) -> &'static str {
+    match source {
+        Some(sigil_kernel::AgentInvocationSource::Chat) => "chat",
+        Some(sigil_kernel::AgentInvocationSource::Mention) => "mention",
+        Some(sigil_kernel::AgentInvocationSource::Skill) => "skill",
+        Some(sigil_kernel::AgentInvocationSource::Task) => "task",
+        Some(sigil_kernel::AgentInvocationSource::Plugin) => "plugin",
+        Some(sigil_kernel::AgentInvocationSource::System) => "system",
+        Some(sigil_kernel::AgentInvocationSource::Unknown) | None => "unknown",
+    }
+}
+
 fn selected_timeline_line(line: Line<'static>) -> Line<'static> {
     line.patch_style(timeline_selection_style())
 }
@@ -1047,4 +1087,84 @@ pub(super) fn clipboard_copy_status(text: &str) -> String {
     let lines = text.lines().count().max(1);
     let chars = text.chars().count();
     format!("{lines} line(s), {chars} char(s)")
+}
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+mod tests {
+    use super::{agent_thread_source_label, agent_thread_status_label};
+    use sigil_kernel::{AgentInvocationSource, AgentThreadStatus};
+
+    #[test]
+    fn agent_thread_labels_cover_status_and_source_variants() {
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Started),
+            "started"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Running),
+            "running"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Blocked),
+            "blocked"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Completed),
+            "completed"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Failed),
+            "failed"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Cancelled),
+            "cancelled"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Interrupted),
+            "interrupted"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Closed),
+            "closed"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Unavailable),
+            "unavailable"
+        );
+        assert_eq!(
+            agent_thread_status_label(AgentThreadStatus::Unknown),
+            "unknown"
+        );
+
+        assert_eq!(
+            agent_thread_source_label(Some(AgentInvocationSource::Chat)),
+            "chat"
+        );
+        assert_eq!(
+            agent_thread_source_label(Some(AgentInvocationSource::Mention)),
+            "mention"
+        );
+        assert_eq!(
+            agent_thread_source_label(Some(AgentInvocationSource::Skill)),
+            "skill"
+        );
+        assert_eq!(
+            agent_thread_source_label(Some(AgentInvocationSource::Task)),
+            "task"
+        );
+        assert_eq!(
+            agent_thread_source_label(Some(AgentInvocationSource::Plugin)),
+            "plugin"
+        );
+        assert_eq!(
+            agent_thread_source_label(Some(AgentInvocationSource::System)),
+            "system"
+        );
+        assert_eq!(
+            agent_thread_source_label(Some(AgentInvocationSource::Unknown)),
+            "unknown"
+        );
+        assert_eq!(agent_thread_source_label(None), "unknown");
+    }
 }

@@ -24,6 +24,9 @@ impl AppState {
                     pending.call.id,
                     approval_access_label(&pending.spec)
                 ));
+                if let Some(source_agent) = self.pending_approval_source_agent(&pending.call.id) {
+                    lines.push(format!("source_agent={source_agent}"));
+                }
                 lines.extend(approval_subject_lines(&pending.subjects));
                 lines.push(format!("preview={}", preview.title));
                 if !preview.summary.trim().is_empty() {
@@ -96,6 +99,9 @@ impl AppState {
                 pending.call.id,
                 approval_access_label(&pending.spec)
             ));
+            if let Some(source_agent) = self.pending_approval_source_agent(&pending.call.id) {
+                lines.push(format!("source_agent={source_agent}"));
+            }
             lines.extend(approval_subject_lines(&pending.subjects));
             lines.push(format!("args={}", pending.call.args_json));
         }
@@ -217,10 +223,12 @@ impl AppState {
     pub(crate) fn approval_modal_view(&self) -> Option<ApprovalModalView> {
         let pending = self.pending_approval.as_ref()?;
         let access_label = approval_access_label(&pending.spec);
+        let source_agent = self.pending_approval_source_agent(&pending.call.id);
         let Some(preview) = pending.preview.as_ref() else {
             return Some(ApprovalModalView {
                 tool_name: pending.call.name.clone(),
                 call_id: pending.call.id.clone(),
+                source_agent,
                 access_label,
                 preview_title: format!("Run {}", pending.call.name),
                 preview_summary: approval_subject_summary(&pending.subjects)
@@ -332,6 +340,7 @@ impl AppState {
         Some(ApprovalModalView {
             tool_name: pending.call.name.clone(),
             call_id: pending.call.id.clone(),
+            source_agent,
             access_label,
             preview_title: preview.title.clone(),
             preview_summary: preview.summary.clone(),
@@ -364,6 +373,35 @@ impl AppState {
         self.code_intelligence_diagnostics_by_path
             .get(&normalize_approval_diagnostic_path(path))
             .copied()
+    }
+
+    fn pending_approval_source_agent(&self, call_id: &str) -> Option<String> {
+        let projection =
+            sigil_kernel::AgentThreadStateProjection::from_entries(&self.current_session_entries);
+        let route = projection
+            .approval_routes
+            .values()
+            .find(|route| route.call_id == call_id)?;
+        let source_label = projection
+            .threads
+            .get(&route.source_thread_id)
+            .and_then(|thread| thread.display_name.clone())
+            .or_else(|| {
+                projection
+                    .threads
+                    .get(&route.source_thread_id)
+                    .and_then(|thread| thread.profile_id.as_ref())
+                    .map(|profile_id| profile_id.as_str().to_owned())
+            })
+            .unwrap_or_else(|| route.source_thread_id.as_str().to_owned());
+        if source_label == route.source_thread_id.as_str() {
+            Some(source_label)
+        } else {
+            Some(format!(
+                "{source_label} · {}",
+                route.source_thread_id.as_str()
+            ))
+        }
     }
 
     fn approval_hunk_positions(&self) -> Vec<usize> {

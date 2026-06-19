@@ -155,10 +155,40 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
         app.last_notice(),
         Some("usage: /agent rename <child-id|current> <name>")
     );
+    app.activate_agent_from_command("close")?;
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /agent close <agent|current>")
+    );
+    app.activate_agent_from_command("cancel")?;
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /agent cancel <agent|current>")
+    );
+    app.activate_agent_from_command("close missing")?;
+    assert_eq!(app.last_notice(), Some("agent not found: missing"));
+    app.activate_agent_from_command("cancel missing")?;
+    assert_eq!(app.last_notice(), Some("agent not found: missing"));
     app.activate_agent_from_command("missing")?;
     assert_eq!(app.last_notice(), Some("agent not found: missing"));
     app.activate_agent_from_command("next")?;
     assert_eq!(app.last_notice(), Some("no child agents to switch"));
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: "orphan".to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative("children/orphan.jsonl")?,
+    };
+    app.activate_agent_from_command("close current")?;
+    assert_eq!(app.last_notice(), Some("agent close unavailable: current"));
+    app.activate_agent_from_command("cancel current")?;
+    assert_eq!(app.last_notice(), Some("agent cancel unavailable: current"));
+    app.active_agent_view = super::super::AgentView::Main;
+    app.activate_agent_from_command("rename current Main Agent")?;
+    assert_eq!(app.last_notice(), Some("agent not found: current"));
+    app.activate_agent_from_command("steer current keep going")?;
+    assert_eq!(
+        app.last_notice(),
+        Some("agent messaging will be enabled with message_agent in the next phase")
+    );
 
     app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
         sigil_kernel::TaskRunEntry {
@@ -172,7 +202,7 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
     let rows = app.agent_sidebar_rows();
     assert!(
         rows.iter()
-            .any(|row| row.label == "agents" && row.detail == "no child sessions recorded")
+            .any(|row| row.label == "agents" && row.detail == "no child agents recorded")
     );
     app.active_pane = PaneFocus::Activity;
     app.sidebar_selected_card = SidebarCard::Agents;
@@ -180,12 +210,12 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(
         app.last_notice(),
-        Some("agent focus unavailable: no child sessions recorded")
+        Some("agent focus unavailable: no child agents recorded")
     );
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.text == "agent focus unavailable: no child sessions recorded")
+            .any(|entry| entry.text == "agent focus unavailable: no child agents recorded")
     );
     Ok(())
 }
@@ -228,6 +258,24 @@ fn agent_rename_filters_and_persists_display_name() -> Result<()> {
         app.last_notice(),
         Some("agent renamed: child_1 -> Repo Audit")
     );
+    assert_eq!(app.active_agent_label(), "Repo Audit");
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(rename))
+            if rename.display_name == "Repo Audit"
+    )));
+    let stale_entries = app
+        .current_session_entries
+        .iter()
+        .filter(|entry| {
+            !matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(_))
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    app.sync_current_session_state(stale_entries);
     assert_eq!(app.active_agent_label(), "Repo Audit");
     assert!(app.current_session_entries.iter().any(|entry| matches!(
         entry,
@@ -298,7 +346,10 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
         row.label == "main" && row.detail == "idle in current session" && row.active
     }));
     assert!(rows.iter().any(|row| {
-        row.label == "agents" && row.detail == "available via /plan" && !row.active && row.muted
+        row.label == "agents"
+            && row.detail == "no child agents recorded"
+            && !row.active
+            && row.muted
     }));
     let temp = tempdir()?;
     let session_dir = temp.path().join(".sigil/sessions");
@@ -450,6 +501,227 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
             && row.detail == "completed · subagent_read · v1:step_1"
             && !row.muted
     }));
+    Ok(())
+}
+
+#[test]
+fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
+    let temp = tempdir()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_dir = temp.path().join(".sigil/sessions");
+    app.session_log_path = session_dir.join("parent.jsonl");
+    let session_ref = sigil_kernel::SessionRef::new_relative("children/thread_1.jsonl")?;
+    let child_store = JsonlSessionStore::new(session_ref.resolve(&session_dir))?;
+    child_store.append(&SessionLogEntry::User(ModelMessage::user("inspect kernel")))?;
+    child_store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("KERNEL_THREAD_DONE".to_owned()),
+        Vec::new(),
+    )))?;
+
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore_1")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("thread_1")?;
+    let run_context = sigil_kernel::AgentRunContextSnapshot {
+        profile_snapshot_id: snapshot_id.clone(),
+        provider: "deepseek".to_owned(),
+        model: "deepseek-v4-pro".to_owned(),
+        reasoning_effort: None,
+        workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
+            temp.path().display().to_string(),
+        )?,
+        effective_tool_scope_hash: "sha256:tools".to_owned(),
+        effective_permission_policy_hash: "sha256:permissions".to_owned(),
+        effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+        provider_capability_hash: "sha256:provider".to_owned(),
+        model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+        budget_policy_hash: "sha256:budget".to_owned(),
+        provider_background_handle_ref: None,
+    };
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            sigil_kernel::AgentProfileCapturedEntry {
+                snapshot: sigil_kernel::AgentProfileSnapshot {
+                    snapshot_id: snapshot_id.clone(),
+                    profile_id: profile_id.clone(),
+                    source: sigil_kernel::AgentProfileSource::System,
+                    source_hash: "sha256:source".to_owned(),
+                    profile_hash: "sha256:profile".to_owned(),
+                    resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                    resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                    resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    resolved_skill_hashes: Vec::new(),
+                    trust_state: sigil_kernel::AgentTrustState::Trusted,
+                },
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: session_ref,
+                profile_id,
+                profile_snapshot_id: snapshot_id,
+                run_context,
+                objective: "inspect kernel".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Foreground,
+                invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+                display_name: Some("kernel map".to_owned()),
+                created_at_ms: Some(42),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id: thread_id.clone(),
+                status: sigil_kernel::AgentThreadStatus::Running,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )),
+    ]);
+
+    let rows = app.agent_sidebar_rows();
+    assert!(rows.iter().any(|row| {
+        row.label == "agent kernel map" && row.detail == "running · explore · chat" && !row.muted
+    }));
+
+    app.input = "/agent thread_1".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "kernel map");
+    let focus_lines = app
+        .transcript_lines(8)
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        focus_lines
+            .iter()
+            .any(|line| line == "status: running · explore · chat")
+    );
+    assert!(
+        focus_lines
+            .iter()
+            .any(|line| line.contains("KERNEL_THREAD_DONE"))
+    );
+
+    app.input = "/agent rename current Kernel Mapper".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "Kernel Mapper");
+    let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
+    assert!(persisted.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(rename))
+                if rename.thread_id == thread_id && rename.display_name == "Kernel Mapper"
+        )
+    }));
+    let stale_entries = app
+        .current_session_entries
+        .iter()
+        .filter(|entry| {
+            !matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(_))
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    app.sync_current_session_state(stale_entries);
+    assert_eq!(app.active_agent_label(), "Kernel Mapper");
+    assert!(app.current_session_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(rename))
+                if rename.thread_id == thread_id && rename.display_name == "Kernel Mapper"
+        )
+    }));
+
+    app.input = "/agent message current continue".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(
+        app.last_notice.as_deref(),
+        Some("agent messaging will be enabled with message_agent in the next phase")
+    );
+
+    app.input = "/agent cancel current".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(
+        app.last_notice.as_deref(),
+        Some("agent cancel unavailable until runtime support: thread_1")
+    );
+    let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
+    assert!(!persisted.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(status))
+                if status.thread_id == thread_id
+                    && status.status == sigil_kernel::AgentThreadStatus::Cancelled
+        )
+    }));
+
+    app.input = "/agent close current".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(
+        app.last_notice.as_deref(),
+        Some("agent close unavailable until terminal: thread_1")
+    );
+    assert_eq!(app.active_agent_label(), "Kernel Mapper");
+    assert!(
+        app.agent_sidebar_rows()
+            .iter()
+            .any(|row| row.label == "agent Kernel Mapper")
+    );
+
+    let mut terminal_entries = app.current_session_entries.clone();
+    terminal_entries.push(SessionLogEntry::Control(
+        ControlEntry::AgentThreadStatusChanged(sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: sigil_kernel::AgentThreadStatus::Completed,
+            reason: None,
+            updated_at_ms: None,
+        }),
+    ));
+    app.sync_current_session_state(terminal_entries.clone());
+
+    app.input = "/agent close current".to_owned();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.active_agent_label(), "main");
+    let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
+    assert!(persisted.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadClosed(closed))
+                if closed.thread_id == thread_id
+        )
+    }));
+    assert!(
+        !app.agent_sidebar_rows()
+            .iter()
+            .any(|row| row.label == "agent Kernel Mapper")
+    );
+
+    app.sync_current_session_state(terminal_entries);
+    assert!(
+        app.current_session_entries.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::AgentThreadClosed(closed))
+                    if closed.thread_id == thread_id
+            )
+        }),
+        "worker sync should not discard locally appended agent close"
+    );
+    assert!(
+        !app.agent_sidebar_rows()
+            .iter()
+            .any(|row| row.label == "agent Kernel Mapper")
+    );
     Ok(())
 }
 

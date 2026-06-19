@@ -608,7 +608,7 @@ fn info_rail_projects_memory_off_and_agent_rows() {
             .info_rail
             .agent_lines
             .iter()
-            .any(|line| line == "  agents: ◇ available via /plan")
+            .any(|line| line == "  agents: ◇ no child agents recorded")
     );
 }
 

@@ -13,8 +13,63 @@ fn approval_request_stores_preview() -> Result<()> {
 }
 
 #[test]
+fn approval_request_projects_source_agent_route() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let source_thread_id = sigil_kernel::AgentThreadId::new("thread_1")?;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(
+            sigil_kernel::AgentThreadDisplayNameEntry {
+                thread_id: source_thread_id.clone(),
+                display_name: "Kernel Mapper".to_owned(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
+            sigil_kernel::AgentApprovalRouteEntry {
+                route_id: sigil_kernel::AgentRouteId::new("approval_route_1")?,
+                source_thread_id,
+                target_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                call_id: "call-1".to_owned(),
+                tool_name: "write_file".to_owned(),
+                status: sigil_kernel::AgentRouteStatus::Requested,
+            },
+        )),
+    ]);
+    inject_write_file_approval(&mut app, sample_approval_preview())?;
+
+    let lines = app.approval_preview_lines().join("\n");
+    assert!(lines.contains("source_agent=Kernel Mapper · thread_1"));
+    let view = app
+        .approval_modal_view()
+        .expect("approval modal view should exist");
+    assert_eq!(
+        view.source_agent.as_deref(),
+        Some("Kernel Mapper · thread_1")
+    );
+    Ok(())
+}
+
+#[test]
 fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let source_thread_id = sigil_kernel::AgentThreadId::new("thread_mcp")?;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(
+            sigil_kernel::AgentThreadDisplayNameEntry {
+                thread_id: source_thread_id.clone(),
+                display_name: "MCP Agent".to_owned(),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
+            sigil_kernel::AgentApprovalRouteEntry {
+                route_id: sigil_kernel::AgentRouteId::new("approval_route_mcp")?,
+                source_thread_id,
+                target_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                call_id: "call-mcp-1".to_owned(),
+                tool_name: "remote_tool".to_owned(),
+                status: sigil_kernel::AgentRouteStatus::Requested,
+            },
+        )),
+    ]);
     app.handle(RunEvent::ToolApprovalRequested {
         call: ToolCall {
             id: "call-mcp-1".to_owned(),
@@ -35,6 +90,7 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
 
     let lines = app.approval_preview_lines().join("\n");
     assert!(lines.contains("tool=remote_tool"));
+    assert!(lines.contains("source_agent=MCP Agent · thread_mcp"));
     assert!(lines.contains("mode=mcp network"));
     assert!(lines.contains(r#"args={"query":"status"}"#));
 
@@ -42,6 +98,7 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
         .approval_modal_view()
         .expect("approval modal view should exist");
     assert_eq!(view.preview_title, "Run remote_tool");
+    assert_eq!(view.source_agent.as_deref(), Some("MCP Agent · thread_mcp"));
     assert_eq!(view.access_label, "mcp network");
     assert!(view.preview_summary.contains("preview unavailable"));
     assert!(

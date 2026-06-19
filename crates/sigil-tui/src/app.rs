@@ -93,6 +93,7 @@ struct AgentSidebarItem {
     label: String,
     detail: String,
     target: Option<AgentView>,
+    thread_id: Option<sigil_kernel::AgentThreadId>,
     muted: bool,
 }
 

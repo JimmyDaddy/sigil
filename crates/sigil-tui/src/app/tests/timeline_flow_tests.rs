@@ -1601,7 +1601,7 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(
         app.last_notice(),
-        Some("agent focus unavailable: available via /plan")
+        Some("agent focus unavailable: no child agents recorded")
     );
     let transcript = app
         .transcript_lines(8)

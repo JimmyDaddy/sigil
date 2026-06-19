@@ -217,6 +217,7 @@ impl AppState {
     }
 
     pub(super) fn sync_current_session_state(&mut self, entries: Vec<SessionLogEntry>) {
+        let entries = preserve_local_ui_control_entries(&self.current_session_entries, entries);
         self.stats = session_stats_from_entries(&entries);
         self.latest_compaction_record = latest_compaction_record(&entries);
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
@@ -668,6 +669,65 @@ fn push_restored_reasoning_timeline_entry(
         role: TimelineRole::Thinking,
         text: delta.to_owned(),
     });
+}
+
+fn preserve_local_ui_control_entries(
+    current_entries: &[SessionLogEntry],
+    mut incoming_entries: Vec<SessionLogEntry>,
+) -> Vec<SessionLogEntry> {
+    for entry in current_entries
+        .iter()
+        .filter(|entry| is_local_ui_control_entry(entry))
+    {
+        if !has_equivalent_local_ui_control_entry(&incoming_entries, entry) {
+            incoming_entries.push(entry.clone());
+        }
+    }
+    incoming_entries
+}
+
+fn has_equivalent_local_ui_control_entry(
+    entries: &[SessionLogEntry],
+    target: &SessionLogEntry,
+) -> bool {
+    entries
+        .iter()
+        .any(|entry| local_ui_control_entries_equal(entry, target))
+}
+
+fn is_local_ui_control_entry(entry: &SessionLogEntry) -> bool {
+    matches!(
+        entry,
+        SessionLogEntry::Control(
+            ControlEntry::AgentThreadClosed(_)
+                | ControlEntry::AgentThreadDisplayName(_)
+                | ControlEntry::TaskChildSessionDisplayName(_)
+        )
+    )
+}
+
+fn local_ui_control_entries_equal(left: &SessionLogEntry, right: &SessionLogEntry) -> bool {
+    match (left, right) {
+        (
+            SessionLogEntry::Control(ControlEntry::AgentThreadClosed(left)),
+            SessionLogEntry::Control(ControlEntry::AgentThreadClosed(right)),
+        ) => left.thread_id == right.thread_id && left.reason == right.reason,
+        (
+            SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(left)),
+            SessionLogEntry::Control(ControlEntry::AgentThreadDisplayName(right)),
+        ) => left.thread_id == right.thread_id && left.display_name == right.display_name,
+        (
+            SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(left)),
+            SessionLogEntry::Control(ControlEntry::TaskChildSessionDisplayName(right)),
+        ) => {
+            left.task_id == right.task_id
+                && left.plan_version == right.plan_version
+                && left.step_id == right.step_id
+                && left.child_task_id == right.child_task_id
+                && left.display_name == right.display_name
+        }
+        _ => false,
+    }
 }
 
 fn session_id_from_path(path: &Path) -> Option<String> {

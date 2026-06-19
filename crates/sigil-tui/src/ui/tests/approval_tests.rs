@@ -56,6 +56,7 @@ fn approval_diff_status_line_includes_selected_file_diagnostics() {
     let view = ApprovalModalView {
         tool_name: "edit_file".to_owned(),
         call_id: "call-1".to_owned(),
+        source_agent: None,
         access_label: "file write".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),
@@ -103,6 +104,7 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
     let base = ApprovalModalView {
         tool_name: "edit_file".to_owned(),
         call_id: "call-1".to_owned(),
+        source_agent: None,
         access_label: "file write".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),
@@ -171,6 +173,18 @@ fn approval_header_lines_render_changeset_risk_and_format_hint() {
     assert!(text.contains("change-123"));
     assert!(text.contains("risk high"));
     assert!(text.contains("format cargo fmt --all"));
+
+    let lines = approval_header_lines(
+        &ApprovalModalView {
+            source_agent: Some("Kernel Mapper · thread_1".to_owned()),
+            ..modal_view("file write")
+        },
+        80,
+    );
+    let text = plain_lines_text(&lines);
+
+    assert!(text.contains(" agent "));
+    assert!(text.contains("Kernel Mapper · thread_1"));
 }
 
 #[test]
@@ -178,6 +192,7 @@ fn approval_footer_lines_include_file_navigation_hint_only_for_multiple_files() 
     let single = ApprovalModalView {
         tool_name: "edit_file".to_owned(),
         call_id: "call-1".to_owned(),
+        source_agent: None,
         access_label: "file write".to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: String::new(),
@@ -589,6 +604,7 @@ fn modal_view(access_label: &str) -> ApprovalModalView {
     ApprovalModalView {
         tool_name: "write_file".to_owned(),
         call_id: "call-1".to_owned(),
+        source_agent: None,
         access_label: access_label.to_owned(),
         preview_title: "Edit src/lib.rs".to_owned(),
         preview_summary: "summary".to_owned(),

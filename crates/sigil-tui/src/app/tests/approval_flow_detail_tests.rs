@@ -2,7 +2,10 @@ use super::*;
 use crate::app::tests::common::{
     inject_write_file_approval, multi_file_approval_preview, test_config,
 };
-use sigil_kernel::{ToolAccess, ToolCategory, ToolPreviewCapability, ToolSubjectScope};
+use sigil_kernel::{
+    ControlEntry, SessionLogEntry, ToolAccess, ToolCategory, ToolPreviewCapability,
+    ToolSubjectScope,
+};
 
 #[test]
 fn approval_helper_functions_format_subjects_and_diff_lines() {
@@ -142,5 +145,77 @@ fn approval_hunkless_and_file_switch_guards_cover_private_paths() -> anyhow::Res
             .iter()
             .any(|line| line.active_hunk && line.text.starts_with("@@"))
     );
+    Ok(())
+}
+
+#[test]
+fn approval_source_agent_helper_uses_profile_and_thread_fallbacks() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    let profile_thread_id = sigil_kernel::AgentThreadId::new("profile_thread")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_a")?;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: profile_thread_id.clone(),
+                parent_thread_id: None,
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/profile_thread.jsonl",
+                )?,
+                profile_id: sigil_kernel::AgentProfileId::new("profile-reader")?,
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: snapshot_id,
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
+                    effective_tool_scope_hash: "tools".to_owned(),
+                    effective_permission_policy_hash: "permissions".to_owned(),
+                    effective_mcp_scope_hash: "mcp".to_owned(),
+                    provider_capability_hash: "provider".to_owned(),
+                    model_visible_agent_index_hash: None,
+                    budget_policy_hash: "budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: "read".to_owned(),
+                prompt_hash: "prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Foreground,
+                invocation_source: sigil_kernel::AgentInvocationSource::Task,
+                display_name: None,
+                created_at_ms: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
+            sigil_kernel::AgentApprovalRouteEntry {
+                route_id: sigil_kernel::AgentRouteId::new("route_profile")?,
+                source_thread_id: profile_thread_id,
+                target_thread_id: None,
+                call_id: "call-profile".to_owned(),
+                tool_name: "read_file".to_owned(),
+                status: sigil_kernel::AgentRouteStatus::Requested,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
+            sigil_kernel::AgentApprovalRouteEntry {
+                route_id: sigil_kernel::AgentRouteId::new("route_missing")?,
+                source_thread_id: sigil_kernel::AgentThreadId::new("missing_thread")?,
+                target_thread_id: None,
+                call_id: "call-missing".to_owned(),
+                tool_name: "read_file".to_owned(),
+                status: sigil_kernel::AgentRouteStatus::Requested,
+            },
+        )),
+    ]);
+
+    assert_eq!(
+        app.pending_approval_source_agent("call-profile").as_deref(),
+        Some("profile-reader · profile_thread")
+    );
+    assert_eq!(
+        app.pending_approval_source_agent("call-missing").as_deref(),
+        Some("missing_thread")
+    );
+    assert_eq!(app.pending_approval_source_agent("call-none"), None);
     Ok(())
 }

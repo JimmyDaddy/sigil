@@ -67,6 +67,7 @@ pub(crate) struct ApprovalChangeSetSummary {
 pub(crate) struct ApprovalModalView {
     pub tool_name: String,
     pub call_id: String,
+    pub source_agent: Option<String>,
     pub access_label: String,
     pub preview_title: String,
     pub preview_summary: String,

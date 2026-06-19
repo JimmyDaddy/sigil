@@ -226,6 +226,14 @@ fn approval_header_lines(view: &ApprovalModalView, max_content_width: usize) -> 
         )]),
     ];
 
+    if let Some(source_agent) = &view.source_agent {
+        lines.push(Line::from(vec![
+            approval_badge("agent", Color::Cyan),
+            Span::raw(" "),
+            Span::styled(source_agent.clone(), Style::default().fg(Color::White)),
+        ]));
+    }
+
     if let Some(change_set) = &view.change_set {
         lines.push(approval_change_set_line(change_set));
         lines.push(approval_format_hint_line(change_set));
