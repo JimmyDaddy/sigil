@@ -277,6 +277,66 @@ fn tool_registry_scope_empty_and_into_registry_are_stable() {
 }
 
 #[test]
+fn tool_registry_scope_intersection_keeps_only_shared_names_and_prefixes() {
+    let role = ToolRegistryScope::from_names_and_prefixes(["read_file", "write_file"], ["mcp__"]);
+    let skill = ToolRegistryScope::from_names_and_prefixes(["write_file", "bash"], ["mcp__docs__"]);
+
+    let effective = role.intersection(&skill);
+
+    assert!(!effective.allow_all);
+    assert!(effective.names.contains("write_file"));
+    assert!(!effective.names.contains("read_file"));
+    assert!(!effective.names.contains("bash"));
+    assert_eq!(effective.prefixes, vec!["mcp__docs__"]);
+}
+
+#[test]
+fn tool_registry_scope_intersection_handles_empty_allow_all_and_nested_prefixes() {
+    let empty = ToolRegistryScope::default();
+    let read_only =
+        ToolRegistryScope::from_names_and_prefixes(["read_file"], std::iter::empty::<&str>());
+    assert!(empty.intersection(&read_only).is_empty());
+    assert!(read_only.intersection(&empty).is_empty());
+
+    let allow_all = ToolRegistryScope {
+        allow_all: true,
+        ..ToolRegistryScope::default()
+    };
+    assert_eq!(allow_all.intersection(&read_only), read_only);
+    assert_eq!(read_only.intersection(&allow_all), read_only);
+
+    let broad =
+        ToolRegistryScope::from_names_and_prefixes(std::iter::empty::<&str>(), ["mcp__docs__"]);
+    let narrow = ToolRegistryScope::from_names_and_prefixes(
+        std::iter::empty::<&str>(),
+        ["mcp__docs__search__"],
+    );
+    assert_eq!(
+        broad.intersection(&narrow).prefixes,
+        vec!["mcp__docs__search__"]
+    );
+}
+
+#[test]
+fn tool_registry_scope_union_merges_names_prefixes_and_allow_all() {
+    let left = ToolRegistryScope::from_names_and_prefixes(["read_file"], ["mcp__docs__"]);
+    let right = ToolRegistryScope::from_names_and_prefixes(["write_file"], ["mcp__git__"]);
+
+    let merged = left.union(&right);
+
+    assert!(!merged.allow_all);
+    assert!(merged.names.contains("read_file"));
+    assert!(merged.names.contains("write_file"));
+    assert_eq!(merged.prefixes, vec!["mcp__docs__", "mcp__git__"]);
+
+    let allow_all = ToolRegistryScope {
+        allow_all: true,
+        ..ToolRegistryScope::default()
+    };
+    assert!(merged.union(&allow_all).allow_all);
+}
+
+#[test]
 fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(NamedRegistryTool("mcp__poisoned__echo")));
@@ -296,6 +356,40 @@ fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
     assert_eq!(drained.len(), 1);
     assert!(registry.spec_for("mcp__poisoned__echo").is_none());
     assert!(registry.spec_for("read_file").is_some());
+}
+
+#[tokio::test]
+async fn scoped_tool_registry_denies_matching_names_after_allow_scope() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NamedRegistryTool("read_file")));
+    registry.register(Arc::new(NamedRegistryTool("write_file")));
+    let scoped = registry.scoped_with_denies(
+        ToolRegistryScope {
+            allow_all: true,
+            ..ToolRegistryScope::default()
+        },
+        ToolRegistryScope::from_names_and_prefixes(["write_file"], std::iter::empty::<&str>()),
+    );
+
+    assert!(scoped.spec_for("read_file").is_some());
+    assert!(scoped.spec_for("write_file").is_none());
+    assert!(
+        scoped
+            .execute(
+                ToolContext {
+                    workspace_root: std::env::temp_dir(),
+                    timeout_secs: 5,
+                },
+                ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "write_file".to_owned(),
+                    args_json: "{}".to_owned(),
+                },
+            )
+            .await
+            .is_err()
+    );
+    Ok(())
 }
 
 #[tokio::test]

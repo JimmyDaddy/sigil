@@ -637,6 +637,7 @@ fn render_session_control_entries_cover_remaining_labels() {
                 model_invocable: true,
                 user_invocable: true,
                 run_as: SkillRunMode::Inline,
+                agent: None,
                 argument_hint: None,
                 allowed_tools: Default::default(),
                 disallowed_tools: Default::default(),

@@ -890,7 +890,7 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
 
     let action = app.execute_slash_command(
         crate::slash::ResolvedSlashCommand {
-            canonical: "/model",
+            canonical: "/model".to_owned(),
             arg: String::new(),
         },
         "/model".to_owned(),
@@ -900,7 +900,7 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
 
     let action = app.execute_slash_command(
         crate::slash::ResolvedSlashCommand {
-            canonical: "/bogus",
+            canonical: "/bogus".to_owned(),
             arg: String::new(),
         },
         "/bogus".to_owned(),
@@ -919,7 +919,7 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
     );
     let action = setup_app.execute_slash_command(
         crate::slash::ResolvedSlashCommand {
-            canonical: "/model",
+            canonical: "/model".to_owned(),
             arg: "pro".to_owned(),
         },
         "/model pro".to_owned(),
@@ -951,7 +951,7 @@ fn model_command_updates_openai_compat_provider_block() -> Result<()> {
 
     let action = app.execute_slash_command(
         crate::slash::ResolvedSlashCommand {
-            canonical: "/model",
+            canonical: "/model".to_owned(),
             arg: "gpt-new".to_owned(),
         },
         "/model gpt-new".to_owned(),

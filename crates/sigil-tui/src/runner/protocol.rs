@@ -21,6 +21,15 @@ pub enum WorkerCommand {
         prompt: String,
         reasoning_effort: ReasoningEffort,
     },
+    InvokeInlineSkill {
+        skill_id: String,
+        arguments: String,
+        reasoning_effort: ReasoningEffort,
+    },
+    InvokeChildSessionSkill {
+        skill_id: String,
+        arguments: String,
+    },
     SubmitTask {
         prompt: String,
     },

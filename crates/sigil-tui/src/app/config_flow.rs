@@ -4,6 +4,7 @@ use crate::config_panel::{
     ConfigFieldMove, ConfigFooterAction, ConfigSection, ConfigState, GEMINI_PROVIDER_KEY,
     OPENAI_COMPAT_PROVIDER_KEY, render_config_readonly_row, render_config_value_row,
 };
+use crate::slash::SLASH_COMMANDS;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{
@@ -1321,6 +1322,7 @@ fn render_skill_detail_lines(skill: &SkillDescriptor) -> Vec<String> {
         render_config_readonly_row("Entrypoint", &skill.entrypoint.display().to_string()),
         render_config_readonly_row("Root", &skill.root.display().to_string()),
         render_config_readonly_row("Argument hint", argument_hint),
+        render_config_readonly_row("Slash", &skill_slash_summary(skill)),
         render_config_readonly_row("Allowed tools", &tool_scope_summary(&skill.allowed_tools)),
         render_config_readonly_row(
             "Disallowed tools",
@@ -1336,6 +1338,20 @@ fn render_skill_detail_lines(skill: &SkillDescriptor) -> Vec<String> {
             skill_action_label(skill_invoke_unavailable_reason(skill)),
         ),
     ]
+}
+
+fn skill_slash_summary(skill: &SkillDescriptor) -> String {
+    let command = format!("/{}", skill.id);
+    if SLASH_COMMANDS
+        .iter()
+        .any(|spec| spec.canonical == command || spec.aliases.contains(&command.as_str()))
+    {
+        format!("shadowed by native {command}")
+    } else if skill.user_invocable {
+        command
+    } else {
+        "not user-invocable".to_owned()
+    }
 }
 
 fn skill_action_label(reason: Option<&'static str>) -> &'static str {

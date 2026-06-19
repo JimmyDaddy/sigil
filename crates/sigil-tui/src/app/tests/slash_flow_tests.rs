@@ -1,5 +1,22 @@
 use super::*;
 
+fn config_for_workspace(workspace_root: &Path) -> RootConfig {
+    let mut config = test_config();
+    config.workspace.root = workspace_root.display().to_string();
+    config
+}
+
+fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
+    let path = workspace_root
+        .join(".sigil")
+        .join("skills")
+        .join(id)
+        .join("SKILL.md");
+    std::fs::create_dir_all(path.parent().expect("skill path should have parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 #[test]
 fn compact_command_dispatches_worker_action_when_idle() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -229,6 +246,268 @@ fn slash_command_hints_include_prefix_matches() {
     app.input = "/res".to_owned();
     let hints = app.slash_command_hints();
     assert!(hints.iter().any(|hint| hint.contains("/resume")));
+}
+
+#[test]
+fn slash_skill_invocation_resolves_inline_skill_after_native_commands() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_skill(
+        workspace.path(),
+        "repo-review",
+        r#"---
+name: repo-review
+description: Review repository changes.
+trust: trusted
+user-invocable: true
+run-as: inline
+---
+
+# Repo Review
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "/repo-review crates/sigil-tui".to_owned();
+
+    let rows = app.slash_selector_rows();
+    assert!(rows.iter().any(|(label, description)| {
+        label == "/repo-review" && description.contains("skill · inline")
+    }));
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::InvokeInlineSkill { skill_id, arguments })
+            if skill_id == "repo-review" && arguments == "crates/sigil-tui"
+    ));
+    assert!(app.is_busy);
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::User && entry.text == "/repo-review crates/sigil-tui"
+    }));
+    Ok(())
+}
+
+#[test]
+fn slash_skill_invocation_resolves_child_session_skill() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_skill(
+        workspace.path(),
+        "repo-audit",
+        r#"---
+name: repo-audit
+description: Audit repository changes.
+trust: trusted
+user-invocable: true
+run-as: child-session
+---
+
+# Repo Audit
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "/repo-audit --depth full".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::InvokeChildSessionSkill { skill_id, arguments })
+            if skill_id == "repo-audit" && arguments == "--depth full"
+    ));
+    assert!(app.is_busy);
+    assert_eq!(
+        app.last_notice(),
+        Some("invoking skill repo-audit in child session")
+    );
+    Ok(())
+}
+
+#[test]
+fn native_slash_command_shadows_matching_skill_id() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_skill(
+        workspace.path(),
+        "config",
+        r#"---
+name: config
+description: Skill with a native command id.
+trust: trusted
+user-invocable: true
+---
+
+# Config Skill
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "/config".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    assert!(app.is_config_mode());
+    assert!(!app.is_busy);
+    Ok(())
+}
+
+#[test]
+fn slash_skill_invocation_requires_trust() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_skill(
+        workspace.path(),
+        "needs-review",
+        r#"---
+name: needs-review
+description: Review required.
+user-invocable: true
+---
+
+# Needs Review
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "/needs-review target".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    assert!(!app.is_busy);
+    assert_eq!(app.last_notice(), Some("skill needs-review is not trusted"));
+    Ok(())
+}
+
+#[test]
+fn slash_skill_invocation_guard_edges_report_notices() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_skill(
+        workspace.path(),
+        "busy-skill",
+        r#"---
+name: busy-skill
+description: Busy skill.
+trust: trusted
+user-invocable: true
+---
+
+# Busy
+"#,
+    )?;
+    write_workspace_skill(
+        workspace.path(),
+        "disabled-skill",
+        r#"---
+name: disabled-skill
+description: Disabled skill.
+trust: trusted
+enabled: false
+user-invocable: true
+---
+
+# Disabled
+"#,
+    )?;
+    write_workspace_skill(
+        workspace.path(),
+        "hidden-skill",
+        r#"---
+name: hidden-skill
+description: Hidden skill.
+trust: trusted
+user-invocable: false
+---
+
+# Hidden
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+
+    let no_slash = app.execute_skill_slash_command(
+        &crate::slash::ResolvedSlashCommand {
+            canonical: "busy-skill".to_owned(),
+            arg: String::new(),
+        },
+        "busy-skill",
+    )?;
+    assert!(no_slash.is_none());
+
+    app.is_busy = true;
+    let busy = app.execute_skill_slash_command(
+        &crate::slash::ResolvedSlashCommand {
+            canonical: "/busy-skill".to_owned(),
+            arg: String::new(),
+        },
+        "/busy-skill",
+    )?;
+    assert!(busy.is_none());
+    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
+    app.is_busy = false;
+
+    let disabled = app.execute_skill_slash_command(
+        &crate::slash::ResolvedSlashCommand {
+            canonical: "/disabled-skill".to_owned(),
+            arg: String::new(),
+        },
+        "/disabled-skill",
+    )?;
+    assert!(disabled.is_none());
+    assert_eq!(app.last_notice(), Some("skill disabled-skill is disabled"));
+
+    let hidden = app.execute_skill_slash_command(
+        &crate::slash::ResolvedSlashCommand {
+            canonical: "/hidden-skill".to_owned(),
+            arg: String::new(),
+        },
+        "/hidden-skill",
+    )?;
+    assert!(hidden.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("skill hidden-skill is not user-invocable")
+    );
+    Ok(())
+}
+
+#[test]
+fn slash_skill_selector_edges_cover_setup_and_private_filters() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_skill(
+        workspace.path(),
+        "empty-description",
+        r#"---
+name: empty-description
+description: ""
+trust: trusted
+user-invocable: true
+---
+"#,
+    )?;
+    let mut setup_app = AppState::from_setup(
+        workspace.path().join("sigil.toml"),
+        workspace.path().to_path_buf(),
+        None,
+    );
+    setup_app.input = "/".to_owned();
+    let _ = setup_app.slash_selector_rows();
+
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "/empty".to_owned();
+    let rows = app.slash_selector_rows();
+    assert!(rows.iter().any(|(label, description)| {
+        label == "/empty-description" && description == "skill · inline"
+    }));
+    assert_eq!(
+        app.selected_slash_entry()
+            .expect("empty description skill should be selectable")
+            .fill,
+        "/empty-description"
+    );
+    assert!(app.slash_skill_entries("repo-review", "").is_empty());
+    assert!(app.slash_skill_entries("", "").is_empty());
+    Ok(())
 }
 
 #[test]

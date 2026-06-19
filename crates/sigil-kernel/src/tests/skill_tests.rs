@@ -237,6 +237,7 @@ fn sample_descriptor(id: &str, source: SkillSource) -> SkillDescriptor {
         model_invocable: true,
         user_invocable: true,
         run_as: SkillRunMode::Inline,
+        agent: None,
         argument_hint: Some("<path>".to_owned()),
         allowed_tools: ToolRegistryScope {
             allow_all: false,

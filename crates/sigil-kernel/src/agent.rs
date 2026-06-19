@@ -232,6 +232,60 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        self.run_with_approval_input_and_tools(
+            session,
+            input,
+            options,
+            &self.tools,
+            handler,
+            approval_handler,
+        )
+        .await
+    }
+
+    /// Runs the agent with a temporary tool registry view.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when session persistence fails, request building fails, the provider
+    /// stream errors, or the approval handler itself errors.
+    pub async fn run_with_approval_input_and_tool_registry<H, A>(
+        &self,
+        session: &mut Session,
+        input: AgentRunInput,
+        options: AgentRunOptions,
+        tools: ToolRegistry,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<AgentRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        self.run_with_approval_input_and_tools(
+            session,
+            input,
+            options,
+            &tools,
+            handler,
+            approval_handler,
+        )
+        .await
+    }
+
+    async fn run_with_approval_input_and_tools<H, A>(
+        &self,
+        session: &mut Session,
+        input: AgentRunInput,
+        options: AgentRunOptions,
+        tools: &ToolRegistry,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<AgentRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
         let AgentRunInput {
             persisted_user_message,
             mut transient_context,
@@ -267,7 +321,7 @@ where
             }
             model_turns = model_turns.saturating_add(1);
 
-            let mut tool_specs = self.tools.specs();
+            let mut tool_specs = tools.specs();
             if task_plan_update.is_some() {
                 tool_specs.push(task_plan_update_tool_spec());
             }
@@ -435,8 +489,8 @@ where
                         continue;
                     }
                     let mut execution_subjects = Vec::new();
-                    if let Some(spec) = self.tools.spec_for(&call.name) {
-                        let subjects = match self.tools.permission_subjects(&tool_ctx, &call) {
+                    if let Some(spec) = tools.spec_for(&call.name) {
+                        let subjects = match tools.permission_subjects(&tool_ctx, &call) {
                             Ok(subjects) => subjects,
                             Err(error) => {
                                 let mut result = ToolResult::error(
@@ -460,7 +514,7 @@ where
                                 continue;
                             }
                         };
-                        let access = match self.tools.permission_access(&tool_ctx, &call) {
+                        let access = match tools.permission_access(&tool_ctx, &call) {
                             Ok(access) => access,
                             Err(error) => {
                                 let mut result = ToolResult::error(
@@ -484,8 +538,7 @@ where
                                 continue;
                             }
                         };
-                        let tool_default_mode = match self
-                            .tools
+                        let tool_default_mode = match tools
                             .permission_default_mode(&tool_ctx, &call)
                         {
                             Ok(mode) => mode,
@@ -580,7 +633,7 @@ where
                                 let preview = if has_external_subject(&decision.subjects) {
                                     Some(external_directory_preview(&call.name, &decision.subjects))
                                 } else {
-                                    match self.tools.preview(tool_ctx.clone(), call.clone()).await {
+                                    match tools.preview(tool_ctx.clone(), call.clone()).await {
                                         Ok(preview) => preview,
                                         Err(error) => {
                                             let error = error.to_string();
@@ -745,7 +798,7 @@ where
                                 continue;
                             }
                         }
-                        let egress_audit = match self.tools.egress_audit(&tool_ctx, &call) {
+                        let egress_audit = match tools.egress_audit(&tool_ctx, &call) {
                             Ok(audit) => audit,
                             Err(error) => {
                                 let mut result = ToolResult::error(
@@ -786,8 +839,7 @@ where
                         None,
                     )?;
                     let execution_started = Instant::now();
-                    let mut result = match self.tools.execute(tool_ctx.clone(), call.clone()).await
-                    {
+                    let mut result = match tools.execute(tool_ctx.clone(), call.clone()).await {
                         Ok(result) => result,
                         Err(error) => ToolResult::error(
                             call.id.clone(),

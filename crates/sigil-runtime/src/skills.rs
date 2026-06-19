@@ -31,6 +31,14 @@ pub struct SkillDiscoveryReport {
     pub warnings: Vec<SkillDiscoveryWarning>,
 }
 
+/// Fully loaded skill body prepared for direct user invocation.
+#[derive(Debug, Clone)]
+pub struct LoadedSkillContext {
+    pub descriptor: SkillDescriptor,
+    pub entry: SkillLoadEntry,
+    pub transient_context: ModelMessage,
+}
+
 /// One non-fatal problem found while discovering skills.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillDiscoveryWarning {
@@ -163,13 +171,6 @@ impl LoadSkillTool {
             snapshot,
         }
     }
-
-    fn descriptor(&self, id: &str) -> Option<&SkillDescriptor> {
-        self.snapshot
-            .descriptors
-            .iter()
-            .find(|descriptor| descriptor.id == id)
-    }
 }
 
 #[async_trait]
@@ -211,156 +212,205 @@ impl Tool for LoadSkillTool {
                 ));
             }
         };
-        let Some(descriptor) = self.descriptor(&skill_id) else {
-            return Ok(ToolResult::error(
-                call_id,
-                LOAD_SKILL_TOOL_NAME,
-                ToolErrorKind::NotFound,
-                format!("unknown skill {skill_id:?}"),
-            ));
-        };
-        if !descriptor.enabled {
-            return Ok(ToolResult::error(
-                call_id,
-                LOAD_SKILL_TOOL_NAME,
-                ToolErrorKind::PermissionDenied,
-                format!("skill {skill_id:?} is disabled"),
-            ));
-        }
-        if descriptor.trust != SkillTrustState::Trusted {
-            return Ok(ToolResult::error(
-                call_id,
-                LOAD_SKILL_TOOL_NAME,
-                ToolErrorKind::PermissionDenied,
-                format!("skill {skill_id:?} is not trusted"),
-            ));
-        }
-        if !descriptor.model_invocable {
-            return Ok(ToolResult::error(
-                call_id,
-                LOAD_SKILL_TOOL_NAME,
-                ToolErrorKind::PermissionDenied,
-                format!("skill {skill_id:?} is not model-invocable"),
-            ));
-        }
-
-        let root = resolved_descriptor_path(&self.workspace_root, &descriptor.root);
-        let entrypoint = resolved_descriptor_path(&self.workspace_root, &descriptor.entrypoint);
-        let root = match root.canonicalize() {
-            Ok(root) => root,
+        let loaded = match load_skill_context(
+            &self.workspace_root,
+            &self.snapshot,
+            &skill_id,
+            SkillLoadInvocation::Model,
+            None,
+            Some(call_id.clone()),
+        ) {
+            Ok(loaded) => loaded,
             Err(error) => {
                 return Ok(ToolResult::error(
                     call_id,
                     LOAD_SKILL_TOOL_NAME,
-                    ToolErrorKind::NotFound,
-                    format!("skill root cannot be resolved: {error}"),
+                    error.kind,
+                    error.message,
                 ));
             }
         };
-        let entrypoint = match entrypoint.canonicalize() {
-            Ok(entrypoint) => entrypoint,
-            Err(error) => {
-                return Ok(ToolResult::error(
-                    call_id,
-                    LOAD_SKILL_TOOL_NAME,
-                    ToolErrorKind::NotFound,
-                    format!("skill entrypoint cannot be resolved: {error}"),
-                ));
-            }
-        };
-        if !entrypoint.starts_with(&root) {
-            return Ok(ToolResult::error(
-                call_id,
-                LOAD_SKILL_TOOL_NAME,
-                ToolErrorKind::PathOutsideWorkspace,
-                format!("skill {skill_id:?} entrypoint is outside its skill root"),
-            ));
-        }
-
-        let bytes = match fs::read(&entrypoint) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                return Ok(ToolResult::error(
-                    call_id,
-                    LOAD_SKILL_TOOL_NAME,
-                    ToolErrorKind::Io,
-                    format!("failed to read skill {skill_id:?}: {error}"),
-                ));
-            }
-        };
-        if bytes.len() > MAX_SKILL_BODY_BYTES {
-            return Ok(ToolResult::error(
-                call_id,
-                LOAD_SKILL_TOOL_NAME,
-                ToolErrorKind::InvalidInput,
-                format!(
-                    "skill {skill_id:?} body is too large: {} bytes exceeds {}",
-                    bytes.len(),
-                    MAX_SKILL_BODY_BYTES
-                ),
-            ));
-        }
-        let body = match std::str::from_utf8(&bytes) {
-            Ok(body) => body.to_owned(),
-            Err(error) => {
-                return Ok(ToolResult::error(
-                    call_id,
-                    LOAD_SKILL_TOOL_NAME,
-                    ToolErrorKind::Utf8,
-                    format!("skill {skill_id:?} is not utf-8: {error}"),
-                ));
-            }
-        };
-        let line_count = body.lines().count();
-        if line_count > MAX_SKILL_BODY_LINES {
-            return Ok(ToolResult::error(
-                call_id,
-                LOAD_SKILL_TOOL_NAME,
-                ToolErrorKind::InvalidInput,
-                format!(
-                    "skill {skill_id:?} body has too many lines: {line_count} exceeds {MAX_SKILL_BODY_LINES}"
-                ),
-            ));
-        }
-        let sha256 = format!("{:x}", Sha256::digest(&bytes));
-        if !descriptor.sha256.is_empty() && descriptor.sha256 != sha256 {
-            return Ok(ToolResult::error(
-                call_id,
-                LOAD_SKILL_TOOL_NAME,
-                ToolErrorKind::InvalidInput,
-                format!("skill {skill_id:?} hash changed since discovery"),
-            ));
-        }
-
-        let entry = SkillLoadEntry {
-            skill_id: descriptor.id.clone(),
-            sha256,
-            source: descriptor.source.clone(),
-            entrypoint: descriptor.entrypoint.clone(),
-            run_id: None,
-            call_id: Some(call_id.clone()),
-            byte_count: bytes.len() as u64,
-            line_count: line_count as u64,
-            loaded_at_ms: unix_time_ms(),
-        };
-        let transient =
-            ModelMessage::system(render_loaded_skill_context(descriptor, &entry, &body));
         Ok(ToolResult::ok(
             call_id,
             LOAD_SKILL_TOOL_NAME,
             format!(
                 "loaded skill {} ({} bytes, {} lines) into transient context",
-                entry.skill_id, entry.byte_count, entry.line_count
+                loaded.entry.skill_id, loaded.entry.byte_count, loaded.entry.line_count
             ),
             ToolResultMeta {
-                bytes: Some(entry.byte_count),
-                total_lines: Some(entry.line_count),
+                bytes: Some(loaded.entry.byte_count),
+                total_lines: Some(loaded.entry.line_count),
                 ..ToolResultMeta::default()
             },
         )
-        .with_control_entry(ControlEntry::SkillLoaded(entry))
-        .with_transient_context(vec![transient]))
+        .with_control_entry(ControlEntry::SkillLoaded(loaded.entry))
+        .with_transient_context(vec![loaded.transient_context]))
     }
+}
+
+/// Loads a user-invoked skill body for direct TUI invocation.
+///
+/// # Errors
+///
+/// Returns an error when the skill is missing, disabled, untrusted, not user-invocable, changed
+/// since discovery, outside its root, too large, or unreadable.
+pub fn load_user_invoked_skill(
+    workspace_root: &Path,
+    snapshot: &SkillIndexSnapshot,
+    skill_id: &str,
+    run_id: Option<String>,
+) -> Result<LoadedSkillContext> {
+    load_skill_context(
+        workspace_root,
+        snapshot,
+        skill_id,
+        SkillLoadInvocation::User,
+        run_id,
+        None,
+    )
+    .map_err(|error| anyhow!(error.message))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SkillLoadInvocation {
+    Model,
+    User,
+}
+
+#[derive(Debug)]
+struct SkillLoadFailure {
+    kind: ToolErrorKind,
+    message: String,
+}
+
+fn load_skill_context(
+    workspace_root: &Path,
+    snapshot: &SkillIndexSnapshot,
+    skill_id: &str,
+    invocation: SkillLoadInvocation,
+    run_id: Option<String>,
+    call_id: Option<String>,
+) -> std::result::Result<LoadedSkillContext, SkillLoadFailure> {
+    let Some(descriptor) = snapshot
+        .descriptors
+        .iter()
+        .find(|descriptor| descriptor.id == skill_id)
+    else {
+        return Err(skill_load_failure(
+            ToolErrorKind::NotFound,
+            format!("unknown skill {skill_id:?}"),
+        ));
+    };
+    if !descriptor.enabled {
+        return Err(skill_load_failure(
+            ToolErrorKind::PermissionDenied,
+            format!("skill {skill_id:?} is disabled"),
+        ));
+    }
+    if descriptor.trust != SkillTrustState::Trusted {
+        return Err(skill_load_failure(
+            ToolErrorKind::PermissionDenied,
+            format!("skill {skill_id:?} is not trusted"),
+        ));
+    }
+    match invocation {
+        SkillLoadInvocation::Model if !descriptor.model_invocable => {
+            return Err(skill_load_failure(
+                ToolErrorKind::PermissionDenied,
+                format!("skill {skill_id:?} is not model-invocable"),
+            ));
+        }
+        SkillLoadInvocation::User if !descriptor.user_invocable => {
+            return Err(skill_load_failure(
+                ToolErrorKind::PermissionDenied,
+                format!("skill {skill_id:?} is not user-invocable"),
+            ));
+        }
+        SkillLoadInvocation::Model | SkillLoadInvocation::User => {}
+    }
+
+    let root = resolved_descriptor_path(workspace_root, &descriptor.root);
+    let entrypoint = resolved_descriptor_path(workspace_root, &descriptor.entrypoint);
+    let root = root.canonicalize().map_err(|error| {
+        skill_load_failure(
+            ToolErrorKind::NotFound,
+            format!("skill root cannot be resolved: {error}"),
+        )
+    })?;
+    let entrypoint = entrypoint.canonicalize().map_err(|error| {
+        skill_load_failure(
+            ToolErrorKind::NotFound,
+            format!("skill entrypoint cannot be resolved: {error}"),
+        )
+    })?;
+    if !entrypoint.starts_with(&root) {
+        return Err(skill_load_failure(
+            ToolErrorKind::PathOutsideWorkspace,
+            format!("skill {skill_id:?} entrypoint is outside its skill root"),
+        ));
+    }
+
+    let bytes = fs::read(&entrypoint).map_err(|error| {
+        skill_load_failure(
+            ToolErrorKind::Io,
+            format!("failed to read skill {skill_id:?}: {error}"),
+        )
+    })?;
+    if bytes.len() > MAX_SKILL_BODY_BYTES {
+        return Err(skill_load_failure(
+            ToolErrorKind::InvalidInput,
+            format!(
+                "skill {skill_id:?} body is too large: {} bytes exceeds {}",
+                bytes.len(),
+                MAX_SKILL_BODY_BYTES
+            ),
+        ));
+    }
+    let body = std::str::from_utf8(&bytes).map_err(|error| {
+        skill_load_failure(
+            ToolErrorKind::Utf8,
+            format!("skill {skill_id:?} is not utf-8: {error}"),
+        )
+    })?;
+    let line_count = body.lines().count();
+    if line_count > MAX_SKILL_BODY_LINES {
+        return Err(skill_load_failure(
+            ToolErrorKind::InvalidInput,
+            format!(
+                "skill {skill_id:?} body has too many lines: {line_count} exceeds {MAX_SKILL_BODY_LINES}"
+            ),
+        ));
+    }
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if !descriptor.sha256.is_empty() && descriptor.sha256 != sha256 {
+        return Err(skill_load_failure(
+            ToolErrorKind::InvalidInput,
+            format!("skill {skill_id:?} hash changed since discovery"),
+        ));
+    }
+
+    let entry = SkillLoadEntry {
+        skill_id: descriptor.id.clone(),
+        sha256,
+        source: descriptor.source.clone(),
+        entrypoint: descriptor.entrypoint.clone(),
+        run_id,
+        call_id,
+        byte_count: bytes.len() as u64,
+        line_count: line_count as u64,
+        loaded_at_ms: unix_time_ms(),
+    };
+    let transient_context =
+        ModelMessage::system(render_loaded_skill_context(descriptor, &entry, body));
+    Ok(LoadedSkillContext {
+        descriptor: descriptor.clone(),
+        entry,
+        transient_context,
+    })
+}
+
+fn skill_load_failure(kind: ToolErrorKind, message: String) -> SkillLoadFailure {
+    SkillLoadFailure { kind, message }
 }
 
 fn model_visible_skill_index_description(snapshot: &SkillIndexSnapshot) -> String {
@@ -807,6 +857,7 @@ impl SkillFrontmatter {
             model_invocable,
             user_invocable: self.bool("user_invocable")?.unwrap_or(true),
             run_as: self.run_mode()?.unwrap_or_else(|| kind.default_run_mode()),
+            agent: self.string("agent")?,
             argument_hint: self.string("argument_hint")?,
             allowed_tools: tool_scope_from_items(allowed_tools),
             disallowed_tools: tool_scope_from_items(

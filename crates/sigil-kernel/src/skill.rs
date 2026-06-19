@@ -39,6 +39,8 @@ pub struct SkillDescriptor {
     #[serde(default)]
     pub run_as: SkillRunMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub argument_hint: Option<String>,
     #[serde(default)]
     pub allowed_tools: ToolRegistryScope,

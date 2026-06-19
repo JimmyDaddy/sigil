@@ -18,8 +18,9 @@ use sigil_kernel::{
     AutoApproveHandler, CompactionConfig, CompletionRequest, ControlEntry, InteractionMode,
     MemoryConfig, MessageRole, NoopEventHandler, PermissionConfig, Provider, ProviderCapabilities,
     ProviderChunk, ReasoningEffort, ReasoningStreamSupport, Session, SessionLogEntry, SkillConfig,
-    SkillIndexSnapshot, SkillRunMode, SkillSource, SkillTrustState, Tool, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolCall, ToolContext, ToolErrorKind, ToolRegistry, ToolResultStatus,
+    SkillDescriptor, SkillIndexSnapshot, SkillRunMode, SkillSource, SkillTrustState, Tool,
+    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolContext, ToolErrorKind,
+    ToolRegistry, ToolResultStatus,
 };
 
 use super::{
@@ -380,6 +381,7 @@ name: repo-review
 description: "Review code # using repository standards."
 when-to-use: Use before committing risky code.
 run-as: child-session
+agent: reviewer
 trust: trusted
 enabled: false
 user-invocable: true
@@ -409,6 +411,7 @@ paths: [crates/**, dev/**]
         Some("Use before committing risky code.")
     );
     assert_eq!(descriptor.run_as, SkillRunMode::ChildSession);
+    assert_eq!(descriptor.agent.as_deref(), Some("reviewer"));
     assert_eq!(descriptor.trust, SkillTrustState::Trusted);
     assert!(!descriptor.enabled);
     assert!(descriptor.user_invocable);
@@ -576,6 +579,191 @@ description: Needs review.
             if error.kind == ToolErrorKind::PermissionDenied
                 && error.message.contains("not model-invocable")
     ));
+}
+
+#[test]
+fn load_user_invoked_skill_allows_manual_only_skill() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_skill(
+        workspace.path().join(".sigil/skills/manual-only/SKILL.md"),
+        r#"---
+name: manual-only
+description: Manual workflow.
+trust: trusted
+disable-model-invocation: true
+user-invocable: true
+---
+
+# Manual
+
+Manual Body Secret
+"#,
+    );
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
+        .expect("discovery should succeed");
+
+    let loaded = super::load_user_invoked_skill(
+        workspace.path(),
+        &report.snapshot,
+        "manual-only",
+        Some("run-7".to_owned()),
+    )
+    .expect("manual invocation should load a user-invocable skill");
+
+    assert_eq!(loaded.descriptor.id, "manual-only");
+    assert_eq!(loaded.entry.skill_id, "manual-only");
+    assert_eq!(loaded.entry.run_id.as_deref(), Some("run-7"));
+    assert!(loaded.entry.call_id.is_none());
+    assert_eq!(loaded.transient_context.role, MessageRole::System);
+    assert!(
+        loaded
+            .transient_context
+            .content
+            .as_deref()
+            .is_some_and(|content| content.contains("Manual Body Secret"))
+    );
+}
+
+#[test]
+fn load_user_invoked_skill_rejects_permission_and_identity_edges() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_skill(
+        workspace.path().join(".sigil/skills/manual-only/SKILL.md"),
+        r#"---
+name: manual-only
+description: Manual workflow.
+trust: trusted
+disable-model-invocation: true
+user-invocable: true
+---
+
+# Manual
+"#,
+    );
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
+        .expect("discovery should succeed");
+    let base = descriptor(&report, "manual-only").clone();
+
+    let unknown =
+        super::load_user_invoked_skill(workspace.path(), &report.snapshot, "missing", None)
+            .expect_err("unknown skill should fail");
+    assert!(unknown.to_string().contains("unknown skill"));
+
+    let mut disabled = base.clone();
+    disabled.enabled = false;
+    assert_user_load_error(workspace.path(), disabled, "disabled");
+
+    let mut hidden = base;
+    hidden.user_invocable = false;
+    assert_user_load_error(workspace.path(), hidden, "not user-invocable");
+}
+
+#[test]
+fn load_user_invoked_skill_rejects_filesystem_and_body_edges() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_skill(
+        workspace.path().join(".sigil/skills/base/SKILL.md"),
+        r#"---
+name: base
+description: Base workflow.
+trust: trusted
+user-invocable: true
+---
+
+# Base
+"#,
+    );
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
+        .expect("discovery should succeed");
+    let base = descriptor(&report, "base").clone();
+
+    let mut missing_root = base.clone();
+    missing_root.root = ".sigil/skills/missing-root".into();
+    assert_user_load_error(
+        workspace.path(),
+        missing_root,
+        "skill root cannot be resolved",
+    );
+
+    let mut missing_entrypoint = base.clone();
+    missing_entrypoint.entrypoint = ".sigil/skills/base/MISSING.md".into();
+    assert_user_load_error(
+        workspace.path(),
+        missing_entrypoint,
+        "skill entrypoint cannot be resolved",
+    );
+
+    write_skill(
+        workspace.path().join(".sigil/skills/other/SKILL.md"),
+        r#"---
+name: other
+description: Other workflow.
+trust: trusted
+user-invocable: true
+---
+
+# Other
+"#,
+    );
+    let mut escaped = base.clone();
+    escaped.entrypoint = ".sigil/skills/other/SKILL.md".into();
+    escaped.sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            fs::read(workspace.path().join(".sigil/skills/other/SKILL.md"))
+                .expect("other skill should read")
+        )
+    );
+    assert_user_load_error(workspace.path(), escaped, "outside its skill root");
+
+    let directory_entrypoint = workspace
+        .path()
+        .join(".sigil/skills/base/directory-entrypoint");
+    fs::create_dir_all(&directory_entrypoint).expect("directory entrypoint should create");
+    let mut directory = base.clone();
+    directory.entrypoint = ".sigil/skills/base/directory-entrypoint".into();
+    directory.sha256.clear();
+    assert_user_load_error(workspace.path(), directory, "failed to read skill");
+
+    let huge_path = workspace.path().join(".sigil/skills/base/huge.md");
+    fs::write(&huge_path, vec![b'a'; 256 * 1024 + 1]).expect("huge skill should write");
+    let mut huge = base.clone();
+    huge.entrypoint = ".sigil/skills/base/huge.md".into();
+    huge.sha256.clear();
+    assert_user_load_error(workspace.path(), huge, "body is too large");
+
+    let invalid_utf8_path = workspace.path().join(".sigil/skills/base/invalid.md");
+    fs::write(&invalid_utf8_path, [0xff, 0xfe, 0xfd]).expect("invalid utf8 should write");
+    let mut invalid_utf8 = base.clone();
+    invalid_utf8.entrypoint = ".sigil/skills/base/invalid.md".into();
+    invalid_utf8.sha256.clear();
+    assert_user_load_error(workspace.path(), invalid_utf8, "is not utf-8");
+
+    let many_lines_path = workspace.path().join(".sigil/skills/base/many-lines.md");
+    fs::write(&many_lines_path, "x\n".repeat(8_001)).expect("many lines should write");
+    let mut many_lines = base.clone();
+    many_lines.entrypoint = ".sigil/skills/base/many-lines.md".into();
+    many_lines.sha256.clear();
+    assert_user_load_error(workspace.path(), many_lines, "too many lines");
+
+    let mut hash_changed = base;
+    hash_changed.sha256 = "not-the-current-hash".to_owned();
+    assert_user_load_error(workspace.path(), hash_changed, "hash changed");
+}
+
+fn assert_user_load_error(
+    workspace_root: &Path,
+    descriptor: SkillDescriptor,
+    expected_message: &str,
+) {
+    let skill_id = descriptor.id.clone();
+    let snapshot = SkillIndexSnapshot::new(vec![descriptor]).expect("snapshot should build");
+    let error = super::load_user_invoked_skill(workspace_root, &snapshot, &skill_id, None)
+        .expect_err("user-invoked skill should fail");
+    assert!(
+        error.to_string().contains(expected_message),
+        "expected {expected_message:?} in {error:#}"
+    );
 }
 
 #[tokio::test]

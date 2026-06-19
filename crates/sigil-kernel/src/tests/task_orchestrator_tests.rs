@@ -9,14 +9,14 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 
 use crate::{
-    Agent, AgentRunOptions, AutoApproveHandler, CompletionRequest, ControlEntry, InteractionMode,
-    JsonlSessionStore, MemoryConfig, MessageRole, PermissionConfig, Provider, ProviderCapabilities,
-    ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator,
-    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunStatus,
-    TaskStepId, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolApproval, ToolCall,
-    ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolSpec,
+    Agent, AgentRunInput, AgentRunOptions, AutoApproveHandler, CompletionRequest, ControlEntry,
+    InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, PermissionConfig,
+    Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport,
+    RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry,
+    SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus, TaskId, TaskPlanEntry,
+    TaskPlanStatus, TaskRouteStatus, TaskRunStatus, TaskStepId, TaskStepSpec, TaskStepStatus, Tool,
+    ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
 };
 
 use super::{
@@ -854,6 +854,268 @@ async fn subagent_step_runs_in_child_session_and_links_parent() -> Result<()> {
             .content
             .as_deref()
             .is_some_and(|content| content.contains("delegated subagent step"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_child_session_keeps_skill_context_out_of_parent_history() -> Result<()> {
+    let subagent_requests = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&subagent_requests),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_skill")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "invoke skill".to_owned(),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("invoke_skill")?,
+                title: "invoke skill repo-review".to_owned(),
+                detail: Some("direct user-invoked child-session skill".to_owned()),
+                role: crate::AgentRole::SubagentWrite,
+            },
+            AgentRunInput::without_persisted_user_message(vec![
+                ModelMessage::system("Loaded Sigil skill body SECRET_SKILL_BODY"),
+                ModelMessage::user("Apply the loaded skill"),
+            ]),
+            options(),
+            options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskChildSession(child))
+                if child.status == TaskChildSessionStatus::Completed
+                    && child.role == crate::AgentRole::SubagentWrite
+        )
+    }));
+    assert!(
+        !session
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, SessionLogEntry::User(_)))
+    );
+    let parent_entries = format!("{:?}", session.entries());
+    assert!(!parent_entries.contains("SECRET_SKILL_BODY"));
+
+    let requests = subagent_requests
+        .lock()
+        .expect("subagent request lock should not be poisoned");
+    assert_eq!(requests.len(), 1);
+    let subagent_messages = format!("{:?}", requests[0].messages);
+    assert!(subagent_messages.contains("SECRET_SKILL_BODY"));
+    assert!(subagent_messages.contains("Apply the loaded skill"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_child_session_rejects_non_subagent_roles() -> Result<()> {
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let error = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_skill")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "invoke skill".to_owned(),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("invoke_skill")?,
+                title: "invoke skill".to_owned(),
+                detail: None,
+                role: crate::AgentRole::Executor,
+            },
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("run")]),
+            options(),
+            options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await
+        .expect_err("non-subagent role should be rejected");
+
+    assert!(error.to_string().contains("requires a subagent role"));
+    assert!(session.entries().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_child_session_supports_subagent_read_role() -> Result<()> {
+    let subagent_read_requests = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&subagent_read_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_read_skill")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "invoke read skill".to_owned(),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("invoke_skill")?,
+                title: "invoke read skill".to_owned(),
+                detail: None,
+                role: crate::AgentRole::SubagentRead,
+            },
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("inspect")]),
+            options(),
+            options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(
+        subagent_read_requests
+            .lock()
+            .expect("subagent read requests should not be poisoned")
+            .len(),
+        1
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskChildSession(child))
+                if child.role == crate::AgentRole::SubagentRead
+                    && child.status == TaskChildSessionStatus::Completed
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_child_session_records_failed_child_provider() -> Result<()> {
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(FailingProvider, ToolRegistry::new()),
+    );
+    let mut session = Session::new("planner", "model");
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_failing_skill")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "invoke failing skill".to_owned(),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("invoke_skill")?,
+                title: "invoke failing skill".to_owned(),
+                detail: None,
+                role: crate::AgentRole::SubagentWrite,
+            },
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("run")]),
+            options(),
+            options(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Failed);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Failed);
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                if run.status == TaskRunStatus::Failed
+                    && run.reason.as_deref().is_some_and(|reason| reason.contains("provider failed"))
+        )
     }));
     Ok(())
 }

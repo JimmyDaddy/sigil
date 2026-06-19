@@ -2,15 +2,53 @@ use std::{fs, time::Duration};
 
 use anyhow::Result;
 use sigil_kernel::{
-    Agent, McpServerConfig, McpServerStartup, ProviderChunk, ReasoningEffort, RunEvent,
-    SessionLogEntry, ToolRegistry,
+    Agent, AgentRole, McpServerConfig, McpServerStartup, ProviderChunk, ReasoningEffort, RunEvent,
+    SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, ToolCall,
+    ToolErrorKind, ToolRegistry, ToolResultStatus,
 };
 use tempfile::tempdir;
 
 use super::{
-    super::{McpActivationStatus, WorkerCommand, WorkerMessage, spawn_agent_worker},
-    common::{PlannedProvider, StreamPlan, spawn_test_worker, test_root_config},
+    super::{
+        McpActivationStatus, WorkerCommand, WorkerMessage, spawn_agent_worker,
+        worker_loop::skill_child_agent_role,
+    },
+    common::{PlannedProvider, StreamPlan, WriteTool, spawn_test_worker, test_root_config},
 };
+
+fn write_workspace_skill(workspace_root: &std::path::Path, id: &str, body: &str) -> Result<()> {
+    let path = workspace_root
+        .join(".sigil")
+        .join("skills")
+        .join(id)
+        .join("SKILL.md");
+    fs::create_dir_all(path.parent().expect("skill path should have parent"))?;
+    fs::write(path, body)?;
+    Ok(())
+}
+
+fn test_child_session_skill(agent: Option<&str>) -> SkillDescriptor {
+    SkillDescriptor {
+        id: "reviewer".to_owned(),
+        name: "Reviewer".to_owned(),
+        description: "Review current changes.".to_owned(),
+        when_to_use: None,
+        root: ".sigil/agents/reviewer.md".into(),
+        entrypoint: ".sigil/agents/reviewer.md".into(),
+        source: SkillSource::Workspace,
+        sha256: "hash".to_owned(),
+        enabled: true,
+        trust: SkillTrustState::Trusted,
+        model_invocable: true,
+        user_invocable: true,
+        run_as: SkillRunMode::ChildSession,
+        agent: agent.map(str::to_owned),
+        argument_hint: None,
+        allowed_tools: Default::default(),
+        disallowed_tools: Default::default(),
+        path_patterns: Vec::new(),
+    }
+}
 
 fn write_fake_server_script(path: &std::path::Path) -> Result<()> {
     fs::write(
@@ -52,6 +90,26 @@ while True:
 "#,
     )?;
     Ok(())
+}
+
+#[test]
+fn child_session_skill_agent_hint_defaults_to_read_role() {
+    assert_eq!(
+        skill_child_agent_role(&test_child_session_skill(None)),
+        AgentRole::SubagentRead
+    );
+    assert_eq!(
+        skill_child_agent_role(&test_child_session_skill(Some("reviewer"))),
+        AgentRole::SubagentRead
+    );
+    assert_eq!(
+        skill_child_agent_role(&test_child_session_skill(Some("subagent-write"))),
+        AgentRole::SubagentWrite
+    );
+    assert_eq!(
+        skill_child_agent_role(&test_child_session_skill(Some("writer"))),
+        AgentRole::SubagentWrite
+    );
 }
 #[test]
 fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
@@ -98,6 +156,130 @@ fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
                 && result.tool_calls == 0
                 && entries.iter().any(|entry| matches!(entry, SessionLogEntry::User(message) if message.content.as_deref() == Some("hello")))
     ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn inline_skill_invocation_applies_skill_tool_scope() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    write_workspace_skill(
+        &workspace_root,
+        "readonly",
+        r#"---
+name: readonly
+description: Read only skill.
+trust: trusted
+user-invocable: true
+run-as: inline
+disallowed-tools: [write_file]
+---
+
+# Readonly
+"#,
+    )?;
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-inline-skill.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "call-write".to_owned(),
+                name: "write_file".to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "call-write".to_owned(),
+                delta: r#"{"path":"note.txt"}"#.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-write".to_owned(),
+                name: "write_file".to_owned(),
+                args_json: r#"{"path":"note.txt"}"#.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("done".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let mut registry = ToolRegistry::new();
+    registry.register(std::sync::Arc::new(WriteTool));
+    let agent = Agent::new(provider, registry);
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::InvokeInlineSkill {
+        skill_id: "readonly".to_owned(),
+        arguments: "target".to_owned(),
+        reasoning_effort: ReasoningEffort::Medium,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let tool_error = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::Event(event)
+                if matches!(
+                    event.as_ref(),
+                    RunEvent::ToolResult(result)
+                        if matches!(
+                            &result.status,
+                            ToolResultStatus::Error(error)
+                                if error.kind == ToolErrorKind::Internal
+                                    && error.message.contains("not available in this role scope")
+                        )
+                )
+        )
+    })?;
+    assert!(matches!(tool_error, WorkerMessage::Event(_)));
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn worker_revalidates_skill_run_mode_after_loading() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    write_workspace_skill(
+        &workspace_root,
+        "child-only",
+        r#"---
+name: child-only
+description: Child only skill.
+trust: trusted
+user-invocable: true
+run-as: child-session
+---
+
+# Child Only
+"#,
+    )?;
+    let session_log_path = temp.path().join(".sigil/sessions/session-skill-mode.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(Vec::new());
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::InvokeInlineSkill {
+        skill_id: "child-only".to_owned(),
+        arguments: String::new(),
+        reasoning_effort: ReasoningEffort::Medium,
+    })?;
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+
+    match failure {
+        WorkerMessage::RunFailed(error) => {
+            assert!(
+                error.contains("child_session mode, not inline mode"),
+                "{error}"
+            );
+        }
+        other => panic!("expected run failure, got {other:?}"),
+    }
 
     worker.shutdown()?;
     Ok(())

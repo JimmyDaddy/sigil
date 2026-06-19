@@ -547,6 +547,7 @@ fn skill_descriptor() -> SkillDescriptor {
         model_invocable: true,
         user_invocable: true,
         run_as: SkillRunMode::Inline,
+        agent: None,
         argument_hint: None,
         allowed_tools: Default::default(),
         disallowed_tools: Default::default(),

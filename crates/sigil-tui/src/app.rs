@@ -169,6 +169,14 @@ pub struct AppState {
 pub enum AppAction {
     SubmitPrompt(String),
     SubmitPlan(String),
+    InvokeInlineSkill {
+        skill_id: String,
+        arguments: String,
+    },
+    InvokeChildSessionSkill {
+        skill_id: String,
+        arguments: String,
+    },
     ContinuePlan {
         task_id: Option<String>,
         guidance: Option<String>,
@@ -984,8 +992,8 @@ impl AppState {
         self.input_cursor = 0;
         self.pending_mouse_slash_confirmation = None;
         self.reset_slash_selector();
-        self.push_event("slash", prompt);
-        match command.canonical {
+        self.push_event("slash", prompt.clone());
+        match command.canonical.as_str() {
             "/compact" => {
                 if self.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; compact later");
@@ -1082,8 +1090,85 @@ impl AppState {
                 }
             }
             _ => {
+                if let Some(action) = self.execute_skill_slash_command(&command, &prompt)? {
+                    return Ok(Some(action));
+                }
                 self.push_timeline(TimelineRole::Notice, "unknown slash command");
                 Ok(None)
+            }
+        }
+    }
+
+    fn execute_skill_slash_command(
+        &mut self,
+        command: &ResolvedSlashCommand,
+        prompt: &str,
+    ) -> Result<Option<AppAction>> {
+        let Some(skill_id) = command.canonical.strip_prefix('/') else {
+            return Ok(None);
+        };
+        let Some(skill) = self.exact_skill_descriptor(skill_id) else {
+            return Ok(None);
+        };
+        if self.is_busy {
+            self.push_timeline(TimelineRole::Notice, "busy; invoke skill later");
+            self.last_notice = Some("busy; invoke skill later".to_owned());
+            return Ok(None);
+        }
+        if !skill.enabled {
+            self.push_timeline(
+                TimelineRole::Notice,
+                format!("skill {skill_id} is disabled"),
+            );
+            self.last_notice = Some(format!("skill {skill_id} is disabled"));
+            return Ok(None);
+        }
+        if skill.trust != sigil_kernel::SkillTrustState::Trusted {
+            self.push_timeline(
+                TimelineRole::Notice,
+                format!("skill {skill_id} is not trusted"),
+            );
+            self.last_notice = Some(format!("skill {skill_id} is not trusted"));
+            return Ok(None);
+        }
+        if !skill.user_invocable {
+            self.push_timeline(
+                TimelineRole::Notice,
+                format!("skill {skill_id} is not user-invocable"),
+            );
+            self.last_notice = Some(format!("skill {skill_id} is not user-invocable"));
+            return Ok(None);
+        }
+
+        self.timeline_scroll_back = 0;
+        self.push_timeline(TimelineRole::User, prompt.to_owned());
+        self.push_event("input", format!("invoked skill {skill_id}"));
+        self.active_pane = PaneFocus::Composer;
+        self.push_event("focus", current_focus_label(self));
+        self.is_busy = true;
+        self.run_phase = RunPhase::Thinking;
+        self.last_phase_marker = None;
+        self.streaming_assistant_index = None;
+        self.streaming_reasoning_index = None;
+        self.refresh_usage_sidebar_cache();
+
+        let arguments = command.arg.trim().to_owned();
+        match skill.run_as {
+            sigil_kernel::SkillRunMode::Inline => {
+                self.last_notice = Some(format!("invoking skill {skill_id}"));
+                self.push_phase_marker(format!("thinking|{}", self.model_name));
+                Ok(Some(AppAction::InvokeInlineSkill {
+                    skill_id: skill_id.to_owned(),
+                    arguments,
+                }))
+            }
+            sigil_kernel::SkillRunMode::ChildSession => {
+                self.last_notice = Some(format!("invoking skill {skill_id} in child session"));
+                self.push_phase_marker(format!("task|{}", self.model_name));
+                Ok(Some(AppAction::InvokeChildSessionSkill {
+                    skill_id: skill_id.to_owned(),
+                    arguments,
+                }))
             }
         }
     }

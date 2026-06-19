@@ -79,6 +79,7 @@ fn skill_detail_helpers_cover_edge_labels_and_prompts() {
         model_invocable: false,
         user_invocable: false,
         run_as: sigil_kernel::SkillRunMode::Inline,
+        agent: None,
         argument_hint: None,
         allowed_tools: sigil_kernel::ToolRegistryScope {
             allow_all: true,
@@ -142,6 +143,34 @@ fn skill_detail_helpers_cover_edge_labels_and_prompts() {
 }
 
 #[test]
+fn skill_detail_warns_when_native_slash_command_shadows_skill_id() {
+    let skill = sigil_kernel::SkillDescriptor {
+        id: "config".to_owned(),
+        name: "Config Skill".to_owned(),
+        description: "Native command id.".to_owned(),
+        when_to_use: None,
+        root: ".sigil/skills/config".into(),
+        entrypoint: ".sigil/skills/config/SKILL.md".into(),
+        source: sigil_kernel::SkillSource::Workspace,
+        sha256: "123456789012".to_owned(),
+        enabled: true,
+        trust: sigil_kernel::SkillTrustState::Trusted,
+        model_invocable: true,
+        user_invocable: true,
+        run_as: sigil_kernel::SkillRunMode::Inline,
+        agent: None,
+        argument_hint: None,
+        allowed_tools: Default::default(),
+        disallowed_tools: Default::default(),
+        path_patterns: Vec::new(),
+    };
+
+    let detail = render_skill_detail_lines(&skill).join("\n");
+
+    assert!(detail.contains("- Slash: shadowed by native /config"));
+}
+
+#[test]
 fn skill_action_methods_cover_guard_edges() -> Result<()> {
     let root_config = test_config();
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
@@ -164,6 +193,7 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
         model_invocable: true,
         user_invocable: true,
         run_as: sigil_kernel::SkillRunMode::Inline,
+        agent: None,
         argument_hint: None,
         allowed_tools: Default::default(),
         disallowed_tools: Default::default(),

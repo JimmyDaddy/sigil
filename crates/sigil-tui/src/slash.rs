@@ -8,7 +8,7 @@ pub(crate) struct SlashCommandSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedSlashCommand {
-    pub(crate) canonical: &'static str,
+    pub(crate) canonical: String,
     pub(crate) arg: String,
 }
 

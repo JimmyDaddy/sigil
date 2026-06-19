@@ -449,6 +449,21 @@ impl AppState {
                 prompt,
                 reasoning_effort: self.reasoning_effort.clone(),
             },
+            AppAction::InvokeInlineSkill {
+                skill_id,
+                arguments,
+            } => WorkerCommand::InvokeInlineSkill {
+                skill_id,
+                arguments,
+                reasoning_effort: self.reasoning_effort.clone(),
+            },
+            AppAction::InvokeChildSessionSkill {
+                skill_id,
+                arguments,
+            } => WorkerCommand::InvokeChildSessionSkill {
+                skill_id,
+                arguments,
+            },
             AppAction::SubmitPlan(prompt) => WorkerCommand::SubmitTask { prompt },
             AppAction::ContinuePlan { task_id, guidance } => {
                 WorkerCommand::ContinueTask { task_id, guidance }

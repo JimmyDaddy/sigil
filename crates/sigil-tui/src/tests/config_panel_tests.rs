@@ -37,6 +37,7 @@ fn test_skill(id: &str) -> sigil_kernel::SkillDescriptor {
         model_invocable: true,
         user_invocable: true,
         run_as: sigil_kernel::SkillRunMode::Inline,
+        agent: None,
         argument_hint: Some("target path".to_owned()),
         allowed_tools: Default::default(),
         disallowed_tools: Default::default(),

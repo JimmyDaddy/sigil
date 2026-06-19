@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -10,9 +10,9 @@ use crate::{
     session::ControlEntry,
     task::{
         AgentRole, SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-        TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus, TaskRunEntry,
-        TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
-        TaskSubagentApprovalRouteEntry, child_session_ref,
+        TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus,
+        TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
+        TaskStepStatus, TaskSubagentApprovalRouteEntry, child_session_ref,
     },
 };
 
@@ -321,6 +321,162 @@ impl SequentialTaskOrchestrator {
         })
     }
 
+    /// Runs one explicit child-session task step without invoking the planner.
+    ///
+    /// This is intended for user-invoked workflows that already resolved to a single
+    /// child-session action, such as a `run_as = child_session` skill.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the step is not a subagent role, durable task state cannot be
+    /// appended, or the child agent run fails before a terminal task status can be recorded.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_direct_child_session<H, A>(
+        &self,
+        session: &mut Session,
+        request: SequentialTaskRequest,
+        step: TaskStepSpec,
+        child_input: AgentRunInput,
+        subagent_read_options: AgentRunOptions,
+        subagent_write_options: AgentRunOptions,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<SequentialTaskRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        if !matches!(
+            step.role,
+            AgentRole::SubagentRead | AgentRole::SubagentWrite
+        ) {
+            bail!("direct child session requires a subagent role");
+        }
+        let plan_version = 1;
+        append_task_run(
+            session,
+            handler,
+            &request,
+            TaskRunStatus::Started,
+            Some("direct child session started".to_owned()),
+        )?;
+        append_task_control(
+            session,
+            handler,
+            ControlEntry::TaskPlan(TaskPlanEntry {
+                task_id: request.task_id.clone(),
+                plan_version,
+                status: TaskPlanStatus::Accepted,
+                steps: vec![step.clone()],
+                reason: Some("direct child session invocation".to_owned()),
+            }),
+        )?;
+        append_task_run(
+            session,
+            handler,
+            &request,
+            TaskRunStatus::Running,
+            Some(format!("running direct child session plan v{plan_version}")),
+        )?;
+        append_task_step(
+            session,
+            handler,
+            &request.task_id,
+            plan_version,
+            &step,
+            TaskStepStatus::Running,
+            None,
+            None,
+        )?;
+
+        let options = match step.role {
+            AgentRole::SubagentRead => subagent_read_options,
+            AgentRole::SubagentWrite => subagent_write_options,
+            AgentRole::Planner | AgentRole::Executor => unreachable!("role checked above"),
+        };
+        let output = match self
+            .run_child_step_with_input(
+                session,
+                &request,
+                plan_version,
+                &step,
+                options,
+                child_input,
+                handler,
+                approval_handler,
+            )
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                append_task_step(
+                    session,
+                    handler,
+                    &request.task_id,
+                    plan_version,
+                    &step,
+                    TaskStepStatus::Failed,
+                    None,
+                    Some(format!("{error:#}")),
+                )?;
+                append_task_run(
+                    session,
+                    handler,
+                    &request,
+                    TaskRunStatus::Failed,
+                    Some(format!("step {} failed: {error:#}", step.step_id.as_str())),
+                )?;
+                return Ok(SequentialTaskRunOutput {
+                    task_id: request.task_id,
+                    plan_version,
+                    steps: vec![SequentialTaskStepOutput {
+                        step_id: step.step_id,
+                        status: TaskStepStatus::Failed,
+                        outcome: AgentRunOutcome::default(),
+                    }],
+                    status: TaskRunStatus::Failed,
+                });
+            }
+        };
+        let status = step_status_from_outcome(&output);
+        append_task_step(
+            session,
+            handler,
+            &request.task_id,
+            plan_version,
+            &step,
+            status,
+            Some(output.final_text.clone()),
+            step_reason_from_output(status, &output),
+        )?;
+        let task_status = if status == TaskStepStatus::Completed {
+            TaskRunStatus::Completed
+        } else {
+            task_status_from_step_status(status)
+        };
+        append_task_run(
+            session,
+            handler,
+            &request,
+            task_status,
+            Some(if task_status == TaskRunStatus::Completed {
+                format!("completed direct child session plan v{plan_version}")
+            } else {
+                step_terminal_reason(&step.step_id, status)
+            }),
+        )?;
+        Ok(SequentialTaskRunOutput {
+            task_id: request.task_id,
+            plan_version,
+            steps: vec![SequentialTaskStepOutput {
+                step_id: step.step_id,
+                status,
+                outcome: output.outcome,
+            }],
+            status: task_status,
+        })
+    }
+
     async fn run_parent_step<H, A>(
         &self,
         session: &mut Session,
@@ -365,6 +521,38 @@ impl SequentialTaskOrchestrator {
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let child_input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+            subagent_step_prompt(&request.objective, plan_version, step, guidance),
+        )]);
+        self.run_child_step_with_input(
+            parent_session,
+            request,
+            plan_version,
+            step,
+            options,
+            child_input,
+            handler,
+            approval_handler,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_child_step_with_input<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: &SequentialTaskRequest,
+        plan_version: u32,
+        step: &TaskStepSpec,
+        options: AgentRunOptions,
+        child_input: AgentRunInput,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<StepRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
         let child_task_id =
             TaskId::new(format!("child_v{plan_version}_{}", step.step_id.as_str()))?;
         let child_session_ref = child_session_ref(&request.task_id, &step.step_id, &child_task_id)?;
@@ -380,9 +568,6 @@ impl SequentialTaskOrchestrator {
             None,
         )?;
         let mut child_session = build_child_session(parent_session, &child_session_ref)?;
-        let child_input = AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-            subagent_step_prompt(&request.objective, plan_version, step, guidance),
-        )]);
         let mut route_handler = TaskApprovalRouteHandler {
             inner: approval_handler,
             parent_session,

@@ -56,6 +56,72 @@ impl ToolRegistryScope {
     pub fn is_empty(&self) -> bool {
         !self.allow_all && self.names.is_empty() && self.prefixes.is_empty()
     }
+
+    pub fn intersection(&self, other: &Self) -> Self {
+        if self.is_empty() || other.is_empty() {
+            return Self::default();
+        }
+        if self.allow_all {
+            return other.clone();
+        }
+        if other.allow_all {
+            return self.clone();
+        }
+
+        let mut names = self
+            .names
+            .iter()
+            .filter(|name| other.allows(name))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        names.extend(other.names.iter().filter(|name| self.allows(name)).cloned());
+
+        let mut prefixes = Vec::new();
+        for left in &self.prefixes {
+            for right in &other.prefixes {
+                if left.starts_with(right) {
+                    push_unique_prefix(&mut prefixes, left.clone());
+                } else if right.starts_with(left) {
+                    push_unique_prefix(&mut prefixes, right.clone());
+                }
+            }
+        }
+
+        Self {
+            allow_all: false,
+            names,
+            prefixes,
+        }
+    }
+
+    pub fn union(&self, other: &Self) -> Self {
+        if self.allow_all || other.allow_all {
+            return Self {
+                allow_all: true,
+                ..Self::default()
+            };
+        }
+
+        let mut names = self.names.clone();
+        names.extend(other.names.iter().cloned());
+
+        let mut prefixes = self.prefixes.clone();
+        for prefix in &other.prefixes {
+            push_unique_prefix(&mut prefixes, prefix.clone());
+        }
+
+        Self {
+            allow_all: false,
+            names,
+            prefixes,
+        }
+    }
+}
+
+fn push_unique_prefix(prefixes: &mut Vec<String>, prefix: String) {
+    if !prefixes.iter().any(|existing| existing == &prefix) {
+        prefixes.push(prefix);
+    }
 }
 
 /// Coarse product category for one provider-neutral tool.
@@ -904,6 +970,7 @@ pub trait Tool: Send + Sync {
 pub struct ToolRegistry {
     tools: Arc<RwLock<BTreeMap<String, Arc<dyn Tool>>>>,
     scope: Option<Arc<ToolRegistryScope>>,
+    deny_scope: Option<Arc<ToolRegistryScope>>,
 }
 
 /// Strong role-specific view over a shared tool registry.
@@ -917,6 +984,7 @@ impl Default for ToolRegistry {
         Self {
             tools: Arc::new(RwLock::new(BTreeMap::new())),
             scope: None,
+            deny_scope: None,
         }
     }
 }
@@ -942,9 +1010,40 @@ impl ToolRegistry {
         ScopedToolRegistry {
             inner: Self {
                 tools: Arc::clone(&self.tools),
-                scope: Some(Arc::new(scope)),
+                scope: Some(Arc::new(self.effective_scope(scope))),
+                deny_scope: self.deny_scope.clone(),
             },
         }
+    }
+
+    /// Returns a scoped registry that also denies matching tool names across all tool paths.
+    pub fn scoped_with_denies(
+        &self,
+        scope: ToolRegistryScope,
+        deny_scope: ToolRegistryScope,
+    ) -> ScopedToolRegistry {
+        ScopedToolRegistry {
+            inner: Self {
+                tools: Arc::clone(&self.tools),
+                scope: Some(Arc::new(self.effective_scope(scope))),
+                deny_scope: self.effective_deny_scope(deny_scope).map(Arc::new),
+            },
+        }
+    }
+
+    fn effective_scope(&self, scope: ToolRegistryScope) -> ToolRegistryScope {
+        match self.scope.as_deref() {
+            Some(existing) => existing.intersection(&scope),
+            None => scope,
+        }
+    }
+
+    fn effective_deny_scope(&self, deny_scope: ToolRegistryScope) -> Option<ToolRegistryScope> {
+        let effective = match self.deny_scope.as_deref() {
+            Some(existing) => existing.union(&deny_scope),
+            None => deny_scope,
+        };
+        (!effective.is_empty()).then_some(effective)
     }
 
     /// Removes registered tools whose names start with the provided prefix.
@@ -1134,6 +1233,10 @@ impl ToolRegistry {
 
     fn allows(&self, name: &str) -> bool {
         self.scope.as_ref().is_none_or(|scope| scope.allows(name))
+            && self
+                .deny_scope
+                .as_ref()
+                .is_none_or(|scope| !scope.allows(name))
     }
 
     fn allowed_tool(

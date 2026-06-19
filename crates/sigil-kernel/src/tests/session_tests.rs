@@ -274,6 +274,7 @@ fn session_skill_state_projection_replays_control_entries() -> Result<()> {
         model_invocable: true,
         user_invocable: true,
         run_as: SkillRunMode::Inline,
+        agent: None,
         argument_hint: None,
         allowed_tools: Default::default(),
         disallowed_tools: Default::default(),

@@ -8,6 +8,7 @@ use crate::slash::{
     SlashArgumentOption, SlashCommandSpec, SlashSelectorEntry,
 };
 use anyhow::Result;
+use sigil_kernel::{SkillDescriptor, SkillTrustState, default_user_config_dir};
 
 impl AppState {
     fn slash_query(prompt: &str) -> Option<(&str, String)> {
@@ -82,7 +83,7 @@ impl AppState {
                     label: spec.canonical.to_owned(),
                     description: format!("{}{}", spec.description, aliases),
                     resolved: ResolvedSlashCommand {
-                        canonical: spec.canonical,
+                        canonical: spec.canonical.to_owned(),
                         arg: arg.to_owned(),
                     },
                 }
@@ -120,7 +121,7 @@ impl AppState {
                 label: option.label.to_owned(),
                 description: format!("{}  {}", option.value, option.description),
                 resolved: ResolvedSlashCommand {
-                    canonical: "/effort",
+                    canonical: "/effort".to_owned(),
                     arg: option.value.to_owned(),
                 },
             })
@@ -144,7 +145,7 @@ impl AppState {
                 label: "current".to_owned(),
                 description: format!("{current}  current custom model"),
                 resolved: ResolvedSlashCommand {
-                    canonical: "/model",
+                    canonical: "/model".to_owned(),
                     arg: current.to_owned(),
                 },
             });
@@ -162,7 +163,7 @@ impl AppState {
             label: option.label.to_owned(),
             description: format!("{}  {}", option.value, option.description),
             resolved: ResolvedSlashCommand {
-                canonical: "/model",
+                canonical: "/model".to_owned(),
                 arg: option.value.to_owned(),
             },
         }));
@@ -174,7 +175,7 @@ impl AppState {
                 label: "custom".to_owned(),
                 description: format!("{custom}  use typed model id"),
                 resolved: ResolvedSlashCommand {
-                    canonical: "/model",
+                    canonical: "/model".to_owned(),
                     arg: custom,
                 },
             });
@@ -213,10 +214,71 @@ impl AppState {
                         relative_age_label(entry.modified_epoch_secs)
                     ),
                     resolved: ResolvedSlashCommand {
-                        canonical: "/resume",
+                        canonical: "/resume".to_owned(),
                         arg: entry.path.display().to_string(),
                     },
                 })
+            })
+            .collect()
+    }
+
+    fn user_invocable_skill_descriptors(&self) -> Vec<SkillDescriptor> {
+        let Some(root_config) = self.root_config_snapshot() else {
+            return Vec::new();
+        };
+        let user_config_dir = default_user_config_dir().ok();
+        sigil_runtime::discover_skill_index_with_user_dir(
+            &self.workspace_root,
+            user_config_dir.as_deref(),
+            &root_config.skills,
+        )
+        .map(|report| report.snapshot.descriptors)
+        .unwrap_or_default()
+    }
+
+    pub(super) fn exact_skill_descriptor(&self, skill_id: &str) -> Option<SkillDescriptor> {
+        self.user_invocable_skill_descriptors()
+            .into_iter()
+            .find(|descriptor| descriptor.id == skill_id)
+    }
+
+    pub(super) fn slash_skill_entries(&self, token: &str, arg: &str) -> Vec<SlashSelectorEntry> {
+        let Some(query) = token.strip_prefix('/') else {
+            return Vec::new();
+        };
+        if query.is_empty() && token != "/" {
+            return Vec::new();
+        }
+        self.user_invocable_skill_descriptors()
+            .into_iter()
+            .filter(|descriptor| descriptor.enabled)
+            .filter(|descriptor| descriptor.user_invocable)
+            .filter(|descriptor| descriptor.trust == SkillTrustState::Trusted)
+            .filter(|descriptor| query.is_empty() || descriptor.id.starts_with(query))
+            .map(|descriptor| {
+                let fill = if arg.is_empty() {
+                    format!("/{}", descriptor.id)
+                } else {
+                    format!("/{} {arg}", descriptor.id)
+                };
+                let description = if descriptor.description.trim().is_empty() {
+                    format!("skill · {}", descriptor.run_as.as_str())
+                } else {
+                    format!(
+                        "skill · {} · {}",
+                        descriptor.run_as.as_str(),
+                        descriptor.description.trim()
+                    )
+                };
+                SlashSelectorEntry {
+                    fill,
+                    label: format!("/{}", descriptor.id),
+                    description,
+                    resolved: ResolvedSlashCommand {
+                        canonical: format!("/{}", descriptor.id),
+                        arg: arg.to_owned(),
+                    },
+                }
             })
             .collect()
     }
@@ -231,7 +293,11 @@ impl AppState {
         {
             entries
         } else {
-            Self::slash_command_entries(token, &arg)
+            let mut entries = Self::slash_command_entries(token, &arg);
+            if Self::exact_slash_command(token).is_none() {
+                entries.extend(self.slash_skill_entries(token, &arg));
+            }
+            entries
         };
 
         self.decorate_pending_mouse_confirmation(&mut entries);
@@ -269,10 +335,19 @@ impl AppState {
             return Some(entry.resolved);
         }
 
-        Self::executable_slash_command(token).map(|spec| ResolvedSlashCommand {
-            canonical: spec.canonical,
-            arg,
-        })
+        if let Some(spec) = Self::executable_slash_command(token) {
+            return Some(ResolvedSlashCommand {
+                canonical: spec.canonical.to_owned(),
+                arg,
+            });
+        }
+        let skill_id = token.strip_prefix('/')?;
+        self.exact_skill_descriptor(skill_id)
+            .filter(|descriptor| descriptor.enabled && descriptor.user_invocable)
+            .map(|descriptor| ResolvedSlashCommand {
+                canonical: format!("/{}", descriptor.id),
+                arg,
+            })
     }
 
     pub(super) fn reset_slash_selector(&mut self) {
@@ -375,7 +450,7 @@ impl AppState {
 
     fn slash_command_requires_mouse_confirmation(command: &ResolvedSlashCommand) -> bool {
         matches!(
-            command.canonical,
+            command.canonical.as_str(),
             "/compact" | "/model" | "/new" | "/quit" | "/resume"
         )
     }

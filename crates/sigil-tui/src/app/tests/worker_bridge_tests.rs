@@ -786,6 +786,27 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         WorkerCommand::SubmitPrompt { prompt, .. } if prompt == "draft"
     ));
     assert!(matches!(
+        app.into_worker_command(AppAction::InvokeInlineSkill {
+            skill_id: "repo-review".to_owned(),
+            arguments: "crates".to_owned(),
+        }),
+        WorkerCommand::InvokeInlineSkill {
+            skill_id,
+            arguments,
+            ..
+        } if skill_id == "repo-review" && arguments == "crates"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::InvokeChildSessionSkill {
+            skill_id: "repo-audit".to_owned(),
+            arguments: "--depth full".to_owned(),
+        }),
+        WorkerCommand::InvokeChildSessionSkill {
+            skill_id,
+            arguments,
+        } if skill_id == "repo-audit" && arguments == "--depth full"
+    ));
+    assert!(matches!(
         app.into_worker_command(AppAction::ApprovalDecision {
             call_id: "call-1".to_owned(),
             approved: true,

@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentRole, AgentRunOptions, ApprovalMode, InteractionMode, McpServerConfig, McpServerStartup,
     Provider, ProviderCapabilities, ReasoningEffort, RoleModelConfig, RootConfig,
-    ScopedToolRegistry, SecretRedactor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory,
-    ToolContext, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
+    ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig,
+    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
     ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
     ToolSubjectScope, default_user_config_dir,
 };
@@ -37,9 +37,9 @@ use sigil_provider_openai_compat::{
 pub mod doctor;
 pub mod skills;
 pub use skills::{
-    LOAD_SKILL_TOOL_NAME, SkillDiscoveryReport, SkillDiscoveryWarning, SkillDiscoveryWarningKind,
-    discover_skill_index, discover_skill_index_with_user_dir, namespaced_plugin_skill_id,
-    register_skill_tools,
+    LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
+    SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,
+    load_user_invoked_skill, namespaced_plugin_skill_id, register_skill_tools,
 };
 
 /// Builds the configured model provider for runtime entrypoints.
@@ -821,13 +821,48 @@ pub fn build_role_tool_registry(
     root_config: &RootConfig,
     role: AgentRole,
 ) -> ScopedToolRegistry {
+    registry.scoped(role_tool_scope(root_config, role))
+}
+
+/// Builds the current agent registry further constrained by a loaded skill descriptor.
+pub fn build_skill_tool_registry(
+    registry: &ToolRegistry,
+    skill: &SkillDescriptor,
+) -> ScopedToolRegistry {
+    let effective_scope = if skill.allowed_tools.is_empty() {
+        ToolRegistryScope {
+            allow_all: true,
+            ..ToolRegistryScope::default()
+        }
+    } else {
+        skill.allowed_tools.clone()
+    };
+    registry.scoped_with_denies(effective_scope, skill.disallowed_tools.clone())
+}
+
+/// Builds a role-scoped registry further constrained by a loaded skill descriptor.
+pub fn build_role_skill_tool_registry(
+    registry: &ToolRegistry,
+    root_config: &RootConfig,
+    role: AgentRole,
+    skill: &SkillDescriptor,
+) -> ScopedToolRegistry {
+    let role_scope = role_tool_scope(root_config, role);
+    let effective_scope = if skill.allowed_tools.is_empty() {
+        role_scope
+    } else {
+        role_scope.intersection(&skill.allowed_tools)
+    };
+    registry.scoped_with_denies(effective_scope, skill.disallowed_tools.clone())
+}
+
+fn role_tool_scope(root_config: &RootConfig, role: AgentRole) -> ToolRegistryScope {
     let configured = &root_config.task.role_config(role).tools;
-    let scope = if configured_allowlist_is_empty(configured) {
+    if configured_allowlist_is_empty(configured) {
         default_role_tool_scope(root_config, role)
     } else {
         tool_scope_from_allowlist(configured)
-    };
-    registry.scoped(scope)
+    }
 }
 
 /// Parses the DeepSeek provider block from the shared root config.

@@ -14,8 +14,9 @@ use sigil_kernel::{
     AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig,
     InteractionMode, LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig,
     PermissionConfig, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport,
-    RoleModelConfig, RootConfig, SessionConfig, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig,
-    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolResult,
+    RoleModelConfig, RootConfig, SessionConfig, SkillDescriptor, SkillRunMode, SkillSource,
+    SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
@@ -25,13 +26,14 @@ use sigil_provider_openai_compat::{OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY
 
 use super::{
     SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
-    build_role_provider, build_role_run_options, build_role_tool_registry, build_run_options,
-    build_tool_registry, build_tool_registry_without_eager_mcp, load_anthropic_config,
-    load_deepseek_config, load_gemini_config, load_openai_compat_config,
-    provider_capabilities_for_name, provider_capability_view,
-    refresh_mcp_server_tools_with_mcp_handlers, register_lazy_mcp_activation_tool,
-    resolve_anthropic_api_key, resolve_deepseek_api_key, resolve_deepseek_api_key_with_session,
-    resolve_gemini_api_key, resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
+    build_role_provider, build_role_run_options, build_role_skill_tool_registry,
+    build_role_tool_registry, build_run_options, build_skill_tool_registry, build_tool_registry,
+    build_tool_registry_without_eager_mcp, load_anthropic_config, load_deepseek_config,
+    load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
+    provider_capability_view, refresh_mcp_server_tools_with_mcp_handlers,
+    register_lazy_mcp_activation_tool, resolve_anthropic_api_key, resolve_deepseek_api_key,
+    resolve_deepseek_api_key_with_session, resolve_gemini_api_key,
+    resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
     resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
 };
 
@@ -369,6 +371,18 @@ fn secret_redactor_for_root_config_redacts_openai_compat_api_key() {
 
 #[test]
 fn secret_redactor_for_root_config_redacts_anthropic_and_gemini_api_keys() {
+    let _guard = ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("env lock poisoned");
+    let _scope = EnvScope::set_many(&[
+        (SIGIL_ANTHROPIC_API_KEY_ENV, "   "),
+        (ANTHROPIC_API_KEY_ENV, "   "),
+        (SIGIL_GEMINI_API_KEY_ENV, "   "),
+        (GEMINI_API_KEY_ENV, "   "),
+        (GOOGLE_API_KEY_ENV, "   "),
+    ]);
+
     let redactor = secret_redactor_for_root_config(&test_root_config("anthropic"));
 
     assert_eq!(
@@ -624,6 +638,105 @@ async fn build_role_tool_registry_applies_default_and_configured_scopes() -> Res
     let planner = build_role_tool_registry(&registry, &configured, AgentRole::Planner);
     assert!(planner.spec_for("write_file").is_some());
     assert!(planner.spec_for("read_file").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    sigil_tools_builtin::register_builtin_tools(&mut registry);
+
+    let skill = SkillDescriptor {
+        id: "readonly".to_owned(),
+        name: "Readonly".to_owned(),
+        description: String::new(),
+        when_to_use: None,
+        root: ".sigil/skills/readonly".into(),
+        entrypoint: ".sigil/skills/readonly/SKILL.md".into(),
+        source: SkillSource::Workspace,
+        sha256: String::new(),
+        enabled: true,
+        trust: SkillTrustState::Trusted,
+        model_invocable: true,
+        user_invocable: true,
+        run_as: SkillRunMode::Inline,
+        agent: None,
+        argument_hint: None,
+        allowed_tools: ToolRegistryScope::from_names_and_prefixes(
+            ["read_file", "write_file"],
+            std::iter::empty::<&str>(),
+        ),
+        disallowed_tools: ToolRegistryScope::from_names_and_prefixes(
+            ["write_file"],
+            std::iter::empty::<&str>(),
+        ),
+        path_patterns: Vec::new(),
+    };
+
+    let direct = build_skill_tool_registry(&registry, &skill);
+    assert!(direct.spec_for("read_file").is_some());
+    assert!(direct.spec_for("write_file").is_none());
+
+    let mut write_allowed_skill = skill.clone();
+    write_allowed_skill.disallowed_tools = ToolRegistryScope::default();
+    let base_read_only = registry
+        .scoped(ToolRegistryScope::from_names_and_prefixes(
+            ["read_file"],
+            std::iter::empty::<&str>(),
+        ))
+        .into_registry();
+    let direct_on_read_only_base = build_skill_tool_registry(&base_read_only, &write_allowed_skill);
+    assert!(direct_on_read_only_base.spec_for("read_file").is_some());
+    assert!(direct_on_read_only_base.spec_for("write_file").is_none());
+
+    let base_denied_write = registry
+        .scoped_with_denies(
+            ToolRegistryScope {
+                allow_all: true,
+                ..ToolRegistryScope::default()
+            },
+            ToolRegistryScope::from_names_and_prefixes(["write_file"], std::iter::empty::<&str>()),
+        )
+        .into_registry();
+    let direct_on_denied_base = build_skill_tool_registry(&base_denied_write, &write_allowed_skill);
+    assert!(direct_on_denied_base.spec_for("read_file").is_some());
+    assert!(direct_on_denied_base.spec_for("write_file").is_none());
+
+    let config = test_root_config("deepseek");
+    let planner = build_role_skill_tool_registry(&registry, &config, AgentRole::Planner, &skill);
+    assert!(planner.spec_for("read_file").is_some());
+    assert!(planner.spec_for("write_file").is_none());
+    assert!(planner.spec_for("bash").is_none());
+
+    let read_child = build_role_skill_tool_registry(
+        &registry,
+        &config,
+        AgentRole::SubagentRead,
+        &write_allowed_skill,
+    );
+    assert!(read_child.spec_for("read_file").is_some());
+    assert!(read_child.spec_for("write_file").is_none());
+
+    let mut write_config = config.clone();
+    write_config.task.allow_write_subagents = true;
+    let write_child = build_role_skill_tool_registry(
+        &registry,
+        &write_config,
+        AgentRole::SubagentWrite,
+        &write_allowed_skill,
+    );
+    assert!(write_child.spec_for("read_file").is_some());
+    assert!(write_child.spec_for("write_file").is_some());
+
+    let mut inheriting_skill = skill.clone();
+    inheriting_skill.allowed_tools = ToolRegistryScope::default();
+    inheriting_skill.disallowed_tools = ToolRegistryScope::default();
+    let inherited =
+        build_role_skill_tool_registry(&registry, &config, AgentRole::Planner, &inheriting_skill);
+    assert!(inherited.spec_for("read_file").is_some());
+    assert!(inherited.spec_for("ls").is_some());
+    assert!(inherited.spec_for("bash").is_none());
+    assert!(inherited.spec_for("write_file").is_none());
     Ok(())
 }
 

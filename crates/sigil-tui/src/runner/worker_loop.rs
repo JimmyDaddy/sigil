@@ -7,13 +7,14 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentRole, AgentRunOptions, AgentRunResult, ControlEntry, ProviderCapabilities,
-    RootConfig, SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry,
-    SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskRouteId,
-    TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepStatus,
+    Agent, AgentRole, AgentRunInput, AgentRunOptions, AgentRunResult, ControlEntry, ModelMessage,
+    ProviderCapabilities, RootConfig, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection,
+    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
     TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
     ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit,
+    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, default_user_config_dir,
 };
 
 use crate::{
@@ -270,6 +271,207 @@ pub(super) fn run_worker_loop<P>(
                         payload: RunTaskPayload::Chat(result),
                     });
                 });
+
+                active_run = Some(ActiveRun {
+                    run_id,
+                    handle,
+                    approval_tx,
+                    elicitation_audit_buffer,
+                });
+            }
+            Ok(WorkerCommand::InvokeInlineSkill {
+                skill_id,
+                arguments,
+                reasoning_effort,
+            }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "agent is already running".to_owned(),
+                    ));
+                    continue;
+                }
+
+                let run_id = next_run_id;
+                let loaded =
+                    match load_worker_skill(&root_config, &options, &skill_id, Some(run_id)) {
+                        Ok(loaded) => loaded,
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                            continue;
+                        }
+                    };
+                if loaded.descriptor.run_as != SkillRunMode::Inline {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "skill {skill_id} is configured for {} mode, not inline mode",
+                        loaded.descriptor.run_as.as_str()
+                    )));
+                    continue;
+                }
+                let Some(run_session) = current_session.take() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+
+                let prompt = skill_invocation_prompt(&skill_id, &arguments);
+                let _ = message_tx.send(WorkerMessage::RunStarted {
+                    prompt: prompt.clone(),
+                });
+
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
+                let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                let skill_registry = sigil_runtime::build_skill_tool_registry(
+                    agent.tool_registry(),
+                    &loaded.descriptor,
+                )
+                .into_registry();
+                let agent = Arc::clone(&agent);
+                let mut options = options.clone();
+                options.reasoning_effort = Some(reasoning_effort);
+                let task_result_tx = task_result_tx.clone();
+                next_run_id += 1;
+
+                let handle = runtime.spawn(async move {
+                    let mut run_session = run_session;
+                    let input = AgentRunInput::transient(prompt, vec![loaded.transient_context]);
+                    let result =
+                        match run_session.append_control(ControlEntry::SkillLoaded(loaded.entry)) {
+                            Ok(()) => {
+                                let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+                                agent
+                                    .run_with_approval_input_and_tool_registry(
+                                        &mut run_session,
+                                        input,
+                                        options,
+                                        skill_registry,
+                                        &mut handler,
+                                        &mut approval_handler,
+                                    )
+                                    .await
+                                    .map(|output| output.result)
+                                    .map_err(|error| format!("{error:#}"))
+                            }
+                            Err(error) => Err(format!("{error:#}")),
+                        };
+                    let result = match append_mcp_elicitation_audits(
+                        &mut run_session,
+                        &run_elicitation_audit_buffer,
+                    ) {
+                        Ok(()) => result,
+                        Err(error) => Err(error),
+                    };
+                    let _ = task_result_tx.send(RunTaskResult {
+                        run_id,
+                        session: run_session,
+                        payload: RunTaskPayload::Chat(result),
+                    });
+                });
+
+                active_run = Some(ActiveRun {
+                    run_id,
+                    handle,
+                    approval_tx,
+                    elicitation_audit_buffer,
+                });
+            }
+            Ok(WorkerCommand::InvokeChildSessionSkill {
+                skill_id,
+                arguments,
+            }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "agent is already running".to_owned(),
+                    ));
+                    continue;
+                }
+                if !root_config.task.enabled {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "task planning is disabled in config".to_owned(),
+                    ));
+                    continue;
+                }
+
+                let run_id = next_run_id;
+                let loaded =
+                    match load_worker_skill(&root_config, &options, &skill_id, Some(run_id)) {
+                        Ok(loaded) => loaded,
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                            continue;
+                        }
+                    };
+                if loaded.descriptor.run_as != SkillRunMode::ChildSession {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "skill {skill_id} is configured for {} mode, not child-session mode",
+                        loaded.descriptor.run_as.as_str()
+                    )));
+                    continue;
+                }
+                let Some(run_session) = current_session.take() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+
+                let task_id = match next_task_id(&run_session) {
+                    Ok(task_id) => task_id,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                let task_id_value = task_id.as_str().to_owned();
+                let parent_session_ref = match session_ref_for_log_path(&current_session_log_path) {
+                    Ok(reference) => reference,
+                    Err(error) => {
+                        current_session = Some(run_session);
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        continue;
+                    }
+                };
+                let objective = skill_child_session_objective(&skill_id, &arguments);
+                let _ = message_tx.send(WorkerMessage::TaskRunStarted {
+                    task_id: task_id_value.clone(),
+                    objective: objective.clone(),
+                });
+
+                let handler = ChannelEventHandler::new(message_tx.clone());
+                let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                let run_id = next_run_id;
+                next_run_id += 1;
+
+                let handle = spawn_skill_child_run(
+                    &runtime,
+                    SkillChildRunSpawn {
+                        run_id,
+                        session: run_session,
+                        task_id,
+                        task_id_value,
+                        parent_session_ref,
+                        objective,
+                        skill_id,
+                        arguments,
+                        loaded,
+                        root_config: root_config.clone(),
+                        options: options.clone(),
+                        base_registry: agent.tool_registry().clone(),
+                        task_result_tx: task_result_tx.clone(),
+                        approval_rx,
+                        handler,
+                        elicitation_audit_buffer: run_elicitation_audit_buffer,
+                    },
+                );
 
                 active_run = Some(ActiveRun {
                     run_id,
@@ -871,6 +1073,25 @@ struct TaskContinueSpawn {
     elicitation_audit_buffer: McpElicitationAuditBuffer,
 }
 
+struct SkillChildRunSpawn {
+    run_id: u64,
+    session: Session,
+    task_id: TaskId,
+    task_id_value: String,
+    parent_session_ref: SessionRef,
+    objective: String,
+    skill_id: String,
+    arguments: String,
+    loaded: sigil_runtime::LoadedSkillContext,
+    root_config: RootConfig,
+    options: AgentRunOptions,
+    base_registry: ToolRegistry,
+    task_result_tx: mpsc::Sender<RunTaskResult>,
+    approval_rx: mpsc::Receiver<ApprovalSignal>,
+    handler: ChannelEventHandler,
+    elicitation_audit_buffer: McpElicitationAuditBuffer,
+}
+
 struct TaskRoleRuntime {
     orchestrator: SequentialTaskOrchestrator,
     planner_options: AgentRunOptions,
@@ -965,10 +1186,72 @@ fn spawn_task_continue(
     })
 }
 
+fn spawn_skill_child_run(
+    runtime: &tokio::runtime::Runtime,
+    spawn: SkillChildRunSpawn,
+) -> tokio::task::JoinHandle<()> {
+    runtime.spawn(async move {
+        let SkillChildRunSpawn {
+            run_id,
+            mut session,
+            task_id,
+            task_id_value,
+            parent_session_ref,
+            objective,
+            skill_id,
+            arguments,
+            loaded,
+            root_config,
+            options,
+            base_registry,
+            task_result_tx,
+            approval_rx,
+            mut handler,
+            elicitation_audit_buffer,
+        } = spawn;
+        let result = run_skill_child_orchestration(
+            &mut session,
+            SkillChildRunOrchestration {
+                task_id,
+                parent_session_ref,
+                objective,
+                skill_id,
+                arguments,
+                loaded,
+                root_config,
+                options,
+                base_registry,
+                approval_rx,
+                handler: &mut handler,
+            },
+        )
+        .await;
+        let result = match append_mcp_elicitation_audits(&mut session, &elicitation_audit_buffer) {
+            Ok(()) => result,
+            Err(error) => Err(error),
+        };
+        send_task_result(run_id, session, task_id_value, result, task_result_tx);
+    })
+}
+
 struct TaskRunOrchestration<'a> {
     task_id: TaskId,
     parent_session_ref: SessionRef,
     objective: String,
+    root_config: RootConfig,
+    options: AgentRunOptions,
+    base_registry: ToolRegistry,
+    approval_rx: mpsc::Receiver<ApprovalSignal>,
+    handler: &'a mut ChannelEventHandler,
+}
+
+struct SkillChildRunOrchestration<'a> {
+    task_id: TaskId,
+    parent_session_ref: SessionRef,
+    objective: String,
+    skill_id: String,
+    arguments: String,
+    loaded: sigil_runtime::LoadedSkillContext,
     root_config: RootConfig,
     options: AgentRunOptions,
     base_registry: ToolRegistry,
@@ -1074,6 +1357,69 @@ async fn continue_task_orchestration(
         .map_err(|error| format!("{error:#}"))
 }
 
+async fn run_skill_child_orchestration(
+    session: &mut Session,
+    request: SkillChildRunOrchestration<'_>,
+) -> std::result::Result<TaskRunStatus, String> {
+    let SkillChildRunOrchestration {
+        task_id,
+        parent_session_ref,
+        objective,
+        skill_id,
+        arguments,
+        loaded,
+        root_config,
+        options,
+        base_registry,
+        approval_rx,
+        handler,
+    } = request;
+    let child_role = skill_child_agent_role(&loaded.descriptor);
+    let TaskRoleRuntime {
+        orchestrator,
+        subagent_read_options,
+        subagent_write_options,
+        ..
+    } = build_skill_child_role_runtime(
+        &root_config,
+        &options,
+        &base_registry,
+        &loaded.descriptor,
+        child_role,
+    )?;
+    session
+        .append_control(ControlEntry::SkillLoaded(loaded.entry))
+        .map_err(|error| format!("{error:#}"))?;
+    let child_input = AgentRunInput::without_persisted_user_message(vec![
+        loaded.transient_context,
+        ModelMessage::user(skill_invocation_prompt(&skill_id, &arguments)),
+    ]);
+    let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+    orchestrator
+        .run_direct_child_session(
+            session,
+            SequentialTaskRequest {
+                task_id,
+                parent_session_ref,
+                objective,
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("invoke_skill").map_err(|error| format!("{error:#}"))?,
+                title: format!("invoke skill {skill_id}"),
+                detail: Some("direct user-invoked child-session skill".to_owned()),
+                role: child_role,
+            },
+            child_input,
+            subagent_read_options,
+            subagent_write_options,
+            handler,
+            &mut approval_handler,
+        )
+        .await
+        .map(|output| output.status)
+        .map_err(|error| format!("{error:#}"))
+}
+
 fn build_task_role_runtime(
     root_config: &RootConfig,
     options: &AgentRunOptions,
@@ -1141,6 +1487,153 @@ fn build_task_role_runtime(
             AgentRole::SubagentWrite,
         ),
     })
+}
+
+fn build_skill_child_role_runtime(
+    root_config: &RootConfig,
+    options: &AgentRunOptions,
+    base_registry: &ToolRegistry,
+    skill: &SkillDescriptor,
+    child_role: AgentRole,
+) -> std::result::Result<TaskRoleRuntime, String> {
+    let planner_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Planner)
+        .map_err(|error| format!("{error:#}"))?;
+    let executor_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Executor)
+        .map_err(|error| format!("{error:#}"))?;
+    let subagent_read_provider =
+        sigil_runtime::build_role_provider(root_config, AgentRole::SubagentRead)
+            .map_err(|error| format!("{error:#}"))?;
+    let subagent_write_provider =
+        sigil_runtime::build_role_provider(root_config, AgentRole::SubagentWrite)
+            .map_err(|error| format!("{error:#}"))?;
+    let planner_registry =
+        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Planner)
+            .into_registry();
+    let executor_registry =
+        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::Executor)
+            .into_registry();
+    let subagent_read_registry = if child_role == AgentRole::SubagentRead {
+        sigil_runtime::build_role_skill_tool_registry(
+            base_registry,
+            root_config,
+            AgentRole::SubagentRead,
+            skill,
+        )
+    } else {
+        sigil_runtime::build_role_tool_registry(base_registry, root_config, AgentRole::SubagentRead)
+    }
+    .into_registry();
+    let subagent_write_registry = if child_role == AgentRole::SubagentWrite {
+        sigil_runtime::build_role_skill_tool_registry(
+            base_registry,
+            root_config,
+            AgentRole::SubagentWrite,
+            skill,
+        )
+    } else {
+        sigil_runtime::build_role_tool_registry(
+            base_registry,
+            root_config,
+            AgentRole::SubagentWrite,
+        )
+    }
+    .into_registry();
+    let workspace_root = options.workspace_root.clone();
+    let interaction_mode = options.interaction_mode;
+    Ok(TaskRoleRuntime {
+        orchestrator: SequentialTaskOrchestrator::new(
+            Agent::new(planner_provider, planner_registry),
+            Agent::new(executor_provider, executor_registry),
+            Agent::new(subagent_read_provider, subagent_read_registry),
+            Agent::new(subagent_write_provider, subagent_write_registry),
+        ),
+        planner_options: sigil_runtime::build_role_run_options(
+            root_config,
+            workspace_root.clone(),
+            interaction_mode,
+            AgentRole::Planner,
+        ),
+        executor_options: sigil_runtime::build_role_run_options(
+            root_config,
+            workspace_root.clone(),
+            interaction_mode,
+            AgentRole::Executor,
+        ),
+        subagent_read_options: sigil_runtime::build_role_run_options(
+            root_config,
+            workspace_root.clone(),
+            interaction_mode,
+            AgentRole::SubagentRead,
+        ),
+        subagent_write_options: sigil_runtime::build_role_run_options(
+            root_config,
+            workspace_root,
+            interaction_mode,
+            AgentRole::SubagentWrite,
+        ),
+    })
+}
+
+pub(super) fn skill_child_agent_role(skill: &SkillDescriptor) -> AgentRole {
+    let Some(agent) = skill.agent.as_deref() else {
+        return AgentRole::SubagentRead;
+    };
+    match normalized_skill_agent_hint(agent).as_str() {
+        "write" | "writer" | "subagentwrite" | "subagentwriter" | "writable" => {
+            AgentRole::SubagentWrite
+        }
+        _ => AgentRole::SubagentRead,
+    }
+}
+
+fn normalized_skill_agent_hint(agent: &str) -> String {
+    agent
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric())
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
+}
+
+fn load_worker_skill(
+    root_config: &RootConfig,
+    options: &AgentRunOptions,
+    skill_id: &str,
+    run_id: Option<u64>,
+) -> std::result::Result<sigil_runtime::LoadedSkillContext, String> {
+    let user_config_dir = default_user_config_dir().ok();
+    let report = sigil_runtime::discover_skill_index_with_user_dir(
+        &options.workspace_root,
+        user_config_dir.as_deref(),
+        &root_config.skills,
+    )
+    .map_err(|error| format!("{error:#}"))?;
+    sigil_runtime::load_user_invoked_skill(
+        &options.workspace_root,
+        &report.snapshot,
+        skill_id,
+        run_id.map(|run_id| run_id.to_string()),
+    )
+    .map_err(|error| format!("{error:#}"))
+}
+
+fn skill_invocation_prompt(skill_id: &str, arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return format!(
+            "Apply the loaded Sigil skill `{skill_id}` to the current task. No additional arguments were provided."
+        );
+    }
+    format!(
+        "Apply the loaded Sigil skill `{skill_id}` to the current task with these user-provided arguments:\n\n```text\n{trimmed}\n```"
+    )
+}
+
+fn skill_child_session_objective(skill_id: &str, arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return format!("invoke child-session skill {skill_id}");
+    }
+    format!("invoke child-session skill {skill_id} with arguments: {trimmed}")
 }
 
 fn send_task_result(
