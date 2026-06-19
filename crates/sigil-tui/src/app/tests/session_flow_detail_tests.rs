@@ -330,6 +330,319 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
 }
 
 #[test]
+fn render_agent_control_entries_and_status_labels() -> Result<()> {
+    assert_eq!(
+        agent_trust_state_label(sigil_kernel::AgentTrustState::Trusted),
+        "trusted"
+    );
+    assert_eq!(
+        agent_trust_state_label(sigil_kernel::AgentTrustState::NeedsReview),
+        "needs_review"
+    );
+    assert_eq!(
+        agent_trust_state_label(sigil_kernel::AgentTrustState::Disabled),
+        "disabled"
+    );
+    assert_eq!(
+        agent_trust_state_label(sigil_kernel::AgentTrustState::Unknown),
+        "unknown"
+    );
+
+    assert_eq!(
+        agent_invocation_mode_label(sigil_kernel::AgentInvocationMode::Foreground),
+        "foreground"
+    );
+    assert_eq!(
+        agent_invocation_mode_label(sigil_kernel::AgentInvocationMode::Background),
+        "background"
+    );
+    assert_eq!(
+        agent_invocation_mode_label(sigil_kernel::AgentInvocationMode::JoinBeforeFinal),
+        "join_before_final"
+    );
+    assert_eq!(
+        agent_invocation_mode_label(sigil_kernel::AgentInvocationMode::Unknown),
+        "unknown"
+    );
+
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Started),
+        "started"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Running),
+        "running"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Blocked),
+        "blocked"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Completed),
+        "completed"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Failed),
+        "failed"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Cancelled),
+        "cancelled"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Interrupted),
+        "interrupted"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Closed),
+        "closed"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Unavailable),
+        "unavailable"
+    );
+    assert_eq!(
+        agent_thread_status_label(sigil_kernel::AgentThreadStatus::Unknown),
+        "unknown"
+    );
+
+    assert_eq!(
+        agent_terminal_status_label(sigil_kernel::AgentThreadTerminalStatus::Completed),
+        "completed"
+    );
+    assert_eq!(
+        agent_terminal_status_label(sigil_kernel::AgentThreadTerminalStatus::Failed),
+        "failed"
+    );
+    assert_eq!(
+        agent_terminal_status_label(sigil_kernel::AgentThreadTerminalStatus::Cancelled),
+        "cancelled"
+    );
+    assert_eq!(
+        agent_terminal_status_label(sigil_kernel::AgentThreadTerminalStatus::Interrupted),
+        "interrupted"
+    );
+    assert_eq!(
+        agent_terminal_status_label(sigil_kernel::AgentThreadTerminalStatus::Unknown),
+        "unknown"
+    );
+
+    assert_eq!(
+        agent_route_status_label(sigil_kernel::AgentRouteStatus::Registered),
+        "registered"
+    );
+    assert_eq!(
+        agent_route_status_label(sigil_kernel::AgentRouteStatus::Requested),
+        "requested"
+    );
+    assert_eq!(
+        agent_route_status_label(sigil_kernel::AgentRouteStatus::Resolved),
+        "resolved"
+    );
+    assert_eq!(
+        agent_route_status_label(sigil_kernel::AgentRouteStatus::Rejected),
+        "rejected"
+    );
+    assert_eq!(
+        agent_route_status_label(sigil_kernel::AgentRouteStatus::Cancelled),
+        "cancelled"
+    );
+    assert_eq!(
+        agent_route_status_label(sigil_kernel::AgentRouteStatus::Stale),
+        "stale"
+    );
+    assert_eq!(
+        agent_route_status_label(sigil_kernel::AgentRouteStatus::Closed),
+        "closed"
+    );
+    assert_eq!(
+        agent_route_status_label(sigil_kernel::AgentRouteStatus::Unknown),
+        "unknown"
+    );
+
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_1")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("thread_1")?;
+    let parent_thread_id = sigil_kernel::AgentThreadId::new("main")?;
+    let attempt_id = sigil_kernel::AgentRunAttemptId::new("attempt_1")?;
+    let route_id = sigil_kernel::AgentRouteId::new("route_1")?;
+    let session_ref = sigil_kernel::SessionRef::new_relative("children/thread_1.jsonl")?;
+    let run_context = sigil_kernel::AgentRunContextSnapshot {
+        profile_snapshot_id: snapshot_id.clone(),
+        provider: "deepseek".to_owned(),
+        model: "deepseek-v4-pro".to_owned(),
+        reasoning_effort: None,
+        workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/workspace")?,
+        effective_tool_scope_hash: "sha256:tools".to_owned(),
+        effective_permission_policy_hash: "sha256:permissions".to_owned(),
+        effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+        provider_capability_hash: "sha256:provider".to_owned(),
+        model_visible_agent_index_hash: None,
+        budget_policy_hash: "sha256:budget".to_owned(),
+        provider_background_handle_ref: None,
+    };
+    let result = sigil_kernel::AgentThreadResult {
+        thread_id: thread_id.clone(),
+        session_ref: session_ref.clone(),
+        status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+        summary: "done".to_owned(),
+        artifacts: Vec::new(),
+        changed_paths: Vec::new(),
+        risks: Vec::new(),
+        followups: Vec::new(),
+        usage: None,
+        output_hash: "sha256:result".to_owned(),
+    };
+
+    let rendered = [
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentProfileCaptured(sigil_kernel::AgentProfileCapturedEntry {
+                snapshot: sigil_kernel::AgentProfileSnapshot {
+                    snapshot_id: snapshot_id.clone(),
+                    profile_id: profile_id.clone(),
+                    source: sigil_kernel::AgentProfileSource::Workspace,
+                    source_hash: "sha256:source".to_owned(),
+                    profile_hash: "sha256:profile".to_owned(),
+                    resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                    resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                    resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    resolved_skill_hashes: Vec::new(),
+                    trust_state: sigil_kernel::AgentTrustState::Trusted,
+                },
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(parent_thread_id.clone()),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: session_ref.clone(),
+                profile_id: profile_id.clone(),
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context,
+                objective: "inspect kernel".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Foreground,
+                invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+                display_name: Some("kernel map".to_owned()),
+                created_at_ms: Some(42),
+            },
+        ))),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentThreadStatusChanged(sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id: thread_id.clone(),
+                status: sigil_kernel::AgentThreadStatus::Running,
+                reason: None,
+                updated_at_ms: Some(43),
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentThreadMessageRouted(sigil_kernel::AgentThreadMessageRoutedEntry {
+                route_id: route_id.clone(),
+                source_thread_id: parent_thread_id.clone(),
+                target_thread_id: thread_id.clone(),
+                prompt_hash: "sha256:steer".to_owned(),
+                status: sigil_kernel::AgentRouteStatus::Resolved,
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentThreadResultRecorded(sigil_kernel::AgentThreadResultRecordedEntry {
+                result,
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentThreadDisplayName(sigil_kernel::AgentThreadDisplayNameEntry {
+                thread_id: thread_id.clone(),
+                display_name: "kernel map".to_owned(),
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::AgentApprovalRoute(
+            sigil_kernel::AgentApprovalRouteEntry {
+                route_id: route_id.clone(),
+                source_thread_id: thread_id.clone(),
+                target_thread_id: Some(parent_thread_id.clone()),
+                call_id: "call-1".to_owned(),
+                tool_name: "read_file".to_owned(),
+                status: sigil_kernel::AgentRouteStatus::Requested,
+            },
+        ))),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentElicitationRoute(sigil_kernel::AgentElicitationRouteEntry {
+                route_id: route_id.clone(),
+                source_thread_id: thread_id.clone(),
+                target_thread_id: Some(parent_thread_id.clone()),
+                server_name: "filesystem".to_owned(),
+                status: sigil_kernel::AgentRouteStatus::Registered,
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentRunAttemptStarted(sigil_kernel::AgentRunAttemptStartedEntry {
+                thread_id: thread_id.clone(),
+                attempt_id: attempt_id.clone(),
+                provider: "deepseek".to_owned(),
+                model: "deepseek-v4-pro".to_owned(),
+                background: true,
+                provider_background_handle_ref: Some("handle".to_owned()),
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::AgentRunHeartbeat(
+            sigil_kernel::AgentRunHeartbeatEntry {
+                thread_id: thread_id.clone(),
+                attempt_id: attempt_id.clone(),
+                updated_at_ms: 44,
+            },
+        ))),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentRunInterrupted(sigil_kernel::AgentRunInterruptedEntry {
+                thread_id: thread_id.clone(),
+                attempt_id,
+                reason: "restore".to_owned(),
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::AgentRouteClosed(
+            sigil_kernel::AgentRouteClosedEntry {
+                route_id: route_id.clone(),
+                reason: "restore".to_owned(),
+            },
+        ))),
+        render_session_log_entry(&SessionLogEntry::Control(
+            ControlEntry::AgentMergeSafePoint(sigil_kernel::AgentMergeSafePointEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: parent_thread_id.clone(),
+                result_hash: "sha256:result".to_owned(),
+            }),
+        )),
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
+            sigil_kernel::AgentThreadClosedEntry {
+                thread_id,
+                reason: Some("archived".to_owned()),
+            },
+        ))),
+    ]
+    .join("\n");
+
+    assert!(rendered.contains("[ctl] agent profile explore trust=trusted"));
+    assert!(rendered.contains("[ctl] agent thread_1 started profile=explore mode=foreground"));
+    assert!(rendered.contains("[ctl] agent thread_1 status=running"));
+    assert!(rendered.contains("[ctl] agent message route_1 status=resolved"));
+    assert!(rendered.contains("[ctl] agent result thread_1 status=completed"));
+    assert!(rendered.contains("[ctl] agent name thread_1 kernel map"));
+    assert!(rendered.contains("[ctl] agent approval route_1 call=call-1 status=requested"));
+    assert!(
+        rendered.contains("[ctl] agent elicitation route_1 server=filesystem status=registered")
+    );
+    assert!(
+        rendered.contains("[ctl] agent attempt attempt_1 thread=thread_1 model=deepseek-v4-pro")
+    );
+    assert!(rendered.contains("[ctl] agent heartbeat attempt_1 thread=thread_1 at=44"));
+    assert!(rendered.contains("[ctl] agent interrupted attempt_1 thread=thread_1"));
+    assert!(rendered.contains("[ctl] agent route route_1 closed"));
+    assert!(rendered.contains("[ctl] agent merge thread_1 parent=main"));
+    assert!(rendered.contains("[ctl] agent thread_1 closed"));
+    Ok(())
+}
+
+#[test]
 fn restored_indexes_and_reasoning_helpers_cover_restore_paths() {
     let preview = ToolPreviewSnapshot::from_preview(
         "call-1",

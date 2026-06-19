@@ -1,21 +1,29 @@
 use serde_json::json;
 
 use crate::{
-    AgentRole, ApprovalMode, BackgroundTaskHandle, ChangeSet, ChangeSetId, ChangeSetResult,
-    ChangeSetResultStatus, ChangeSetRisk, CompactionRecord, ControlEntry, McpElicitationDecision,
-    McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
-    PUBLIC_RUN_EVENT_SCHEMA_VERSION, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
-    PluginTrustEntry, PrefixSnapshot, ProviderContinuationState, PublicControlEvent,
-    PublicRunEvent, PublicRunEventKind, ResponseHandle, RunEvent, SessionRef, SkillDescriptor,
-    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
-    TaskStepEntry, TaskStepId, TaskStepStatus, TaskSubagentApprovalRouteEntry,
-    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
-    TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolCall,
-    ToolCategory, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
-    ToolSpec, ToolSubject, UsageStats,
+    AgentApprovalRouteEntry, AgentElicitationRouteEntry, AgentInvocationMode,
+    AgentInvocationSource, AgentMergeSafePointEntry, AgentProfileCapturedEntry, AgentProfileId,
+    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentRole,
+    AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
+    AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
+    AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
+    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultRecordedEntry,
+    AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    AgentThreadTerminalStatus, AgentTrustState, ApprovalMode, BackgroundTaskHandle, ChangeSet,
+    ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CompactionRecord,
+    ControlEntry, McpElicitationDecision, McpElicitationEntry, MemoryLoadReport, MemorySnapshot,
+    ModelMessage, PUBLIC_RUN_EVENT_SCHEMA_VERSION, PluginCapability, PluginManifestSnapshot,
+    PluginTrustDecision, PluginTrustEntry, PrefixSnapshot, ProviderContinuationState,
+    PublicControlEvent, PublicRunEvent, PublicRunEventKind, ResponseHandle, RunEvent, SessionRef,
+    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
+    SkillTrustState, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus,
+    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus,
+    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolCall, ToolCategory, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceRootSnapshot,
 };
 
 #[test]
@@ -499,6 +507,143 @@ fn public_control_event_kinds_cover_control_entry_variants() {
             "task_subagent_elicitation_route",
         ),
         (
+            ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
+                snapshot: agent_profile_snapshot(),
+            }),
+            "agent_profile_captured",
+        ),
+        (
+            ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
+                thread_id: agent_thread_id(),
+                parent_thread_id: Some(AgentThreadId::new("main").expect("valid thread id")),
+                parent_session_ref: session_ref(),
+                thread_session_ref: agent_session_ref(),
+                profile_id: agent_profile_id(),
+                profile_snapshot_id: agent_snapshot_id(),
+                run_context: agent_run_context(),
+                objective: "inspect kernel".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: AgentInvocationMode::Foreground,
+                invocation_source: AgentInvocationSource::Chat,
+                display_name: Some("kernel map".to_owned()),
+                created_at_ms: Some(42),
+            }),
+            "agent_thread_started",
+        ),
+        (
+            ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+                thread_id: agent_thread_id(),
+                status: AgentThreadStatus::Running,
+                reason: None,
+                updated_at_ms: Some(43),
+            }),
+            "agent_thread_status_changed",
+        ),
+        (
+            ControlEntry::AgentThreadMessageRouted(AgentThreadMessageRoutedEntry {
+                route_id: agent_route_id(),
+                source_thread_id: AgentThreadId::new("main").expect("valid thread id"),
+                target_thread_id: agent_thread_id(),
+                prompt_hash: "sha256:steer".to_owned(),
+                status: AgentRouteStatus::Resolved,
+            }),
+            "agent_thread_message_routed",
+        ),
+        (
+            ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry {
+                result: AgentThreadResult {
+                    thread_id: agent_thread_id(),
+                    session_ref: agent_session_ref(),
+                    status: AgentThreadTerminalStatus::Completed,
+                    summary: "done".to_owned(),
+                    artifacts: Vec::new(),
+                    changed_paths: Vec::new(),
+                    risks: Vec::new(),
+                    followups: Vec::new(),
+                    usage: None,
+                    output_hash: "sha256:result".to_owned(),
+                },
+            }),
+            "agent_thread_result_recorded",
+        ),
+        (
+            ControlEntry::AgentThreadDisplayName(AgentThreadDisplayNameEntry {
+                thread_id: agent_thread_id(),
+                display_name: "kernel map".to_owned(),
+            }),
+            "agent_thread_display_name",
+        ),
+        (
+            ControlEntry::AgentApprovalRoute(AgentApprovalRouteEntry {
+                route_id: AgentRouteId::new("agent-route-approval").expect("valid route id"),
+                source_thread_id: agent_thread_id(),
+                target_thread_id: Some(AgentThreadId::new("main").expect("valid thread id")),
+                call_id: "call-agent".to_owned(),
+                tool_name: "read_file".to_owned(),
+                status: AgentRouteStatus::Requested,
+            }),
+            "agent_approval_route",
+        ),
+        (
+            ControlEntry::AgentElicitationRoute(AgentElicitationRouteEntry {
+                route_id: AgentRouteId::new("agent-route-elicitation").expect("valid route id"),
+                source_thread_id: agent_thread_id(),
+                target_thread_id: Some(AgentThreadId::new("main").expect("valid thread id")),
+                server_name: "filesystem".to_owned(),
+                status: AgentRouteStatus::Registered,
+            }),
+            "agent_elicitation_route",
+        ),
+        (
+            ControlEntry::AgentRunAttemptStarted(AgentRunAttemptStartedEntry {
+                thread_id: agent_thread_id(),
+                attempt_id: agent_attempt_id(),
+                provider: "deepseek".to_owned(),
+                model: "deepseek-v4-pro".to_owned(),
+                background: true,
+                provider_background_handle_ref: Some("opaque-handle".to_owned()),
+            }),
+            "agent_run_attempt_started",
+        ),
+        (
+            ControlEntry::AgentRunHeartbeat(AgentRunHeartbeatEntry {
+                thread_id: agent_thread_id(),
+                attempt_id: agent_attempt_id(),
+                updated_at_ms: 44,
+            }),
+            "agent_run_heartbeat",
+        ),
+        (
+            ControlEntry::AgentRunInterrupted(AgentRunInterruptedEntry {
+                thread_id: agent_thread_id(),
+                attempt_id: agent_attempt_id(),
+                reason: "restore".to_owned(),
+            }),
+            "agent_run_interrupted",
+        ),
+        (
+            ControlEntry::AgentRouteClosed(AgentRouteClosedEntry {
+                route_id: agent_route_id(),
+                reason: "restore".to_owned(),
+            }),
+            "agent_route_closed",
+        ),
+        (
+            ControlEntry::AgentMergeSafePoint(AgentMergeSafePointEntry {
+                thread_id: agent_thread_id(),
+                parent_thread_id: AgentThreadId::new("main").expect("valid thread id"),
+                result_hash: "sha256:result".to_owned(),
+            }),
+            "agent_merge_safe_point",
+        ),
+        (
+            ControlEntry::AgentThreadClosed(AgentThreadClosedEntry {
+                thread_id: agent_thread_id(),
+                reason: Some("archived".to_owned()),
+            }),
+            "agent_thread_closed",
+        ),
+        (
             ControlEntry::Note {
                 kind: "diagnostic".to_owned(),
                 data: json!({ "value": 1 }),
@@ -625,6 +770,62 @@ fn route_id() -> TaskRouteId {
 
 fn session_ref() -> SessionRef {
     SessionRef::new_relative("child.jsonl").expect("valid session ref")
+}
+
+fn agent_session_ref() -> SessionRef {
+    SessionRef::new_relative("children/agent-thread-1.jsonl").expect("valid session ref")
+}
+
+fn agent_profile_id() -> AgentProfileId {
+    AgentProfileId::new("explore").expect("valid profile id")
+}
+
+fn agent_snapshot_id() -> AgentProfileSnapshotId {
+    AgentProfileSnapshotId::new("snapshot-1").expect("valid snapshot id")
+}
+
+fn agent_thread_id() -> AgentThreadId {
+    AgentThreadId::new("agent-thread-1").expect("valid thread id")
+}
+
+fn agent_attempt_id() -> AgentRunAttemptId {
+    AgentRunAttemptId::new("attempt-1").expect("valid attempt id")
+}
+
+fn agent_route_id() -> AgentRouteId {
+    AgentRouteId::new("agent-route-1").expect("valid route id")
+}
+
+fn agent_profile_snapshot() -> AgentProfileSnapshot {
+    AgentProfileSnapshot {
+        snapshot_id: agent_snapshot_id(),
+        profile_id: agent_profile_id(),
+        source: AgentProfileSource::Workspace,
+        source_hash: "sha256:source".to_owned(),
+        profile_hash: "sha256:profile".to_owned(),
+        resolved_tool_scope_hash: "sha256:tools".to_owned(),
+        resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+        resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+        resolved_skill_hashes: Vec::new(),
+        trust_state: AgentTrustState::Trusted,
+    }
+}
+
+fn agent_run_context() -> AgentRunContextSnapshot {
+    AgentRunContextSnapshot {
+        profile_snapshot_id: agent_snapshot_id(),
+        provider: "deepseek".to_owned(),
+        model: "deepseek-v4-pro".to_owned(),
+        reasoning_effort: None,
+        workspace_root: WorkspaceRootSnapshot::new("/workspace").expect("valid workspace root"),
+        effective_tool_scope_hash: "sha256:tools".to_owned(),
+        effective_permission_policy_hash: "sha256:permissions".to_owned(),
+        effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+        provider_capability_hash: "sha256:provider".to_owned(),
+        model_visible_agent_index_hash: None,
+        budget_policy_hash: "sha256:budget".to_owned(),
+        provider_background_handle_ref: None,
+    }
 }
 
 fn task_run_entry() -> TaskRunEntry {

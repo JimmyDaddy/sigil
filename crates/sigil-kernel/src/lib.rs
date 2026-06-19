@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_thread;
 pub mod approval;
 pub mod changeset;
 pub mod config;
@@ -18,6 +19,19 @@ pub mod tool;
 pub use agent::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunOutput, AgentRunResult,
     AgentRunTerminalReason,
+};
+pub use agent_thread::{
+    AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentInvocationMode,
+    AgentInvocationRequest, AgentInvocationSource, AgentMergeSafePointEntry, AgentPermissionPolicy,
+    AgentProfile, AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind,
+    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentRouteClosedEntry,
+    AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection,
+    AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
+    AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
+    AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
+    AgentUsageSummary, WorkspaceRootSnapshot, closed_agent_routes, interrupted_agent_attempts,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
 pub use changeset::{

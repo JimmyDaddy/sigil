@@ -960,6 +960,77 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 route.server_name,
                 task_route_status_label(route.status)
             ),
+            ControlEntry::AgentProfileCaptured(entry) => format!(
+                "[ctl] agent profile {} trust={}",
+                entry.snapshot.profile_id.as_str(),
+                agent_trust_state_label(entry.snapshot.trust_state)
+            ),
+            ControlEntry::AgentThreadStarted(entry) => format!(
+                "[ctl] agent {} started profile={} mode={}",
+                entry.thread_id.as_str(),
+                entry.profile_id.as_str(),
+                agent_invocation_mode_label(entry.invocation_mode)
+            ),
+            ControlEntry::AgentThreadStatusChanged(entry) => format!(
+                "[ctl] agent {} status={}",
+                entry.thread_id.as_str(),
+                agent_thread_status_label(entry.status)
+            ),
+            ControlEntry::AgentThreadMessageRouted(entry) => format!(
+                "[ctl] agent message {} status={}",
+                entry.route_id.as_str(),
+                agent_route_status_label(entry.status)
+            ),
+            ControlEntry::AgentThreadResultRecorded(entry) => format!(
+                "[ctl] agent result {} status={}",
+                entry.result.thread_id.as_str(),
+                agent_terminal_status_label(entry.result.status)
+            ),
+            ControlEntry::AgentThreadDisplayName(entry) => format!(
+                "[ctl] agent name {} {}",
+                entry.thread_id.as_str(),
+                truncate_session_view_text(&entry.display_name, 48)
+            ),
+            ControlEntry::AgentApprovalRoute(route) => format!(
+                "[ctl] agent approval {} call={} status={}",
+                route.route_id.as_str(),
+                route.call_id,
+                agent_route_status_label(route.status)
+            ),
+            ControlEntry::AgentElicitationRoute(route) => format!(
+                "[ctl] agent elicitation {} server={} status={}",
+                route.route_id.as_str(),
+                route.server_name,
+                agent_route_status_label(route.status)
+            ),
+            ControlEntry::AgentRunAttemptStarted(entry) => format!(
+                "[ctl] agent attempt {} thread={} model={}",
+                entry.attempt_id.as_str(),
+                entry.thread_id.as_str(),
+                truncate_session_view_text(&entry.model, 32)
+            ),
+            ControlEntry::AgentRunHeartbeat(entry) => format!(
+                "[ctl] agent heartbeat {} thread={} at={}",
+                entry.attempt_id.as_str(),
+                entry.thread_id.as_str(),
+                entry.updated_at_ms
+            ),
+            ControlEntry::AgentRunInterrupted(entry) => format!(
+                "[ctl] agent interrupted {} thread={}",
+                entry.attempt_id.as_str(),
+                entry.thread_id.as_str()
+            ),
+            ControlEntry::AgentRouteClosed(entry) => {
+                format!("[ctl] agent route {} closed", entry.route_id.as_str())
+            }
+            ControlEntry::AgentMergeSafePoint(entry) => format!(
+                "[ctl] agent merge {} parent={}",
+                entry.thread_id.as_str(),
+                entry.parent_thread_id.as_str()
+            ),
+            ControlEntry::AgentThreadClosed(entry) => {
+                format!("[ctl] agent {} closed", entry.thread_id.as_str())
+            }
             ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
         },
     }
@@ -1126,6 +1197,62 @@ fn task_route_status_label(status: sigil_kernel::TaskRouteStatus) -> &'static st
         sigil_kernel::TaskRouteStatus::Rejected => "rejected",
         sigil_kernel::TaskRouteStatus::Cancelled => "cancelled",
         sigil_kernel::TaskRouteStatus::Stale => "stale",
+    }
+}
+
+fn agent_trust_state_label(status: sigil_kernel::AgentTrustState) -> &'static str {
+    match status {
+        sigil_kernel::AgentTrustState::Trusted => "trusted",
+        sigil_kernel::AgentTrustState::NeedsReview => "needs_review",
+        sigil_kernel::AgentTrustState::Disabled => "disabled",
+        sigil_kernel::AgentTrustState::Unknown => "unknown",
+    }
+}
+
+fn agent_invocation_mode_label(mode: sigil_kernel::AgentInvocationMode) -> &'static str {
+    match mode {
+        sigil_kernel::AgentInvocationMode::Foreground => "foreground",
+        sigil_kernel::AgentInvocationMode::Background => "background",
+        sigil_kernel::AgentInvocationMode::JoinBeforeFinal => "join_before_final",
+        sigil_kernel::AgentInvocationMode::Unknown => "unknown",
+    }
+}
+
+fn agent_thread_status_label(status: sigil_kernel::AgentThreadStatus) -> &'static str {
+    match status {
+        sigil_kernel::AgentThreadStatus::Started => "started",
+        sigil_kernel::AgentThreadStatus::Running => "running",
+        sigil_kernel::AgentThreadStatus::Blocked => "blocked",
+        sigil_kernel::AgentThreadStatus::Completed => "completed",
+        sigil_kernel::AgentThreadStatus::Failed => "failed",
+        sigil_kernel::AgentThreadStatus::Cancelled => "cancelled",
+        sigil_kernel::AgentThreadStatus::Interrupted => "interrupted",
+        sigil_kernel::AgentThreadStatus::Closed => "closed",
+        sigil_kernel::AgentThreadStatus::Unavailable => "unavailable",
+        sigil_kernel::AgentThreadStatus::Unknown => "unknown",
+    }
+}
+
+fn agent_terminal_status_label(status: sigil_kernel::AgentThreadTerminalStatus) -> &'static str {
+    match status {
+        sigil_kernel::AgentThreadTerminalStatus::Completed => "completed",
+        sigil_kernel::AgentThreadTerminalStatus::Failed => "failed",
+        sigil_kernel::AgentThreadTerminalStatus::Cancelled => "cancelled",
+        sigil_kernel::AgentThreadTerminalStatus::Interrupted => "interrupted",
+        sigil_kernel::AgentThreadTerminalStatus::Unknown => "unknown",
+    }
+}
+
+fn agent_route_status_label(status: sigil_kernel::AgentRouteStatus) -> &'static str {
+    match status {
+        sigil_kernel::AgentRouteStatus::Registered => "registered",
+        sigil_kernel::AgentRouteStatus::Requested => "requested",
+        sigil_kernel::AgentRouteStatus::Resolved => "resolved",
+        sigil_kernel::AgentRouteStatus::Rejected => "rejected",
+        sigil_kernel::AgentRouteStatus::Cancelled => "cancelled",
+        sigil_kernel::AgentRouteStatus::Stale => "stale",
+        sigil_kernel::AgentRouteStatus::Closed => "closed",
+        sigil_kernel::AgentRouteStatus::Unknown => "unknown",
     }
 }
 

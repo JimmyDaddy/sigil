@@ -11,6 +11,14 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     CompactionConfig, MemoryConfig, MemoryLoadReport,
+    agent_thread::{
+        AgentApprovalRouteEntry, AgentElicitationRouteEntry, AgentMergeSafePointEntry,
+        AgentProfileCapturedEntry, AgentRouteClosedEntry, AgentRunAttemptStartedEntry,
+        AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
+        AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry, AgentThreadResultRecordedEntry,
+        AgentThreadStartedEntry, AgentThreadStateProjection, AgentThreadStatusChangedEntry,
+        closed_agent_routes, interrupted_agent_attempts,
+    },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     memory::{apply_memory_report, materialize_memory},
     permission::ApprovalMode,
@@ -132,6 +140,34 @@ pub enum ControlEntry {
     TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry),
     #[serde(alias = "TaskSubagentElicitationRoute")]
     TaskSubagentElicitationRoute(TaskSubagentElicitationRouteEntry),
+    #[serde(alias = "AgentProfileCaptured")]
+    AgentProfileCaptured(AgentProfileCapturedEntry),
+    #[serde(alias = "AgentThreadStarted")]
+    AgentThreadStarted(AgentThreadStartedEntry),
+    #[serde(alias = "AgentThreadStatusChanged")]
+    AgentThreadStatusChanged(AgentThreadStatusChangedEntry),
+    #[serde(alias = "AgentThreadMessageRouted")]
+    AgentThreadMessageRouted(AgentThreadMessageRoutedEntry),
+    #[serde(alias = "AgentThreadResultRecorded")]
+    AgentThreadResultRecorded(AgentThreadResultRecordedEntry),
+    #[serde(alias = "AgentThreadDisplayName")]
+    AgentThreadDisplayName(AgentThreadDisplayNameEntry),
+    #[serde(alias = "AgentApprovalRoute")]
+    AgentApprovalRoute(AgentApprovalRouteEntry),
+    #[serde(alias = "AgentElicitationRoute")]
+    AgentElicitationRoute(AgentElicitationRouteEntry),
+    #[serde(alias = "AgentRunAttemptStarted")]
+    AgentRunAttemptStarted(AgentRunAttemptStartedEntry),
+    #[serde(alias = "AgentRunHeartbeat")]
+    AgentRunHeartbeat(AgentRunHeartbeatEntry),
+    #[serde(alias = "AgentRunInterrupted")]
+    AgentRunInterrupted(AgentRunInterruptedEntry),
+    #[serde(alias = "AgentRouteClosed")]
+    AgentRouteClosed(AgentRouteClosedEntry),
+    #[serde(alias = "AgentMergeSafePoint")]
+    AgentMergeSafePoint(AgentMergeSafePointEntry),
+    #[serde(alias = "AgentThreadClosed")]
+    AgentThreadClosed(AgentThreadClosedEntry),
     #[serde(alias = "Note")]
     Note {
         kind: String,
@@ -405,6 +441,8 @@ impl Session {
         let mut session = Self::from_entries(provider_name, model_name, entries).with_store(store);
         session.ensure_identity_entry()?;
         session.mark_interrupted_tool_executions()?;
+        session.mark_interrupted_agent_attempts()?;
+        session.close_orphan_agent_routes()?;
         Ok(session)
     }
 
@@ -502,6 +540,11 @@ impl Session {
     /// Returns a durable task projection reconstructed from append-only control entries.
     pub fn task_state_projection(&self) -> TaskStateProjection {
         TaskStateProjection::from_entries(&self.entries)
+    }
+
+    /// Returns a durable agent thread projection reconstructed from append-only control entries.
+    pub fn agent_thread_state_projection(&self) -> AgentThreadStateProjection {
+        AgentThreadStateProjection::from_entries(&self.entries)
     }
 
     /// Returns a durable skill projection reconstructed from append-only control entries.
@@ -735,6 +778,20 @@ impl Session {
     fn mark_interrupted_tool_executions(&mut self) -> Result<()> {
         for execution in interrupted_tool_executions(&self.entries) {
             self.append_control(ControlEntry::ToolExecution(Box::new(execution)))?;
+        }
+        Ok(())
+    }
+
+    fn mark_interrupted_agent_attempts(&mut self) -> Result<()> {
+        for entry in interrupted_agent_attempts(&self.entries) {
+            self.append_control(ControlEntry::AgentRunInterrupted(entry))?;
+        }
+        Ok(())
+    }
+
+    fn close_orphan_agent_routes(&mut self) -> Result<()> {
+        for entry in closed_agent_routes(&self.entries) {
+            self.append_control(ControlEntry::AgentRouteClosed(entry))?;
         }
         Ok(())
     }
