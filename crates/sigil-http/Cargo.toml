@@ -8,6 +8,7 @@ license.workspace = true
 serde.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-runtime = { path = "../sigil-runtime" }
+thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

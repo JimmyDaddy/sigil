@@ -36,7 +36,7 @@ sigil/
 - `sigil-tools-builtin` 提供文件读写、编辑、删除、多文件 change set apply、搜索、目录枚举和 shell 执行。
 - `sigil-code-intel` 提供可选 LSP / Tree-sitter 代码智能，包括符号、定义、引用、诊断、code action 查询，以及需要审批 diff 的 code action / rename edit 工具。
 - `sigil-mcp` 支持 stdio MCP server、`initialize`、`tools/list`、`tools/call`、read-only `resources/list` / `resources/read`、read-only `prompts/list` / `prompts/get`、`roots/list`、elicitation handler、progress/listChanged runtime events、lazy activation 和 trust enforcement。
-- `sigil-http` 当前承载 HTTP/SSE adapter server config DTO 与边界测试；后续负责 HTTP routing、auth、SSE serialization 和 runtime session/run registry，不依赖 `sigil-tui`，不复制 agent loop。
+- `sigil-http` 当前承载 HTTP/SSE adapter server config DTO、in-memory session/run registry、run start/cancel 与 approval decision routing；后续负责 HTTP routing、auth 和 SSE serialization，不依赖 `sigil-tui`，不复制 agent loop。
 - `sigil` 提供 `sigil` binary：无子命令时直接启动 TUI；`run` 自动化入口和 `doctor` 本地诊断入口保留为显式子命令；`prefix` / `fim` 保留为隐藏调试或 provider 专项入口，不作为普通用户主心智。
 - `sigil --version` 输出 package version、git commit、target 和 profile，用于安装后 smoke、release archive 验证和问题定位。
 - `sigil-tui` 承载第一用户入口的 TUI 实现，包括 chat/composer、slash selector、Quick Setup、`/config`、`/doctor`、`/new`、`/resume`、`/plan`、审批 modal、tool activity、diff preview、session 恢复、task 状态展示、context compaction、markdown code block 高亮和 code intelligence 状态展示。
