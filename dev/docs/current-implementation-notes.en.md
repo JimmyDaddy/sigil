@@ -17,7 +17,7 @@ sigil/
     sigil-code-intel/          # LSP client, Tree-sitter fallback, and code intelligence tools
     sigil-mcp/                 # stdio MCP client and tool adapter
     sigil-runtime/             # Shared provider / tool / run option assembly for entrypoints
-    sigil-http/                # HTTP/SSE adapter config DTO and future server boundary
+    sigil-http/                # HTTP/SSE adapter DTOs, auth/SSE helpers, and future server boundary
     sigil/                     # `sigil` binary: starts the TUI by default; subcommands are for automation/debugging
     sigil-tui/                 # TUI state, rendering, and runner for the primary user entrypoint
   docs/                        # User documentation
@@ -36,7 +36,7 @@ sigil/
 - `sigil-tools-builtin` provides file read/write/edit/delete, multi-file change set apply, search, directory listing, and shell execution.
 - `sigil-code-intel` provides optional LSP / Tree-sitter code intelligence, including read-only symbol, definition, reference, diagnostic, and code action query tools, plus code action / rename edit tools with approval diff previews.
 - `sigil-mcp` supports stdio MCP servers, `initialize`, `tools/list`, `tools/call`, read-only `resources/list` / `resources/read`, read-only `prompts/list` / `prompts/get`, `roots/list`, elicitation handling, progress/listChanged runtime events, lazy activation, and trust enforcement.
-- `sigil-http` currently owns the HTTP/SSE adapter server config DTO, in-memory session/run registry, run start/cancel handling, and approval decision routing; later work will add HTTP routing, auth, and SSE serialization without depending on `sigil-tui` or duplicating the agent loop.
+- `sigil-http` currently owns the HTTP/SSE adapter server config DTO, bearer auth validator, `PublicRunEvent` SSE serialization, per-run event sequence helper, in-memory session/run registry, run start/cancel handling, and approval decision routing; later work will add HTTP routing and server wiring without depending on `sigil-tui` or duplicating the agent loop.
 - `sigil` provides the `sigil` binary: no subcommand starts the TUI directly; `run` and `doctor` remain explicit automation and diagnostics subcommands; `prefix` and `fim` remain hidden debugging or provider-specific entrypoints rather than normal user concepts.
 - `sigil --version` prints the package version, git commit, target, and profile for install smoke checks, release archive validation, and issue triage.
 - `sigil-tui` owns the primary TUI implementation: chat/composer, slash selector, Quick Setup, `/config`, `/doctor`, `/new`, `/resume`, `/plan`, approval modal, tool activity, diff preview, session recovery, task status display, context compaction, markdown code block highlighting, and code intelligence status display.

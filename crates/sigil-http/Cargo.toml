@@ -6,12 +6,10 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 sigil-kernel = { path = "../sigil-kernel" }
 sigil-runtime = { path = "../sigil-runtime" }
 thiserror.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

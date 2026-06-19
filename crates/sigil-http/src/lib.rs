@@ -7,11 +7,13 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use sigil_kernel::ToolApprovalUserDecision;
+use sigil_kernel::{PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision};
 use thiserror::Error as ThisError;
 
 /// Environment variable read by the HTTP adapter for its bearer token by default.
 pub const DEFAULT_HTTP_TOKEN_ENV: &str = "SIGIL_HTTP_TOKEN";
+/// SSE event name used for public run events.
+pub const HTTP_RUN_EVENT_SSE_NAME: &str = "run_event";
 
 /// Configuration for the local HTTP/SSE adapter.
 ///
@@ -93,6 +95,28 @@ impl Default for HttpAuthConfig {
     }
 }
 
+impl HttpAuthConfig {
+    /// Builds a bearer-token validator from an already resolved token value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when token auth is required but no non-empty token was provided.
+    pub fn validator_from_token(
+        &self,
+        token: Option<&str>,
+    ) -> Result<HttpAuthValidator, HttpAuthError> {
+        if !self.require_token {
+            return Ok(HttpAuthValidator::disabled());
+        }
+        let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Err(HttpAuthError::MissingToken {
+                token_env: self.token_env.clone(),
+            });
+        };
+        Ok(HttpAuthValidator::required(token))
+    }
+}
+
 /// Configuration validation errors for the HTTP/SSE adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpServerConfigError {
@@ -122,6 +146,222 @@ impl fmt::Display for HttpServerConfigError {
 }
 
 impl Error for HttpServerConfigError {}
+
+/// Bearer-token validator for the HTTP adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpAuthValidator {
+    expected_token: Option<String>,
+}
+
+impl HttpAuthValidator {
+    /// Creates a validator that accepts requests without an Authorization header.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            expected_token: None,
+        }
+    }
+
+    /// Creates a validator that requires `Bearer <token>`.
+    #[must_use]
+    fn required(token: impl Into<String>) -> Self {
+        Self {
+            expected_token: Some(token.into()),
+        }
+    }
+
+    /// Returns whether requests must present a bearer token.
+    #[must_use]
+    pub fn token_required(&self) -> bool {
+        self.expected_token.is_some()
+    }
+
+    /// Validates one raw Authorization header value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when auth is required and the header is missing, malformed, or invalid.
+    pub fn validate_authorization_header(
+        &self,
+        authorization: Option<&str>,
+    ) -> Result<(), HttpAuthError> {
+        let Some(expected_token) = self.expected_token.as_deref() else {
+            return Ok(());
+        };
+        let Some(header) = authorization
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(HttpAuthError::MissingAuthorization);
+        };
+        let Some((scheme, token)) = header.split_once(' ') else {
+            return Err(HttpAuthError::InvalidAuthorizationScheme);
+        };
+        if !scheme.eq_ignore_ascii_case("Bearer") {
+            return Err(HttpAuthError::InvalidAuthorizationScheme);
+        }
+        if token.trim() != expected_token {
+            return Err(HttpAuthError::InvalidToken);
+        }
+        Ok(())
+    }
+}
+
+/// Authentication errors returned by the HTTP adapter boundary.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum HttpAuthError {
+    /// Token auth is enabled but the configured token source did not produce a token.
+    #[error("http auth token is missing from {token_env}")]
+    MissingToken { token_env: String },
+    /// The request did not include an Authorization header.
+    #[error("http authorization header is required")]
+    MissingAuthorization,
+    /// The Authorization header did not use the Bearer scheme.
+    #[error("http authorization header must use bearer token auth")]
+    InvalidAuthorizationScheme,
+    /// The bearer token did not match the configured token.
+    #[error("http bearer token is invalid")]
+    InvalidToken,
+}
+
+/// One Server-Sent Events frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpSseEvent {
+    event: String,
+    data: String,
+}
+
+impl HttpSseEvent {
+    /// Creates one SSE frame payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the event name is empty or contains line breaks.
+    pub fn new(event: impl Into<String>, data: impl Into<String>) -> Result<Self, HttpSseError> {
+        let event = event.into();
+        if event.is_empty() || event.contains('\r') || event.contains('\n') {
+            return Err(HttpSseError::InvalidEventName { event });
+        }
+        Ok(Self {
+            event,
+            data: data.into(),
+        })
+    }
+
+    /// Returns the SSE event name.
+    #[must_use]
+    pub fn event(&self) -> &str {
+        &self.event
+    }
+
+    /// Returns the serialized SSE data payload.
+    #[must_use]
+    pub fn data(&self) -> &str {
+        &self.data
+    }
+
+    /// Encodes the frame using SSE `event:` and `data:` fields.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        let mut encoded = String::new();
+        append_sse_field(&mut encoded, "event", &self.event);
+        append_sse_field(&mut encoded, "data", &self.data);
+        encoded.push('\n');
+        encoded
+    }
+}
+
+/// Errors returned while serializing HTTP SSE frames.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum HttpSseError {
+    /// The SSE event name is invalid.
+    #[error("http sse event name is invalid: {event}")]
+    InvalidEventName { event: String },
+    /// The public run event could not be serialized to JSON.
+    #[error("http run event serialization failed: {message}")]
+    Serialize { message: String },
+}
+
+/// Serializes one public run event into an SSE frame.
+///
+/// # Errors
+///
+/// Returns an error when the public event cannot be serialized.
+pub fn public_run_event_to_sse(event: &PublicRunEvent) -> Result<HttpSseEvent, HttpSseError> {
+    let data = serde_json::to_string(event).map_err(|error| HttpSseError::Serialize {
+        message: error.to_string(),
+    })?;
+    HttpSseEvent::new(HTTP_RUN_EVENT_SSE_NAME, data)
+}
+
+/// Sequence generator for public run events emitted by the HTTP adapter.
+#[derive(Default)]
+pub struct HttpRunEventSequencer {
+    state: Mutex<BTreeMap<HttpRunSequenceKey, u64>>,
+}
+
+impl HttpRunEventSequencer {
+    /// Creates an empty sequencer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates the next public event for a session/run pair.
+    pub fn next_public_event(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        event: PublicRunEventKind,
+    ) -> PublicRunEvent {
+        let sequence = self.next_sequence(session_id, run_id);
+        PublicRunEvent::new(session_id, run_id, sequence, event)
+    }
+
+    /// Creates the next SSE frame for a session/run pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the public event cannot be serialized.
+    pub fn next_sse_event(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        event: PublicRunEventKind,
+    ) -> Result<HttpSseEvent, HttpSseError> {
+        let event = self.next_public_event(session_id, run_id, event);
+        public_run_event_to_sse(&event)
+    }
+
+    fn next_sequence(&self, session_id: &str, run_id: &str) -> u64 {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let key = HttpRunSequenceKey {
+            session_id: session_id.to_owned(),
+            run_id: run_id.to_owned(),
+        };
+        let sequence = state.entry(key).or_insert(0);
+        *sequence += 1;
+        *sequence
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HttpRunSequenceKey {
+    session_id: String,
+    run_id: String,
+}
+
+fn append_sse_field(buffer: &mut String, field: &str, value: &str) {
+    for line in value.split('\n') {
+        buffer.push_str(field);
+        buffer.push_str(": ");
+        buffer.push_str(line);
+        buffer.push('\n');
+    }
+}
 
 /// Request body for creating one HTTP adapter session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

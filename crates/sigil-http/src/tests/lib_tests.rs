@@ -3,15 +3,17 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use serde_json::json;
-use sigil_kernel::ToolApprovalUserDecision;
+use serde_json::{Value, json};
+use sigil_kernel::{PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision};
 
 use super::{
-    DEFAULT_HTTP_TOKEN_ENV, HttpApprovalDecision, HttpApprovalDecisionRecord,
-    HttpApprovalDecisionRequest, HttpAuthConfig, HttpPendingApproval, HttpRegistryError,
-    HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
-    HttpRunDriverError, HttpRunDriverStart, HttpRunStartRequest, HttpRunStatus, HttpServerConfig,
-    HttpServerConfigError, HttpSessionCreateRequest, HttpSessionRunRegistry,
+    DEFAULT_HTTP_TOKEN_ENV, HTTP_RUN_EVENT_SSE_NAME, HttpApprovalDecision,
+    HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
+    HttpPendingApproval, HttpRegistryError, HttpRunApprovalMode, HttpRunDriver,
+    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
+    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpServerConfig,
+    HttpServerConfigError, HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError,
+    HttpSseEvent, public_run_event_to_sse,
 };
 
 #[test]
@@ -131,6 +133,169 @@ fn config_validation_rejects_external_bind_without_token_auth() {
         HttpServerConfigError::ExternalBindWithoutToken.to_string(),
         "http token auth is required for non-loopback bind addresses"
     );
+}
+
+#[test]
+fn auth_validator_uses_secure_defaults_and_accepts_matching_bearer() {
+    let config = HttpAuthConfig::default();
+    assert_eq!(
+        config.validator_from_token(None),
+        Err(HttpAuthError::MissingToken {
+            token_env: DEFAULT_HTTP_TOKEN_ENV.to_owned()
+        })
+    );
+    assert_eq!(
+        config.validator_from_token(Some("   ")),
+        Err(HttpAuthError::MissingToken {
+            token_env: DEFAULT_HTTP_TOKEN_ENV.to_owned()
+        })
+    );
+
+    let validator = config
+        .validator_from_token(Some("  secret-token  "))
+        .expect("non-empty token should create validator");
+    assert!(validator.token_required());
+    validator
+        .validate_authorization_header(Some("Bearer secret-token"))
+        .expect("matching bearer token should pass");
+    validator
+        .validate_authorization_header(Some("bearer   secret-token"))
+        .expect("bearer scheme should be case insensitive");
+
+    let disabled = HttpAuthConfig {
+        require_token: false,
+        token_env: "IGNORED".to_owned(),
+    }
+    .validator_from_token(None)
+    .expect("disabled auth should not require a token");
+    assert!(!disabled.token_required());
+    disabled
+        .validate_authorization_header(None)
+        .expect("disabled auth should accept missing authorization");
+}
+
+#[test]
+fn auth_validator_rejects_missing_malformed_and_invalid_headers() {
+    let validator = HttpAuthConfig::default()
+        .validator_from_token(Some("secret-token"))
+        .expect("token should create validator");
+
+    assert_eq!(
+        validator.validate_authorization_header(None),
+        Err(HttpAuthError::MissingAuthorization)
+    );
+    assert_eq!(
+        validator.validate_authorization_header(Some("  ")),
+        Err(HttpAuthError::MissingAuthorization)
+    );
+    assert_eq!(
+        validator.validate_authorization_header(Some("Basic secret-token")),
+        Err(HttpAuthError::InvalidAuthorizationScheme)
+    );
+    assert_eq!(
+        validator.validate_authorization_header(Some("Bearer")),
+        Err(HttpAuthError::InvalidAuthorizationScheme)
+    );
+    assert_eq!(
+        validator.validate_authorization_header(Some("Bearer wrong-token")),
+        Err(HttpAuthError::InvalidToken)
+    );
+    assert_eq!(
+        HttpAuthError::InvalidToken.to_string(),
+        "http bearer token is invalid"
+    );
+}
+
+#[test]
+fn public_run_event_serializes_to_run_event_sse_frame() {
+    let event = PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        12,
+        PublicRunEventKind::TextDelta {
+            text: "hello".to_owned(),
+        },
+    );
+
+    let sse = public_run_event_to_sse(&event).expect("public run event should serialize");
+    let data: Value = serde_json::from_str(sse.data()).expect("sse data should be json");
+
+    assert_eq!(sse.event(), HTTP_RUN_EVENT_SSE_NAME);
+    assert_eq!(data["schema_version"], 1);
+    assert_eq!(data["session_id"], "session-1");
+    assert_eq!(data["run_id"], "run-1");
+    assert_eq!(data["sequence"], 12);
+    assert_eq!(data["event"]["type"], "text_delta");
+    assert_eq!(data["event"]["text"], "hello");
+    assert_eq!(
+        sse.encode(),
+        format!("event: run_event\ndata: {}\n\n", sse.data())
+    );
+}
+
+#[test]
+fn sse_event_encoder_handles_multiline_data_and_rejects_bad_event_names() {
+    let event =
+        HttpSseEvent::new("debug", "line-1\nline-2").expect("valid event name should create frame");
+
+    assert_eq!(event.event(), "debug");
+    assert_eq!(event.data(), "line-1\nline-2");
+    assert_eq!(
+        event.encode(),
+        "event: debug\ndata: line-1\ndata: line-2\n\n"
+    );
+    assert_eq!(
+        HttpSseEvent::new("", "payload"),
+        Err(HttpSseError::InvalidEventName {
+            event: String::new()
+        })
+    );
+    assert_eq!(
+        HttpSseEvent::new("bad\nname", "payload"),
+        Err(HttpSseError::InvalidEventName {
+            event: "bad\nname".to_owned()
+        })
+    );
+}
+
+#[test]
+fn run_event_sequencer_is_monotonic_per_session_run_pair() {
+    let sequencer = HttpRunEventSequencer::new();
+
+    let first = sequencer.next_public_event(
+        "session-1",
+        "run-1",
+        PublicRunEventKind::Notice {
+            message: "first".to_owned(),
+        },
+    );
+    let second = sequencer.next_public_event(
+        "session-1",
+        "run-1",
+        PublicRunEventKind::RunFinished {
+            final_text: "done".to_owned(),
+        },
+    );
+    let other_run = sequencer.next_public_event(
+        "session-1",
+        "run-2",
+        PublicRunEventKind::RunStarted {
+            prompt: "hello".to_owned(),
+        },
+    );
+    let other_session =
+        sequencer.next_public_event("session-2", "run-1", PublicRunEventKind::RunCancelled);
+    let third_sse = sequencer
+        .next_sse_event("session-1", "run-1", PublicRunEventKind::RunCancelled)
+        .expect("sequenced event should serialize");
+    let third_data: Value =
+        serde_json::from_str(third_sse.data()).expect("sequenced sse data should be json");
+
+    assert_eq!(first.sequence, 1);
+    assert_eq!(second.sequence, 2);
+    assert_eq!(other_run.sequence, 1);
+    assert_eq!(other_session.sequence, 1);
+    assert_eq!(third_data["sequence"], 3);
 }
 
 #[test]
