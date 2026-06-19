@@ -17,6 +17,7 @@ sigil-provider-deepseek = { path = "../sigil-provider-deepseek" }
 sigil-provider-gemini = { path = "../sigil-provider-gemini" }
 sigil-provider-openai-compat = { path = "../sigil-provider-openai-compat" }
 sigil-tools-builtin = { path = "../sigil-tools-builtin" }
+toml.workspace = true
 
 [dev-dependencies]
 futures.workspace = true

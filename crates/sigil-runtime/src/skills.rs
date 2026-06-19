@@ -12,9 +12,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    ControlEntry, ModelMessage, SkillConfig, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
-    SkillRunMode, SkillSource, SkillTrustState, Tool, ToolAccess, ToolCategory, ToolContext,
-    ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ControlEntry, ModelMessage, PluginSkillRef, SkillConfig, SkillDescriptor, SkillIndexSnapshot,
+    SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, Tool, ToolAccess, ToolCategory,
+    ToolContext, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
 };
 
@@ -135,6 +135,66 @@ pub fn namespaced_plugin_skill_id(plugin_id: &str, skill_id: &str) -> Result<Str
         bail!("invalid plugin skill id {skill_id:?}");
     }
     Ok(format!("{plugin_id}/{skill_id}"))
+}
+
+/// Discovers plugin-owned skills from manifest-relative entries under one plugin root.
+///
+/// # Errors
+///
+/// Returns an error when a referenced skill path is unsafe, missing, unreadable, malformed, or
+/// duplicated within the plugin manifest.
+pub fn discover_plugin_skill_descriptors(
+    workspace_root: &Path,
+    plugin_id: &str,
+    plugin_root: &Path,
+    skills: &[PluginSkillRef],
+) -> Result<Vec<SkillDescriptor>> {
+    let canonical_workspace_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let canonical_plugin_root = plugin_root
+        .canonicalize()
+        .with_context(|| format!("failed to resolve plugin root {}", plugin_root.display()))?;
+    if !canonical_plugin_root.starts_with(&canonical_workspace_root) {
+        bail!("plugin {plugin_id} root escapes workspace root");
+    }
+
+    let mut descriptors = Vec::new();
+    let mut claimed_ids = BTreeSet::new();
+    for skill in skills {
+        let entrypoint = plugin_root.join(&skill.path);
+        let canonical_entrypoint = entrypoint.canonicalize().with_context(|| {
+            format!(
+                "failed to resolve plugin {plugin_id} skill {}",
+                skill.path.display()
+            )
+        })?;
+        if !canonical_entrypoint.starts_with(&canonical_plugin_root) {
+            bail!(
+                "plugin {plugin_id} skill path escapes plugin root: {}",
+                skill.path.display()
+            );
+        }
+        let logical_entrypoint = plugin_root.join(&skill.path);
+        let fallback_id = fallback_skill_id(&skill.path)?;
+        let descriptor = descriptor_from_entrypoint(
+            workspace_root,
+            logical_entrypoint.parent().unwrap_or(plugin_root),
+            &logical_entrypoint,
+            &fallback_id,
+            &SkillCandidateKind::PluginSkill {
+                plugin_id: plugin_id.to_owned(),
+            },
+        )?;
+        if !claimed_ids.insert(descriptor.id.clone()) {
+            bail!(
+                "plugin {plugin_id} declares duplicate skill {}",
+                descriptor.id
+            );
+        }
+        descriptors.push(descriptor);
+    }
+    Ok(descriptors)
 }
 
 /// Registers the internal model-facing skill loading tool from a discovered index.
@@ -524,7 +584,7 @@ impl SkillDiscovery {
     }
 
     fn discover_skill_dir(&mut self, dir: &Path, kind: SkillCandidateKind) {
-        if !self.directory_is_valid(dir, kind) {
+        if !self.directory_is_valid(dir, &kind) {
             return;
         }
 
@@ -554,12 +614,12 @@ impl SkillDiscovery {
                 );
                 continue;
             }
-            self.discover_entrypoint(&path, &entrypoint, &fallback_id, kind);
+            self.discover_entrypoint(&path, &entrypoint, &fallback_id, &kind);
         }
     }
 
     fn discover_agent_dir(&mut self, dir: &Path, kind: SkillCandidateKind) {
-        if !self.directory_is_valid(dir, kind) {
+        if !self.directory_is_valid(dir, &kind) {
             return;
         }
 
@@ -581,7 +641,7 @@ impl SkillDiscovery {
                 continue;
             }
             let root = path.parent().unwrap_or(dir);
-            self.discover_entrypoint(root, &path, &fallback_id, kind);
+            self.discover_entrypoint(root, &path, &fallback_id, &kind);
         }
     }
 
@@ -590,56 +650,30 @@ impl SkillDiscovery {
         root: &Path,
         entrypoint: &Path,
         fallback_id: &str,
-        kind: SkillCandidateKind,
+        kind: &SkillCandidateKind,
     ) {
         if !self.entrypoint_is_valid(entrypoint, kind) {
             return;
         }
 
-        let bytes = match fs::read(entrypoint) {
-            Ok(bytes) => bytes,
+        let descriptor = match descriptor_from_entrypoint(
+            &self.workspace_root,
+            root,
+            entrypoint,
+            fallback_id,
+            kind,
+        ) {
+            Ok(descriptor) => descriptor,
             Err(error) => {
                 self.warn(
-                    SkillDiscoveryWarningKind::ReadFailed,
-                    entrypoint,
-                    format!("failed to read skill entrypoint: {error}"),
-                );
-                return;
-            }
-        };
-        let raw = match std::str::from_utf8(&bytes) {
-            Ok(raw) => raw,
-            Err(error) => {
-                self.warn(
-                    SkillDiscoveryWarningKind::ReadFailed,
-                    entrypoint,
-                    format!("skill entrypoint is not utf-8: {error}"),
-                );
-                return;
-            }
-        };
-        let frontmatter = match SkillFrontmatter::parse(raw) {
-            Ok(frontmatter) => frontmatter,
-            Err(error) => {
-                self.warn(
-                    SkillDiscoveryWarningKind::InvalidFrontmatter,
+                    warning_kind_for_descriptor_error(&error),
                     entrypoint,
                     error.to_string(),
                 );
                 return;
             }
         };
-        let id = match descriptor_id(&frontmatter, fallback_id, kind) {
-            Ok(id) => id,
-            Err(error) => {
-                self.warn(
-                    SkillDiscoveryWarningKind::InvalidName,
-                    entrypoint,
-                    error.to_string(),
-                );
-                return;
-            }
-        };
+        let id = descriptor.id.clone();
         if let Some(existing_path) = self.claimed_ids.get(&id) {
             self.warn(
                 SkillDiscoveryWarningKind::Shadowed,
@@ -648,31 +682,11 @@ impl SkillDiscovery {
             );
             return;
         }
-
-        let descriptor = match frontmatter.to_descriptor(
-            id.clone(),
-            root,
-            entrypoint,
-            fallback_id,
-            format!("{:x}", Sha256::digest(&bytes)),
-            kind,
-            &self.workspace_root,
-        ) {
-            Ok(descriptor) => descriptor,
-            Err(error) => {
-                self.warn(
-                    SkillDiscoveryWarningKind::InvalidFrontmatter,
-                    entrypoint,
-                    error.to_string(),
-                );
-                return;
-            }
-        };
         self.claimed_ids.insert(id, descriptor.entrypoint.clone());
         self.descriptors.push(descriptor);
     }
 
-    fn directory_is_valid(&mut self, dir: &Path, kind: SkillCandidateKind) -> bool {
+    fn directory_is_valid(&mut self, dir: &Path, kind: &SkillCandidateKind) -> bool {
         if !dir.exists() {
             return false;
         }
@@ -695,7 +709,7 @@ impl SkillDiscovery {
         true
     }
 
-    fn entrypoint_is_valid(&mut self, entrypoint: &Path, kind: SkillCandidateKind) -> bool {
+    fn entrypoint_is_valid(&mut self, entrypoint: &Path, kind: &SkillCandidateKind) -> bool {
         if kind.is_workspace_scoped() && !self.path_stays_in_workspace(entrypoint) {
             self.warn(
                 SkillDiscoveryWarningKind::InvalidPath,
@@ -751,7 +765,7 @@ impl SkillDiscovery {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SkillCandidateKind {
     WorkspaceSkill,
     WorkspaceAgent,
@@ -759,30 +773,34 @@ enum SkillCandidateKind {
     ClaudeAgent,
     UserSkill,
     UserAgent,
+    PluginSkill { plugin_id: String },
 }
 
 impl SkillCandidateKind {
-    fn is_agent(self) -> bool {
+    fn is_agent(&self) -> bool {
         matches!(
             self,
             Self::WorkspaceAgent | Self::ClaudeAgent | Self::UserAgent
         )
     }
 
-    fn is_workspace_scoped(self) -> bool {
+    fn is_workspace_scoped(&self) -> bool {
         !matches!(self, Self::UserSkill | Self::UserAgent)
     }
 
-    fn source(self) -> SkillSource {
+    fn source(&self) -> SkillSource {
         match self {
             Self::WorkspaceSkill | Self::WorkspaceAgent | Self::ClaudeSkill | Self::ClaudeAgent => {
                 SkillSource::Workspace
             }
             Self::UserSkill | Self::UserAgent => SkillSource::User,
+            Self::PluginSkill { plugin_id } => SkillSource::Plugin {
+                plugin_id: plugin_id.clone(),
+            },
         }
     }
 
-    fn default_run_mode(self) -> SkillRunMode {
+    fn default_run_mode(&self) -> SkillRunMode {
         if self.is_agent() {
             SkillRunMode::ChildSession
         } else {
@@ -830,7 +848,7 @@ impl SkillFrontmatter {
         entrypoint: &Path,
         fallback_id: &str,
         sha256: String,
-        kind: SkillCandidateKind,
+        kind: &SkillCandidateKind,
         workspace_root: &Path,
     ) -> Result<SkillDescriptor> {
         let name = self
@@ -997,7 +1015,7 @@ fn parse_frontmatter_fields(lines: &[String]) -> Result<BTreeMap<String, Frontma
 fn descriptor_id(
     frontmatter: &SkillFrontmatter,
     fallback_id: &str,
-    kind: SkillCandidateKind,
+    kind: &SkillCandidateKind,
 ) -> Result<String> {
     let base_id = frontmatter
         .string("id")?
@@ -1010,6 +1028,62 @@ fn descriptor_id(
         return namespaced_plugin_skill_id(&plugin_id, &base_id);
     }
     Ok(base_id)
+}
+
+fn descriptor_from_entrypoint(
+    workspace_root: &Path,
+    root: &Path,
+    entrypoint: &Path,
+    fallback_id: &str,
+    kind: &SkillCandidateKind,
+) -> Result<SkillDescriptor> {
+    let bytes = fs::read(entrypoint)
+        .with_context(|| format!("failed to read skill entrypoint {}", entrypoint.display()))?;
+    let raw = std::str::from_utf8(&bytes)
+        .with_context(|| format!("skill entrypoint is not utf-8: {}", entrypoint.display()))?;
+    let frontmatter = SkillFrontmatter::parse(raw)?;
+    let id = descriptor_id(&frontmatter, fallback_id, kind)?;
+    frontmatter.to_descriptor(
+        id,
+        root,
+        entrypoint,
+        fallback_id,
+        format!("{:x}", Sha256::digest(&bytes)),
+        kind,
+        workspace_root,
+    )
+}
+
+fn warning_kind_for_descriptor_error(error: &anyhow::Error) -> SkillDiscoveryWarningKind {
+    let message = error.to_string();
+    if message.contains("invalid skill id") {
+        SkillDiscoveryWarningKind::InvalidName
+    } else if message.contains("failed to read") || message.contains("not utf-8") {
+        SkillDiscoveryWarningKind::ReadFailed
+    } else {
+        SkillDiscoveryWarningKind::InvalidFrontmatter
+    }
+}
+
+fn fallback_skill_id(path: &Path) -> Result<String> {
+    if path.file_name() == Some(OsStr::new("SKILL.md"))
+        && let Some(parent_name) = path.parent().and_then(Path::file_name)
+    {
+        let value = parent_name.to_string_lossy().into_owned();
+        if valid_skill_id(&value) {
+            return Ok(value);
+        }
+        bail!("invalid plugin skill directory name {value:?}");
+    }
+    let value = path
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if valid_skill_id(&value) {
+        Ok(value)
+    } else {
+        bail!("invalid plugin skill file name {value:?}")
+    }
 }
 
 fn configured_dir(base: &Path, configured: &str) -> PathBuf {

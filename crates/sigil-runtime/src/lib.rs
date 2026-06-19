@@ -35,7 +35,13 @@ use sigil_provider_openai_compat::{
 };
 
 pub mod doctor;
+pub mod plugins;
 pub mod skills;
+pub use plugins::{
+    PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
+    PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
+    discover_workspace_plugins, merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
+};
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
     SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,

@@ -2345,6 +2345,7 @@ dependencies = [
  "sigil-tools-builtin",
  "tempfile",
  "tokio",
+ "toml",
 ]
 
 [[package]]
