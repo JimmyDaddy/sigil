@@ -2230,6 +2230,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigil-http"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sigil-kernel",
+ "sigil-runtime",
+]
+
+[[package]]
 name = "sigil-kernel"
 version = "0.1.0"
 dependencies = [

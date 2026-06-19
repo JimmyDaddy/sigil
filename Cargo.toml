@@ -9,6 +9,7 @@ members = [
     "crates/sigil-code-intel",
     "crates/sigil-mcp",
     "crates/sigil-runtime",
+    "crates/sigil-http",
     "crates/sigil",
     "crates/sigil-tui",
 ]

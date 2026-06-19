@@ -1,0 +1,16 @@
+[package]
+name = "sigil-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+sigil-kernel = { path = "../sigil-kernel" }
+sigil-runtime = { path = "../sigil-runtime" }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

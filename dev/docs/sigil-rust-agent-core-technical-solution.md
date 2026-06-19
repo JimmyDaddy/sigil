@@ -171,6 +171,10 @@ sigil/
       src/
         lib.rs
         tests/lib_tests.rs
+    sigil-http/
+      src/
+        lib.rs
+        tests/lib_tests.rs
     sigil/
       src/
         main.rs
@@ -209,6 +213,7 @@ sigil/
 - `sigil-code-intel`：隔离 LSP client 生命周期、Rust Tree-sitter fallback、符号/诊断缓存、只读 code intelligence tools，以及带 approval diff preview 的 LSP edit tools（code action / rename）。配置结构保留在 kernel 的通用 `CodeIntelligenceConfig` / `LanguageServerConfig` 中，code-intel 可以依赖 kernel 的工具契约和配置类型，但 kernel 不反向依赖 LSP 或 Tree-sitter；动态代码智能结果只通过 bounded tool result 进入 provider-visible history，不注入 system prompt。
 - `sigil-mcp`：隔离 stdio MCP client 与工具适配逻辑，把远端 MCP 工具包装成同一个 kernel tool registry surface。
 - `sigil-runtime`：收口跨入口共享的 provider factory、tool registry 和 run options，避免 TUI / CLI 各自硬编码装配链。它不是新的领域层，kernel 仍然不知道 runtime 存在。
+- `sigil-http`：HTTP/SSE adapter crate。当前先承载 server config DTO 和 crate 边界测试；后续只做 HTTP routing、auth、SSE serialization 与 runtime session/run registry，不依赖 `sigil-tui`，不复制 agent loop。
 - `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、隐藏 provider 调试命令保留为显式子命令，不承担最终产品心智；诊断事实由 `sigil-runtime` 提供，避免 CLI 与 TUI 后续各写一套判断。
 - `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke；`.github/workflows/release.yml` 在 tag 发布时构建多平台 archive、生成 provenance attestation、渲染 Homebrew formula asset 并创建 GitHub release。独立 tap 同步、自更新和更完整包管理器分发仍是后续 packaging 工作。
 - `sigil-tui`：第一用户入口的 TUI 实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
