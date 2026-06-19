@@ -345,6 +345,12 @@ Gemini:
 
 `GEMINI_API_KEY` and `GOOGLE_API_KEY` remain fallback sources for the Gemini provider.
 
+## Plugins
+
+Workspace plugin manifests are discovered from `.sigil/plugins/<id>/plugin.toml`. They are reviewed from the TUI rather than edited in `sigil.toml`.
+
+Open `/config`, move to `Plugins`, and use `PgUp/PgDn` to select a discovered manifest. The detail view shows the trust state, relative manifest path, full manifest hash, skill paths, hook commands with args and approval mode, and MCP server commands with args, startup, and required status. Footer `approve` trusts only the displayed manifest hash; footer `deny` disables that hash. Sigil reloads the manifest before recording the decision, so a changed hash must be reviewed again.
+
 ## MCP
 
 MCP servers are configured with `[[mcp_servers]]`. See [mcp.md](mcp.md).

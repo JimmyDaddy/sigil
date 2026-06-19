@@ -5,10 +5,14 @@ use crate::config_panel::{
     OPENAI_COMPAT_PROVIDER_KEY, render_config_readonly_row, render_config_value_row,
 };
 use crate::slash::SLASH_COMMANDS;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{
-    ApprovalMode, CodeIntelStartup, McpServerConfig, McpServerStartup, RootConfig, SkillDescriptor,
+    ApprovalMode, CodeIntelStartup, ControlEntry, JsonlSessionStore, McpServerConfig,
+    McpServerStartup, PluginCapability, PluginManifestSnapshot, PluginStateProjection,
+    PluginTrustDecision, PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor,
     SkillSource, SkillTrustState, ToolRegistryScope, default_user_config_dir,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
@@ -157,6 +161,9 @@ impl AppState {
         } else if state.selected_section == ConfigSection::Skills {
             lines.push("Skills: PgUp/PgDn switch".to_owned());
             lines.push("Skills: footer load/invoke".to_owned());
+        } else if state.selected_section == ConfigSection::Plugins {
+            lines.push("Plugins: PgUp/PgDn switch".to_owned());
+            lines.push("Plugins: footer approve/deny".to_owned());
         }
         lines
     }
@@ -392,6 +399,54 @@ impl AppState {
                 lines.push("PgUp/PgDn skill  footer load/invoke".to_owned());
                 lines.extend(render_config_selection_details(config_state));
             }
+            ConfigSection::Plugins => {
+                lines.push("[discovery]".to_owned());
+                lines.push(render_config_readonly_row(
+                    "Configured",
+                    &format!("{} plugins", config_state.plugin_manifests.len()),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Warnings",
+                    &format!("{} warnings", config_state.plugin_warnings.len()),
+                ));
+                if config_state.plugin_manifests.is_empty() {
+                    lines.push(render_config_hint_row("No plugin manifests discovered"));
+                    lines.push(render_config_hint_row(
+                        "Workspace plugins live under .sigil/plugins/<id>/plugin.toml",
+                    ));
+                } else {
+                    lines.push(render_config_readonly_row(
+                        "Selected",
+                        &format!(
+                            "{} of {}",
+                            config_state.selected_plugin_index + 1,
+                            config_state.plugin_manifests.len()
+                        ),
+                    ));
+                    if let Some(plugin) = config_state.selected_plugin() {
+                        lines.push(String::new());
+                        lines.push("[plugin]".to_owned());
+                        lines.push(render_config_value_row(config_state, ConfigField::PluginId));
+                        lines.extend(render_plugin_detail_lines(plugin));
+                    }
+                }
+                if !config_state.plugin_warnings.is_empty() {
+                    lines.push(String::new());
+                    lines.push("[warnings]".to_owned());
+                    for warning in config_state.plugin_warnings.iter().take(4) {
+                        lines.push(render_config_hint_row(warning));
+                    }
+                    if config_state.plugin_warnings.len() > 4 {
+                        lines.push(format!(
+                            "... {} more warnings",
+                            config_state.plugin_warnings.len() - 4
+                        ));
+                    }
+                }
+                lines.push(String::new());
+                lines.push("PgUp/PgDn plugin  footer approve/deny".to_owned());
+                lines.extend(render_config_selection_details(config_state));
+            }
             ConfigSection::Mcp => {
                 lines.push("[servers]".to_owned());
                 lines.push(render_config_readonly_row(
@@ -615,6 +670,17 @@ impl AppState {
                                 self.last_notice = Some("no skill to select".to_owned());
                             }
                         }
+                        ConfigSection::Plugins => {
+                            if config_state.cycle_plugin(false) {
+                                self.last_notice = Some(format!(
+                                    "plugin {}/{}",
+                                    config_state.selected_plugin_index + 1,
+                                    config_state.plugin_manifests.len()
+                                ));
+                            } else {
+                                self.last_notice = Some("no plugin to select".to_owned());
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -642,6 +708,17 @@ impl AppState {
                                 ));
                             } else {
                                 self.last_notice = Some("no skill to select".to_owned());
+                            }
+                        }
+                        ConfigSection::Plugins => {
+                            if config_state.cycle_plugin(true) {
+                                self.last_notice = Some(format!(
+                                    "plugin {}/{}",
+                                    config_state.selected_plugin_index + 1,
+                                    config_state.plugin_manifests.len()
+                                ));
+                            } else {
+                                self.last_notice = Some("no plugin to select".to_owned());
                             }
                         }
                         _ => {}
@@ -703,6 +780,12 @@ impl AppState {
                         ConfigFooterAction::ActivateMcp => self.activate_selected_mcp_server(),
                         ConfigFooterAction::LoadSkill => self.load_selected_skill(),
                         ConfigFooterAction::InvokeSkill => self.open_selected_skill_arguments(),
+                        ConfigFooterAction::ApprovePlugin => {
+                            self.review_selected_plugin(PluginTrustDecision::Trusted)
+                        }
+                        ConfigFooterAction::DenyPlugin => {
+                            self.review_selected_plugin(PluginTrustDecision::Disabled)
+                        }
                         ConfigFooterAction::Close => self.attempt_close_config(),
                     };
                 }
@@ -881,6 +964,8 @@ impl AppState {
         let mut config_state = ConfigState::from_root_config(root_config);
         let (skills, warnings) = self.discover_config_skills(root_config);
         config_state.set_skill_discovery(skills, warnings);
+        let (plugins, plugin_warnings) = self.discover_config_plugins();
+        config_state.set_plugin_discovery(plugins, plugin_warnings);
         self.config_state = Some(config_state);
         self.last_notice = Some("opened config".to_owned());
         self.push_event("mode", "config");
@@ -918,6 +1003,28 @@ impl AppState {
                 (report.snapshot.descriptors, warnings)
             }
             Err(error) => (Vec::new(), vec![format!("skill discovery failed: {error}")]),
+        }
+    }
+
+    fn discover_config_plugins(&self) -> (Vec<PluginManifestSnapshot>, Vec<String>) {
+        let projection = PluginStateProjection::from_entries(&self.current_session_entries);
+        let trust_entries = projection
+            .trust_entries
+            .into_values()
+            .collect::<Vec<PluginTrustEntry>>();
+        match sigil_runtime::discover_workspace_plugins(&self.workspace_root, &trust_entries) {
+            Ok(report) => {
+                let warnings = report
+                    .warnings
+                    .into_iter()
+                    .map(|warning| format!("{}: {}", warning.path.display(), warning.message))
+                    .collect();
+                (report.manifests, warnings)
+            }
+            Err(error) => (
+                Vec::new(),
+                vec![format!("plugin discovery failed: {error}")],
+            ),
         }
     }
 
@@ -996,6 +1103,131 @@ impl AppState {
             return None;
         };
         Some(skill.clone())
+    }
+
+    fn review_selected_plugin(
+        &mut self,
+        decision: PluginTrustDecision,
+    ) -> Result<Option<AppAction>> {
+        if self.is_busy {
+            self.last_notice = Some("busy; review plugin later".to_owned());
+            return Ok(None);
+        }
+        let Some(plugin) = self.selected_config_plugin() else {
+            return Ok(None);
+        };
+        let Some(plugin) = self.refresh_selected_plugin_for_review(&plugin) else {
+            return Ok(None);
+        };
+
+        plugin.validate()?;
+        let trust = PluginTrustEntry {
+            plugin_id: plugin.plugin_id.clone(),
+            manifest_path: plugin.manifest_path.clone(),
+            manifest_hash: plugin.manifest_hash.clone(),
+            decision,
+            reviewed_at_ms: unix_time_ms(),
+        };
+        trust.validate()?;
+
+        self.ensure_current_session_identity()?;
+        self.append_plugin_review_entries(plugin.clone(), trust)?;
+        if let Some(config_state) = self.config_state.as_mut()
+            && let Some(selected) = config_state.selected_plugin_mut()
+        {
+            selected.trust = decision;
+        }
+
+        let action = plugin_review_action_label(decision);
+        self.last_notice = Some(format!("plugin {} {action}", plugin.plugin_id));
+        self.push_event("plugin", format!("{} {action}", plugin.plugin_id));
+        Ok(None)
+    }
+
+    fn selected_config_plugin(&mut self) -> Option<PluginManifestSnapshot> {
+        let Some(config_state) = self.config_state.as_ref() else {
+            self.last_notice = Some("config is unavailable".to_owned());
+            return None;
+        };
+        if config_state.selected_section != ConfigSection::Plugins {
+            self.last_notice = Some("plugin review is available in Plugins config".to_owned());
+            return None;
+        }
+        let Some(plugin) = config_state.selected_plugin() else {
+            self.last_notice = Some("no plugin selected".to_owned());
+            return None;
+        };
+        Some(plugin.clone())
+    }
+
+    fn refresh_selected_plugin_for_review(
+        &mut self,
+        cached: &PluginManifestSnapshot,
+    ) -> Option<PluginManifestSnapshot> {
+        let (manifests, warnings) = self.discover_config_plugins();
+        let refreshed = manifests
+            .iter()
+            .find(|plugin| {
+                plugin.plugin_id == cached.plugin_id && plugin.manifest_path == cached.manifest_path
+            })
+            .cloned();
+        if let Some(config_state) = self.config_state.as_mut() {
+            config_state.set_plugin_discovery(manifests, warnings);
+            if let Some(index) = config_state.plugin_manifests.iter().position(|plugin| {
+                plugin.plugin_id == cached.plugin_id && plugin.manifest_path == cached.manifest_path
+            }) {
+                config_state.selected_plugin_index = index;
+            }
+        }
+
+        let Some(refreshed) = refreshed else {
+            self.last_notice = Some(format!(
+                "plugin {} is no longer available; review refreshed",
+                cached.plugin_id
+            ));
+            return None;
+        };
+        if refreshed.manifest_hash != cached.manifest_hash {
+            self.last_notice = Some(format!(
+                "plugin {} changed; review refreshed",
+                cached.plugin_id
+            ));
+            return None;
+        }
+        Some(refreshed)
+    }
+
+    fn ensure_current_session_identity(&mut self) -> Result<()> {
+        if self.current_session_entries.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+            )
+        }) {
+            return Ok(());
+        }
+        self.append_control_to_current_session(ControlEntry::SessionIdentity {
+            provider_name: self.provider_name.clone(),
+            model_name: self.model_name.clone(),
+        })
+    }
+
+    fn append_plugin_review_entries(
+        &mut self,
+        snapshot: PluginManifestSnapshot,
+        trust: PluginTrustEntry,
+    ) -> Result<()> {
+        self.append_control_to_current_session(ControlEntry::PluginManifestCaptured(snapshot))?;
+        self.append_control_to_current_session(ControlEntry::PluginTrustDecision(trust))?;
+        Ok(())
+    }
+
+    fn append_control_to_current_session(&mut self, control: ControlEntry) -> Result<()> {
+        let entry = SessionLogEntry::Control(control.clone());
+        let store = JsonlSessionStore::new(&self.session_log_path)?;
+        store.append(&entry)?;
+        self.append_current_session_control(control);
+        Ok(())
     }
 
     fn attempt_close_config(&mut self) -> Result<Option<AppAction>> {
@@ -1130,8 +1362,10 @@ impl AppState {
         self.recompute_compaction_status(false);
         self.refresh_usage_sidebar_cache();
         let (skills, warnings) = self.discover_config_skills(root_config);
+        let (plugins, plugin_warnings) = self.discover_config_plugins();
         if let Some(config_state) = self.config_state.as_mut() {
             config_state.set_skill_discovery(skills, warnings);
+            config_state.set_plugin_discovery(plugins, plugin_warnings);
         }
     }
 
@@ -1265,6 +1499,8 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
             lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
         } else if config_state.selected_section == ConfigSection::Skills {
             lines.push("skills: PgUp/PgDn skill · footer load/invoke".to_owned());
+        } else if config_state.selected_section == ConfigSection::Plugins {
+            lines.push("plugins: PgUp/PgDn plugin · footer approve/deny".to_owned());
         }
         return lines;
     };
@@ -1291,8 +1527,43 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
         lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
     } else if config_state.selected_section == ConfigSection::Skills {
         lines.push("skills: PgUp/PgDn skill · footer load/invoke".to_owned());
+    } else if config_state.selected_section == ConfigSection::Plugins {
+        lines.push("plugins: PgUp/PgDn plugin · footer approve/deny".to_owned());
     }
 
+    lines
+}
+
+fn render_plugin_detail_lines(plugin: &PluginManifestSnapshot) -> Vec<String> {
+    let name = if plugin.name.trim().is_empty() {
+        plugin.plugin_id.as_str()
+    } else {
+        plugin.name.as_str()
+    };
+    let description = plugin.description.as_deref().unwrap_or("none");
+    let mut lines = vec![
+        render_config_readonly_row("Name", name),
+        render_config_readonly_row("Version", &plugin.version),
+        render_config_readonly_row("Description", description),
+        render_config_readonly_row("Trust", plugin.trust.as_str()),
+        render_config_readonly_row("Manifest", &plugin.manifest_path.display().to_string()),
+    ];
+    push_wrapped_readonly_rows(&mut lines, "Hash", &plugin.manifest_hash);
+    lines.push(render_config_readonly_row(
+        "Implications",
+        &plugin_implication_summary(&plugin.capabilities),
+    ));
+    lines.extend(render_plugin_skill_lines(&plugin.capabilities));
+    lines.extend(render_plugin_hook_lines(&plugin.capabilities));
+    lines.extend(render_plugin_mcp_lines(&plugin.capabilities));
+    lines.push(render_config_readonly_row(
+        "Approve",
+        "trusts this manifest hash",
+    ));
+    lines.push(render_config_readonly_row(
+        "Deny",
+        "disables this manifest hash",
+    ));
     lines
 }
 
@@ -1338,6 +1609,176 @@ fn render_skill_detail_lines(skill: &SkillDescriptor) -> Vec<String> {
             skill_action_label(skill_invoke_unavailable_reason(skill)),
         ),
     ]
+}
+
+fn plugin_implication_summary(capabilities: &[PluginCapability]) -> String {
+    let mut parts = Vec::new();
+    if capabilities
+        .iter()
+        .any(|capability| matches!(capability, PluginCapability::Skill { .. }))
+    {
+        parts.push("skill instructions");
+    }
+    if capabilities
+        .iter()
+        .any(|capability| matches!(capability, PluginCapability::Hook { .. }))
+    {
+        parts.push("hook commands");
+    }
+    if capabilities
+        .iter()
+        .any(|capability| matches!(capability, PluginCapability::McpServer { .. }))
+    {
+        parts.push("MCP server processes");
+    }
+    if parts.is_empty() {
+        "none".to_owned()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn render_plugin_skill_lines(capabilities: &[PluginCapability]) -> Vec<String> {
+    let skills = capabilities
+        .iter()
+        .filter_map(|capability| match capability {
+            PluginCapability::Skill { path } => Some(path.display().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut lines = vec![String::new(), "[skills]".to_owned()];
+    if skills.is_empty() {
+        lines.push(render_config_readonly_row("Skill count", "0"));
+        return lines;
+    }
+    for (index, path) in skills.iter().enumerate() {
+        push_wrapped_readonly_rows(&mut lines, &format!("Skill {}", index + 1), path);
+    }
+    lines
+}
+
+fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
+    let hooks = capabilities
+        .iter()
+        .filter_map(|capability| match capability {
+            PluginCapability::Hook {
+                event,
+                command,
+                args,
+                approval,
+            } => Some((event, command, args, approval)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut lines = vec![String::new(), "[hooks]".to_owned()];
+    if hooks.is_empty() {
+        lines.push(render_config_readonly_row("Hook count", "0"));
+        return lines;
+    }
+    for (index, (event, command, args, approval)) in hooks.iter().enumerate() {
+        let label = format!("Hook {}", index + 1);
+        lines.push(render_config_readonly_row(&label, event.as_str()));
+        push_wrapped_readonly_rows(
+            &mut lines,
+            &format!("{label} command"),
+            &command_with_args(command, args),
+        );
+        lines.push(render_config_readonly_row(
+            &format!("{label} approval"),
+            approval.as_str(),
+        ));
+    }
+    lines
+}
+
+fn render_plugin_mcp_lines(capabilities: &[PluginCapability]) -> Vec<String> {
+    let servers = capabilities
+        .iter()
+        .filter_map(|capability| match capability {
+            PluginCapability::McpServer {
+                name,
+                command,
+                args,
+                startup,
+                required,
+            } => Some((name, command, args, startup, *required)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut lines = vec![String::new(), "[mcp servers]".to_owned()];
+    if servers.is_empty() {
+        lines.push(render_config_readonly_row("MCP count", "0"));
+        return lines;
+    }
+    for (index, (name, command, args, startup, required)) in servers.iter().enumerate() {
+        let label = format!("MCP {}", index + 1);
+        lines.push(render_config_readonly_row(&label, name.as_str()));
+        push_wrapped_readonly_rows(
+            &mut lines,
+            &format!("{label} command"),
+            &command_with_args(command, args),
+        );
+        lines.push(render_config_readonly_row(
+            &format!("{label} startup"),
+            startup.as_str(),
+        ));
+        lines.push(render_config_readonly_row(
+            &format!("{label} required"),
+            bool_summary(*required),
+        ));
+    }
+    lines
+}
+
+fn push_wrapped_readonly_rows(lines: &mut Vec<String>, label: &str, value: &str) {
+    let value = if value.trim().is_empty() {
+        "none"
+    } else {
+        value
+    };
+    for (index, segment) in chunk_for_review_display(value).into_iter().enumerate() {
+        let row_label = if index == 0 {
+            label.to_owned()
+        } else {
+            format!("{label} part {}", index + 1)
+        };
+        lines.push(render_config_readonly_row(&row_label, &segment));
+    }
+}
+
+fn chunk_for_review_display(value: &str) -> Vec<String> {
+    const CHUNK_SIZE: usize = 48;
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= CHUNK_SIZE {
+        return vec![value.to_owned()];
+    }
+    chars
+        .chunks(CHUNK_SIZE)
+        .map(|chunk| chunk.iter().collect::<String>())
+        .collect()
+}
+
+fn command_with_args(command: &str, args: &[String]) -> String {
+    std::iter::once(command.to_owned())
+        .chain(args.iter().map(|arg| command_arg_display(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn command_arg_display(arg: &str) -> String {
+    if arg.chars().any(char::is_whitespace) {
+        format!("{arg:?}")
+    } else {
+        arg.to_owned()
+    }
+}
+
+fn plugin_review_action_label(decision: PluginTrustDecision) -> &'static str {
+    match decision {
+        PluginTrustDecision::Trusted => "approved",
+        PluginTrustDecision::Disabled => "denied",
+        PluginTrustDecision::NeedsReview => "needs review",
+    }
 }
 
 fn skill_slash_summary(skill: &SkillDescriptor) -> String {
@@ -1597,6 +2038,13 @@ fn bool_summary(value: bool) -> &'static str {
 
 fn render_config_hint_row(text: &str) -> String {
     format!("i {text}")
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

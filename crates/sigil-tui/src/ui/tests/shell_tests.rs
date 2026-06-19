@@ -43,6 +43,71 @@ fn test_config() -> RootConfig {
     }
 }
 
+fn write_plugin_with_many_capabilities(workspace_root: &Path) -> anyhow::Result<()> {
+    let plugin_root = workspace_root.join(".sigil/plugins/command-pack");
+    fs::create_dir_all(&plugin_root)?;
+    fs::write(
+        plugin_root.join("plugin.toml"),
+        r#"id = "command-pack"
+name = "Command Pack"
+version = "0.1.0"
+
+[[hooks]]
+event = "pre_tool_use"
+command = "scripts/hook-1.sh"
+args = ["--flag-1"]
+approval = "ask"
+
+[[hooks]]
+event = "post_tool_use"
+command = "scripts/hook-2.sh"
+args = ["--flag-2"]
+approval = "ask"
+
+[[hooks]]
+event = "session_start"
+command = "scripts/hook-3.sh"
+args = ["--flag-3"]
+approval = "deny"
+
+[[hooks]]
+event = "session_stop"
+command = "scripts/hook-4.sh"
+args = ["--flag-4"]
+approval = "allow"
+
+[[mcp_servers]]
+name = "tools-1"
+command = "node"
+args = ["server-1.js"]
+startup = "lazy"
+required = false
+
+[[mcp_servers]]
+name = "tools-2"
+command = "node"
+args = ["server-2.js"]
+startup = "lazy"
+required = false
+
+[[mcp_servers]]
+name = "tools-3"
+command = "node"
+args = ["server-3.js"]
+startup = "eager"
+required = true
+
+[[mcp_servers]]
+name = "tools-4"
+command = "node"
+args = ["server-4.js"]
+startup = "eager"
+required = true
+"#,
+    )?;
+    Ok(())
+}
+
 #[test]
 fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -193,7 +258,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Provider 1/8"));
+    assert!(rendered.contains("Provider 1/9"));
     assert!(rendered.contains("focus Model"));
     assert!(rendered.contains("key model"));
     assert!(rendered.contains("keys Tab section"));
@@ -210,9 +275,9 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/8", "focus Model"),
-            (2, "Memory 3/8", "focus Memory"),
-            (3, "Compaction 4/8", "focus Auto compact"),
+            (0, "Provider 1/9", "focus Model"),
+            (2, "Memory 3/9", "focus Memory"),
+            (3, "Compaction 4/9", "focus Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.input = "/config".to_owned();
@@ -955,6 +1020,37 @@ fn render_config_narrow_screen_truncates_long_values() -> anyhow::Result<()> {
 }
 
 #[test]
+fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    write_plugin_with_many_capabilities(&workspace)?;
+    let mut config = test_config();
+    config.workspace.root = workspace.display().to_string();
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    for _ in 0..7 {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    }
+    let backend = TestBackend::new(96, 80);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Plugins 8/9"));
+    assert!(rendered.contains("Hook 4"));
+    assert!(rendered.contains("session_stop"));
+    assert!(rendered.contains("scripts/hook-4.sh --flag-4"));
+    assert!(rendered.contains("MCP 4"));
+    assert!(rendered.contains("tools-4"));
+    assert!(rendered.contains("node server-4.js"));
+    assert!(!rendered.contains("- Hooks:"));
+    assert!(!rendered.contains("- MCP:"));
+    Ok(())
+}
+
+#[test]
 fn render_config_short_terminal_scrolls_to_selected_field() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/config".to_owned();
@@ -1056,7 +1152,7 @@ fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Memory 3/8"));
+    assert!(rendered.contains("Memory 3/9"));
     assert!(rendered.contains("read Documents"));
     assert!(rendered.contains("read Last scan"));
     assert!(rendered.contains("read Root files"));

@@ -75,6 +75,7 @@ impl PluginManifest {
         let hook_capabilities = self.hooks.iter().map(|hook| PluginCapability::Hook {
             event: hook.event.clone(),
             command: hook.command.clone(),
+            args: hook.args.clone(),
             approval: hook.approval,
         });
         let mcp_capabilities = self
@@ -83,6 +84,7 @@ impl PluginManifest {
             .map(|server| PluginCapability::McpServer {
                 name: server.name.clone(),
                 command: server.command.clone(),
+                args: server.args.clone(),
                 startup: server.startup,
                 required: server.required,
             });
@@ -150,11 +152,15 @@ pub enum PluginCapability {
     Hook {
         event: String,
         command: String,
+        #[serde(default)]
+        args: Vec<String>,
         approval: ApprovalMode,
     },
     McpServer {
         name: String,
         command: String,
+        #[serde(default)]
+        args: Vec<String>,
         startup: McpServerStartup,
         required: bool,
     },

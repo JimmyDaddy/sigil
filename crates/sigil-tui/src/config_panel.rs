@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
-    ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, RootConfig,
-    SkillDescriptor,
+    ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig,
+    PluginManifestSnapshot, RootConfig, SkillDescriptor,
 };
 use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
@@ -34,11 +34,12 @@ pub(crate) enum ConfigSection {
     CodeIntelligence,
     Terminal,
     Skills,
+    Plugins,
     Mcp,
 }
 
 impl ConfigSection {
-    pub(crate) const FLOW: [Self; 8] = [
+    pub(crate) const FLOW: [Self; 9] = [
         Self::Provider,
         Self::Permissions,
         Self::Memory,
@@ -46,6 +47,7 @@ impl ConfigSection {
         Self::CodeIntelligence,
         Self::Terminal,
         Self::Skills,
+        Self::Plugins,
         Self::Mcp,
     ];
 
@@ -58,6 +60,7 @@ impl ConfigSection {
             Self::CodeIntelligence => "Code Intel",
             Self::Terminal => "Terminal",
             Self::Skills => "Skills",
+            Self::Plugins => "Plugins",
             Self::Mcp => "MCP",
         }
     }
@@ -71,6 +74,7 @@ impl ConfigSection {
             Self::CodeIntelligence => "LSP readiness",
             Self::Terminal => "terminal integration",
             Self::Skills => "skill browser",
+            Self::Plugins => "plugin trust review",
             Self::Mcp => "MCP servers",
         }
     }
@@ -128,6 +132,7 @@ pub(crate) enum ConfigField {
     TerminalOsc52Clipboard,
     TerminalScrollSensitivity,
     SkillId,
+    PluginId,
     McpName,
     McpCommand,
     McpArgsCsv,
@@ -163,6 +168,7 @@ impl ConfigField {
         Self::TerminalScrollSensitivity,
     ];
     const SKILL_FIELDS: [Self; 1] = [Self::SkillId];
+    const PLUGIN_FIELDS: [Self; 1] = [Self::PluginId];
     const MCP_FIELDS: [Self; 4] = [
         Self::McpName,
         Self::McpCommand,
@@ -179,6 +185,7 @@ impl ConfigField {
             ConfigSection::CodeIntelligence => &Self::CODE_INTELLIGENCE_FIELDS,
             ConfigSection::Terminal => &Self::TERMINAL_FIELDS,
             ConfigSection::Skills => &Self::SKILL_FIELDS,
+            ConfigSection::Plugins => &Self::PLUGIN_FIELDS,
             ConfigSection::Mcp => &Self::MCP_FIELDS,
         }
     }
@@ -209,6 +216,7 @@ impl ConfigField {
             Self::TerminalOsc52Clipboard => "osc52_clipboard",
             Self::TerminalScrollSensitivity => "scroll_sensitivity",
             Self::SkillId => "skill",
+            Self::PluginId => "plugin",
             Self::McpName => "name",
             Self::McpCommand => "command",
             Self::McpArgsCsv => "args_csv",
@@ -238,6 +246,7 @@ impl ConfigField {
             Self::TerminalOsc52Clipboard => "OSC52 clipboard",
             Self::TerminalScrollSensitivity => "Scroll sensitivity",
             Self::SkillId => "Skill",
+            Self::PluginId => "Plugin",
             Self::McpName => "Name",
             Self::McpCommand => "Command",
             Self::McpArgsCsv => "Arguments",
@@ -307,6 +316,9 @@ impl ConfigField {
             Self::SkillId => {
                 "Selected reusable skill. PgUp/PgDn switches skills; footer actions load or invoke it."
             }
+            Self::PluginId => {
+                "Selected plugin manifest. PgUp/PgDn switches plugins; footer actions approve or deny the manifest hash."
+            }
             Self::McpName => "Stable local name for this MCP server.",
             Self::McpCommand => "Executable used to start the MCP server process.",
             Self::McpArgsCsv => "Comma-separated startup arguments for the MCP server.",
@@ -346,7 +358,7 @@ impl ConfigField {
             | Self::TerminalMouseCapture
             | Self::TerminalOsc52Clipboard => "Enter toggle",
             Self::TerminalScrollSensitivity => "Enter input",
-            Self::SkillId => "",
+            Self::SkillId | Self::PluginId => "",
             _ if self.accepts_text_input() => "Enter input",
             _ => "",
         }
@@ -360,6 +372,8 @@ pub(crate) enum ConfigFooterAction {
     ActivateMcp,
     LoadSkill,
     InvokeSkill,
+    ApprovePlugin,
+    DenyPlugin,
     Close,
 }
 
@@ -372,11 +386,13 @@ impl ConfigFooterAction {
         Self::Close,
     ];
     const SKILLS_ORDER: [Self; 3] = [Self::LoadSkill, Self::InvokeSkill, Self::Close];
+    const PLUGINS_ORDER: [Self; 3] = [Self::ApprovePlugin, Self::DenyPlugin, Self::Close];
 
     pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
             ConfigSection::Mcp => &Self::MCP_ORDER,
             ConfigSection::Skills => &Self::SKILLS_ORDER,
+            ConfigSection::Plugins => &Self::PLUGINS_ORDER,
             ConfigSection::Provider
             | ConfigSection::Permissions
             | ConfigSection::Memory
@@ -397,6 +413,8 @@ impl ConfigFooterAction {
             Self::ActivateMcp => "activate",
             Self::LoadSkill => "load",
             Self::InvokeSkill => "invoke",
+            Self::ApprovePlugin => "approve",
+            Self::DenyPlugin => "deny",
             Self::Close => "close",
         }
     }
@@ -408,6 +426,8 @@ impl ConfigFooterAction {
             Self::ActivateMcp => "activate_mcp",
             Self::LoadSkill => "load_skill",
             Self::InvokeSkill => "invoke_skill",
+            Self::ApprovePlugin => "approve_plugin",
+            Self::DenyPlugin => "deny_plugin",
             Self::Close => "close",
         }
     }
@@ -891,8 +911,11 @@ pub(crate) struct ConfigState {
     pub(crate) selected_footer_action: ConfigFooterAction,
     pub(crate) selected_mcp_server_index: usize,
     pub(crate) selected_skill_index: usize,
+    pub(crate) selected_plugin_index: usize,
     pub(crate) skill_descriptors: Vec<SkillDescriptor>,
     pub(crate) skill_warnings: Vec<String>,
+    pub(crate) plugin_manifests: Vec<PluginManifestSnapshot>,
+    pub(crate) plugin_warnings: Vec<String>,
     pub(crate) draft: ConfigDraft,
     pub(crate) dirty: bool,
     pub(crate) close_guard_armed: bool,
@@ -910,8 +933,11 @@ impl ConfigState {
             selected_footer_action: ConfigFooterAction::Save,
             selected_mcp_server_index: 0,
             selected_skill_index: 0,
+            selected_plugin_index: 0,
             skill_descriptors: Vec::new(),
             skill_warnings: Vec::new(),
+            plugin_manifests: Vec::new(),
+            plugin_warnings: Vec::new(),
             draft: ConfigDraft::from_root_config(root_config),
             dirty: false,
             close_guard_armed: false,
@@ -922,6 +948,7 @@ impl ConfigState {
         self.selected_section = section;
         self.sync_mcp_selection();
         self.sync_skill_selection();
+        self.sync_plugin_selection();
         self.footer_selected = false;
         self.selected_field = self.first_field_for_section(section);
     }
@@ -948,6 +975,7 @@ impl ConfigState {
         match section {
             ConfigSection::Mcp => self.draft.mcp_servers.is_empty(),
             ConfigSection::Skills => self.skill_descriptors.is_empty(),
+            ConfigSection::Plugins => self.plugin_manifests.is_empty(),
             _ => false,
         }
     }
@@ -1057,6 +1085,32 @@ impl ConfigState {
             .min(self.skill_descriptors.len().saturating_sub(1));
     }
 
+    pub(crate) fn set_plugin_discovery(
+        &mut self,
+        manifests: Vec<PluginManifestSnapshot>,
+        warnings: Vec<String>,
+    ) {
+        self.plugin_manifests = manifests;
+        self.plugin_warnings = warnings;
+        self.sync_plugin_selection();
+        if self.selected_section == ConfigSection::Plugins {
+            self.selected_field = self.first_field_for_section(ConfigSection::Plugins);
+        }
+    }
+
+    pub(crate) fn sync_plugin_selection(&mut self) {
+        if self.plugin_manifests.is_empty() {
+            self.selected_plugin_index = 0;
+            if self.selected_section == ConfigSection::Plugins {
+                self.selected_field = None;
+            }
+            return;
+        }
+        self.selected_plugin_index = self
+            .selected_plugin_index
+            .min(self.plugin_manifests.len().saturating_sub(1));
+    }
+
     pub(crate) fn selected_skill(&self) -> Option<&SkillDescriptor> {
         self.skill_descriptors.get(self.selected_skill_index)
     }
@@ -1072,6 +1126,29 @@ impl ConfigState {
             self.selected_skill_index = len - 1;
         } else {
             self.selected_skill_index -= 1;
+        }
+        true
+    }
+
+    pub(crate) fn selected_plugin(&self) -> Option<&PluginManifestSnapshot> {
+        self.plugin_manifests.get(self.selected_plugin_index)
+    }
+
+    pub(crate) fn selected_plugin_mut(&mut self) -> Option<&mut PluginManifestSnapshot> {
+        self.plugin_manifests.get_mut(self.selected_plugin_index)
+    }
+
+    pub(crate) fn cycle_plugin(&mut self, forward: bool) -> bool {
+        if self.plugin_manifests.is_empty() {
+            return false;
+        }
+        let len = self.plugin_manifests.len();
+        if forward {
+            self.selected_plugin_index = (self.selected_plugin_index + 1) % len;
+        } else if self.selected_plugin_index == 0 {
+            self.selected_plugin_index = len - 1;
+        } else {
+            self.selected_plugin_index -= 1;
         }
         true
     }
@@ -1155,6 +1232,9 @@ impl ConfigState {
             ConfigField::CompactionTailMessages => Some(&self.draft.compaction_tail_messages),
             ConfigField::TerminalScrollSensitivity => Some(&self.draft.terminal_scroll_sensitivity),
             ConfigField::SkillId => self.selected_skill().map(|skill| skill.id.as_str()),
+            ConfigField::PluginId => self
+                .selected_plugin()
+                .map(|plugin| plugin.plugin_id.as_str()),
             ConfigField::McpName => self
                 .selected_mcp_server()
                 .map(|server| server.name.as_str()),
@@ -1199,7 +1279,7 @@ impl ConfigState {
             ConfigField::TerminalScrollSensitivity => {
                 Some(&mut self.draft.terminal_scroll_sensitivity)
             }
-            ConfigField::SkillId => None,
+            ConfigField::SkillId | ConfigField::PluginId => None,
             ConfigField::McpName => self
                 .selected_mcp_server_mut()
                 .map(|server| &mut server.name),
@@ -1236,6 +1316,12 @@ impl ConfigState {
                 return self
                     .selected_skill()
                     .map(|skill| skill.id.clone())
+                    .unwrap_or_else(|| "none".to_owned());
+            }
+            ConfigField::PluginId => {
+                return self
+                    .selected_plugin()
+                    .map(|plugin| plugin.plugin_id.clone())
                     .unwrap_or_else(|| "none".to_owned());
             }
             ConfigField::PermissionsDefaultMode => {
@@ -1462,7 +1548,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::McpName
         | ConfigField::McpCommand
         | ConfigField::McpArgsCsv => !character.is_control(),
-        ConfigField::SkillId => false,
+        ConfigField::SkillId | ConfigField::PluginId => false,
         ConfigField::ProviderApiKey
         | ConfigField::ProviderName
         | ConfigField::PermissionsDefaultMode

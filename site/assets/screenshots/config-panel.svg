@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1488" height="738" viewBox="0 0 1488 738" role="img" aria-labelledby="title desc">
   <title id="title">Sigil config panel preview</title>
-  <desc id="desc">Generated from the Sigil TUI renderer: provider, memory, compaction, tools, terminal, and MCP settings.</desc>
+  <desc id="desc">Generated from the Sigil TUI renderer: provider, permissions, memory, compaction, code intelligence, terminal, Skills, Plugins trust review, and MCP settings.</desc>
   <rect width="100%" height="100%" rx="18" fill="#101820"/>
   <rect x="24" y="24" width="1440" height="690" rx="14" fill="#07080a" stroke="#30414d"/>
   <rect x="24" y="24" width="1440" height="42" rx="14" fill="#151a20"/>

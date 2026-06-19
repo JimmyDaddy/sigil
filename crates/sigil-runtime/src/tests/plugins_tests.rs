@@ -110,11 +110,13 @@ required = false
             PluginCapability::Hook {
                 event: "pre_tool_use".to_owned(),
                 command: "scripts/check-tool-policy.sh".to_owned(),
+                args: Vec::new(),
                 approval: ApprovalMode::Ask,
             },
             PluginCapability::McpServer {
                 name: "repo-tools".to_owned(),
                 command: "node".to_owned(),
+                args: vec!["server.js".to_owned()],
                 startup: McpServerStartup::Lazy,
                 required: false,
             },

@@ -345,6 +345,12 @@ Gemini：
 
 `GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 作为 Gemini provider 的备用来源继续读取。
 
+## Plugins
+
+Workspace plugin manifest 从 `.sigil/plugins/<id>/plugin.toml` 发现。它们通过 TUI review，不在 `sigil.toml` 里直接编辑。
+
+打开 `/config`，进入 `Plugins`，用 `PgUp/PgDn` 选择已发现 manifest。detail view 会展示 trust 状态、相对 manifest 路径、完整 manifest hash、skill 路径、带 args 和 approval mode 的 hook command，以及带 args、startup 和 required 状态的 MCP server command。footer 的 `approve` 只信任当前展示的 manifest hash；`deny` 会禁用这个 hash。记录决策前 Sigil 会重新加载 manifest，所以 hash 改变后必须重新 review。
+
 ## MCP
 
 MCP server 使用 `[[mcp_servers]]` 配置，详见 [mcp.md](mcp.md)。

@@ -143,6 +143,30 @@ fn skill_detail_helpers_cover_edge_labels_and_prompts() {
 }
 
 #[test]
+fn plugin_detail_helpers_cover_empty_capability_surface() {
+    let plugin = sigil_kernel::PluginManifestSnapshot {
+        plugin_id: "empty-pack".to_owned(),
+        name: String::new(),
+        version: "0.1.0".to_owned(),
+        description: None,
+        manifest_path: ".sigil/plugins/empty-pack/plugin.toml".into(),
+        manifest_hash: String::new(),
+        trust: sigil_kernel::PluginTrustDecision::NeedsReview,
+        capabilities: Vec::new(),
+    };
+
+    let detail = render_plugin_detail_lines(&plugin).join("\n");
+
+    assert!(detail.contains("- Name: empty-pack"));
+    assert!(detail.contains("- Description: none"));
+    assert!(detail.contains("- Hash: none"));
+    assert!(detail.contains("- Implications: none"));
+    assert!(detail.contains("- Skill count: 0"));
+    assert!(detail.contains("- Hook count: 0"));
+    assert!(detail.contains("- MCP count: 0"));
+}
+
+#[test]
 fn skill_detail_warns_when_native_slash_command_shadows_skill_id() {
     let skill = sigil_kernel::SkillDescriptor {
         id: "config".to_owned(),

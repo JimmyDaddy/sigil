@@ -74,9 +74,11 @@ fn plugin_manifest_validation_accepts_reviewable_capabilities() -> Result<()> {
         PluginCapability::Hook {
             event,
             command,
+            args,
             approval,
         } if event == "pre_tool_use"
             && command == "scripts/check-tool-policy.sh"
+            && args == &vec!["--strict".to_owned()]
             && *approval == ApprovalMode::Ask
     ));
     assert!(matches!(
@@ -84,10 +86,12 @@ fn plugin_manifest_validation_accepts_reviewable_capabilities() -> Result<()> {
         PluginCapability::McpServer {
             name,
             command,
+            args,
             startup,
             required,
         } if name == "repo-tools"
             && command == "node"
+            && args == &vec!["server.js".to_owned()]
             && *startup == McpServerStartup::Lazy
             && !*required
     ));
@@ -148,6 +152,7 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
         PluginCapability::Hook {
             event: " ".to_owned(),
             command: "scripts/hook.sh".to_owned(),
+            args: Vec::new(),
             approval: ApprovalMode::Ask,
         }
         .validate()
@@ -157,6 +162,7 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
         PluginCapability::Hook {
             event: "pre_tool_use".to_owned(),
             command: " ".to_owned(),
+            args: Vec::new(),
             approval: ApprovalMode::Ask,
         }
         .validate()
@@ -166,6 +172,7 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
         PluginCapability::McpServer {
             name: "repo-tools".to_owned(),
             command: " ".to_owned(),
+            args: Vec::new(),
             startup: McpServerStartup::Lazy,
             required: false,
         }

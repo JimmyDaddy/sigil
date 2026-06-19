@@ -45,6 +45,21 @@ fn test_skill(id: &str) -> sigil_kernel::SkillDescriptor {
     }
 }
 
+fn test_plugin(id: &str) -> sigil_kernel::PluginManifestSnapshot {
+    sigil_kernel::PluginManifestSnapshot {
+        plugin_id: id.to_owned(),
+        name: id.to_owned(),
+        version: "0.1.0".to_owned(),
+        description: Some("test plugin".to_owned()),
+        manifest_path: format!(".sigil/plugins/{id}/plugin.toml").into(),
+        manifest_hash: format!("{id}-sha"),
+        capabilities: vec![sigil_kernel::PluginCapability::Skill {
+            path: "skills/review/SKILL.md".into(),
+        }],
+        trust: sigil_kernel::PluginTrustDecision::NeedsReview,
+    }
+}
+
 #[test]
 fn config_section_flow_wraps() {
     assert_eq!(
@@ -60,7 +75,8 @@ fn config_section_flow_wraps() {
         ConfigSection::Terminal
     );
     assert_eq!(ConfigSection::Terminal.next_flow(), ConfigSection::Skills);
-    assert_eq!(ConfigSection::Skills.next_flow(), ConfigSection::Mcp);
+    assert_eq!(ConfigSection::Skills.next_flow(), ConfigSection::Plugins);
+    assert_eq!(ConfigSection::Plugins.next_flow(), ConfigSection::Mcp);
     assert_eq!(ConfigSection::Mcp.next_flow(), ConfigSection::Provider);
     assert_eq!(ConfigSection::Provider.previous_flow(), ConfigSection::Mcp);
 }
@@ -94,6 +110,14 @@ fn config_footer_action_navigation_wraps() {
     assert_eq!(
         ConfigFooterAction::Close.next_for_section(ConfigSection::Skills),
         ConfigFooterAction::LoadSkill
+    );
+    assert_eq!(
+        ConfigFooterAction::ApprovePlugin.next_for_section(ConfigSection::Plugins),
+        ConfigFooterAction::DenyPlugin
+    );
+    assert_eq!(
+        ConfigFooterAction::Close.next_for_section(ConfigSection::Plugins),
+        ConfigFooterAction::ApprovePlugin
     );
 }
 
@@ -338,7 +362,8 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(4));
     assert_eq!(ConfigSection::Terminal.flow_index(), Some(5));
     assert_eq!(ConfigSection::Skills.flow_index(), Some(6));
-    assert_eq!(ConfigSection::Mcp.flow_index(), Some(7));
+    assert_eq!(ConfigSection::Plugins.flow_index(), Some(7));
+    assert_eq!(ConfigSection::Mcp.flow_index(), Some(8));
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
         &[
@@ -369,9 +394,14 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::fields_for_section(ConfigSection::Skills),
         &[ConfigField::SkillId]
     );
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Plugins),
+        &[ConfigField::PluginId]
+    );
 
     assert_eq!(ConfigField::McpCommand.label(), "command");
     assert_eq!(ConfigField::SkillId.label(), "skill");
+    assert_eq!(ConfigField::PluginId.label(), "plugin");
     assert_eq!(ConfigField::McpArgsCsv.label(), "args_csv");
     assert_eq!(ConfigField::CodeIntelStartup.label(), "startup");
     assert_eq!(
@@ -393,6 +423,8 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::SkillId.action_label(), "");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
     assert_eq!(ConfigFooterAction::LoadSkill.button_label(), "load");
+    assert_eq!(ConfigFooterAction::ApprovePlugin.button_label(), "approve");
+    assert_eq!(ConfigFooterAction::DenyPlugin.field_label(), "deny_plugin");
     assert_eq!(
         ConfigFooterAction::InvokeSkill.field_label(),
         "invoke_skill"
@@ -421,6 +453,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             .help_text()
             .contains("Comma-separated")
     );
+    assert!(ConfigField::PluginId.help_text().contains("manifest hash"));
     assert!(
         ConfigField::CodeIntelDiscoveryEnabled
             .help_text()
@@ -534,6 +567,44 @@ fn config_state_handles_skill_collection_navigation() {
     );
     assert!(state.cycle_skill(false));
     assert_eq!(state.selected_skill_index, 0);
+}
+
+#[test]
+fn config_state_handles_plugin_collection_navigation() {
+    let mut state = ConfigState::from_root_config(&test_root_config());
+
+    state.set_section(ConfigSection::Plugins);
+    assert_eq!(state.selected_field, None);
+    assert_eq!(state.move_field(true), ConfigFieldMove::Unavailable);
+    assert!(!state.focus_last_field());
+    assert!(!state.cycle_plugin(true));
+
+    state.set_plugin_discovery(
+        vec![test_plugin("repo-review"), test_plugin("policy")],
+        vec!["invalid plugin ignored".to_owned()],
+    );
+    assert_eq!(state.selected_field, Some(ConfigField::PluginId));
+    assert_eq!(state.selected_plugin_index, 0);
+    assert_eq!(
+        state.plugin_warnings,
+        vec!["invalid plugin ignored".to_owned()]
+    );
+    assert_eq!(
+        state.field_text_value(ConfigField::PluginId),
+        Some("repo-review")
+    );
+    assert_eq!(state.display_value(ConfigField::PluginId), "repo-review");
+    assert!(state.field_text_value_mut(ConfigField::PluginId).is_none());
+    assert!(!config_field_accepts_char(ConfigField::PluginId, 'x'));
+
+    assert!(state.cycle_plugin(true));
+    assert_eq!(state.selected_plugin_index, 1);
+    assert_eq!(
+        state.field_text_value(ConfigField::PluginId),
+        Some("policy")
+    );
+    assert!(state.cycle_plugin(false));
+    assert_eq!(state.selected_plugin_index, 0);
 }
 
 #[test]

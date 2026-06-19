@@ -17,6 +17,56 @@ fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<
     Ok(())
 }
 
+fn write_workspace_plugin(workspace_root: &Path, id: &str, version: &str) -> Result<()> {
+    let plugin_root = workspace_root.join(".sigil").join("plugins").join(id);
+    std::fs::create_dir_all(plugin_root.join("skills/review"))?;
+    std::fs::write(
+        plugin_root.join("skills/review/SKILL.md"),
+        r#"---
+id: review
+description: Review repositories.
+trust: trusted
+---
+
+# Review
+"#,
+    )?;
+    std::fs::write(
+        plugin_root.join("plugin.toml"),
+        format!(
+            r#"id = "{id}"
+name = "Repository Review"
+version = "{version}"
+description = "Reusable review pack."
+
+[[skills]]
+path = "skills/review/SKILL.md"
+
+[[hooks]]
+event = "pre_tool_use"
+command = "scripts/check-tool-policy.sh"
+args = ["--policy", "strict"]
+approval = "ask"
+
+[[mcp_servers]]
+name = "repo-tools"
+command = "node"
+args = ["server.js"]
+startup = "lazy"
+required = false
+"#
+        ),
+    )?;
+    Ok(())
+}
+
+fn write_invalid_workspace_plugin(workspace_root: &Path, id: &str) -> Result<()> {
+    let plugin_root = workspace_root.join(".sigil").join("plugins").join(id);
+    std::fs::create_dir_all(&plugin_root)?;
+    std::fs::write(plugin_root.join("plugin.toml"), "id = ")?;
+    Ok(())
+}
+
 #[test]
 fn config_command_opens_first_editable_step() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -120,7 +170,7 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     assert_eq!(state.selected_field, None);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Skills"));
+    assert_eq!(app.config_section_title(), Some("Plugins"));
     assert_eq!(app.config_selected_field_label(), None);
 
     app.config_state
@@ -130,7 +180,7 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Skills"));
+    assert_eq!(app.config_section_title(), Some("Plugins"));
     assert_eq!(app.config_selected_field_label(), None);
 
     app.config_state
@@ -346,10 +396,10 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/8 · provider settings");
+    assert_eq!(lines[0], "Provider 1/9 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] permissions memory compaction code intel terminal skills mcp"
+        "[provider] permissions memory compaction code intel terminal skills plugins mcp"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -507,7 +557,7 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Code Intel 5/8 · LSP readiness"));
+    assert!(detail.contains("Code Intel 5/9 · LSP readiness"));
     assert!(detail.contains("[controls]"));
     assert!(detail.contains("Code intelligence: yes"));
     assert!(detail.contains("Startup: lazy"));
@@ -538,7 +588,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Terminal 6/8 · terminal integration"));
+    assert!(detail.contains("Terminal 6/9 · terminal integration"));
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("Mouse capture: yes"));
     assert!(detail.contains("OSC52 clipboard: yes"));
@@ -582,7 +632,7 @@ paths: [crates/**]
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Skills 7/8 · skill browser"));
+    assert!(detail.contains("Skills 7/9 · skill browser"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 1 skills"));
     assert!(detail.contains("- Selected: 1 of 1"));
@@ -990,6 +1040,487 @@ description: Needs review before use.
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("skill draft is not trusted"));
     assert!(app.is_config_mode());
+    Ok(())
+}
+
+#[test]
+fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_plugin(&workspace, "repo-review", "0.1.0")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Plugins);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Plugins 8/9 · plugin trust review"));
+    assert!(detail.contains("[discovery]"));
+    assert!(detail.contains("- Configured: 1 plugins"));
+    assert!(detail.contains("- Selected: 1 of 1"));
+    assert!(detail.contains("[plugin]"));
+    assert!(detail.contains("Plugin: repo-review"));
+    assert!(detail.contains("- Name: Repository Review"));
+    assert!(detail.contains("- Version: 0.1.0"));
+    assert!(detail.contains("- Description: Reusable review pack."));
+    assert!(detail.contains("- Trust: needs_review"));
+    assert!(detail.contains("- Manifest: .sigil/plugins/repo-review/plugin.toml"));
+    let manifest_hash = app
+        .config_state
+        .as_ref()
+        .and_then(|state| state.selected_plugin())
+        .map(|plugin| plugin.manifest_hash.clone())
+        .expect("plugin should be selected");
+    assert!(detail.contains(&format!("- Hash: {}", &manifest_hash[..48])));
+    assert!(detail.contains(&format!("- Hash part 2: {}", &manifest_hash[48..])));
+    assert!(
+        detail.contains("- Implications: skill instructions, hook commands, MCP server processes")
+    );
+    assert!(detail.contains("[skills]"));
+    assert!(detail.contains("- Skill 1: skills/review/SKILL.md"));
+    assert!(detail.contains("[hooks]"));
+    assert!(detail.contains("- Hook 1: pre_tool_use"));
+    assert!(detail.contains("- Hook 1 command: scripts/check-tool-policy.sh --policy strict"));
+    assert!(detail.contains("- Hook 1 approval: ask"));
+    assert!(detail.contains("[mcp servers]"));
+    assert!(detail.contains("- MCP 1: repo-tools"));
+    assert!(detail.contains("- MCP 1 command: node server.js"));
+    assert!(detail.contains("- MCP 1 startup: lazy"));
+    assert!(detail.contains("- MCP 1 required: no"));
+    assert!(detail.contains("- Approve: trusts this manifest hash"));
+    assert!(detail.contains("- Deny: disables this manifest hash"));
+    assert!(detail.contains("plugins: PgUp/PgDn plugin · footer approve/deny"));
+
+    let nav = app.config_nav_lines().join("\n");
+    assert!(nav.contains("Plugins: PgUp/PgDn switch"));
+    assert!(nav.contains("Plugins: footer approve/deny"));
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["approve", "deny", "close"]
+    );
+    Ok(())
+}
+
+#[test]
+fn config_plugins_step_renders_empty_discovery_and_warning_overflow() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    for index in 0..5 {
+        write_invalid_workspace_plugin(&workspace, &format!("bad-{index}"))?;
+    }
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Plugins);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("- Configured: 0 plugins"));
+    assert!(detail.contains("- Warnings: 5 warnings"));
+    assert!(detail.contains("No plugin manifests discovered"));
+    assert!(detail.contains("Workspace plugins live under .sigil/plugins/<id>/plugin.toml"));
+    assert!(detail.contains("[warnings]"));
+    assert!(detail.contains("... 1 more warnings"));
+    Ok(())
+}
+
+#[test]
+fn config_plugins_review_renders_complete_command_surface() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let plugin_root = workspace.join(".sigil/plugins/command-pack");
+    std::fs::create_dir_all(&plugin_root)?;
+    std::fs::write(
+        plugin_root.join("plugin.toml"),
+        r#"id = "command-pack"
+name = "Command Pack"
+version = "0.1.0"
+
+[[hooks]]
+event = "pre_tool_use"
+command = "scripts/hook-1.sh"
+args = ["--flag-1"]
+approval = "ask"
+
+[[hooks]]
+event = "post_tool_use"
+command = "scripts/hook-2.sh"
+args = ["--flag-2"]
+approval = "ask"
+
+[[hooks]]
+event = "session_start"
+command = "scripts/hook-3.sh"
+args = ["--flag-3"]
+approval = "deny"
+
+[[hooks]]
+event = "session_stop"
+command = "scripts/hook-4.sh"
+args = ["--flag-4", "two words"]
+approval = "allow"
+
+[[mcp_servers]]
+name = "tools-1"
+command = "node"
+args = ["server-1.js"]
+startup = "lazy"
+required = false
+
+[[mcp_servers]]
+name = "tools-2"
+command = "node"
+args = ["server-2.js"]
+startup = "lazy"
+required = false
+
+[[mcp_servers]]
+name = "tools-3"
+command = "node"
+args = ["server-3.js"]
+startup = "eager"
+required = true
+
+[[mcp_servers]]
+name = "tools-4"
+command = "node"
+args = ["server-4.js"]
+startup = "eager"
+required = true
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Plugins);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    for expected in [
+        "- Hook 1: pre_tool_use",
+        "- Hook 1 command: scripts/hook-1.sh --flag-1",
+        "- Hook 1 approval: ask",
+        "- Hook 2: post_tool_use",
+        "- Hook 2 command: scripts/hook-2.sh --flag-2",
+        "- Hook 2 approval: ask",
+        "- Hook 3: session_start",
+        "- Hook 3 command: scripts/hook-3.sh --flag-3",
+        "- Hook 3 approval: deny",
+        "- Hook 4: session_stop",
+        r#"- Hook 4 command: scripts/hook-4.sh --flag-4 "two words""#,
+        "- Hook 4 approval: allow",
+        "- MCP 1: tools-1",
+        "- MCP 1 command: node server-1.js",
+        "- MCP 1 startup: lazy",
+        "- MCP 1 required: no",
+        "- MCP 2: tools-2",
+        "- MCP 2 command: node server-2.js",
+        "- MCP 2 startup: lazy",
+        "- MCP 2 required: no",
+        "- MCP 3: tools-3",
+        "- MCP 3 command: node server-3.js",
+        "- MCP 3 startup: eager",
+        "- MCP 3 required: yes",
+        "- MCP 4: tools-4",
+        "- MCP 4 command: node server-4.js",
+        "- MCP 4 startup: eager",
+        "- MCP 4 required: yes",
+    ] {
+        assert!(detail.contains(expected), "missing {expected}");
+    }
+    assert!(!detail.contains("- Hooks:"));
+    assert!(!detail.contains("- MCP:"));
+    Ok(())
+}
+
+#[test]
+fn config_plugins_page_keys_cycle_discovered_plugins() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_plugin(&workspace, "alpha", "0.1.0")?;
+    write_workspace_plugin(&workspace, "beta", "0.1.0")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Plugins);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_plugin_index,
+        1
+    );
+    assert_eq!(app.last_notice(), Some("plugin 2/2"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_plugin_index,
+        0
+    );
+    assert_eq!(app.last_notice(), Some("plugin 1/2"));
+
+    let empty_workspace = temp.path().join("empty-workspace");
+    std::fs::create_dir_all(&empty_workspace)?;
+    let mut empty_app = AppState::from_root_config(
+        &temp.path().join("empty-sigil.toml"),
+        &config_for_workspace(&empty_workspace),
+    );
+    empty_app.open_config_panel();
+    empty_app
+        .config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Plugins);
+    let _ = empty_app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(empty_app.last_notice(), Some("no plugin to select"));
+    let _ = empty_app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(empty_app.last_notice(), Some("no plugin to select"));
+    Ok(())
+}
+
+#[test]
+fn config_plugins_footer_writes_append_only_trust_entry() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_plugin(&workspace, "repo-review", "0.1.0")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    let session_log_path = app.session_log_path.clone();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist");
+    state.set_section(ConfigSection::Plugins);
+    state.focus_footer(ConfigFooterAction::ApprovePlugin);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("plugin repo-review approved"));
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(
+        state.selected_plugin().map(|plugin| plugin.trust),
+        Some(sigil_kernel::PluginTrustDecision::Trusted)
+    );
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert_eq!(entries.len(), 3);
+    assert!(matches!(
+        entries[0],
+        SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+    ));
+    let manifest = match &entries[1] {
+        SessionLogEntry::Control(ControlEntry::PluginManifestCaptured(manifest)) => manifest,
+        other => panic!("expected manifest capture, got {other:?}"),
+    };
+    assert_eq!(manifest.plugin_id, "repo-review");
+    assert_eq!(
+        manifest.trust,
+        sigil_kernel::PluginTrustDecision::NeedsReview
+    );
+    assert!(manifest.capabilities.iter().any(|capability| matches!(
+        capability,
+        sigil_kernel::PluginCapability::Hook { args, .. }
+            if args == &vec!["--policy".to_owned(), "strict".to_owned()]
+    )));
+    let trust = match &entries[2] {
+        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trust)) => trust,
+        other => panic!("expected trust decision, got {other:?}"),
+    };
+    assert_eq!(trust.plugin_id, "repo-review");
+    assert_eq!(trust.manifest_hash, manifest.manifest_hash);
+    assert_eq!(trust.decision, sigil_kernel::PluginTrustDecision::Trusted);
+    Ok(())
+}
+
+#[test]
+fn config_plugins_footer_denies_and_guards_busy_wrong_section_and_empty_selection() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_plugin(&workspace, "repo-review", "0.1.0")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.is_busy = true;
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Plugins);
+        state.focus_footer(ConfigFooterAction::DenyPlugin);
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("busy; review plugin later"));
+
+    app.is_busy = false;
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        state.focus_footer(ConfigFooterAction::DenyPlugin);
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("plugin review is available in Plugins config")
+    );
+
+    let empty_workspace = temp.path().join("empty-workspace");
+    std::fs::create_dir_all(&empty_workspace)?;
+    let mut empty_app = AppState::from_root_config(
+        &temp.path().join("empty-sigil.toml"),
+        &config_for_workspace(&empty_workspace),
+    );
+    empty_app.open_config_panel();
+    {
+        let state = empty_app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Plugins);
+        state.focus_footer(ConfigFooterAction::DenyPlugin);
+    }
+    let action = empty_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(empty_app.last_notice(), Some("no plugin selected"));
+
+    let mut deny_app = AppState::from_root_config(
+        &temp.path().join("deny-sigil.toml"),
+        &config_for_workspace(&workspace),
+    );
+    deny_app.open_config_panel();
+    let state = deny_app
+        .config_state
+        .as_mut()
+        .expect("config state should exist");
+    state.set_section(ConfigSection::Plugins);
+    state.focus_footer(ConfigFooterAction::DenyPlugin);
+    let action = deny_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(deny_app.last_notice(), Some("plugin repo-review denied"));
+    let entries = JsonlSessionStore::read_entries(&deny_app.session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trust))
+            if trust.decision == sigil_kernel::PluginTrustDecision::Disabled
+    )));
+    Ok(())
+}
+
+#[test]
+fn config_plugins_footer_reloads_manifest_before_reviewing_hash() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_plugin(&workspace, "repo-review", "0.1.0")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    let session_log_path = app.session_log_path.clone();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist");
+    state.set_section(ConfigSection::Plugins);
+    let old_hash = state
+        .selected_plugin()
+        .expect("plugin should be discovered")
+        .manifest_hash
+        .clone();
+    state.focus_footer(ConfigFooterAction::ApprovePlugin);
+    write_workspace_plugin(&workspace, "repo-review", "0.2.0")?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("plugin repo-review changed; review refreshed")
+    );
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    let refreshed = state
+        .selected_plugin()
+        .expect("plugin should still be selected");
+    assert_eq!(refreshed.version, "0.2.0");
+    assert_ne!(refreshed.manifest_hash, old_hash);
+    assert_eq!(
+        refreshed.trust,
+        sigil_kernel::PluginTrustDecision::NeedsReview
+    );
+    assert!(JsonlSessionStore::read_entries(&session_log_path)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn config_plugins_footer_reloads_manifest_before_reviewing_missing_plugin() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_plugin(&workspace, "repo-review", "0.1.0")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Plugins);
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ApprovePlugin);
+    std::fs::remove_file(
+        workspace
+            .join(".sigil")
+            .join("plugins")
+            .join("repo-review")
+            .join("plugin.toml"),
+    )?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("plugin repo-review is no longer available; review refreshed")
+    );
+    assert!(!app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(_))
+    )));
     Ok(())
 }
 

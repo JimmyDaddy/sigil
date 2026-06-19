@@ -32,7 +32,7 @@ If the diff does not match your intent, deny it and ask for a narrower change.
 
 ![Sigil config panel preview](../../site/assets/screenshots/config-panel.svg)
 
-Use `/config` for common provider, permission, memory, compaction, code intelligence, terminal, and MCP settings. Lower-frequency provider details remain in `sigil.toml` and environment variables.
+Use `/config` for common provider, permission, memory, compaction, code intelligence, terminal, Skills, Plugins trust review, and MCP settings. Lower-frequency provider details remain in `sigil.toml` and environment variables.
 
 ## Regenerating These Captures
 

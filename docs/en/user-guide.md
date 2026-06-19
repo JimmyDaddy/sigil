@@ -70,6 +70,12 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 
 `/model`, `/effort`, and `/resume` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute.
 
+## Config Panel
+
+The `/config` panel groups provider, permission, memory, compaction, code intelligence, terminal, Skills, Plugins, and MCP settings. In the `Plugins` section, Sigil discovers workspace plugin manifests under `.sigil/plugins/<id>/plugin.toml`.
+
+Use `PgUp/PgDn` to move between discovered plugins. The detail view shows the current trust state, manifest path, full manifest hash, skills, hook commands with args and approval mode, and MCP server commands with args, startup, and required status. Footer `approve` trusts the currently displayed manifest hash; footer `deny` disables that hash. Sigil refreshes the manifest before writing the review decision and appends the review to the session log.
+
 ## Planned Tasks
 
 Normal composer input stays chat-first until the current session has a planned task. After that, composer input continues the latest planned task and is passed to the active executor/subagent step as continuation guidance. Use `/plan <task>` when you want Sigil to break a larger request into durable steps before execution.
