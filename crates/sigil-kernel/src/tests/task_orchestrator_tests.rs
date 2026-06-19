@@ -53,6 +53,33 @@ fn planner_prompt_explains_subagent_delegation_without_direct_task_tool() {
     assert!(prompt.contains("child sessions"));
 }
 
+#[test]
+fn new_with_child_runner_constructs_orchestrator() {
+    let _orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        crate::LegacyTaskChildSessionRunner::new(
+            boxed_agent(
+                CapturingExecutorProvider {
+                    requests: Arc::new(Mutex::new(Vec::new())),
+                },
+                ToolRegistry::new(),
+            ),
+            boxed_agent(
+                CapturingExecutorProvider {
+                    requests: Arc::new(Mutex::new(Vec::new())),
+                },
+                ToolRegistry::new(),
+            ),
+        ),
+    );
+}
+
 struct CapturingExecutorProvider {
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
 }
@@ -1246,13 +1273,12 @@ async fn subagent_write_step_routes_approved_approval_to_parent_session() -> Res
 }
 
 #[tokio::test]
-async fn child_step_defensive_parent_role_fallback_uses_executor_agent() -> Result<()> {
-    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+async fn child_step_rejects_parent_role_in_child_runner() -> Result<()> {
     let orchestrator = SequentialTaskOrchestrator::new(
         boxed_agent(PlannerProvider, ToolRegistry::new()),
         boxed_agent(
             CapturingExecutorProvider {
-                requests: Arc::clone(&executor_requests),
+                requests: Arc::new(Mutex::new(Vec::new())),
             },
             ToolRegistry::new(),
         ),
@@ -1285,7 +1311,7 @@ async fn child_step_defensive_parent_role_fallback_uses_executor_agent() -> Resu
     let mut handler = crate::event::NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
 
-    let output = orchestrator
+    let result = orchestrator
         .run_child_step(
             &mut session,
             &request,
@@ -1296,15 +1322,14 @@ async fn child_step_defensive_parent_role_fallback_uses_executor_agent() -> Resu
             &mut handler,
             &mut approval_handler,
         )
-        .await?;
+        .await;
 
-    assert_eq!(output.final_text, "step complete");
-    assert_eq!(
-        executor_requests
-            .lock()
-            .expect("executor request lock should not be poisoned")
-            .len(),
-        1
+    assert!(result.is_err());
+    let error = result.err().expect("error was checked above");
+    assert!(
+        error
+            .to_string()
+            .contains("task child session runner requires a subagent role")
     );
     Ok(())
 }
@@ -1837,6 +1862,9 @@ fn capabilities() -> ProviderCapabilities {
         supports_structured_output: false,
         supports_assistant_prefix_seed: false,
         supports_schema_constrained_tools: false,
+        supports_agent_background_resume: false,
+        supports_agent_thread_usage: false,
+        supports_agent_result_replay: false,
         supports_infill_completion: false,
         supports_system_fingerprint: false,
         tool_name_max_chars: 64,

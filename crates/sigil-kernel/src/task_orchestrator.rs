@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow, bail};
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -42,15 +43,70 @@ pub struct SequentialTaskStepOutput {
     pub outcome: AgentRunOutcome,
 }
 
-/// Sequential planner/executor task orchestrator.
-pub struct SequentialTaskOrchestrator {
-    planner: BoxedAgent,
-    executor: BoxedAgent,
+/// Input passed from the task orchestrator to a runtime-owned child-session runner.
+#[derive(Debug, Clone)]
+pub struct TaskChildSessionRunRequest {
+    pub task: SequentialTaskRequest,
+    pub plan_version: u32,
+    pub step: TaskStepSpec,
+    pub child_input: AgentRunInput,
+    pub options: AgentRunOptions,
+}
+
+/// Output returned by a child-session runner after a terminal child run.
+#[derive(Debug, Clone)]
+pub struct TaskChildSessionRunOutput {
+    pub final_text: String,
+    pub outcome: AgentRunOutcome,
+}
+
+/// Runtime-neutral contract for launching task child sessions.
+///
+/// The kernel owns task control-plane semantics, but runtime implementations own concrete child
+/// session creation, profile snapshots, provider/tool assembly, and route-aware child lifecycle.
+#[async_trait]
+pub trait TaskChildSessionRunner: Send + Sync {
+    /// Runs one task child session and returns its bounded terminal output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when child session creation, control-log append, approval routing, or the
+    /// child agent run fails before a terminal result can be recorded.
+    async fn run_child_session<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send;
+}
+
+/// Legacy in-kernel child-session runner retained for compatibility tests and non-runtime callers.
+pub struct LegacyTaskChildSessionRunner {
     subagent_read: BoxedAgent,
     subagent_write: BoxedAgent,
 }
 
-impl SequentialTaskOrchestrator {
+impl LegacyTaskChildSessionRunner {
+    pub fn new(subagent_read: BoxedAgent, subagent_write: BoxedAgent) -> Self {
+        Self {
+            subagent_read,
+            subagent_write,
+        }
+    }
+}
+
+/// Sequential planner/executor task orchestrator.
+pub struct SequentialTaskOrchestrator<R = LegacyTaskChildSessionRunner> {
+    planner: BoxedAgent,
+    executor: BoxedAgent,
+    child_runner: R,
+}
+
+impl SequentialTaskOrchestrator<LegacyTaskChildSessionRunner> {
     pub fn new(
         planner: BoxedAgent,
         executor: BoxedAgent,
@@ -60,8 +116,24 @@ impl SequentialTaskOrchestrator {
         Self {
             planner,
             executor,
-            subagent_read,
-            subagent_write,
+            child_runner: LegacyTaskChildSessionRunner::new(subagent_read, subagent_write),
+        }
+    }
+}
+
+impl<R> SequentialTaskOrchestrator<R>
+where
+    R: TaskChildSessionRunner,
+{
+    pub fn new_with_child_runner(
+        planner: BoxedAgent,
+        executor: BoxedAgent,
+        child_runner: R,
+    ) -> Self {
+        Self {
+            planner,
+            executor,
+            child_runner,
         }
     }
 
@@ -553,15 +625,62 @@ impl SequentialTaskOrchestrator {
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let output = self
+            .child_runner
+            .run_child_session(
+                parent_session,
+                TaskChildSessionRunRequest {
+                    task: request.clone(),
+                    plan_version,
+                    step: step.clone(),
+                    child_input,
+                    options,
+                },
+                handler,
+                approval_handler,
+            )
+            .await?;
+        Ok(StepRunOutput {
+            final_text: output.final_text,
+            outcome: output.outcome,
+        })
+    }
+}
+
+struct StepRunOutput {
+    final_text: String,
+    outcome: AgentRunOutcome,
+}
+
+#[async_trait]
+impl TaskChildSessionRunner for LegacyTaskChildSessionRunner {
+    async fn run_child_session<H, A>(
+        &self,
+        parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        handler: &mut H,
+        approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        let TaskChildSessionRunRequest {
+            task,
+            plan_version,
+            step,
+            child_input,
+            options,
+        } = request;
         let child_task_id =
             TaskId::new(format!("child_v{plan_version}_{}", step.step_id.as_str()))?;
-        let child_session_ref = child_session_ref(&request.task_id, &step.step_id, &child_task_id)?;
+        let child_session_ref = child_session_ref(&task.task_id, &step.step_id, &child_task_id)?;
         append_child_session(
             parent_session,
             handler,
-            request,
+            &task,
             plan_version,
-            step,
+            &step,
             &child_task_id,
             &child_session_ref,
             TaskChildSessionStatus::Started,
@@ -571,15 +690,17 @@ impl SequentialTaskOrchestrator {
         let mut route_handler = TaskApprovalRouteHandler {
             inner: approval_handler,
             parent_session,
-            request,
+            request: &task,
             plan_version,
-            step,
+            step: &step,
             child_session_ref: &child_session_ref,
         };
         let agent = match step.role {
             AgentRole::SubagentRead => &self.subagent_read,
             AgentRole::SubagentWrite => &self.subagent_write,
-            AgentRole::Planner | AgentRole::Executor => &self.executor,
+            AgentRole::Planner | AgentRole::Executor => {
+                bail!("task child session runner requires a subagent role")
+            }
         };
         let output = match agent
             .run_with_approval_input(
@@ -596,9 +717,9 @@ impl SequentialTaskOrchestrator {
                 append_child_session(
                     route_handler.parent_session,
                     handler,
-                    request,
+                    &task,
                     plan_version,
-                    step,
+                    &step,
                     &child_task_id,
                     &child_session_ref,
                     TaskChildSessionStatus::Failed,
@@ -616,21 +737,19 @@ impl SequentialTaskOrchestrator {
         append_child_session(
             route_handler.parent_session,
             handler,
-            request,
+            &task,
             plan_version,
-            step,
+            &step,
             &child_task_id,
             &child_session_ref,
             status,
             summary_hash,
         )?;
-        Ok(step_output)
+        Ok(TaskChildSessionRunOutput {
+            final_text: step_output.final_text,
+            outcome: step_output.outcome,
+        })
     }
-}
-
-struct StepRunOutput {
-    final_text: String,
-    outcome: AgentRunOutcome,
 }
 
 struct TaskApprovalRouteHandler<'a, A> {

@@ -88,8 +88,9 @@ pub use task::{
     task_plan_update_tool_spec,
 };
 pub use task_orchestrator::{
-    SequentialTaskOrchestrator, SequentialTaskRequest, SequentialTaskRunOutput,
-    SequentialTaskStepOutput,
+    LegacyTaskChildSessionRunner, SequentialTaskOrchestrator, SequentialTaskRequest,
+    SequentialTaskRunOutput, SequentialTaskStepOutput, TaskChildSessionRunOutput,
+    TaskChildSessionRunRequest, TaskChildSessionRunner,
 };
 pub use terminal_task::{
     TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection,

@@ -485,6 +485,9 @@ fn provider_capability_view_uses_provider_neutral_rows() {
             "structured_output",
             "assistant_prefix_seed",
             "background_tasks",
+            "agent_background_resume",
+            "agent_thread_usage",
+            "agent_result_replay",
             "response_handles",
             "cache_reporting",
             "system_fingerprint",
@@ -502,6 +505,9 @@ fn provider_capability_view_uses_provider_neutral_rows() {
             .iter()
             .any(|row| { row.key == "reasoning_effort" && row.status.as_str() == "unsupported" })
     );
+    assert!(view.rows.iter().any(|row| {
+        row.key == "agent_background_resume" && row.status.as_str() == "unsupported"
+    }));
     assert!(provider_capabilities_for_name("unknown").is_none());
 }
 
@@ -521,6 +527,9 @@ fn provider_capability_view_projects_every_capability_field() {
             supports_structured_output: true,
             supports_assistant_prefix_seed: true,
             supports_schema_constrained_tools: true,
+            supports_agent_background_resume: false,
+            supports_agent_thread_usage: false,
+            supports_agent_result_replay: false,
             supports_infill_completion: true,
             supports_system_fingerprint: true,
             tool_name_max_chars: 48,

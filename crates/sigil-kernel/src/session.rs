@@ -42,6 +42,7 @@ use crate::{
 
 /// Append-only session log entry stored in the durable JSONL session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // Keep the durable JSONL shape unboxed across control variants.
 #[serde(rename_all = "snake_case")]
 pub enum SessionLogEntry {
     #[serde(alias = "User")]
@@ -81,6 +82,7 @@ pub struct MemorySnapshot {
 
 /// Control-plane state that must survive resume and remain outside model-facing chat history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // Boxing variants would churn append-only control projection matches.
 #[serde(rename_all = "snake_case")]
 pub enum ControlEntry {
     #[serde(alias = "SessionIdentity")]

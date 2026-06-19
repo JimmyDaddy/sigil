@@ -71,6 +71,18 @@ pub(super) fn run_worker_loop<P>(
     let mut next_run_id = 1_u64;
     let mut discarded_run_ids = BTreeSet::new();
     let mut pending_mcp_refreshes = BTreeSet::new();
+    let agent_supervisor = match sigil_runtime::AgentProfileRegistry::from_root_config(&root_config)
+    {
+        Ok(registry) => sigil_runtime::AgentSupervisor::new(
+            registry,
+            sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
+            provider_capabilities.clone(),
+        ),
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+            return;
+        }
+    };
 
     loop {
         while let Ok(event) = mcp_event_rx.try_recv() {
@@ -466,6 +478,7 @@ pub(super) fn run_worker_loop<P>(
                         root_config: root_config.clone(),
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
+                        agent_supervisor: agent_supervisor.clone(),
                         task_result_tx: task_result_tx.clone(),
                         approval_rx,
                         handler,
@@ -544,6 +557,7 @@ pub(super) fn run_worker_loop<P>(
                         root_config: root_config.clone(),
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
+                        agent_supervisor: agent_supervisor.clone(),
                         task_result_tx: task_result_tx.clone(),
                         approval_rx,
                         handler,
@@ -622,6 +636,7 @@ pub(super) fn run_worker_loop<P>(
                         root_config: root_config.clone(),
                         options: options.clone(),
                         base_registry: agent.tool_registry().clone(),
+                        agent_supervisor: agent_supervisor.clone(),
                         task_result_tx: task_result_tx.clone(),
                         approval_rx,
                         handler,
@@ -1050,6 +1065,7 @@ struct TaskRunSpawn {
     root_config: RootConfig,
     options: AgentRunOptions,
     base_registry: ToolRegistry,
+    agent_supervisor: sigil_runtime::AgentSupervisor,
     task_result_tx: mpsc::Sender<RunTaskResult>,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: ChannelEventHandler,
@@ -1067,6 +1083,7 @@ struct TaskContinueSpawn {
     root_config: RootConfig,
     options: AgentRunOptions,
     base_registry: ToolRegistry,
+    agent_supervisor: sigil_runtime::AgentSupervisor,
     task_result_tx: mpsc::Sender<RunTaskResult>,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: ChannelEventHandler,
@@ -1086,6 +1103,7 @@ struct SkillChildRunSpawn {
     root_config: RootConfig,
     options: AgentRunOptions,
     base_registry: ToolRegistry,
+    agent_supervisor: sigil_runtime::AgentSupervisor,
     task_result_tx: mpsc::Sender<RunTaskResult>,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: ChannelEventHandler,
@@ -1093,7 +1111,7 @@ struct SkillChildRunSpawn {
 }
 
 struct TaskRoleRuntime {
-    orchestrator: SequentialTaskOrchestrator,
+    orchestrator: SequentialTaskOrchestrator<sigil_runtime::AgentSupervisorTaskChildRunner>,
     planner_options: AgentRunOptions,
     executor_options: AgentRunOptions,
     subagent_read_options: AgentRunOptions,
@@ -1115,6 +1133,7 @@ fn spawn_task_run(
             root_config,
             options,
             base_registry,
+            agent_supervisor,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -1129,6 +1148,7 @@ fn spawn_task_run(
                 root_config,
                 options,
                 base_registry,
+                agent_supervisor,
                 approval_rx,
                 handler: &mut handler,
             },
@@ -1158,6 +1178,7 @@ fn spawn_task_continue(
             root_config,
             options,
             base_registry,
+            agent_supervisor,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -1173,6 +1194,7 @@ fn spawn_task_continue(
                 root_config,
                 options,
                 base_registry,
+                agent_supervisor,
                 approval_rx,
                 handler: &mut handler,
             },
@@ -1204,6 +1226,7 @@ fn spawn_skill_child_run(
             root_config,
             options,
             base_registry,
+            agent_supervisor,
             task_result_tx,
             approval_rx,
             mut handler,
@@ -1221,6 +1244,7 @@ fn spawn_skill_child_run(
                 root_config,
                 options,
                 base_registry,
+                agent_supervisor,
                 approval_rx,
                 handler: &mut handler,
             },
@@ -1241,6 +1265,7 @@ struct TaskRunOrchestration<'a> {
     root_config: RootConfig,
     options: AgentRunOptions,
     base_registry: ToolRegistry,
+    agent_supervisor: sigil_runtime::AgentSupervisor,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
 }
@@ -1255,6 +1280,7 @@ struct SkillChildRunOrchestration<'a> {
     root_config: RootConfig,
     options: AgentRunOptions,
     base_registry: ToolRegistry,
+    agent_supervisor: sigil_runtime::AgentSupervisor,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
 }
@@ -1267,6 +1293,7 @@ struct TaskContinueOrchestration<'a> {
     root_config: RootConfig,
     options: AgentRunOptions,
     base_registry: ToolRegistry,
+    agent_supervisor: sigil_runtime::AgentSupervisor,
     approval_rx: mpsc::Receiver<ApprovalSignal>,
     handler: &'a mut ChannelEventHandler,
 }
@@ -1282,6 +1309,7 @@ async fn run_task_orchestration(
         root_config,
         options,
         base_registry,
+        agent_supervisor,
         approval_rx,
         handler,
     } = request;
@@ -1291,7 +1319,7 @@ async fn run_task_orchestration(
         executor_options,
         subagent_read_options,
         subagent_write_options,
-    } = build_task_role_runtime(&root_config, &options, &base_registry)?;
+    } = build_task_role_runtime(&root_config, &options, &base_registry, agent_supervisor)?;
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     orchestrator
         .run(
@@ -1326,6 +1354,7 @@ async fn continue_task_orchestration(
         root_config,
         options,
         base_registry,
+        agent_supervisor,
         approval_rx,
         handler,
     } = request;
@@ -1335,7 +1364,7 @@ async fn continue_task_orchestration(
         subagent_read_options,
         subagent_write_options,
         ..
-    } = build_task_role_runtime(&root_config, &options, &base_registry)?;
+    } = build_task_role_runtime(&root_config, &options, &base_registry, agent_supervisor)?;
     let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
     orchestrator
         .continue_run(
@@ -1371,6 +1400,7 @@ async fn run_skill_child_orchestration(
         root_config,
         options,
         base_registry,
+        agent_supervisor,
         approval_rx,
         handler,
     } = request;
@@ -1386,6 +1416,7 @@ async fn run_skill_child_orchestration(
         &base_registry,
         &loaded.descriptor,
         child_role,
+        agent_supervisor,
     )?;
     session
         .append_control(ControlEntry::SkillLoaded(loaded.entry))
@@ -1425,7 +1456,9 @@ fn build_task_role_runtime(
     root_config: &RootConfig,
     options: &AgentRunOptions,
     base_registry: &ToolRegistry,
+    agent_supervisor: sigil_runtime::AgentSupervisor,
 ) -> std::result::Result<TaskRoleRuntime, String> {
+    agent_supervisor.reset_turn_budget();
     let planner_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Planner)
         .map_err(|error| format!("{error:#}"))?;
     let executor_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Executor)
@@ -1456,12 +1489,16 @@ fn build_task_role_runtime(
     .into_registry();
     let workspace_root = options.workspace_root.clone();
     let interaction_mode = options.interaction_mode;
+    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new(
+        agent_supervisor,
+        Agent::new(subagent_read_provider, subagent_read_registry),
+        Agent::new(subagent_write_provider, subagent_write_registry),
+    );
     Ok(TaskRoleRuntime {
-        orchestrator: SequentialTaskOrchestrator::new(
+        orchestrator: SequentialTaskOrchestrator::new_with_child_runner(
             Agent::new(planner_provider, planner_registry),
             Agent::new(executor_provider, executor_registry),
-            Agent::new(subagent_read_provider, subagent_read_registry),
-            Agent::new(subagent_write_provider, subagent_write_registry),
+            child_runner,
         ),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,
@@ -1496,7 +1533,9 @@ fn build_skill_child_role_runtime(
     base_registry: &ToolRegistry,
     skill: &SkillDescriptor,
     child_role: AgentRole,
+    agent_supervisor: sigil_runtime::AgentSupervisor,
 ) -> std::result::Result<TaskRoleRuntime, String> {
+    agent_supervisor.reset_turn_budget();
     let planner_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Planner)
         .map_err(|error| format!("{error:#}"))?;
     let executor_provider = sigil_runtime::build_role_provider(root_config, AgentRole::Executor)
@@ -1541,12 +1580,16 @@ fn build_skill_child_role_runtime(
     .into_registry();
     let workspace_root = options.workspace_root.clone();
     let interaction_mode = options.interaction_mode;
+    let child_runner = sigil_runtime::AgentSupervisorTaskChildRunner::new(
+        agent_supervisor,
+        Agent::new(subagent_read_provider, subagent_read_registry),
+        Agent::new(subagent_write_provider, subagent_write_registry),
+    );
     Ok(TaskRoleRuntime {
-        orchestrator: SequentialTaskOrchestrator::new(
+        orchestrator: SequentialTaskOrchestrator::new_with_child_runner(
             Agent::new(planner_provider, planner_registry),
             Agent::new(executor_provider, executor_registry),
-            Agent::new(subagent_read_provider, subagent_read_registry),
-            Agent::new(subagent_write_provider, subagent_write_registry),
+            child_runner,
         ),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,

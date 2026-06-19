@@ -87,6 +87,12 @@ pub struct ProviderCapabilities {
     pub supports_structured_output: bool,
     pub supports_assistant_prefix_seed: bool,
     pub supports_schema_constrained_tools: bool,
+    #[serde(default)]
+    pub supports_agent_background_resume: bool,
+    #[serde(default)]
+    pub supports_agent_thread_usage: bool,
+    #[serde(default)]
+    pub supports_agent_result_replay: bool,
     pub supports_infill_completion: bool,
     pub supports_system_fingerprint: bool,
     pub tool_name_max_chars: usize,

@@ -34,9 +34,20 @@ use sigil_provider_openai_compat::{
     OpenAiCompatibleProviderConfig, openai_compatible_capabilities,
 };
 
+pub mod agent_profile_registry;
+pub mod agent_supervisor;
 pub mod doctor;
 pub mod plugins;
 pub mod skills;
+pub use agent_profile_registry::{
+    AgentProfileIndexContext, AgentProfileRegistry, BUILD_PROFILE_ID, EXPLORE_PROFILE_ID,
+    ModelVisibleAgentIndex, ModelVisibleAgentIndexEntry, PLAN_PROFILE_ID, ResolvedAgentProfile,
+    WORKER_PROFILE_ID,
+};
+pub use agent_supervisor::{
+    AgentBudgetPolicy, AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart,
+    AgentTaskChildThread, ForegroundCancelImpact,
+};
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
     PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
@@ -191,6 +202,24 @@ pub fn provider_capability_view(
         "Background tasks",
         status_for_bool(capabilities.supports_background_tasks),
         "provider-managed async work",
+    ));
+    rows.push(capability_row(
+        "agent_background_resume",
+        "Agent background resume",
+        status_for_bool(capabilities.supports_agent_background_resume),
+        "provider-backed child thread resume",
+    ));
+    rows.push(capability_row(
+        "agent_thread_usage",
+        "Agent thread usage",
+        status_for_bool(capabilities.supports_agent_thread_usage),
+        "per-agent usage replay",
+    ));
+    rows.push(capability_row(
+        "agent_result_replay",
+        "Agent result replay",
+        status_for_bool(capabilities.supports_agent_result_replay),
+        "provider-backed child result replay",
     ));
     rows.push(capability_row(
         "response_handles",
