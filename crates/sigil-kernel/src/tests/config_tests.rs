@@ -5,7 +5,9 @@ use super::{
     McpServerStartup, McpTrustClass, RootConfig, default_user_config_dir, default_user_config_path,
     preferred_config_path, resolve_workspace_root,
 };
-use crate::{AgentConfig, AgentRole, ApprovalMode, TaskConfig, TaskMode, WorkspaceConfig};
+use crate::{
+    AgentConfig, AgentRole, ApprovalMode, SkillConfig, TaskConfig, TaskMode, WorkspaceConfig,
+};
 
 #[test]
 fn compaction_threshold_status_follows_configured_window() {
@@ -46,6 +48,39 @@ context_window_tokens = 128000
 }
 
 #[test]
+fn skill_config_defaults_and_toml_overrides_are_stable() {
+    let defaults = SkillConfig::default();
+    assert!(defaults.enabled);
+    assert_eq!(defaults.workspace_dir, ".sigil/skills");
+    assert_eq!(defaults.workspace_agents_dir, ".sigil/agents");
+    assert!(defaults.user_skills);
+    assert!(defaults.user_agents);
+    assert_eq!(defaults.compatibility_sources, vec!["claude"]);
+
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[skills]
+enabled = false
+workspace_dir = "skills"
+workspace_agents_dir = "agents"
+user_skills = false
+user_agents = false
+compatibility_sources = ["opencode"]
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("skills config should load");
+    assert!(!config.skills.enabled);
+    assert_eq!(config.skills.workspace_dir, "skills");
+    assert_eq!(config.skills.workspace_agents_dir, "agents");
+    assert!(!config.skills.user_skills);
+    assert!(!config.skills.user_agents);
+    assert_eq!(config.skills.compatibility_sources, vec!["opencode"]);
+}
+
+#[test]
 fn preferred_config_path_uses_explicit_or_local_file() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let explicit = temp.path().join("explicit.toml");
@@ -79,6 +114,7 @@ fn root_config_save_roundtrips() {
         },
         permission: Default::default(),
         memory: Default::default(),
+        skills: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
@@ -109,6 +145,7 @@ fn root_config_save_handles_paths_without_parent() {
         },
         permission: Default::default(),
         memory: Default::default(),
+        skills: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
@@ -589,6 +626,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         },
         permission: Default::default(),
         memory: Default::default(),
+        skills: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),

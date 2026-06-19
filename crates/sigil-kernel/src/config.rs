@@ -28,6 +28,8 @@ pub struct RootConfig {
     #[serde(default)]
     pub memory: MemoryConfig,
     #[serde(default)]
+    pub skills: SkillConfig,
+    #[serde(default)]
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub code_intelligence: CodeIntelligenceConfig,
@@ -444,6 +446,37 @@ impl Default for MemoryConfig {
     }
 }
 
+/// Skill discovery configuration shared by runtime entrypoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct SkillConfig {
+    #[serde(default = "default_skill_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_skill_workspace_dir")]
+    pub workspace_dir: String,
+    #[serde(default = "default_skill_workspace_agents_dir")]
+    pub workspace_agents_dir: String,
+    #[serde(default = "default_skill_user_skills")]
+    pub user_skills: bool,
+    #[serde(default = "default_skill_user_agents")]
+    pub user_agents: bool,
+    #[serde(default = "default_skill_compatibility_sources")]
+    pub compatibility_sources: Vec<String>,
+}
+
+impl Default for SkillConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_skill_enabled(),
+            workspace_dir: default_skill_workspace_dir(),
+            workspace_agents_dir: default_skill_workspace_agents_dir(),
+            user_skills: default_skill_user_skills(),
+            user_agents: default_skill_user_agents(),
+            compatibility_sources: default_skill_compatibility_sources(),
+        }
+    }
+}
+
 /// Context compaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -722,6 +755,30 @@ fn default_lsp_startup_timeout_ms() -> u64 {
 
 fn default_memory_enabled() -> bool {
     true
+}
+
+fn default_skill_enabled() -> bool {
+    true
+}
+
+fn default_skill_workspace_dir() -> String {
+    ".sigil/skills".to_owned()
+}
+
+fn default_skill_workspace_agents_dir() -> String {
+    ".sigil/agents".to_owned()
+}
+
+fn default_skill_user_skills() -> bool {
+    true
+}
+
+fn default_skill_user_agents() -> bool {
+    true
+}
+
+fn default_skill_compatibility_sources() -> Vec<String> {
+    vec!["claude".to_owned()]
 }
 
 fn default_compaction_enabled() -> bool {

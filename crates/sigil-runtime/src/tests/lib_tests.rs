@@ -53,6 +53,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         },
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
+        skills: Default::default(),
         compaction: sigil_kernel::CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
         terminal: Default::default(),

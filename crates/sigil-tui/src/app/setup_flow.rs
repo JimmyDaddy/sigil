@@ -306,6 +306,7 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
         },
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
+        skills: Default::default(),
         compaction: CompactionConfig {
             enabled: true,
             soft_threshold_ratio: 0.5,

@@ -33,6 +33,7 @@ fn test_config() -> RootConfig {
         },
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
+        skills: Default::default(),
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),

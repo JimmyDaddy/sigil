@@ -35,6 +35,11 @@ use sigil_provider_openai_compat::{
 };
 
 pub mod doctor;
+pub mod skills;
+pub use skills::{
+    SkillDiscoveryReport, SkillDiscoveryWarning, SkillDiscoveryWarningKind, discover_skill_index,
+    discover_skill_index_with_user_dir, namespaced_plugin_skill_id,
+};
 
 /// Builds the configured model provider for runtime entrypoints.
 ///

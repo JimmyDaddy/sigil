@@ -30,6 +30,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
         },
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: false },
+        skills: Default::default(),
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
