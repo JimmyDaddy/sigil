@@ -36,7 +36,7 @@ This page separates what users can rely on today from what is experimental, limi
 | MCP lazy startup | Lazy servers are configured but do not register fake tools until activated. |
 | External directories | Disabled by default and should stay narrow and approval-backed. |
 | Headless automation | `sigil run` is useful for scripts but cannot show interactive approval modals. |
-| HTTP/SSE adapter | `sigil serve` validates localhost/token defaults and prints a preflight plan; HTTP routing and listener startup remain future work. |
+| HTTP/SSE adapter | `sigil serve` validates local bind/token defaults and prints a preflight plan; HTTP routing and listener startup remain future work. |
 
 ## Future Work
 

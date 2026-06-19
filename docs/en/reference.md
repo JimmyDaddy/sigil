@@ -13,14 +13,22 @@ This page collects the user-facing commands, keys, paths, and environment variab
 | Submit prompt or selected slash command | `Enter` |
 | Scroll transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | Cycle default permission mode | `Shift-Tab` |
+| Insert composer newline | `Shift-Enter`, `Alt-Enter`, `Ctrl-J` |
+| Move composer cursor by line or character | `Ctrl-A/E`, `Ctrl-B/F`, `Left/Right` |
+| Move composer cursor by word | `Alt-B/F`, `Ctrl-Left/Right` |
+| Delete composer text | `Backspace/Delete`, `Ctrl-H`, `Ctrl-W`, `Ctrl/Alt-Backspace`, `Ctrl/Alt-Delete` |
+| Kill/yank composer line tail | `Ctrl-K/Y` |
+| Restore last draft cleared with Esc | `Ctrl-Z` |
 | Cancel current run | `Ctrl-C` |
 | Leave overlay or clear activity focus | `Esc` |
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
+| Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A` |
 | Expand or collapse thinking / activity | `Ctrl-T` |
 | Run code diagnostics for changed source files | `Alt-D` |
+| Cancel focused running terminal task | `Alt-X` |
 
-When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input.
+When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input. If child agents exist, `Down` from the last composer input row focuses the composer agent panel. `Ctrl-Z` is a single draft restore for text cleared by `Esc`, not a general undo stack.
 
 ## Slash Commands
 
@@ -30,6 +38,8 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/doctor` | Run local setup diagnostics inside the transcript |
 | `/new` | Start a fresh session with the current provider and model |
 | `/resume` | Select and restore a previous session |
+| `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
+| `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
 | `/plan <task>` | Create a durable plan and execute the task step by step |
 | `/plan continue` | Continue the latest planned task without extra guidance |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
@@ -39,7 +49,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 
 Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 
-`/model`, `/effort`, and `/resume` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute.
+`/model`, `/effort`, `/resume`, and `/agent` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
 
 ## CLI Commands
 
@@ -48,7 +58,7 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 | `sigil` | Open the TUI in the current workspace |
 | `sigil doctor` | Run local diagnostics |
 | `sigil run "<task>"` | Run a non-interactive automation task |
-| `sigil serve` | Validate HTTP/SSE adapter localhost/token defaults; HTTP routing is not implemented yet |
+| `sigil serve` | Validate HTTP/SSE adapter local bind/token defaults; HTTP routing is not implemented yet |
 | `sigil --version` | Print the installed version |
 | `sigil --config <path> doctor` | Run diagnostics with an explicit config file |
 

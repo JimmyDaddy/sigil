@@ -74,6 +74,7 @@ TUI 当前保持 chat-first：
 - 窄终端自动收起 info rail，优先保证 chat/composer 可用。
 - 启动恢复旧会话时，会把完整 scrollback 分批 seed 到 terminal scrollback，避免长会话集中在单帧重放。
 - prompt 提交后 composer 清空并保持可见。
+- composer 支持常见 readline 风格编辑键，包括当前行首/尾、字符/词移动、词删除、`Ctrl-K/Y` kill/yank、`Shift-Enter` / `Alt-Enter` / `Ctrl-J` 换行，以及 `Ctrl-Z` 恢复最近一次被 `Esc` 清空的非空 draft；draft restore 是运行态编辑状态，不写入 durable session/control log。
 - 主屏不要求用户用 `Tab` 在卡片间切焦点；`Shift-Tab` 轮换并持久化默认 `allow / ask / deny` 权限模式。
 
 运行态提示只做渲染层投影，不写回 durable transcript。live phase 只保留在运行态和事件流里。
@@ -133,7 +134,7 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 
 ## Task Planning 当前实现
 
-计划任务通过 TUI `/plan <任务>` 进入；当前 session 存在未完成 task 时，普通 composer 输入会转成 `ContinueTask` 尝试，并作为 continuation guidance 注入本次 executor/subagent step prompt。没有未完成 task context 时，普通输入仍走 chat-first。普通 chat 没有可直接调用的 `task` / `subagent` launcher；如果模型误调这些工具，agent loop 会返回指导性 tool result，要求通过 `/plan` 和 `task_plan_update` step role 表达 delegated work，而不会伪造子任务执行。worker protocol 使用 `SubmitTask` / `ContinueTask` 命令和 `TaskRunStarted` / `TaskRunFinished` 消息；task run / step / child-session control entry 也会通过实时 `RunEvent::Control` 同步到 TUI。Info rail 从 durable task control entries 渲染 task 状态、最新 plan 版本、完成进度、当前或最近失败步骤，以及当前 plan 的步骤摘要。步骤摘要使用状态化 marker 和行文本颜色：running 高亮，completed 绿色，failed/blocked 红色，cancelled/interrupted 金色，pending 弱化。
+计划任务通过 TUI `/plan <任务>` 进入；当前 session 存在未完成 task 时，普通 composer 输入会转成 `ContinueTask` 尝试，并作为 continuation guidance 注入本次 executor/subagent step prompt。没有未完成 task context 时，普通输入仍走 chat-first。普通 chat 没有可直接调用的 `task` / `subagent` launcher；如果模型误调这些工具，agent loop 会返回指导性 tool result，要求通过 `/plan` 和 `task_plan_update` step role 表达 delegated work，而不会伪造子任务执行。worker protocol 使用 `SubmitTask` / `ContinueTask` 命令和 `TaskRunStarted` / `TaskRunFinished` 消息；task run / step / child-session control entry 也会通过实时 `RunEvent::Control` 同步到 TUI。Info rail 从 durable task control entries 渲染 task 状态、最新 plan 版本、完成进度、当前或最近失败步骤，以及当前 plan 的步骤摘要；`Agents` 区会列出 `main` 和具体 child agent，存在 child agent 时 composer 会渲染紧凑 agent 面板，输入光标位于 composer 最后一行时 `Down` 聚焦该面板，`Up/Down` 选择 agent 行，`Enter` 切换可见 transcript，`Alt-A` / `Shift-Alt-A` 也可在可见 agent transcript 间循环切换，`/agent <main|child-id>` 可通过 slash selector 精确选择，`/agent rename <child-id|current> <name>` 会追加 `TaskChildSessionDisplayName` control entry 作为 presentation-only 展示名覆盖；展示名优先级是 persisted rename、plan step `display_name`、最后退回 role+ordinal（如 `read 1` / `write 1`）。选择 child agent 后主聊天区切到对应 child session transcript，并保留 sticky breadcrumb。步骤摘要使用状态化 marker 和行文本颜色：running 高亮，completed 绿色，failed/blocked 红色，cancelled/interrupted 金色，pending 弱化。
 
 `sigil-kernel::SequentialTaskOrchestrator` 先运行 planner role，通过 internal `task_plan_update` tool 接收 plan update，再顺序执行 steps。Executor step 在 parent session 中运行，但 step context 作为 transient request context 注入，不会变成普通 user history。Subagent read/write step 在 child session 中运行，parent session 记录 child-session lifecycle link，并为 child tool approval 与 MCP elicitation 写 route 摘要。
 

@@ -64,7 +64,9 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Need | Use |
 | --- | --- |
 | Ask or edit normally | Type in the composer |
+| Edit long composer drafts | `Ctrl-A/E`, `Alt-B/F`, `Ctrl-K/Y`, `Ctrl-Z` |
 | Plan a larger task | `/plan <task>` |
+| Switch or rename visible parent/child agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A`, `/agent`, or `/agent rename <child-id|current> <name>` |
 | Start or switch sessions | `/new`, `/resume` |
 | Change common settings | `/config` |
 | Diagnose setup/auth/MCP/LSP | `/doctor` |

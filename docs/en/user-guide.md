@@ -40,13 +40,15 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 | Open slash command selector | `/` |
 | Scroll transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | Cycle default permission mode | `Shift-Tab` |
+| Edit composer text | `Ctrl-A/E`, `Ctrl-B/F`, `Alt-B/F`, `Ctrl-K/Y`, `Ctrl-Z` |
 | Cancel current run | `Ctrl-C` |
 | Leave overlay or clear activity focus | `Esc` |
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
+| Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A` / `Shift-Alt-A` |
 | Expand or collapse thinking / activity | `Ctrl-T` |
 
-When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input.
+When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input. `Shift-Enter`, `Alt-Enter`, and `Ctrl-J` insert a newline. `Ctrl-Z` restores the last non-empty draft cleared with `Esc`; it is a single draft restore, not a general undo stack.
 
 Mouse mode supports transcript scrolling, composer cursor placement, approval controls, slash candidates, setup/config rows, session selection, activity selection, and tool card header or hidden-preview expand/collapse when your terminal supports mouse capture. Drag across transcript text to select by displayed columns, then press `Ctrl-C` to copy the selection through OSC52 when clipboard integration is enabled.
 
@@ -61,6 +63,8 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/config` | Open the TUI config panel |
 | `/doctor` | Run local setup diagnostics with a summary and remediation list |
 | `/resume` | Select and restore a previous session |
+| `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
+| `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
 | `/plan <task>` | Create a durable plan and execute the task step by step |
 | `/plan continue` | Continue the latest planned task without extra guidance |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
@@ -68,7 +72,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/compact` | Manually compact the provider-visible context for the current session |
 | `/quit` | Quit the TUI |
 
-`/model`, `/effort`, and `/resume` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute.
+`/model`, `/effort`, `/resume`, and `/agent` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
 
 ## Config Panel
 
@@ -86,7 +90,7 @@ Planned tasks use role-specific agents:
 - Executor: performs normal workspace changes for executor steps.
 - Subagent read/write: runs delegated steps in child sessions and links the child session back to the parent task.
 
-Task runs, plans, step status, child-session links, and subagent approval route summaries are stored as append-only control entries. The info rail shows the latest task status, plan version, and current step from that durable state.
+Task runs, plans, step status, child-session links, and subagent approval route summaries are stored as append-only control entries. The info rail shows the latest task status, plan version, and current step from that durable state. When child agents exist, the composer shows a compact agent panel under the input with each agent's status. Press `Down` from the last composer input row to focus that panel, use `Up/Down` to choose an agent, and press `Enter` to switch the main chat area. `Alt-A` / `Shift-Alt-A` still cycle the visible transcript between `main` and concrete child agents, and `/agent` picks a specific target. Child agent display names come from explicit plan metadata, then persisted `/agent rename` overrides, and otherwise fall back to generic role labels such as `read 1` or `write 1`.
 
 Session restore only rebuilds the visible task state. It does not automatically continue unfinished work. Type the next instruction in the composer to continue the latest task with guidance, or use `/plan continue` to continue without extra guidance.
 

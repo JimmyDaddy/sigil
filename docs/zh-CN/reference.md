@@ -13,14 +13,22 @@
 | 提交 prompt 或已选 slash command | `Enter` |
 | 滚动 transcript | `PageUp/PageDown`, `Ctrl-U/D`, `Ctrl-Home/End` |
 | 切换默认 permission mode | `Shift-Tab` |
+| 插入 composer 换行 | `Shift-Enter`、`Alt-Enter`、`Ctrl-J` |
+| 按行或字符移动 composer 光标 | `Ctrl-A/E`、`Ctrl-B/F`、`Left/Right` |
+| 按词移动 composer 光标 | `Alt-B/F`、`Ctrl-Left/Right` |
+| 删除 composer 文本 | `Backspace/Delete`、`Ctrl-H`、`Ctrl-W`、`Ctrl/Alt-Backspace`、`Ctrl/Alt-Delete` |
+| kill/yank composer 行尾 | `Ctrl-K/Y` |
+| 恢复最近一次被 Esc 清空的 draft | `Ctrl-Z` |
 | 取消当前 run | `Ctrl-C` |
 | 离开 overlay 或清除 activity focus | `Esc` |
 | 聚焦最新 activity | `Ctrl-G` |
 | 在 activities 间移动 | `Alt-J` / `Alt-K` |
+| 切换可见 agent transcript | composer agent 面板（`Down`、`Up/Down`、`Enter`）、`Alt-A`、`Shift-Alt-A` |
 | 展开或折叠 thinking / activity | `Ctrl-T` |
 | 对 changed source files 运行 code diagnostics | `Alt-D` |
+| 取消聚焦的运行中 terminal task | `Alt-X` |
 
-当 composer 聚焦时，`Up/Down` 会优先处理 prompt history 或 multiline input 内的光标移动。
+当 composer 聚焦时，`Up/Down` 会优先处理 prompt history 或 multiline input 内的光标移动。如果存在 child agent，输入光标位于 composer 最后一行时按 `Down` 会聚焦 composer agent 面板。`Ctrl-Z` 只恢复被 `Esc` 清空的单个 draft，不是通用 undo 栈。
 
 ## Slash Commands
 
@@ -30,6 +38,8 @@
 | `/doctor` | 在 transcript 中运行本地 setup diagnostics |
 | `/new` | 使用当前 provider 和 model 开始新 session |
 | `/resume` | 选择并恢复历史 session |
+| `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
+| `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
 | `/plan <task>` | 创建 durable plan，并分步骤执行任务 |
 | `/plan continue` | 不带额外 guidance 继续最新 planned task |
 | `/model <flash|pro|id>` | 切换下一轮 run 的 model，并开始新 session |
@@ -39,7 +49,7 @@
 
 Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。
 
-`/model`、`/effort` 和 `/resume` 会展示候选项。使用 `Up/Down` 选择，`Tab` 接受，`Enter` 执行。
+`/model`、`/effort`、`/resume` 和 `/agent` 会展示候选项。使用 `Up/Down` 选择，`Tab` 接受，`Enter` 执行。`/agent rename` 会在输入新名字前展示 child agent 候选项。
 
 ## CLI Commands
 
@@ -48,7 +58,7 @@ Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应
 | `sigil` | 在当前 workspace 打开 TUI |
 | `sigil doctor` | 运行本地诊断 |
 | `sigil run "<task>"` | 运行非交互自动化任务 |
-| `sigil serve` | 校验 HTTP/SSE adapter 的 localhost/token 默认值；HTTP routing 尚未实现 |
+| `sigil serve` | 校验 HTTP/SSE adapter 的 local bind/token 默认值；HTTP routing 尚未实现 |
 | `sigil --version` | 打印安装版本 |
 | `sigil --config <path> doctor` | 使用显式 config 文件运行诊断 |
 
