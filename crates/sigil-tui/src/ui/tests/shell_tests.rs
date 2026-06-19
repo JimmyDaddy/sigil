@@ -129,6 +129,24 @@ fn render_main_screen_shows_keyboard_help_modal() -> anyhow::Result<()> {
 }
 
 #[test]
+fn render_main_screen_keeps_notice_label_visible() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::Notice(
+        "permission read_file subject=crates/sigil-kernel/src/skill.rs mode=allow".to_owned(),
+    ))?;
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("notice"));
+    assert!(rendered.contains("permission read_file"));
+    assert!(!rendered.contains("notice info"));
+    Ok(())
+}
+
+#[test]
 fn render_main_screen_collapses_info_rail_on_narrow_terminals() -> anyhow::Result<()> {
     let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let backend = TestBackend::new(80, 24);

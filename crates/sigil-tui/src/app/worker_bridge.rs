@@ -153,7 +153,7 @@ impl AppState {
                 self.modal_state = None;
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.last_notice = Some("agent idle".to_owned());
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
@@ -181,7 +181,7 @@ impl AppState {
                 self.modal_state = None;
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.last_notice = Some(notice);
                 self.sync_current_session_state(entries);
                 self.refresh_session_history();
@@ -205,7 +205,7 @@ impl AppState {
                 self.modal_state = None;
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.restore_session_view(
                     session_log_path,
                     provider_name,
@@ -249,7 +249,7 @@ impl AppState {
                 self.modal_state = None;
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
                     session_log_path,
@@ -273,7 +273,7 @@ impl AppState {
                 self.modal_state = None;
                 self.last_phase_marker = None;
                 self.finish_streaming_assistant_entry();
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.session_delta_stats = sigil_kernel::SessionStats::default();
                 self.restore_session_view(
                     session_log_path,
@@ -299,7 +299,7 @@ impl AppState {
                 self.modal_state = None;
                 self.last_phase_marker = None;
                 self.streaming_assistant_index = None;
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 match trigger {
                     CompactionTrigger::Manual => {
                         self.restore_session_view(
@@ -381,7 +381,7 @@ impl AppState {
                 self.modal_state = None;
                 self.last_phase_marker = None;
                 self.streaming_assistant_index = None;
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.refresh_usage_sidebar_cache();
                 let summary = summarize_error(&error);
                 self.last_notice = Some(summary.clone());
@@ -805,7 +805,7 @@ impl EventHandler for AppState {
             RunEvent::ToolCallStarted(call) => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
                 self.finish_streaming_assistant_entry();
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.push_phase_marker(format!("tool|{}", call.name));
                 self.push_event("tool:start", format!("{} {}", call.name, call.id));
             }
@@ -817,7 +817,7 @@ impl EventHandler for AppState {
             RunEvent::ToolCallCompleted(call) => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
                 self.finish_streaming_assistant_entry();
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.push_phase_marker(format!("tool|{}", call.name));
                 self.push_event("tool:complete", format!("{} {}", call.name, call.id));
             }
@@ -829,6 +829,7 @@ impl EventHandler for AppState {
             } => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
                 self.finish_streaming_assistant_entry();
+                self.finish_streaming_reasoning_entry();
                 if let Some(preview) = preview.as_ref() {
                     self.tool_preview_snapshots
                         .entry(call.id.clone())
@@ -891,7 +892,7 @@ impl EventHandler for AppState {
             }
             RunEvent::ToolResult(result) => {
                 self.run_phase = RunPhase::Tool(result.tool_name.clone());
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 self.push_phase_marker(format!("tool|{}", result.tool_name));
                 let status = if result.is_error() { "error" } else { "ok" };
                 self.apply_code_intelligence_tool_status(&result);
@@ -964,7 +965,7 @@ impl EventHandler for AppState {
                 self.run_phase = RunPhase::Streaming;
                 self.push_phase_marker("streaming".to_owned());
                 self.finish_streaming_assistant_entry();
-                self.streaming_reasoning_index = None;
+                self.finish_streaming_reasoning_entry();
                 if let Some(content) = message.content
                     && !content.is_empty()
                 {

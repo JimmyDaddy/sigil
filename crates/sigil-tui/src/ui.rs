@@ -22,7 +22,9 @@ pub use shell::render;
 
 pub use layout_snapshot::{LayoutMode, LayoutSnapshot};
 
-pub(crate) use timeline::{TimelineRenderOptions, render_timeline_entry_lines_with_options};
+pub(crate) use timeline::{
+    TimelineRenderOptions, render_timeline_entry_lines_with_options, thinking_has_collapsed_content,
+};
 pub(crate) use tool_card::tool_activity_view;
 
 pub(crate) use status_indicator::{

@@ -164,7 +164,7 @@ Use `/resume` to select a session. If a planned task is still unfinished, contin
 
 ## Context Usage Is High
 
-The info rail shows context usage. Sigil can compact the provider-visible context when thresholds are reached.
+The info rail shows the latest prompt usage reported by the provider. If the `ctx` line says the window is unavailable, set `fallback_context_window_tokens`; when soft or hard thresholds are reached, Sigil can compact the provider-visible context.
 
 Manual compaction:
 

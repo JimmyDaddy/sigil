@@ -401,6 +401,8 @@ impl AppState {
         self.recompute_compaction_status(false);
         self.timeline.clear();
         self.tool_activity_cache.clear();
+        self.expanded_thinking_entry_indices.clear();
+        self.collapsed_thinking_entry_indices.clear();
         self.events.clear();
         self.reset_scroll();
 
@@ -782,6 +784,11 @@ fn render_model_message_line(message: &ModelMessage) -> String {
             .map(|call| call.name.as_str())
             .collect::<Vec<_>>()
             .join(", ");
+        let content =
+            truncate_session_view_text(message.content.as_deref().unwrap_or_default(), 160);
+        if !content.is_empty() {
+            return format!("[{role}] {content} tool_calls [{names}]");
+        }
         return format!("[{role}] tool_calls [{names}]");
     }
 

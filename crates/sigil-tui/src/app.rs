@@ -144,6 +144,8 @@ pub struct AppState {
     compaction_config: CompactionConfig,
     memory_config: MemoryConfig,
     thinking_block_mode: ThinkingBlockMode,
+    expanded_thinking_entry_indices: BTreeSet<usize>,
+    collapsed_thinking_entry_indices: BTreeSet<usize>,
     selected_tool_activity_key: Option<String>,
     expanded_tool_activity_keys: BTreeSet<String>,
     collapsed_tool_activity_keys: BTreeSet<String>,
@@ -312,6 +314,8 @@ impl AppState {
             compaction_config: root_config.compaction.clone(),
             memory_config: root_config.memory.clone(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
+            expanded_thinking_entry_indices: BTreeSet::new(),
+            collapsed_thinking_entry_indices: BTreeSet::new(),
             selected_tool_activity_key: None,
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
@@ -433,6 +437,8 @@ impl AppState {
             compaction_config: CompactionConfig::default(),
             memory_config: MemoryConfig::default(),
             thinking_block_mode: ThinkingBlockMode::Collapsed,
+            expanded_thinking_entry_indices: BTreeSet::new(),
+            collapsed_thinking_entry_indices: BTreeSet::new(),
             selected_tool_activity_key: None,
             expanded_tool_activity_keys: BTreeSet::new(),
             collapsed_tool_activity_keys: BTreeSet::new(),
@@ -623,6 +629,8 @@ impl AppState {
         self.approval_diff_mode = ApprovalDiffMode::Full;
         self.approval_selected_action = ApprovalAction::Deny;
         self.selected_tool_activity_key = None;
+        self.expanded_thinking_entry_indices.clear();
+        self.collapsed_thinking_entry_indices.clear();
         self.expanded_tool_activity_keys.clear();
         self.collapsed_tool_activity_keys.clear();
         self.pending_terminal_cancel_confirmation = None;
@@ -795,14 +803,17 @@ impl AppState {
                 if key.modifiers.contains(KeyModifiers::CONTROL)
                     && self.pending_approval.is_none() =>
             {
-                if self.active_pane != PaneFocus::Activity && self.has_thinking_blocks() {
+                if self.active_pane != PaneFocus::Activity && self.has_collapsible_thinking_blocks()
+                {
                     self.toggle_thinking_block_mode();
                     return Ok(None);
                 }
                 if self.selected_tool_activity_key.is_some() && self.toggle_selected_tool_card() {
                     return Ok(None);
                 }
-                self.toggle_thinking_block_mode();
+                if self.has_collapsible_thinking_blocks() {
+                    self.toggle_thinking_block_mode();
+                }
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {}
             KeyCode::Char('z') | KeyCode::Char('Z')
@@ -1447,15 +1458,18 @@ impl AppState {
     }
 
     pub(crate) fn context_usage_line(&self) -> String {
-        match self.displayed_context_window_tokens() {
+        let resolved = self.resolved_context_window();
+        match resolved.tokens {
             Some(cap) if cap > 0 => format!(
-                "ctx: {}% · {} / {} tok",
+                "ctx: {}% · prompt {} / {} {} · {}",
                 self.context_usage_percent(cap),
                 format_token_compact(self.stats.last_prompt_tokens),
-                format_token_compact(cap as u64)
+                format_token_compact(cap as u64),
+                context_window_source_label(resolved.source),
+                self.context_usage_hint(cap)
             ),
             _ => format!(
-                "ctx: n/a · {} tok",
+                "ctx: n/a · prompt {} · set fallback_context_window_tokens",
                 format_token_compact(self.stats.last_prompt_tokens)
             ),
         }
@@ -1465,15 +1479,19 @@ impl AppState {
         let resolved = self.resolved_context_window();
         match resolved.tokens {
             Some(cap) if cap > 0 => format!(
-                "policy: {} {} · soft {}% · hard {}%",
+                "policy: {} {} · soft {}% ({}) · hard {}% ({})",
+                context_window_source_label(resolved.source),
                 format_token_count(cap as u64),
-                match resolved.source {
-                    ContextWindowSource::Provider => "provider",
-                    ContextWindowSource::Config => "fallback",
-                    ContextWindowSource::None => "n/a",
-                },
                 ratio_to_percent(self.compaction_config.soft_threshold_ratio),
-                ratio_to_percent(self.compaction_config.hard_threshold_ratio)
+                format_token_compact(threshold_token_count(
+                    cap,
+                    self.compaction_config.soft_threshold_ratio
+                )),
+                ratio_to_percent(self.compaction_config.hard_threshold_ratio),
+                format_token_compact(threshold_token_count(
+                    cap,
+                    self.compaction_config.hard_threshold_ratio
+                ))
             ),
             _ => format!(
                 "policy: soft {}% · hard {}%",
@@ -1507,6 +1525,7 @@ impl AppState {
         let balance_line = self.balance_sidebar_line();
         let mut lines = vec![
             self.context_usage_line(),
+            self.session_token_line(),
             format!("compact: {}", self.compaction_status),
             self.compaction_policy_line(),
             self.tool_card_status_line(),
@@ -1558,6 +1577,14 @@ impl AppState {
         }
     }
 
+    fn session_token_line(&self) -> String {
+        format!(
+            "session tok: input {} · output {}",
+            format_token_compact(self.stats.prompt_tokens),
+            format_token_compact(self.stats.completion_tokens)
+        )
+    }
+
     fn usage_cost_currency(&self) -> UsageCostCurrency {
         UsageCostCurrency::from_code(self.balance_snapshot.currency.as_deref())
     }
@@ -1574,7 +1601,7 @@ impl AppState {
             "tok {}",
             format_token_compact(self.stats.last_prompt_tokens)
         );
-        let context = match self.displayed_context_window_tokens() {
+        let context = match self.resolved_context_window().tokens {
             Some(cap) if cap > 0 => format!("ctx {}%", self.context_usage_percent(cap)),
             _ => "ctx n/a".to_owned(),
         };
@@ -1586,10 +1613,6 @@ impl AppState {
             self.permission_default_mode,
             if self.is_busy { "cancel" } else { "quit" }
         )
-    }
-
-    fn displayed_context_window_tokens(&self) -> Option<u32> {
-        self.resolved_context_window().tokens
     }
 
     fn resolved_context_window(&self) -> crate::context_window::ResolvedContextWindow {
@@ -1612,6 +1635,25 @@ impl AppState {
         ((self.stats.last_prompt_tokens as f64 / cap as f64) * 100.0)
             .round()
             .clamp(0.0, 999.0) as u64
+    }
+
+    fn context_usage_hint(&self, cap: u32) -> String {
+        match self
+            .resolved_compaction_config()
+            .threshold_status(self.stats.last_prompt_tokens)
+        {
+            CompactionThresholdStatus::Off => "compact off".to_owned(),
+            CompactionThresholdStatus::NotAvailable => "threshold n/a".to_owned(),
+            CompactionThresholdStatus::Ready => format!(
+                "soft at {}",
+                format_token_compact(threshold_token_count(
+                    cap,
+                    self.compaction_config.soft_threshold_ratio
+                ))
+            ),
+            CompactionThresholdStatus::Soft => "soft; /compact".to_owned(),
+            CompactionThresholdStatus::Hard => "hard; auto-compact".to_owned(),
+        }
     }
 
     pub fn is_setup_mode(&self) -> bool {
@@ -1834,6 +1876,18 @@ fn has_control_without_alt(key: KeyEvent) -> bool {
 
 fn has_alt_without_control(key: KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::ALT) && !key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn context_window_source_label(source: ContextWindowSource) -> &'static str {
+    match source {
+        ContextWindowSource::Provider => "provider",
+        ContextWindowSource::Config => "fallback",
+        ContextWindowSource::None => "n/a",
+    }
+}
+
+fn threshold_token_count(cap: u32, ratio: f32) -> u64 {
+    (f64::from(cap) * f64::from(ratio.max(0.0))).round() as u64
 }
 
 #[cfg(test)]

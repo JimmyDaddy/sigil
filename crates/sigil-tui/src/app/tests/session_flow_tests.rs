@@ -166,6 +166,7 @@ fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
 
     let rendered = plain_transcript(&app, 20);
     assert!(rendered.contains("thought"));
+    assert!(!rendered.contains("thinking"));
     assert!(rendered.contains("step 1"));
     assert!(rendered.contains("step 2"));
     Ok(())

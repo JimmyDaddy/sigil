@@ -1,4 +1,4 @@
-use ratatui::text::Line;
+use ratatui::{style::Style, text::Line};
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
@@ -66,6 +66,47 @@ fn render_timeline_entry_lines_handles_empty_user_assistant_and_system_entries()
     assert!(render_timeline_entry_lines(&empty_user).is_empty());
     assert!(render_timeline_entry_lines(&empty_assistant).is_empty());
     assert_eq!(render_timeline_entry_lines(&empty_system).len(), 2);
+}
+
+#[test]
+fn render_timeline_entry_lines_marks_intermediate_assistant_info_only() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Assistant,
+        text: "checking **provider** shape".to_owned(),
+    };
+
+    let normal =
+        render_timeline_entry_lines_with_options(&entry, &TimelineRenderOptions::default(), 0);
+    let normal_plain = rendered_plain_lines(&normal).join("\n");
+    assert!(normal_plain.contains("checking provider shape"));
+    assert!(!normal_plain.contains("• checking provider shape"));
+
+    let marked = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            intermediate_assistant_indices: std::collections::BTreeSet::from([0]),
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let marked_plain = rendered_plain_lines(&marked).join("\n");
+    assert!(marked_plain.contains("• checking provider shape"));
+
+    let thinking = TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: "checking provider shape".to_owned(),
+    };
+    let thinking_marked = render_timeline_entry_lines_with_options(
+        &thinking,
+        &TimelineRenderOptions {
+            intermediate_assistant_indices: std::collections::BTreeSet::from([0]),
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let thinking_plain = rendered_plain_lines(&thinking_marked).join("\n");
+    assert!(thinking_plain.contains("thought"));
+    assert!(!thinking_plain.contains("•"));
 }
 
 #[test]
@@ -398,7 +439,6 @@ fn render_timeline_entry_lines_show_phase_block() {
     };
 
     let lines = render_timeline_entry_lines(&entry);
-
     assert!(
         lines[0]
             .spans
@@ -483,6 +523,12 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
             .any(|span| span.content.as_ref().contains("thought"))
     );
     assert!(
+        !lines[0]
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("thinking"))
+    );
+    assert!(
         lines[0]
             .spans
             .iter()
@@ -538,6 +584,58 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
             .iter()
             .any(|span| span.content.as_ref().contains("step 4"))
     }));
+
+    let streaming = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            streaming_reasoning_index: Some(0),
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    assert!(
+        streaming[0]
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("Ctrl-T collapse"))
+    );
+    assert!(
+        streaming[0]
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("thinking"))
+    );
+    assert!(
+        !streaming[0]
+            .spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("thought"))
+    );
+    assert!(streaming.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("step 4"))
+    }));
+
+    let hovered = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            hovered_thinking_entry_index: Some(0),
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let header_span = hovered[0]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref().contains("thought"))
+        .expect("expected hovered thinking header span");
+    assert!(
+        header_span
+            .style
+            .add_modifier
+            .contains(Modifier::UNDERLINED)
+    );
 }
 
 #[test]
@@ -558,8 +656,30 @@ fn render_timeline_entry_lines_handles_empty_and_closed_fence_thinking_previews(
         text: " \n ".to_owned(),
     };
     let empty_plain = rendered_plain_lines(&render_timeline_entry_lines(&empty)).join("\n");
-    assert!(empty_plain.contains("1 lines"));
+    assert!(empty_plain.contains("1 line"));
+    assert!(!empty_plain.contains("Ctrl-T"));
     assert!(!empty_plain.contains("more lines hidden"));
+
+    let short = TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: "only step\nsecond step\nthird step".to_owned(),
+    };
+    let short_plain = rendered_plain_lines(&render_timeline_entry_lines(&short)).join("\n");
+    assert!(short_plain.contains("3 lines"));
+    assert!(short_plain.contains("third step"));
+    assert!(!short_plain.contains("Ctrl-T"));
+    assert!(!short_plain.contains("more lines hidden"));
+    let expanded_short_plain = rendered_plain_lines(&render_timeline_entry_lines_with_options(
+        &short,
+        &TimelineRenderOptions {
+            expand_thinking_blocks: true,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    ))
+    .join("\n");
+    assert!(expanded_short_plain.contains("3 lines"));
+    assert!(!expanded_short_plain.contains("Ctrl-T"));
 
     let closed_fence = TimelineEntry {
         role: TimelineRole::Thinking,
@@ -1834,21 +1954,32 @@ fn render_timeline_entry_lines_label_notice_tones() {
     let ok_plain = rendered_plain_lines(&render_timeline_entry_lines(&ok_notice)).join("\n");
     let error_plain = rendered_plain_lines(&render_timeline_entry_lines(&error_notice)).join("\n");
 
-    assert!(ok_plain.contains("ok"));
+    assert!(ok_plain.contains("done"));
     assert!(ok_plain.contains("saved: config updated"));
     assert!(error_plain.contains("error"));
     assert!(error_plain.contains("missing token"));
 }
 
 #[test]
-fn render_timeline_entry_lines_skips_blank_notice_lines_and_styles_role_spans() {
+fn render_timeline_entry_lines_keeps_notice_visible_without_info_subtitle() {
     let notice = TimelineEntry {
         role: TimelineRole::Notice,
-        text: "info: **ready**\n\nplain".to_owned(),
+        text: "info: **checking**\n\nplain".to_owned(),
     };
-    let notice_plain = rendered_plain_lines(&render_timeline_entry_lines(&notice)).join("\n");
-    assert!(notice_plain.contains("info: ready"));
+    let notice_lines = render_timeline_entry_lines(&notice);
+    let notice_rows = rendered_plain_lines(&notice_lines);
+    let notice_plain = notice_rows.join("\n");
+
+    assert!(notice_rows.iter().any(|row| row.trim() == "notice"));
+    assert!(notice_plain.contains("checking"));
     assert!(notice_plain.contains("plain"));
+    assert!(!notice_plain.contains("notice info"));
+    assert_eq!(notice_rows.len(), 4);
+    assert_eq!(notice_lines[0].spans[0].content.as_ref(), "notice");
+    assert_eq!(
+        notice_lines[0].spans[0].style,
+        Style::default().fg(accent_gold())
+    );
 
     let mut markdown_state = MarkdownRenderState::default();
     let options = MarkdownRenderOptions::timeline(40);

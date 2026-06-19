@@ -164,7 +164,7 @@ tmux、screen、SSH、WSL 和手工 smoke check 见 [terminal-compatibility.md](
 
 ## Context Usage 很高
 
-Info rail 会显示 context usage。达到阈值后，Sigil 可以 compact provider-visible context。
+Info rail 会显示 provider 返回的上一轮 prompt usage。如果 `ctx` 行提示窗口不可用，可以设置 `fallback_context_window_tokens`；达到 soft 或 hard threshold 后，Sigil 可以 compact provider-visible context。
 
 手动 compaction：
 

@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{collections::BTreeSet, ops::Range};
 
 use ratatui::{
     style::{Color, Style},
@@ -106,10 +106,18 @@ impl AppState {
         let is_tool = role == TimelineRole::Tool;
         let previous_selected_tool = self.selected_tool_activity_key.clone();
         let entry_index = self.timeline.len();
+        let assistant_before_tool = is_tool
+            .then(|| self.latest_assistant_entry_index_before(entry_index))
+            .flatten();
         self.timeline.push(TimelineEntry {
             role,
             text: text.into(),
         });
+        if let Some(index) = assistant_before_tool
+            && self.assistant_entry_is_intermediate_info(index)
+        {
+            self.rerender_timeline_entry(index);
+        }
         if is_tool
             && let Some(entry) = self.timeline.last()
             && let Some(activity) = self.tool_activity_cache_entry(entry_index, entry)
@@ -142,7 +150,7 @@ impl AppState {
     }
 
     pub(super) fn append_assistant_delta(&mut self, delta: &str) {
-        self.streaming_reasoning_index = None;
+        self.finish_streaming_reasoning_entry();
         if let Some(index) = self.streaming_assistant_index
             && let Some(entry) = self.timeline.get_mut(index)
         {
@@ -169,6 +177,12 @@ impl AppState {
         self.streaming_reasoning_index = self.timeline.len().checked_sub(1);
     }
 
+    pub(super) fn finish_streaming_reasoning_entry(&mut self) {
+        if let Some(index) = self.streaming_reasoning_index.take() {
+            self.rerender_timeline_entry_deferred(index);
+        }
+    }
+
     pub(super) fn push_phase_marker(&mut self, text: impl Into<String>) {
         let text = text.into();
         if self.last_phase_marker.as_deref() == Some(text.as_str()) {
@@ -183,15 +197,62 @@ impl AppState {
             ThinkingBlockMode::Collapsed => ThinkingBlockMode::Expanded,
             ThinkingBlockMode::Expanded => ThinkingBlockMode::Collapsed,
         };
+        self.expanded_thinking_entry_indices.clear();
+        self.collapsed_thinking_entry_indices.clear();
         self.rebuild_timeline_render_cache();
         self.last_notice = Some(format!("thinking {}", self.thinking_block_mode.as_str()));
         self.push_event("thinking:view", self.thinking_block_mode.as_str());
     }
 
-    pub(super) fn has_thinking_blocks(&self) -> bool {
+    pub(crate) fn toggle_thinking_entry(&mut self, entry_index: usize) -> bool {
+        let Some(entry) = self.timeline.get(entry_index) else {
+            return false;
+        };
+        if entry.role != TimelineRole::Thinking
+            || !crate::ui::thinking_has_collapsed_content(&entry.text)
+        {
+            return false;
+        }
+
+        let expanded = self.thinking_entry_is_expanded(entry_index);
+        if expanded {
+            self.expanded_thinking_entry_indices.remove(&entry_index);
+            self.collapsed_thinking_entry_indices.insert(entry_index);
+        } else {
+            self.collapsed_thinking_entry_indices.remove(&entry_index);
+            self.expanded_thinking_entry_indices.insert(entry_index);
+        }
+        self.rerender_timeline_entry(entry_index);
+        let state = if expanded { "collapsed" } else { "expanded" };
+        self.last_notice = Some(format!("thinking {state}"));
+        self.push_event("thinking:entry", format!("{entry_index} {state}"));
+        true
+    }
+
+    pub(super) fn has_collapsible_thinking_blocks(&self) -> bool {
         self.timeline
             .iter()
-            .any(|entry| entry.role == TimelineRole::Thinking && !entry.text.trim().is_empty())
+            .any(|entry| self.thinking_entry_is_collapsible(entry))
+    }
+
+    pub(crate) fn collapsible_thinking_entry_indices(&self) -> Vec<usize> {
+        self.timeline
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| self.thinking_entry_is_collapsible(entry).then_some(index))
+            .collect()
+    }
+
+    fn thinking_entry_is_collapsible(&self, entry: &TimelineEntry) -> bool {
+        entry.role == TimelineRole::Thinking
+            && crate::ui::thinking_has_collapsed_content(&entry.text)
+    }
+
+    fn thinking_entry_is_expanded(&self, entry_index: usize) -> bool {
+        self.streaming_reasoning_index == Some(entry_index)
+            || self.expanded_thinking_entry_indices.contains(&entry_index)
+            || (matches!(self.thinking_block_mode, ThinkingBlockMode::Expanded)
+                && !self.collapsed_thinking_entry_indices.contains(&entry_index))
     }
 
     pub(super) fn rebuild_timeline_render_cache(&mut self) {
@@ -793,7 +854,58 @@ impl AppState {
             collapsed_tool_activity_keys: self.collapsed_tool_activity_keys.clone(),
             max_content_width: self.timeline_content_width(),
             streaming_assistant_index: self.streaming_assistant_index,
+            streaming_reasoning_index: self.streaming_reasoning_index,
+            intermediate_assistant_indices: self.intermediate_assistant_indices(),
+            expanded_thinking_entry_indices: self.expanded_thinking_entry_indices.clone(),
+            collapsed_thinking_entry_indices: self.collapsed_thinking_entry_indices.clone(),
+            hovered_thinking_entry_index: self.hovered_thinking_entry_index(),
         }
+    }
+
+    fn hovered_thinking_entry_index(&self) -> Option<usize> {
+        match self.mouse_hover_target? {
+            crate::mouse::HitTarget::ThinkingBlock { entry_index } => Some(entry_index),
+            _ => None,
+        }
+    }
+
+    fn intermediate_assistant_indices(&self) -> BTreeSet<usize> {
+        self.timeline
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                (entry.role == TimelineRole::Assistant
+                    && !entry.text.trim().is_empty()
+                    && self.assistant_entry_is_intermediate_info(index))
+                .then_some(index)
+            })
+            .collect()
+    }
+
+    fn assistant_entry_is_intermediate_info(&self, index: usize) -> bool {
+        self.timeline
+            .iter()
+            .skip(index.saturating_add(1))
+            .find_map(|entry| match entry.role {
+                TimelineRole::Tool => Some(true),
+                TimelineRole::Notice | TimelineRole::Phase | TimelineRole::System => None,
+                TimelineRole::User | TimelineRole::Assistant | TimelineRole::Thinking => {
+                    Some(false)
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    fn latest_assistant_entry_index_before(&self, index: usize) -> Option<usize> {
+        self.timeline
+            .iter()
+            .take(index)
+            .enumerate()
+            .rev()
+            .find_map(|(entry_index, entry)| {
+                (entry.role == TimelineRole::Assistant && !entry.text.trim().is_empty())
+                    .then_some(entry_index)
+            })
     }
 
     fn timeline_content_width(&self) -> usize {

@@ -48,6 +48,7 @@ pub enum HitTarget {
     ToolCardHeader { entry_index: usize },
     ToolCardHiddenPreview { entry_index: usize },
     ToolCard { entry_index: usize },
+    ThinkingBlock { entry_index: usize },
     Composer,
     LivePanel,
     InfoRailAgentRow { index: usize },

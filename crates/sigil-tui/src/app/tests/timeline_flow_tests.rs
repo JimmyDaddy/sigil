@@ -67,6 +67,18 @@ fn transcript_plain(lines: Vec<Line<'static>>) -> String {
         .join("\n")
 }
 
+fn transcript_plain_lines(lines: Vec<Line<'static>>) -> Vec<String> {
+    lines
+        .into_iter()
+        .map(|line| {
+            line.spans
+                .into_iter()
+                .map(|span| span.content.into_owned())
+                .collect::<String>()
+        })
+        .collect()
+}
+
 #[test]
 fn column_selection_helpers_cover_empty_and_zero_width_edges() {
     let unchanged = selected_timeline_line_columns(Line::from(Span::raw("abc")), 2..2);
@@ -125,11 +137,13 @@ fn long_transcript_keeps_render_cache_consistent_without_front_trim() {
 }
 
 #[test]
-fn reasoning_delta_creates_collapsed_thinking_block() -> Result<()> {
+fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     app.handle(RunEvent::ReasoningDelta("planning step 1".to_owned()))?;
-    app.handle(RunEvent::ReasoningDelta("\nplanning step 2".to_owned()))?;
+    app.handle(RunEvent::ReasoningDelta(
+        "\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
 
     assert!(
         !app.timeline
@@ -142,18 +156,43 @@ fn reasoning_delta_creates_collapsed_thinking_block() -> Result<()> {
         })
     );
     assert!(app.timeline.iter().any(|entry| {
-        entry.role == TimelineRole::Thinking && entry.text == "planning step 1\nplanning step 2"
+        entry.role == TimelineRole::Thinking
+            && entry.text == "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4"
     }));
+    let streaming = app.transcript_lines(20);
+    let streaming_plain = transcript_plain(streaming.clone());
+    assert!(streaming_plain.contains("thinking"));
+    assert!(!streaming_plain.contains("thought"));
+    assert!(streaming.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("Ctrl-T collapse"))
+    }));
+    assert!(streaming.iter().any(|line| {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("planning step 4"))
+    }));
+
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+
     let collapsed = app.transcript_lines(20);
+    let collapsed_plain = transcript_plain(collapsed.clone());
+    assert!(collapsed_plain.contains("thought"));
+    assert!(!collapsed_plain.contains("thinking"));
     assert!(collapsed.iter().any(|line| {
         line.spans
             .iter()
             .any(|span| span.content.as_ref().contains("Ctrl-T expand"))
     }));
-    assert!(collapsed.iter().any(|line| {
+    assert!(!collapsed.iter().any(|line| {
         line.spans
             .iter()
-            .any(|span| span.content.as_ref().contains("planning step 2"))
+            .any(|span| span.content.as_ref().contains("planning step 4"))
     }));
     Ok(())
 }
@@ -167,6 +206,11 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     app.handle(RunEvent::ReasoningDelta(
         "\nplanning step 3\nplanning step 4".to_owned(),
     ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
 
     let collapsed = app.transcript_lines(20);
     assert!(collapsed.iter().any(|line| {
@@ -218,6 +262,107 @@ fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
 }
 
 #[test]
+fn ctrl_t_toggles_thinking_from_activity_without_tool_selection() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta(
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    app.active_pane = PaneFocus::Activity;
+    app.selected_tool_activity_key = None;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+
+    assert_eq!(app.last_notice(), Some("thinking expanded"));
+    let expanded = transcript_plain(app.transcript_lines(20));
+    assert!(expanded.contains("Ctrl-T collapse"));
+    assert!(expanded.contains("planning step 4"));
+    Ok(())
+}
+
+#[test]
+fn ctrl_t_ignores_thinking_without_hidden_content() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta("single visible step".to_owned()))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    let rendered = transcript_plain(app.transcript_lines(20));
+    assert!(rendered.contains("single visible step"));
+    assert!(!rendered.contains("Ctrl-T"));
+    let thinking_view_events_before = app
+        .events
+        .iter()
+        .filter(|event| event.label == "thinking:view")
+        .count();
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL))?;
+
+    let rendered_after = transcript_plain(app.transcript_lines(20));
+    assert!(rendered_after.contains("single visible step"));
+    assert!(!rendered_after.contains("Ctrl-T"));
+    assert_eq!(
+        app.events
+            .iter()
+            .filter(|event| event.label == "thinking:view")
+            .count(),
+        thinking_view_events_before
+    );
+    assert_ne!(app.last_notice(), Some("thinking expanded"));
+    assert_ne!(app.last_notice(), Some("thinking collapsed"));
+    Ok(())
+}
+
+#[test]
+fn thinking_entry_toggle_handles_missing_uncollapsible_and_global_override() -> Result<()> {
+    let mut short_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    short_app.handle(RunEvent::ReasoningDelta("single visible step".to_owned()))?;
+    short_app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    let short_index = short_app
+        .timeline
+        .iter()
+        .position(|entry| entry.role == TimelineRole::Thinking)
+        .expect("expected thinking entry");
+
+    assert!(!short_app.toggle_thinking_entry(usize::MAX));
+    assert!(!short_app.toggle_thinking_entry(short_index));
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ReasoningDelta(
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-2".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    let entry_index = app.collapsible_thinking_entry_indices()[0];
+
+    app.toggle_thinking_block_mode();
+    let expanded = transcript_plain(app.transcript_lines(20));
+    assert!(expanded.contains("Ctrl-T collapse"));
+    assert!(expanded.contains("planning step 4"));
+
+    assert!(app.toggle_thinking_entry(entry_index));
+    let collapsed = transcript_plain(app.transcript_lines(20));
+    assert!(collapsed.contains("Ctrl-T expand"));
+    assert!(!collapsed.contains("planning step 4"));
+    Ok(())
+}
+
+#[test]
 fn ctrl_t_expands_thinking_when_tool_selection_is_stale_in_composer() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.push_timeline(
@@ -241,6 +386,11 @@ fn ctrl_t_expands_thinking_when_tool_selection_is_stale_in_composer() -> Result<
     app.handle(RunEvent::ReasoningDelta(
         "\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
     ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-2".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
     let collapsed = app.transcript_lines(20);
     assert!(collapsed.iter().any(|line| {
         line.spans
@@ -437,6 +587,60 @@ fn streaming_assistant_defers_code_highlight_until_finished() -> Result<()> {
     let finished_style =
         timeline_span_style_containing(&app, "fn").expect("finished fn should render");
     assert_ne!(finished_style, plain_code_style);
+    Ok(())
+}
+
+#[test]
+fn assistant_message_before_tool_remains_visible() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
+        Some("checking provider shape".to_owned()),
+        Vec::new(),
+    )))?;
+    let before_tool = transcript_plain_lines(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(
+        before_tool
+            .iter()
+            .any(|line| line.contains("checking provider shape"))
+    );
+    assert!(
+        !before_tool
+            .iter()
+            .any(|line| line.contains("• checking provider shape"))
+    );
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-1".to_owned(),
+        "read_file".to_owned(),
+        "file contents",
+        ToolResultMeta::default(),
+    )))?;
+
+    let after_tool = transcript_plain_lines(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(
+        after_tool
+            .iter()
+            .any(|line| line.contains("checking provider shape"))
+    );
+    assert!(
+        after_tool
+            .iter()
+            .any(|line| line.contains("• checking provider shape"))
+    );
+
+    app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
+        Some("final answer".to_owned()),
+        Vec::new(),
+    )))?;
+
+    let after_final = transcript_plain_lines(app.transcript_lines(app.timeline_viewport_rows()));
+    assert!(after_final.iter().any(|line| line.contains("final answer")));
+    assert!(
+        !after_final
+            .iter()
+            .any(|line| line.contains("• final answer"))
+    );
     Ok(())
 }
 
@@ -996,12 +1200,16 @@ fn permission_notices_between_inspection_tools_remain_visible() {
     );
 
     let rendered = app.timeline_plain_cache.join("\n");
+    let live = transcript_plain(app.transcript_lines(app.timeline_viewport_rows()));
 
     assert!(!rendered.contains("Inspected"));
+    assert!(rendered.contains("notice"));
     assert!(rendered.contains("permission ls subject=crates mode=allow"));
     assert!(rendered.contains("permission read_file subject=README.md mode=allow"));
     assert!(rendered.contains("Listed crates"));
     assert!(rendered.contains("Read README.md"));
+    assert!(live.contains("notice"));
+    assert!(live.contains("permission read_file subject=README.md mode=allow"));
 }
 
 #[test]
@@ -1210,14 +1418,35 @@ fn context_usage_and_compaction_policy_share_effective_window() -> Result<()> {
         system_fingerprint: None,
     }))?;
 
-    assert_eq!(app.context_usage_line(), "ctx: 9% · 90.4K / 1.0M tok");
+    assert_eq!(
+        app.context_usage_line(),
+        "ctx: 9% · prompt 90.4K / 1.0M provider · soft at 500.0K"
+    );
     assert_eq!(app.compaction_status, "ready");
     assert!(app.footer_status_line().contains("tok 90.4K"));
     assert!(app.footer_status_line().contains("ctx 9%"));
     assert!(
-        app.usage_sidebar_lines()
-            .iter()
-            .any(|line| line == "policy: 1,000,000 provider · soft 50% · hard 80%")
+        app.usage_sidebar_lines().iter().any(
+            |line| line == "policy: provider 1,000,000 · soft 50% (500.0K) · hard 80% (800.0K)"
+        )
+    );
+
+    config.agent.provider = "custom".to_owned();
+    config.agent.model = "custom-model".to_owned();
+    let mut fallback_app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    fallback_app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 64_000,
+        completion_tokens: 0,
+        cache_hit_tokens: 0,
+        cache_miss_tokens: 64_000,
+        input_cost: 0.0,
+        output_cost: 0.0,
+        cache_savings: 0.0,
+        system_fingerprint: None,
+    }))?;
+    assert_eq!(
+        fallback_app.context_usage_line(),
+        "ctx: 50% · prompt 64.0K / 128.0K fallback · soft; /compact"
     );
     Ok(())
 }
@@ -1237,6 +1466,11 @@ fn usage_display_shows_session_and_delta_costs() -> Result<()> {
         system_fingerprint: None,
     }))?;
 
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "session tok: input 100 · output 40")
+    );
     assert!(
         app.usage_sidebar_lines()
             .iter()
@@ -1452,7 +1686,10 @@ fn app_status_helpers_cover_empty_balance_context_and_session_title() {
     app.stats.last_prompt_tokens = 1234;
 
     assert_eq!(app.balance_sidebar_line(), "balance: checking");
-    assert_eq!(app.context_usage_line(), "ctx: 0% · 1.2K / 1.0M tok");
+    assert_eq!(
+        app.context_usage_line(),
+        "ctx: 0% · prompt 1.2K / 1.0M provider · soft at 500.0K"
+    );
     let policy = app.compaction_policy_line();
     assert!(policy.starts_with("policy: "));
     assert!(policy.contains("provider"));

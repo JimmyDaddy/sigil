@@ -65,6 +65,18 @@ fn render_model_and_session_entries_cover_tool_and_control_variants() {
         render_model_message_line(&tool_call_message),
         "[assistant] tool_calls [read_file]"
     );
+    let tool_call_with_content = ModelMessage::assistant(
+        Some("checking provider shape".to_owned()),
+        vec![sigil_kernel::ToolCall {
+            id: "call-2".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: "{}".to_owned(),
+        }],
+    );
+    assert_eq!(
+        render_model_message_line(&tool_call_with_content),
+        "[assistant] checking provider shape tool_calls [read_file]"
+    );
     assert_eq!(
         render_model_message_line(&ModelMessage::tool("call-1", "tool output")),
         "[tool] call-1 => tool output"
@@ -430,6 +442,14 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
             Some("child answer".to_owned()),
             Vec::new(),
         )),
+        SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some("checking provider shape".to_owned()),
+            vec![sigil_kernel::ToolCall {
+                id: "call-tool".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: "{}".to_owned(),
+            }],
+        )),
         SessionLogEntry::ToolResult(ModelMessage::tool("call-1", "tool output")),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_delta".to_owned(),
@@ -496,6 +516,7 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
     );
     assert!(rendered.contains("child prompt"));
     assert!(rendered.contains("child answer"));
+    assert!(rendered.contains("checking provider shape"));
     assert!(rendered.contains("tool output"));
     assert!(rendered.contains("think 1"));
     assert!(rendered.contains("think 2"));

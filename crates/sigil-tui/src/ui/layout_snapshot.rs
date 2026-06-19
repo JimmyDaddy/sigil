@@ -36,6 +36,7 @@ pub struct LayoutSnapshot {
     pub info_rail: Rect,
     pub live_text_rows: Vec<LiveTextRowHitArea>,
     pub tool_cards: Vec<ToolCardHitArea>,
+    pub thinking_blocks: Vec<ThinkingBlockHitArea>,
     pub info_rail_agent_rows: Vec<InfoRailAgentRowHitArea>,
     pub slash_overlay: Option<SlashOverlayHitAreas>,
     pub approval_modal: Option<Rect>,
@@ -50,6 +51,13 @@ pub struct ToolCardHitArea {
     pub area: Rect,
     pub header_area: Option<Rect>,
     pub hidden_preview_area: Option<Rect>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThinkingBlockHitArea {
+    pub entry_index: usize,
+    pub area: Rect,
+    pub header_area: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +182,7 @@ impl LayoutSnapshot {
             info_rail: shell.info_rail,
             live_text_rows: live_text_row_hit_areas(shell.live_panel, app),
             tool_cards: tool_card_hit_areas(shell.live_panel, app),
+            thinking_blocks: thinking_block_hit_areas(shell.live_panel, app),
             info_rail_agent_rows: info_rail_agent_row_hit_areas(shell.info_rail, app),
             slash_overlay: slash_overlay_hit_areas(shell.live_panel, shell.composer, app),
             approval_modal: app
@@ -199,6 +208,7 @@ impl LayoutSnapshot {
             info_rail: Rect::default(),
             live_text_rows: Vec::new(),
             tool_cards: Vec::new(),
+            thinking_blocks: Vec::new(),
             info_rail_agent_rows: Vec::new(),
             slash_overlay: None,
             approval_modal: None,
@@ -309,6 +319,13 @@ impl LayoutSnapshot {
             if contains(tool_card.area, column, row) {
                 return HitTarget::ToolCard {
                     entry_index: tool_card.entry_index,
+                };
+            }
+        }
+        for thinking_block in &self.thinking_blocks {
+            if contains(thinking_block.area, column, row) {
+                return HitTarget::ThinkingBlock {
+                    entry_index: thinking_block.entry_index,
                 };
             }
         }
@@ -650,6 +667,44 @@ fn tool_card_hit_areas(live_area: Rect, app: &AppState) -> Vec<ToolCardHitArea> 
                     ),
                     header_area,
                     hidden_preview_area,
+                }
+            })
+        })
+        .collect()
+}
+
+fn thinking_block_hit_areas(live_area: Rect, app: &AppState) -> Vec<ThinkingBlockHitArea> {
+    let Some(rows) = visible_timeline_rows(live_area, app) else {
+        return Vec::new();
+    };
+
+    app.collapsible_thinking_entry_indices()
+        .into_iter()
+        .filter_map(|entry_index| {
+            let range = app.timeline_entry_render_range(entry_index)?;
+            let start = range.start.max(rows.visible_start);
+            let end = range.end.min(rows.visible_end);
+            (start < end).then(|| {
+                let header_area =
+                    (range.start >= rows.visible_start && range.start < end).then(|| {
+                        Rect::new(
+                            rows.content_frame.x,
+                            rows.content_y
+                                .saturating_add((range.start - rows.visible_start) as u16),
+                            rows.content_frame.width,
+                            1,
+                        )
+                    });
+                ThinkingBlockHitArea {
+                    entry_index,
+                    area: Rect::new(
+                        rows.content_frame.x,
+                        rows.content_y
+                            .saturating_add((start - rows.visible_start) as u16),
+                        rows.content_frame.width,
+                        (end - start) as u16,
+                    ),
+                    header_area,
                 }
             })
         })

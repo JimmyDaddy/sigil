@@ -3,7 +3,7 @@ use crate::{
     mouse::{AppMouseOutcome, HitTarget, MouseInput, MouseInputKind},
     ui::{LayoutMode, LayoutSnapshot},
 };
-use ratatui::layout::Rect;
+use ratatui::{layout::Rect, text::Line};
 use unicode_width::UnicodeWidthStr;
 
 fn mouse(kind: MouseInputKind, column: u16, row: u16) -> MouseInput {
@@ -17,6 +17,19 @@ fn mouse(kind: MouseInputKind, column: u16, row: u16) -> MouseInput {
 
 fn point_in(area: Rect) -> (u16, u16) {
     (area.x, area.y)
+}
+
+fn rendered_plain(lines: Vec<Line<'static>>) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn slash_candidate_point(layout: &LayoutSnapshot, index: usize) -> (u16, u16) {
@@ -92,6 +105,34 @@ fn tool_card_hidden_preview_point(layout: &LayoutSnapshot, entry_index: usize) -
         hit_area
             .hidden_preview_area
             .expect("expected visible hidden preview hit area"),
+    )
+}
+
+fn thinking_header_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .thinking_blocks
+        .iter()
+        .find(|area| area.entry_index == entry_index)
+        .expect("expected visible thinking block hit area");
+    point_in(
+        hit_area
+            .header_area
+            .expect("expected visible thinking block header"),
+    )
+}
+
+fn thinking_block_body_point(layout: &LayoutSnapshot, entry_index: usize) -> (u16, u16) {
+    let hit_area = layout
+        .thinking_blocks
+        .iter()
+        .find(|area| area.entry_index == entry_index)
+        .expect("expected visible thinking block hit area");
+    (
+        hit_area.area.x,
+        hit_area
+            .area
+            .y
+            .saturating_add(u16::from(hit_area.area.height > 1)),
     )
 }
 
@@ -605,6 +646,41 @@ fn layout_snapshot_hits_visible_tool_cards_over_live_panel() {
 }
 
 #[test]
+fn layout_snapshot_hits_visible_thinking_block_over_live_panel() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.handle(RunEvent::ReasoningDelta(
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+
+    let thinking_entry_index = app.collapsible_thinking_entry_indices()[0];
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = thinking_header_point(&layout, thinking_entry_index);
+
+    assert_eq!(
+        layout.hit_target(column, row),
+        HitTarget::ThinkingBlock {
+            entry_index: thinking_entry_index
+        }
+    );
+
+    let (column, row) = thinking_block_body_point(&layout, thinking_entry_index);
+
+    assert_eq!(
+        layout.hit_target(column, row),
+        HitTarget::ThinkingBlock {
+            entry_index: thinking_entry_index
+        }
+    );
+    Ok(())
+}
+
+#[test]
 fn mouse_drag_selects_live_text_and_ctrl_c_copies_selection() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
@@ -1012,6 +1088,126 @@ fn mouse_move_tool_card_updates_hover_visual_state() -> Result<()> {
 
     assert!(matches!(no_change, AppMouseOutcome::Noop));
     assert_eq!(app.mouse_hover_target, None);
+    Ok(())
+}
+
+#[test]
+fn mouse_click_thinking_block_toggles_expansion() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 24);
+    app.handle(RunEvent::ReasoningDelta(
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    let thinking_entry_index = app.collapsible_thinking_entry_indices()[0];
+    let collapsed_plain = rendered_plain(app.transcript_lines(20));
+    assert!(collapsed_plain.contains("thought"));
+    assert!(collapsed_plain.contains("Ctrl-T expand"));
+    assert!(!collapsed_plain.contains("planning step 4"));
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let (column, row) = thinking_block_body_point(&layout, thinking_entry_index);
+    let revision = app.timeline_revision();
+    let hover = app.handle_mouse_event(mouse(MouseInputKind::Moved, column, row), &layout)?;
+
+    assert!(matches!(hover, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.mouse_hover_target,
+        Some(HitTarget::ThinkingBlock {
+            entry_index: thinking_entry_index
+        })
+    );
+    assert!(app.timeline_revision() > revision);
+
+    let leave_revision = app.timeline_revision();
+    let (composer_column, composer_row) = point_in(layout.composer);
+    let leave = app.handle_mouse_event(
+        mouse(MouseInputKind::Moved, composer_column, composer_row),
+        &layout,
+    )?;
+
+    assert!(matches!(leave, AppMouseOutcome::Redraw));
+    assert_eq!(app.mouse_hover_target, Some(HitTarget::Composer));
+    assert!(app.timeline_revision() > leave_revision);
+
+    let expand = app.handle_mouse_event(mouse(MouseInputKind::LeftUp, column, row), &layout)?;
+
+    assert!(matches!(expand, AppMouseOutcome::Redraw));
+    assert_eq!(
+        app.mouse_hover_target,
+        Some(HitTarget::ThinkingBlock {
+            entry_index: thinking_entry_index
+        })
+    );
+    let expanded_plain = rendered_plain(app.transcript_lines(20));
+    assert!(expanded_plain.contains("Ctrl-T collapse"));
+    assert!(expanded_plain.contains("planning step 4"));
+
+    let expanded_layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 24), &app);
+    let (column, row) = thinking_header_point(&expanded_layout, thinking_entry_index);
+    let collapse = app.handle_mouse_event(
+        mouse(MouseInputKind::LeftDown, column, row),
+        &expanded_layout,
+    )?;
+
+    assert!(matches!(collapse, AppMouseOutcome::Redraw));
+    let collapsed_again_plain = rendered_plain(app.transcript_lines(20));
+    assert!(collapsed_again_plain.contains("Ctrl-T expand"));
+    assert!(!collapsed_again_plain.contains("planning step 4"));
+    Ok(())
+}
+
+#[test]
+fn mouse_short_thinking_block_has_no_click_target() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.handle(RunEvent::ReasoningDelta("single visible step".to_owned()))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+
+    let plain = rendered_plain(app.transcript_lines(20));
+    assert!(plain.contains("single visible step"));
+    assert!(!plain.contains("Ctrl-T"));
+
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+
+    assert!(layout.thinking_blocks.is_empty());
+    Ok(())
+}
+
+#[test]
+fn mouse_stale_thinking_block_hit_without_collapsed_content_is_noop() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(120, 20);
+    app.handle(RunEvent::ReasoningDelta(
+        "planning step 1\nplanning step 2\nplanning step 3\nplanning step 4".to_owned(),
+    ))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-1".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    let thinking_entry_index = app.collapsible_thinking_entry_indices()[0];
+    let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
+    let (column, row) = thinking_block_body_point(&layout, thinking_entry_index);
+    app.timeline[thinking_entry_index].text = "single visible step".to_owned();
+
+    let outcome = app.handle_mouse_event(mouse(MouseInputKind::LeftDown, column, row), &layout)?;
+
+    assert!(matches!(outcome, AppMouseOutcome::Noop));
+    assert_eq!(
+        app.mouse_hover_target,
+        Some(HitTarget::ThinkingBlock {
+            entry_index: thinking_entry_index
+        })
+    );
     Ok(())
 }
 
@@ -1501,6 +1697,7 @@ fn mouse_scroll_approval_modal_hit_when_no_pending_is_noop() -> Result<()> {
         info_rail: Rect::new(60, 0, 20, 12),
         live_text_rows: Vec::new(),
         tool_cards: Vec::new(),
+        thinking_blocks: Vec::new(),
         info_rail_agent_rows: Vec::new(),
         slash_overlay: None,
         approval_modal: Some(Rect::new(10, 2, 20, 6)),
@@ -1532,6 +1729,7 @@ fn mouse_scroll_composer_hit_when_no_pending_is_noop() -> Result<()> {
         info_rail: Rect::new(60, 0, 20, 12),
         live_text_rows: Vec::new(),
         tool_cards: Vec::new(),
+        thinking_blocks: Vec::new(),
         info_rail_agent_rows: Vec::new(),
         slash_overlay: None,
         approval_modal: None,

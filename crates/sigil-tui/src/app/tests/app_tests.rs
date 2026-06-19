@@ -1369,7 +1369,15 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
     app.provider_name = "custom".to_owned();
     app.model_name = "unknown".to_owned();
     app.compaction_config.context_window_tokens = None;
-    assert_eq!(app.context_usage_line(), "ctx: n/a · 0 tok");
+    assert_eq!(
+        app.context_usage_line(),
+        "ctx: n/a · prompt 0 · set fallback_context_window_tokens"
+    );
+    assert_eq!(app.context_usage_hint(100), "threshold n/a");
+    assert_eq!(
+        crate::app::context_window_source_label(crate::context_window::ContextWindowSource::None),
+        "n/a"
+    );
     assert!(app.compaction_policy_line().starts_with("policy: soft"));
     assert!(app.footer_status_line().contains("ctx n/a"));
 

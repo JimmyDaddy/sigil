@@ -214,6 +214,11 @@ impl AppState {
                     Ok(crate::mouse::AppMouseOutcome::Noop)
                 }
             }
+            crate::mouse::HitTarget::ThinkingBlock { entry_index }
+                if self.pending_approval.is_none() =>
+            {
+                Ok(self.click_thinking_block(entry_index, target))
+            }
             crate::mouse::HitTarget::Composer if self.pending_approval.is_none() => {
                 Ok(self.click_composer(input, layout))
             }
@@ -244,6 +249,9 @@ impl AppState {
             | crate::mouse::HitTarget::ToolCardHiddenPreview { entry_index }
             | crate::mouse::HitTarget::ToolCard { entry_index } => {
                 self.click_tool_card_toggle_target(entry_index, input, layout, target)
+            }
+            crate::mouse::HitTarget::ThinkingBlock { entry_index } => {
+                Ok(self.click_thinking_block(entry_index, target))
             }
             crate::mouse::HitTarget::Composer => Ok(self.click_composer(input, layout)),
             crate::mouse::HitTarget::InfoRailAgentRow { index } => {
@@ -300,6 +308,21 @@ impl AppState {
         self.blur_composer_agent_panel();
         self.position_input_cursor_from_mouse(input.column, input.row, layout);
         crate::mouse::AppMouseOutcome::Redraw
+    }
+
+    fn click_thinking_block(
+        &mut self,
+        entry_index: usize,
+        target: crate::mouse::HitTarget,
+    ) -> crate::mouse::AppMouseOutcome {
+        self.cancel_tool_card_body_click();
+        self.set_mouse_hover_target(Some(target));
+        self.clear_timeline_text_selection();
+        if self.toggle_thinking_entry(entry_index) {
+            crate::mouse::AppMouseOutcome::Redraw
+        } else {
+            crate::mouse::AppMouseOutcome::Noop
+        }
     }
 
     fn click_info_rail_agent_row(
@@ -413,7 +436,9 @@ impl AppState {
                 self.move_slash_selector(!upward);
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
-            crate::mouse::HitTarget::LivePanel | crate::mouse::HitTarget::Background => {
+            crate::mouse::HitTarget::ThinkingBlock { .. }
+            | crate::mouse::HitTarget::LivePanel
+            | crate::mouse::HitTarget::Background => {
                 self.handle_mouse_scroll(upward);
                 Ok(crate::mouse::AppMouseOutcome::Redraw)
             }
@@ -576,12 +601,22 @@ impl AppState {
         }
         let previous_tool = tool_hover_entry_index(self.mouse_hover_target);
         let next_tool = tool_hover_entry_index(target);
+        let previous_thinking = thinking_hover_entry_index(self.mouse_hover_target);
+        let next_thinking = thinking_hover_entry_index(target);
         self.mouse_hover_target = target;
         if previous_tool != next_tool {
             if let Some(index) = previous_tool {
                 self.rerender_timeline_entry(index);
             }
             if let Some(index) = next_tool {
+                self.rerender_timeline_entry(index);
+            }
+        }
+        if previous_thinking != next_thinking {
+            if let Some(index) = previous_thinking {
+                self.rerender_timeline_entry(index);
+            }
+            if let Some(index) = next_thinking {
                 self.rerender_timeline_entry(index);
             }
         }
@@ -605,6 +640,13 @@ fn tool_hover_entry_index(target: Option<crate::mouse::HitTarget>) -> Option<usi
         crate::mouse::HitTarget::ToolCardHeader { entry_index }
         | crate::mouse::HitTarget::ToolCardHiddenPreview { entry_index }
         | crate::mouse::HitTarget::ToolCard { entry_index } => Some(entry_index),
+        _ => None,
+    }
+}
+
+fn thinking_hover_entry_index(target: Option<crate::mouse::HitTarget>) -> Option<usize> {
+    match target? {
+        crate::mouse::HitTarget::ThinkingBlock { entry_index } => Some(entry_index),
         _ => None,
     }
 }

@@ -127,11 +127,12 @@ Sigil stores session and control state as append-only JSONL. For users, this mea
 
 ## Long Context and Compaction
 
-The info rail shows current context usage. Sigil calculates soft and hard thresholds from the model context window or the configured fallback window:
+The info rail shows the latest provider-reported prompt usage against the model context window. The `ctx` line labels whether the window came from provider metadata or `fallback_context_window_tokens`, and Sigil calculates soft and hard thresholds from that same window:
 
 - Soft threshold: context pressure is getting high.
 - Hard threshold: automatic compaction runs after the current run returns to idle.
 - `/compact`: manually compact the current session's provider-visible context.
+- If the window is unknown, configure `fallback_context_window_tokens` so the TUI can show percentages and threshold hints.
 
 Compaction appends control records. It does not rewrite old history.
 

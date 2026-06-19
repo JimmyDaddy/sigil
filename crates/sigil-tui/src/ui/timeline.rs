@@ -32,12 +32,17 @@ const COLLAPSED_THINKING_CODE_PREVIEW_LINES: usize = 2;
 pub(crate) struct TimelineRenderOptions {
     pub expand_tool_previews: bool,
     pub expand_thinking_blocks: bool,
+    pub streaming_reasoning_index: Option<usize>,
     pub selected_tool_activity_key: Option<String>,
     pub hovered_tool_activity_key: Option<String>,
     pub expanded_tool_activity_keys: BTreeSet<String>,
     pub collapsed_tool_activity_keys: BTreeSet<String>,
     pub max_content_width: usize,
     pub streaming_assistant_index: Option<usize>,
+    pub intermediate_assistant_indices: BTreeSet<usize>,
+    pub expanded_thinking_entry_indices: BTreeSet<usize>,
+    pub collapsed_thinking_entry_indices: BTreeSet<usize>,
+    pub hovered_thinking_entry_index: Option<usize>,
 }
 
 pub(crate) fn render_timeline_entry_lines_with_options(
@@ -52,13 +57,27 @@ pub(crate) fn render_timeline_entry_lines_with_options(
             entry,
             options.max_content_width,
             options.streaming_assistant_index != Some(entry_index),
+            options
+                .intermediate_assistant_indices
+                .contains(&entry_index),
         )
     } else if entry.role == TimelineRole::Phase {
         render_phase_entry_lines(entry)
     } else if entry.role == TimelineRole::Thinking {
+        let active = options.streaming_reasoning_index == Some(entry_index);
+        let expanded = active
+            || options
+                .expanded_thinking_entry_indices
+                .contains(&entry_index)
+            || (options.expand_thinking_blocks
+                && !options
+                    .collapsed_thinking_entry_indices
+                    .contains(&entry_index));
         render_thinking_entry_lines(
             entry,
-            options.expand_thinking_blocks,
+            active,
+            expanded,
+            options.hovered_thinking_entry_index == Some(entry_index),
             options.max_content_width,
         )
     } else if entry.role == TimelineRole::Tool {
@@ -172,12 +191,13 @@ fn render_assistant_entry_lines(
     entry: &TimelineEntry,
     max_content_width: usize,
     highlight_code: bool,
+    intermediate_info: bool,
 ) -> Vec<Line<'static>> {
     let accent = accent_blue();
     if entry.text.trim().is_empty() {
         return Vec::new();
     }
-    render_markdown_timeline_lines(
+    let mut lines = render_markdown_timeline_lines(
         accent,
         Style::default().fg(ink()),
         &entry.text,
@@ -185,39 +205,78 @@ fn render_assistant_entry_lines(
             highlight_code,
             ..MarkdownRenderOptions::timeline(max_content_width)
         },
+    );
+    if intermediate_info {
+        mark_first_visible_assistant_line(&mut lines);
+    }
+    lines
+}
+
+fn mark_first_visible_assistant_line(lines: &mut [Line<'static>]) {
+    for line in lines {
+        let visible = line
+            .spans
+            .iter()
+            .any(|span| !span.content.as_ref().trim().is_empty());
+        if !visible {
+            continue;
+        }
+        if let Some(first) = line.spans.first_mut()
+            && first.content.as_ref() == "  "
+        {
+            *first = assistant_info_marker_span();
+        } else {
+            line.spans.insert(0, assistant_info_marker_span());
+        }
+        return;
+    }
+}
+
+fn assistant_info_marker_span() -> Span<'static> {
+    Span::styled(
+        "• ",
+        Style::default().fg(dim()).add_modifier(Modifier::BOLD),
     )
 }
 
 fn render_thinking_entry_lines(
     entry: &TimelineEntry,
+    active: bool,
     expanded: bool,
+    hovered: bool,
     max_content_width: usize,
 ) -> Vec<Line<'static>> {
-    let accent = Color::Rgb(158, 148, 120);
+    let accent = if hovered {
+        accent_gold()
+    } else {
+        Color::Rgb(158, 148, 120)
+    };
+    let header_modifier = if hovered {
+        Modifier::ITALIC | Modifier::BOLD | Modifier::UNDERLINED
+    } else {
+        Modifier::ITALIC | Modifier::BOLD
+    };
     let body_style = Style::default()
         .fg(Color::Rgb(170, 166, 152))
         .add_modifier(Modifier::ITALIC);
     let total_lines = thinking_line_count(&entry.text);
     let preview_lines = thinking_preview_lines(&entry.text, COLLAPSED_THINKING_PREVIEW_LINES);
     let preview_count = preview_lines.len();
+    let hidden_lines = total_lines.saturating_sub(preview_count);
+    let has_hidden_content = thinking_has_collapsed_content(&entry.text);
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            "thought",
-            Style::default()
-                .fg(accent)
-                .add_modifier(Modifier::ITALIC | Modifier::BOLD),
+            if active { "thinking" } else { "thought" },
+            Style::default().fg(accent).add_modifier(header_modifier),
         ),
         Span::raw("  "),
         Span::styled(
-            if expanded {
-                format!("{total_lines} lines · Ctrl-T collapse")
-            } else if preview_count == 0 {
-                format!("{total_lines} lines · Ctrl-T expand")
+            if expanded && has_hidden_content {
+                format!("{} · Ctrl-T collapse", thinking_line_label(total_lines))
+            } else if !expanded && has_hidden_content {
+                format!("showing first {preview_count}/{total_lines} lines · Ctrl-T expand")
             } else {
-                format!(
-                    "showing first {}/{} lines · Ctrl-T expand",
-                    preview_count, total_lines
-                )
+                thinking_line_label(total_lines)
             },
             Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
         ),
@@ -232,7 +291,6 @@ fn render_thinking_entry_lines(
             &preview_lines.join("\n"),
             MarkdownRenderOptions::timeline(max_content_width),
         ));
-        let hidden_lines = total_lines.saturating_sub(preview_count);
         if hidden_lines > 0 {
             lines.push(timeline_content_line(
                 accent,
@@ -296,6 +354,21 @@ fn thinking_line_count(text: &str) -> usize {
         .max(1)
 }
 
+fn thinking_line_label(count: usize) -> String {
+    if count == 1 {
+        "1 line".to_owned()
+    } else {
+        format!("{count} lines")
+    }
+}
+
+pub(crate) fn thinking_has_collapsed_content(text: &str) -> bool {
+    if text.trim().is_empty() {
+        return false;
+    }
+    thinking_line_count(text) > thinking_preview_lines(text, COLLAPSED_THINKING_PREVIEW_LINES).len()
+}
+
 fn thinking_preview_lines(text: &str, max_lines: usize) -> Vec<String> {
     let lines = text
         .lines()
@@ -346,32 +419,32 @@ fn is_markdown_fence(line: &str) -> bool {
 }
 
 fn render_notice_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
-    let accent = notice_accent(&entry.text);
-    let mut lines = vec![timeline_header_line(
-        "notice",
+    let tone = notice_tone(&entry.text);
+    let accent = notice_accent(tone);
+    let body_style = notice_body_style(tone);
+    let mut lines = vec![timeline_minor_header_line(
+        notice_inline_label(tone),
         accent,
-        notice_tone_label(accent),
+        "",
     )];
-    for line in entry.text.lines() {
-        if line.trim().is_empty() {
+    for line in entry.text.lines().filter(|line| !line.trim().is_empty()) {
+        let display_text = notice_display_text(line);
+        if display_text.is_empty() {
             continue;
         }
         lines.push(timeline_content_line(
             accent,
-            render_notice_body_spans(line, accent),
+            render_notice_body_spans(display_text, body_style),
         ));
     }
     lines
 }
 
-fn notice_tone_label(accent: Color) -> &'static str {
-    if accent == accent_rose() {
-        "error"
-    } else if accent == accent_lime() {
-        "ok"
-    } else {
-        "info"
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeTone {
+    Error,
+    Ok,
+    Info,
 }
 
 fn render_timeline_content_spans(
@@ -387,56 +460,74 @@ fn render_timeline_content_spans(
         TimelineRole::Tool => {
             render_code_line_spans(line, accent_rose(), Style::default().fg(ink()))
         }
-        TimelineRole::System | TimelineRole::Phase | TimelineRole::Notice => {
-            render_inline_markdown_spans_with_options(
-                line,
-                base_style.add_modifier(Modifier::BOLD),
-                markdown_options,
-            )
+        TimelineRole::System | TimelineRole::Phase => render_inline_markdown_spans_with_options(
+            line,
+            base_style.add_modifier(Modifier::BOLD),
+            markdown_options,
+        ),
+        TimelineRole::Notice => {
+            render_inline_markdown_spans_with_options(line, base_style, markdown_options)
         }
         TimelineRole::User => vec![Span::styled(line.to_owned(), base_style)],
     }
 }
 
-fn notice_accent(text: &str) -> Color {
+fn notice_tone(text: &str) -> NoticeTone {
     let lower = text.to_ascii_lowercase();
     if lower.contains("failed")
         || lower.contains("error")
         || lower.contains("deny")
         || lower.contains("missing")
     {
-        accent_rose()
+        NoticeTone::Error
     } else if lower.contains("approved")
         || lower.contains("restored")
         || lower.contains("ready")
         || lower.contains("saved")
     {
-        accent_lime()
+        NoticeTone::Ok
     } else {
-        accent_gold()
+        NoticeTone::Info
     }
 }
 
-fn render_notice_body_spans(line: &str, accent: Color) -> Vec<Span<'static>> {
-    if let Some((label, value)) = line.split_once(':') {
-        let mut spans = vec![];
-        spans.push(Span::styled(
-            format!("{label}:"),
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" "));
-        spans.extend(render_inline_markdown_spans_with_options(
-            value.trim_start(),
-            Style::default().fg(ink()),
-            MarkdownRenderOptions::timeline(80),
-        ));
-        return spans;
+fn notice_inline_label(tone: NoticeTone) -> &'static str {
+    match tone {
+        NoticeTone::Error => "error",
+        NoticeTone::Ok => "done",
+        NoticeTone::Info => "notice",
     }
-    render_inline_markdown_spans_with_options(
-        line,
-        Style::default().fg(ink()),
-        MarkdownRenderOptions::timeline(80),
-    )
+}
+
+fn notice_accent(tone: NoticeTone) -> Color {
+    match tone {
+        NoticeTone::Error => accent_rose(),
+        NoticeTone::Ok => accent_lime(),
+        NoticeTone::Info => accent_gold(),
+    }
+}
+
+fn notice_body_style(tone: NoticeTone) -> Style {
+    let color = match tone {
+        NoticeTone::Error => muted(),
+        NoticeTone::Ok | NoticeTone::Info => dim(),
+    };
+    Style::default().fg(color)
+}
+
+fn notice_display_text(line: &str) -> &str {
+    let trimmed = line.trim();
+    if let Some((label, value)) = trimmed.split_once(':') {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "error" | "info" | "notice" | "ok" => return value.trim_start(),
+            _ => {}
+        }
+    }
+    trimmed
+}
+
+fn render_notice_body_spans(line: &str, base_style: Style) -> Vec<Span<'static>> {
+    render_inline_markdown_spans_with_options(line, base_style, MarkdownRenderOptions::timeline(80))
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
