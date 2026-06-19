@@ -1088,6 +1088,14 @@ fn session_boundary_summary_and_identity_helpers_cover_tool_edges() {
         ModelMessage::system("system prompt"),
         ModelMessage::user("hello\nworld"),
         assistant_call.clone(),
+        ModelMessage::assistant(
+            Some("checking provider shape".to_owned()),
+            vec![crate::ToolCall {
+                id: "call-2".to_owned(),
+                name: "grep".to_owned(),
+                args_json: "{}".to_owned(),
+            }],
+        ),
         ModelMessage {
             id: "tool-no-id".to_owned(),
             role: crate::MessageRole::Tool,
@@ -1098,7 +1106,8 @@ fn session_boundary_summary_and_identity_helpers_cover_tool_edges() {
     ]);
     assert!(summary.contains("01. system system prompt"));
     assert!(summary.contains("03. assistant tool_calls [read_file]"));
-    assert!(summary.contains("04. tool unknown =>"));
+    assert!(summary.contains("04. assistant checking provider shape tool_calls [grep]"));
+    assert!(summary.contains("05. tool unknown =>"));
     assert!(summary.contains("..."));
 
     assert_eq!(super::truncate_stable("a   b", 10), "a b");

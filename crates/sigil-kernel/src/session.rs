@@ -954,6 +954,18 @@ fn summarize_messages(messages: &[ModelMessage]) -> String {
                 .map(|call| call.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            let content = message.content.as_deref().unwrap_or_default();
+            let truncated = truncate_stable(content, 160);
+            if !truncated.is_empty() {
+                lines.push(format!(
+                    "{:02}. {} {} tool_calls [{}]",
+                    index + 1,
+                    label,
+                    truncated,
+                    names
+                ));
+                continue;
+            }
             lines.push(format!(
                 "{:02}. {} tool_calls [{}]",
                 index + 1,

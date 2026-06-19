@@ -1396,6 +1396,74 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn agent_persists_text_before_tool_call_on_assistant_message() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(EchoTool));
+    let agent = Agent::new(
+        ScriptedToolProvider {
+            initial_chunks: vec![
+                ProviderChunk::TextDelta("checking provider shape".to_owned()),
+                ProviderChunk::ToolCallStart {
+                    id: "call-1".to_owned(),
+                    name: "echo".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "call-1".to_owned(),
+                    delta: r#"{"value":"hello"}"#.to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "echo".to_owned(),
+                    args_json: r#"{"value":"hello"}"#.to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+            final_text: "done".to_owned(),
+        },
+        registry,
+    );
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("mock-scripted", "mock-model").with_store(store.clone());
+    let mut handler = crate::event::NoopEventHandler;
+
+    let result = agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: temp.path().to_path_buf(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    let entries = JsonlSessionStore::read_entries(store.path())?;
+    let assistant_tool_message = entries.iter().find_map(|entry| match entry {
+        SessionLogEntry::Assistant(message) if !message.tool_calls.is_empty() => Some(message),
+        _ => None,
+    });
+    let assistant_tool_message =
+        assistant_tool_message.expect("assistant tool-call message should be persisted");
+    assert_eq!(
+        assistant_tool_message.content.as_deref(),
+        Some("checking provider shape")
+    );
+    assert_eq!(assistant_tool_message.tool_calls.len(), 1);
+    assert_eq!(assistant_tool_message.tool_calls[0].name, "echo");
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(TerminalStartAuditTool));

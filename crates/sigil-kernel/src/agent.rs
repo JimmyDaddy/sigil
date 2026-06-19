@@ -411,7 +411,10 @@ where
 
             if !completed_calls.is_empty() {
                 total_tool_calls += completed_calls.len();
-                let assistant_message = ModelMessage::assistant(None, completed_calls.clone());
+                let assistant_content =
+                    (!assistant_text.trim().is_empty()).then(|| assistant_text.clone());
+                let assistant_message =
+                    ModelMessage::assistant(assistant_content, completed_calls.clone());
                 let assistant_message_id = assistant_message.id.clone();
                 session.append_assistant_message(assistant_message.clone())?;
                 handler.handle(RunEvent::AssistantMessage(assistant_message))?;
