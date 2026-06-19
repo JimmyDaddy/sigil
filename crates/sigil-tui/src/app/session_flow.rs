@@ -743,6 +743,17 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 snapshot.original_stats.added,
                 snapshot.original_stats.removed
             ),
+            ControlEntry::SkillIndexCaptured(snapshot) => format!(
+                "[ctl] skills index count={} fp={}",
+                snapshot.descriptors.len(),
+                truncate_session_view_text(&snapshot.fingerprint, 16)
+            ),
+            ControlEntry::SkillLoaded(entry) => format!(
+                "[ctl] skill {} loaded bytes={} lines={}",
+                truncate_session_view_text(&entry.skill_id, 48),
+                entry.byte_count,
+                entry.line_count
+            ),
             ControlEntry::ChangeSetProposed(change_set) => format!(
                 "[ctl] changeset {} proposed risk={} files={} {}",
                 change_set.id.as_str(),

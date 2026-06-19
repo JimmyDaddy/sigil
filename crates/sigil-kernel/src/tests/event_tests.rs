@@ -5,7 +5,8 @@ use crate::{
     ChangeSetResultStatus, ChangeSetRisk, CompactionRecord, ControlEntry, McpElicitationDecision,
     McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
     PUBLIC_RUN_EVENT_SCHEMA_VERSION, PrefixSnapshot, ProviderContinuationState, PublicControlEvent,
-    PublicRunEvent, PublicRunEventKind, ResponseHandle, RunEvent, SessionRef,
+    PublicRunEvent, PublicRunEventKind, ResponseHandle, RunEvent, SessionRef, SkillDescriptor,
+    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState,
     TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
     TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
     TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
@@ -330,6 +331,27 @@ fn public_control_event_kinds_cover_control_entry_variants() {
             "tool_preview_captured",
         ),
         (
+            ControlEntry::SkillIndexCaptured(
+                SkillIndexSnapshot::new(vec![skill_descriptor()])
+                    .expect("valid skill index snapshot"),
+            ),
+            "skill_index_captured",
+        ),
+        (
+            ControlEntry::SkillLoaded(SkillLoadEntry {
+                skill_id: "repo-review".to_owned(),
+                sha256: "hash".to_owned(),
+                source: SkillSource::Workspace,
+                entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
+                run_id: Some("run-1".to_owned()),
+                call_id: Some("call-1".to_owned()),
+                byte_count: 128,
+                line_count: 7,
+                loaded_at_ms: 42,
+            }),
+            "skill_loaded",
+        ),
+        (
             ControlEntry::ChangeSetProposed(ChangeSet {
                 id: ChangeSetId::new("change-1").expect("valid change set id"),
                 title: "Update README".to_owned(),
@@ -507,6 +529,28 @@ fn prefix_snapshot() -> PrefixSnapshot {
         memory_fingerprint: "memory".to_owned(),
         tool_schema_fingerprint: "tools".to_owned(),
         skill_index_fingerprint: "skills".to_owned(),
+    }
+}
+
+fn skill_descriptor() -> SkillDescriptor {
+    SkillDescriptor {
+        id: "repo-review".to_owned(),
+        name: "Repo Review".to_owned(),
+        description: "Review repository changes".to_owned(),
+        when_to_use: Some("Use for repository code review.".to_owned()),
+        root: ".sigil/skills/repo-review".into(),
+        entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
+        source: SkillSource::Workspace,
+        sha256: "hash".to_owned(),
+        enabled: true,
+        trust: SkillTrustState::Trusted,
+        model_invocable: true,
+        user_invocable: true,
+        run_as: SkillRunMode::Inline,
+        argument_hint: None,
+        allowed_tools: Default::default(),
+        disallowed_tools: Default::default(),
+        path_patterns: Vec::new(),
     }
 }
 

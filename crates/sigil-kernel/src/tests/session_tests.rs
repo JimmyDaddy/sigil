@@ -5,7 +5,8 @@ use anyhow::Result;
 use crate::{
     ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk,
     CompactionRecord, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
-    ProviderContinuationState, ResponseHandle, TerminalTaskEntry, TerminalTaskHandle,
+    ProviderContinuationState, ResponseHandle, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
+    SkillRunMode, SkillSource, SkillTrustState, TerminalTaskEntry, TerminalTaskHandle,
     TerminalTaskId, TerminalTaskStatus, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
     ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit,
     ToolSubjectKind, ToolSubjectScope, UsageStats, provider::ModelMessage,
@@ -253,6 +254,53 @@ fn session_terminal_task_projection_replays_control_entries() -> Result<()> {
     assert_eq!(projection.latest_task_id.as_ref(), Some(&id));
     assert_eq!(projection.active_task_ids, vec![id]);
     assert!(matches!(latest.status, TerminalTaskStatus::Running));
+    Ok(())
+}
+
+#[test]
+fn session_skill_state_projection_replays_control_entries() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let snapshot = SkillIndexSnapshot::new(vec![SkillDescriptor {
+        id: "repo-review".to_owned(),
+        name: "Repo Review".to_owned(),
+        description: "Review repository changes".to_owned(),
+        when_to_use: Some("Use for repository code review.".to_owned()),
+        root: ".sigil/skills/repo-review".into(),
+        entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
+        source: SkillSource::Workspace,
+        sha256: "hash".to_owned(),
+        enabled: true,
+        trust: SkillTrustState::Trusted,
+        model_invocable: true,
+        user_invocable: true,
+        run_as: SkillRunMode::Inline,
+        argument_hint: None,
+        allowed_tools: Default::default(),
+        disallowed_tools: Default::default(),
+        path_patterns: Vec::new(),
+    }])?;
+    session.append_control(ControlEntry::SkillIndexCaptured(snapshot.clone()))?;
+    session.append_control(ControlEntry::SkillLoaded(SkillLoadEntry {
+        skill_id: "repo-review".to_owned(),
+        sha256: "hash".to_owned(),
+        source: SkillSource::Workspace,
+        entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
+        run_id: Some("run-1".to_owned()),
+        call_id: Some("call-1".to_owned()),
+        byte_count: 128,
+        line_count: 7,
+        loaded_at_ms: 42,
+    }))?;
+
+    let projection = session.skill_state_projection();
+    let latest_loaded = projection.latest_loaded().expect("latest loaded skill");
+
+    assert_eq!(projection.latest_index, Some(snapshot));
+    assert_eq!(
+        projection.latest_loaded_skill_id.as_deref(),
+        Some("repo-review")
+    );
+    assert_eq!(latest_loaded.entry.byte_count, 128);
     Ok(())
 }
 

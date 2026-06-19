@@ -18,6 +18,7 @@ use crate::{
         CompletionRequest, ModelMessage, PrefixSnapshot, ProviderContinuationState, ResponseHandle,
         SessionStats, UsageStats,
     },
+    skill::{SkillIndexSnapshot, SkillLoadEntry, SkillStateProjection},
     task::{
         TaskChildSessionEntry, TaskPlanEntry, TaskRunEntry, TaskStateProjection, TaskStepEntry,
         TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
@@ -99,6 +100,10 @@ pub enum ControlEntry {
     McpElicitation(Box<McpElicitationEntry>),
     #[serde(alias = "ToolPreviewCaptured")]
     ToolPreviewCaptured(ToolPreviewSnapshot),
+    #[serde(alias = "SkillIndexCaptured")]
+    SkillIndexCaptured(SkillIndexSnapshot),
+    #[serde(alias = "SkillLoaded")]
+    SkillLoaded(SkillLoadEntry),
     #[serde(alias = "ChangeSetProposed")]
     ChangeSetProposed(ChangeSet),
     #[serde(alias = "ChangeSetApplied")]
@@ -489,6 +494,11 @@ impl Session {
     /// Returns a durable task projection reconstructed from append-only control entries.
     pub fn task_state_projection(&self) -> TaskStateProjection {
         TaskStateProjection::from_entries(&self.entries)
+    }
+
+    /// Returns a durable skill projection reconstructed from append-only control entries.
+    pub fn skill_state_projection(&self) -> SkillStateProjection {
+        SkillStateProjection::from_entries(&self.entries)
     }
 
     /// Returns a durable change set projection reconstructed from append-only control entries.

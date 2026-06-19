@@ -247,6 +247,8 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ToolEgress(_) => "tool_egress",
         ControlEntry::McpElicitation(_) => "mcp_elicitation",
         ControlEntry::ToolPreviewCaptured(_) => "tool_preview_captured",
+        ControlEntry::SkillIndexCaptured(_) => "skill_index_captured",
+        ControlEntry::SkillLoaded(_) => "skill_loaded",
         ControlEntry::ChangeSetProposed(_) => "change_set_proposed",
         ControlEntry::ChangeSetApplied(_) => "change_set_applied",
         ControlEntry::TerminalTask(_) => "terminal_task",

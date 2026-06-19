@@ -8,6 +8,7 @@ pub mod permission;
 pub mod provider;
 pub mod secret;
 pub mod session;
+pub mod skill;
 pub mod task;
 pub mod task_orchestrator;
 pub mod terminal_task;
@@ -52,6 +53,10 @@ pub use session::{
     McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry, ToolApprovalAuditAction,
     ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry,
     ToolExecutionStatus, ToolSubjectAudit, latest_compaction_record, session_stats_from_entries,
+};
+pub use skill::{
+    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,
+    SkillStateProjection, SkillTrustState,
 };
 pub use task::{
     AgentRole, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionEntry,

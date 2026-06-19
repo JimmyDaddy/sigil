@@ -6,8 +6,9 @@ use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
     ApprovalMode, CompactionConfig, CompactionRecord, McpElicitationDecision, McpElicitationEntry,
-    MemoryConfig, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolError,
-    ToolErrorKind, ToolResultMeta, WorkspaceConfig,
+    MemoryConfig, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
+    SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
+    ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
 };
 
 #[test]
@@ -619,6 +620,49 @@ fn render_session_control_entries_cover_remaining_labels() {
         },
     )));
     assert!(approval.contains("action=resolved"));
+
+    let skill_index =
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::SkillIndexCaptured(
+            SkillIndexSnapshot::new(vec![SkillDescriptor {
+                id: "repo-review".to_owned(),
+                name: "Repo Review".to_owned(),
+                description: "Review repository changes".to_owned(),
+                when_to_use: None,
+                root: ".sigil/skills/repo-review".into(),
+                entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
+                source: SkillSource::Workspace,
+                sha256: "hash".to_owned(),
+                enabled: true,
+                trust: SkillTrustState::Trusted,
+                model_invocable: true,
+                user_invocable: true,
+                run_as: SkillRunMode::Inline,
+                argument_hint: None,
+                allowed_tools: Default::default(),
+                disallowed_tools: Default::default(),
+                path_patterns: Vec::new(),
+            }])
+            .expect("valid skill index"),
+        )));
+    assert!(skill_index.contains("skills index count=1"));
+
+    let skill_loaded = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::SkillLoaded(SkillLoadEntry {
+            skill_id: "repo-review".to_owned(),
+            sha256: "hash".to_owned(),
+            source: SkillSource::Workspace,
+            entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
+            run_id: Some("run-1".to_owned()),
+            call_id: Some("call-1".to_owned()),
+            byte_count: 128,
+            line_count: 7,
+            loaded_at_ms: 42,
+        }),
+    ));
+    assert_eq!(
+        skill_loaded,
+        "[ctl] skill repo-review loaded bytes=128 lines=7"
+    );
 
     for decision in [
         McpElicitationDecision::Accepted,
