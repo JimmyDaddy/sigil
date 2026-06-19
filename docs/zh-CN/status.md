@@ -36,6 +36,7 @@
 | MCP lazy startup | Lazy server 会记录配置，但激活前不会注册假工具。 |
 | External directories | 默认关闭，应保持窄范围和 approval-backed。 |
 | Headless automation | `sigil run` 可用于脚本，但不能展示交互 approval modal。 |
+| HTTP/SSE adapter | `sigil serve` 会校验 localhost/token 默认值并输出 preflight plan；HTTP routing 和 listener startup 仍是后续工作。 |
 
 ## 未来工作
 

@@ -48,10 +48,11 @@ Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 | `sigil` | Open the TUI in the current workspace |
 | `sigil doctor` | Run local diagnostics |
 | `sigil run "<task>"` | Run a non-interactive automation task |
+| `sigil serve` | Validate HTTP/SSE adapter localhost/token defaults; HTTP routing is not implemented yet |
 | `sigil --version` | Print the installed version |
 | `sigil --config <path> doctor` | Run diagnostics with an explicit config file |
 
-Subcommands are for automation, diagnostics, and scripts. The full product surface is the TUI.
+Subcommands are for automation, diagnostics, scripts, and adapter preflight checks. The full product surface is the TUI.
 
 ## Config Resolution
 

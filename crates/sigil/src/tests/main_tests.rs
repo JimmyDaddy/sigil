@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -21,9 +22,10 @@ use tokio::{
 };
 
 use super::{
-    BuildInfo, Cli, Commands, StdoutEventHandler, default_session_path, drain_provider_stream,
-    render_doctor_report, render_provider_chunk, render_run_event, render_version,
-    resolve_workspace_root,
+    BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, ServeOptions, ServeStartupPlan,
+    StdoutEventHandler, build_serve_startup_plan, default_session_path, drain_provider_stream,
+    render_doctor_report, render_provider_chunk, render_run_event, render_serve_startup_plan,
+    render_version, resolve_workspace_root, serve_command,
 };
 
 fn boxed_chunk_stream(
@@ -331,6 +333,50 @@ fn cli_parses_doctor_command_with_explicit_config() -> Result<()> {
 }
 
 #[test]
+fn cli_parses_serve_command_with_secure_defaults() -> Result<()> {
+    let cli = Cli::try_parse_from(["sigil", "serve"])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Serve {
+            host,
+            port: 0,
+            ref token_env,
+            no_token: false,
+        }) if host == IpAddr::V4(Ipv4Addr::LOCALHOST)
+            && token_env == DEFAULT_HTTP_TOKEN_ENV
+    ));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_serve_command_overrides() -> Result<()> {
+    let cli = Cli::try_parse_from([
+        "sigil",
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8765",
+        "--token-env",
+        "CUSTOM_SIGIL_HTTP_TOKEN",
+        "--no-token",
+    ])?;
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Serve {
+            host,
+            port: 8765,
+            ref token_env,
+            no_token: true,
+        }) if host == IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            && token_env == "CUSTOM_SIGIL_HTTP_TOKEN"
+    ));
+    Ok(())
+}
+
+#[test]
 fn cli_parses_version_flag_without_subcommand() -> Result<()> {
     let cli = Cli::try_parse_from(["sigil", "--version"])?;
 
@@ -399,6 +445,72 @@ fn render_doctor_report_formats_checks_and_summary() {
     assert!(rendered.contains("[warn] terminal - TERM is not set"));
     assert!(rendered.contains("fix: set TERM in the shell before launching the TUI"));
     assert!(rendered.contains("summary: warn"));
+}
+
+#[test]
+fn serve_startup_plan_requires_token_by_default() {
+    let error = build_serve_startup_plan(default_serve_options(), None)
+        .expect_err("serve should require token by default");
+
+    assert!(error.to_string().contains(DEFAULT_HTTP_TOKEN_ENV));
+}
+
+#[test]
+fn serve_startup_plan_rejects_external_bind_without_token() {
+    let options = ServeOptions {
+        host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        no_token: true,
+        ..default_serve_options()
+    };
+
+    let error = build_serve_startup_plan(options, None)
+        .expect_err("external bind without token should be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("token auth is required for non-loopback bind addresses")
+    );
+}
+
+#[test]
+fn serve_startup_plan_renders_pending_routing_hint() -> Result<()> {
+    let plan = build_serve_startup_plan(default_serve_options(), Some("secret-token"))?;
+    let rendered = render_serve_startup_plan(&plan);
+
+    assert_eq!(plan.bind_addr, SocketAddr::from(([127, 0, 0, 1], 0)));
+    assert!(plan.token_required);
+    assert_eq!(plan.token_env.as_deref(), Some(DEFAULT_HTTP_TOKEN_ENV));
+    assert!(rendered.contains("Sigil HTTP/SSE adapter"));
+    assert!(rendered.contains("bind: 127.0.0.1:0"));
+    assert!(rendered.contains("auth: bearer token from SIGIL_HTTP_TOKEN"));
+    assert!(rendered.contains("HTTP routing is not implemented yet"));
+    serve_command(default_serve_options(), Some("secret-token"))?;
+    Ok(())
+}
+
+#[test]
+fn serve_startup_plan_renders_disabled_auth_and_token_env_fallback() -> Result<()> {
+    let disabled = build_serve_startup_plan(
+        ServeOptions {
+            no_token: true,
+            ..default_serve_options()
+        },
+        None,
+    )?;
+    let fallback = ServeStartupPlan {
+        bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        token_required: true,
+        token_env: None,
+    };
+
+    assert!(!disabled.token_required);
+    assert_eq!(disabled.token_env, None);
+    assert!(render_serve_startup_plan(&disabled).contains("auth: disabled"));
+    assert!(
+        render_serve_startup_plan(&fallback).contains("auth: bearer token from SIGIL_HTTP_TOKEN")
+    );
+    Ok(())
 }
 
 #[test]
@@ -630,6 +742,15 @@ fn create_test_workspace(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("sigil-tests-{name}-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&path).expect("test workspace should create");
     path
+}
+
+fn default_serve_options() -> ServeOptions {
+    ServeOptions {
+        host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 0,
+        token_env: DEFAULT_HTTP_TOKEN_ENV.to_owned(),
+        no_token: false,
+    }
 }
 
 fn write_test_config(path: &std::path::Path, base_url: &str) -> Result<()> {

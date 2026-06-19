@@ -48,10 +48,11 @@ Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应
 | `sigil` | 在当前 workspace 打开 TUI |
 | `sigil doctor` | 运行本地诊断 |
 | `sigil run "<task>"` | 运行非交互自动化任务 |
+| `sigil serve` | 校验 HTTP/SSE adapter 的 localhost/token 默认值；HTTP routing 尚未实现 |
 | `sigil --version` | 打印安装版本 |
 | `sigil --config <path> doctor` | 使用显式 config 文件运行诊断 |
 
-子命令用于自动化、诊断和脚本。完整产品表面是 TUI。
+子命令用于自动化、诊断、脚本和 adapter preflight check。完整产品表面是 TUI。
 
 ## Config 解析顺序
 

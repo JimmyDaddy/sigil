@@ -2200,6 +2200,7 @@ dependencies = [
  "clap",
  "futures",
  "serde_json",
+ "sigil-http",
  "sigil-kernel",
  "sigil-provider-deepseek",
  "sigil-runtime",

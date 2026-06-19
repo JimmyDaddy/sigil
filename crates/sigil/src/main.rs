@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::{Path, PathBuf},
+};
 
 #[cfg(not(test))]
 use std::env;
@@ -6,6 +9,7 @@ use std::env;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures::StreamExt;
+use sigil_http::{DEFAULT_HTTP_TOKEN_ENV, HttpAuthConfig, HttpServerConfig};
 #[cfg(not(test))]
 use sigil_kernel::preferred_config_path;
 use sigil_kernel::{
@@ -55,6 +59,16 @@ enum Commands {
         prompt: String,
     },
     Doctor,
+    Serve {
+        #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+        host: IpAddr,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long = "token-env", default_value = DEFAULT_HTTP_TOKEN_ENV)]
+        token_env: String,
+        #[arg(long = "no-token", action = clap::ArgAction::SetTrue)]
+        no_token: bool,
+    },
     #[command(hide = true)]
     Prefix {
         prompt: String,
@@ -96,6 +110,27 @@ async fn main() -> Result<()> {
     match command {
         Commands::Run { prompt } => run_command(&config_path, &cwd, prompt).await,
         Commands::Doctor => doctor_command(&config_path, &cwd),
+        Commands::Serve {
+            host,
+            port,
+            token_env,
+            no_token,
+        } => {
+            let token = if no_token {
+                None
+            } else {
+                env::var(&token_env).ok()
+            };
+            serve_command(
+                ServeOptions {
+                    host,
+                    port,
+                    token_env,
+                    no_token,
+                },
+                token.as_deref(),
+            )
+        }
         Commands::Prefix {
             prompt,
             assistant_prefix,
@@ -140,6 +175,71 @@ fn render_doctor_report(report: &DoctorReport) -> String {
     }
     output.push_str(&format!("summary: {}\n", report.overall_status().as_str()));
     output
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServeOptions {
+    host: IpAddr,
+    port: u16,
+    token_env: String,
+    no_token: bool,
+}
+
+impl ServeOptions {
+    fn http_config(&self) -> HttpServerConfig {
+        HttpServerConfig {
+            bind_host: self.host,
+            port: self.port,
+            auth: HttpAuthConfig {
+                require_token: !self.no_token,
+                token_env: self.token_env.clone(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServeStartupPlan {
+    bind_addr: SocketAddr,
+    token_required: bool,
+    token_env: Option<String>,
+}
+
+fn serve_command(options: ServeOptions, token: Option<&str>) -> Result<()> {
+    let plan = build_serve_startup_plan(options, token)?;
+    print!("{}", render_serve_startup_plan(&plan));
+    Ok(())
+}
+
+fn build_serve_startup_plan(
+    options: ServeOptions,
+    token: Option<&str>,
+) -> Result<ServeStartupPlan> {
+    let config = options.http_config();
+    config.validate()?;
+    let validator = config.auth.validator_from_token(token)?;
+    Ok(ServeStartupPlan {
+        bind_addr: config.bind_addr(),
+        token_required: validator.token_required(),
+        token_env: if config.auth.require_token {
+            Some(config.auth.token_env)
+        } else {
+            None
+        },
+    })
+}
+
+fn render_serve_startup_plan(plan: &ServeStartupPlan) -> String {
+    let auth = if plan.token_required {
+        let token_env = plan.token_env.as_deref().unwrap_or(DEFAULT_HTTP_TOKEN_ENV);
+        format!("bearer token from {token_env}")
+    } else {
+        "disabled".to_owned()
+    };
+    format!(
+        "Sigil HTTP/SSE adapter\nbind: {}\nauth: {}\nstatus: HTTP routing is not implemented yet; no listener started\n",
+        plan.bind_addr, auth
+    )
 }
 
 async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> Result<()> {
