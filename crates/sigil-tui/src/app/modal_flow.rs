@@ -95,6 +95,7 @@ pub(super) struct SecretInputState {
 pub(super) enum TextInputTarget {
     SetupModel,
     ConfigField(ConfigField),
+    SkillArguments,
 }
 
 impl TextInputTarget {
@@ -102,6 +103,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel => "Model ID",
             Self::ConfigField(field) => field.display_label(),
+            Self::SkillArguments => "Skill Arguments",
         }
     }
 
@@ -109,6 +111,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel => "Custom model id.",
             Self::ConfigField(field) => field.help_text(),
+            Self::SkillArguments => "Arguments passed to the selected skill invocation.",
         }
     }
 
@@ -116,6 +119,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel => "model",
             Self::ConfigField(_) => "value",
+            Self::SkillArguments => "arguments",
         }
     }
 
@@ -123,6 +127,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel => None,
             Self::ConfigField(field) => Some(field.label()),
+            Self::SkillArguments => None,
         }
     }
 }
@@ -766,6 +771,9 @@ impl AppState {
                     }
                     self.last_notice = Some(format!("updated {}", field.label()));
                 }
+                TextInputTarget::SkillArguments => {
+                    self.last_notice = Some("skill arguments submitted".to_owned());
+                }
             },
         }
     }
@@ -959,6 +967,7 @@ fn text_input_target_accepts_char(target: TextInputTarget, character: char) -> b
     match target {
         TextInputTarget::SetupModel => !character.is_control(),
         TextInputTarget::ConfigField(field) => config_field_accepts_char(field, character),
+        TextInputTarget::SkillArguments => !character.is_control(),
     }
 }
 

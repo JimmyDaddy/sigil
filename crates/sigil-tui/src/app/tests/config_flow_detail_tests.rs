@@ -64,6 +64,152 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
 }
 
 #[test]
+fn skill_detail_helpers_cover_edge_labels_and_prompts() {
+    let mut skill = sigil_kernel::SkillDescriptor {
+        id: "review".to_owned(),
+        name: String::new(),
+        description: String::new(),
+        when_to_use: None,
+        root: ".sigil/skills/review".into(),
+        entrypoint: ".sigil/skills/review/SKILL.md".into(),
+        source: sigil_kernel::SkillSource::User,
+        sha256: String::new(),
+        enabled: false,
+        trust: sigil_kernel::SkillTrustState::NeedsReview,
+        model_invocable: false,
+        user_invocable: false,
+        run_as: sigil_kernel::SkillRunMode::Inline,
+        argument_hint: None,
+        allowed_tools: sigil_kernel::ToolRegistryScope {
+            allow_all: true,
+            ..Default::default()
+        },
+        disallowed_tools: sigil_kernel::ToolRegistryScope::from_names_and_prefixes(
+            Vec::<String>::new(),
+            ["mcp:"],
+        ),
+        path_patterns: Vec::new(),
+    };
+
+    let detail = render_skill_detail_lines(&skill).join("\n");
+    assert!(detail.contains("- Name: review"));
+    assert!(detail.contains("- Description: none"));
+    assert!(detail.contains("- Source: user"));
+    assert!(detail.contains("- Hash: none"));
+    assert!(detail.contains("- Argument hint: none"));
+    assert!(detail.contains("- Allowed tools: all"));
+    assert!(detail.contains("- Disallowed tools: prefixes=mcp:"));
+    assert!(detail.contains("- Paths: none"));
+    assert!(detail.contains("- Load: is disabled"));
+    assert!(detail.contains("- Invoke: is disabled"));
+    assert_eq!(skill_action_label(None), "available");
+    assert_eq!(short_hash("123456789012"), "123456789012");
+    assert!(skill_load_prompt(&skill).contains("`review`"));
+    assert!(skill_invoke_prompt(&skill, "  ").contains("No additional arguments"));
+
+    skill.enabled = true;
+    assert_eq!(
+        skill_load_unavailable_reason(&skill),
+        Some("is not trusted")
+    );
+    skill.trust = sigil_kernel::SkillTrustState::Trusted;
+    assert_eq!(
+        skill_load_unavailable_reason(&skill),
+        Some("is not model-invocable")
+    );
+    skill.model_invocable = true;
+    assert_eq!(
+        skill_invoke_unavailable_reason(&skill),
+        Some("is not user-invocable")
+    );
+
+    skill.user_invocable = true;
+    skill.source = sigil_kernel::SkillSource::Plugin {
+        plugin_id: "pack".to_owned(),
+    };
+    skill.sha256 = "1234567890abcdef".to_owned();
+    skill.allowed_tools =
+        sigil_kernel::ToolRegistryScope::from_names_and_prefixes(["read_file"], ["code_"]);
+    skill.disallowed_tools = Default::default();
+    skill.path_patterns = vec!["crates/**".to_owned()];
+    let detail = render_skill_detail_lines(&skill).join("\n");
+    assert!(detail.contains("- Source: plugin:pack"));
+    assert!(detail.contains("- Hash: 1234567890ab..."));
+    assert!(detail.contains("- Allowed tools: names=read_file prefixes=code_"));
+    assert!(detail.contains("- Disallowed tools: none"));
+    assert!(detail.contains("- Paths: crates/**"));
+    assert!(skill_invoke_prompt(&skill, "target=crates/sigil-tui").contains("target=crates"));
+}
+
+#[test]
+fn skill_action_methods_cover_guard_edges() -> Result<()> {
+    let root_config = test_config();
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
+
+    let action = app.load_selected_skill()?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("config is unavailable"));
+
+    let skill = sigil_kernel::SkillDescriptor {
+        id: "review".to_owned(),
+        name: "Review".to_owned(),
+        description: "Review changes.".to_owned(),
+        when_to_use: None,
+        root: ".sigil/skills/review".into(),
+        entrypoint: ".sigil/skills/review/SKILL.md".into(),
+        source: sigil_kernel::SkillSource::Workspace,
+        sha256: "123456789012".to_owned(),
+        enabled: true,
+        trust: sigil_kernel::SkillTrustState::NeedsReview,
+        model_invocable: true,
+        user_invocable: true,
+        run_as: sigil_kernel::SkillRunMode::Inline,
+        argument_hint: None,
+        allowed_tools: Default::default(),
+        disallowed_tools: Default::default(),
+        path_patterns: Vec::new(),
+    };
+    let mut config_state = ConfigState::from_root_config(&root_config);
+    config_state.set_section(ConfigSection::Skills);
+    config_state.set_skill_discovery(vec![skill], Vec::new());
+    app.config_state = Some(config_state);
+
+    app.is_busy = true;
+    let action = app.open_selected_skill_arguments()?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
+
+    app.is_busy = false;
+    let action = app.open_selected_skill_arguments()?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("skill review is not trusted"));
+
+    app.is_busy = true;
+    let action = app.submit_selected_skill_invocation("target module".to_owned())?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
+
+    app.is_busy = false;
+    let action = app.submit_selected_skill_invocation("target module".to_owned())?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("skill review is not trusted"));
+
+    let mut empty_state = ConfigState::from_root_config(&root_config);
+    empty_state.set_section(ConfigSection::Skills);
+    empty_state.set_skill_discovery(Vec::new(), Vec::new());
+    app.config_state = Some(empty_state);
+
+    let action = app.open_selected_skill_arguments()?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("no skill selected"));
+
+    let action = app.submit_selected_skill_invocation("target module".to_owned())?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("no skill selected"));
+    Ok(())
+}
+
+#[test]
 fn provider_detail_renders_capability_summary() {
     let root_config = test_config();
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);

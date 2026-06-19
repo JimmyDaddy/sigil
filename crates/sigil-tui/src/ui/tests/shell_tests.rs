@@ -193,7 +193,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Provider 1/7"));
+    assert!(rendered.contains("Provider 1/8"));
     assert!(rendered.contains("focus Model"));
     assert!(rendered.contains("key model"));
     assert!(rendered.contains("keys Tab section"));
@@ -210,9 +210,9 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/7", "focus Model"),
-            (2, "Memory 3/7", "focus Memory"),
-            (3, "Compaction 4/7", "focus Auto compact"),
+            (0, "Provider 1/8", "focus Model"),
+            (2, "Memory 3/8", "focus Memory"),
+            (3, "Compaction 4/8", "focus Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.input = "/config".to_owned();
@@ -1056,7 +1056,7 @@ fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Memory 3/7"));
+    assert!(rendered.contains("Memory 3/8"));
     assert!(rendered.contains("read Documents"));
     assert!(rendered.contains("read Last scan"));
     assert!(rendered.contains("read Root files"));

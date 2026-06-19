@@ -368,6 +368,18 @@ fn model_picker_submit_updates_setup_and_fim_targets() -> Result<()> {
 }
 
 #[test]
+fn skill_arguments_modal_outcome_has_default_notice_fallback() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.apply_modal_outcome(ModalOutcome::TextSubmitted {
+        target: super::super::modal_flow::TextInputTarget::SkillArguments,
+        value: "module=runtime".to_owned(),
+    });
+
+    assert_eq!(app.last_notice(), Some("skill arguments submitted"));
+}
+
+#[test]
 fn model_picker_key_edges_cover_up_decrement_and_empty_selection() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");

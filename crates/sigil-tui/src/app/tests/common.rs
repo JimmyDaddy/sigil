@@ -1,6 +1,13 @@
 use super::*;
 
 pub(crate) fn test_config() -> RootConfig {
+    let skills = sigil_kernel::SkillConfig {
+        user_skills: false,
+        user_agents: false,
+        compatibility_sources: Vec::new(),
+        ..Default::default()
+    };
+
     RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
@@ -16,7 +23,7 @@ pub(crate) fn test_config() -> RootConfig {
         },
         permission: PermissionConfig::default(),
         memory: MemoryConfig { enabled: true },
-        skills: Default::default(),
+        skills,
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),

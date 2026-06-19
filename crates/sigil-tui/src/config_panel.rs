@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, RootConfig,
+    SkillDescriptor,
 };
 use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
@@ -32,17 +33,19 @@ pub(crate) enum ConfigSection {
     Compaction,
     CodeIntelligence,
     Terminal,
+    Skills,
     Mcp,
 }
 
 impl ConfigSection {
-    pub(crate) const FLOW: [Self; 7] = [
+    pub(crate) const FLOW: [Self; 8] = [
         Self::Provider,
         Self::Permissions,
         Self::Memory,
         Self::Compaction,
         Self::CodeIntelligence,
         Self::Terminal,
+        Self::Skills,
         Self::Mcp,
     ];
 
@@ -54,6 +57,7 @@ impl ConfigSection {
             Self::Compaction => "Compaction",
             Self::CodeIntelligence => "Code Intel",
             Self::Terminal => "Terminal",
+            Self::Skills => "Skills",
             Self::Mcp => "MCP",
         }
     }
@@ -66,6 +70,7 @@ impl ConfigSection {
             Self::Compaction => "context and thresholds",
             Self::CodeIntelligence => "LSP readiness",
             Self::Terminal => "terminal integration",
+            Self::Skills => "skill browser",
             Self::Mcp => "MCP servers",
         }
     }
@@ -122,6 +127,7 @@ pub(crate) enum ConfigField {
     TerminalMouseCapture,
     TerminalOsc52Clipboard,
     TerminalScrollSensitivity,
+    SkillId,
     McpName,
     McpCommand,
     McpArgsCsv,
@@ -156,6 +162,7 @@ impl ConfigField {
         Self::TerminalOsc52Clipboard,
         Self::TerminalScrollSensitivity,
     ];
+    const SKILL_FIELDS: [Self; 1] = [Self::SkillId];
     const MCP_FIELDS: [Self; 4] = [
         Self::McpName,
         Self::McpCommand,
@@ -171,6 +178,7 @@ impl ConfigField {
             ConfigSection::Compaction => &Self::COMPACTION_FIELDS,
             ConfigSection::CodeIntelligence => &Self::CODE_INTELLIGENCE_FIELDS,
             ConfigSection::Terminal => &Self::TERMINAL_FIELDS,
+            ConfigSection::Skills => &Self::SKILL_FIELDS,
             ConfigSection::Mcp => &Self::MCP_FIELDS,
         }
     }
@@ -200,6 +208,7 @@ impl ConfigField {
             Self::TerminalMouseCapture => "mouse_capture",
             Self::TerminalOsc52Clipboard => "osc52_clipboard",
             Self::TerminalScrollSensitivity => "scroll_sensitivity",
+            Self::SkillId => "skill",
             Self::McpName => "name",
             Self::McpCommand => "command",
             Self::McpArgsCsv => "args_csv",
@@ -228,6 +237,7 @@ impl ConfigField {
             Self::TerminalMouseCapture => "Mouse capture",
             Self::TerminalOsc52Clipboard => "OSC52 clipboard",
             Self::TerminalScrollSensitivity => "Scroll sensitivity",
+            Self::SkillId => "Skill",
             Self::McpName => "Name",
             Self::McpCommand => "Command",
             Self::McpArgsCsv => "Arguments",
@@ -294,6 +304,9 @@ impl ConfigField {
             Self::TerminalScrollSensitivity => {
                 "Mouse wheel rows per tick for transcript and approval diff scrolling."
             }
+            Self::SkillId => {
+                "Selected reusable skill. PgUp/PgDn switches skills; footer actions load or invoke it."
+            }
             Self::McpName => "Stable local name for this MCP server.",
             Self::McpCommand => "Executable used to start the MCP server process.",
             Self::McpArgsCsv => "Comma-separated startup arguments for the MCP server.",
@@ -333,6 +346,7 @@ impl ConfigField {
             | Self::TerminalMouseCapture
             | Self::TerminalOsc52Clipboard => "Enter toggle",
             Self::TerminalScrollSensitivity => "Enter input",
+            Self::SkillId => "",
             _ if self.accepts_text_input() => "Enter input",
             _ => "",
         }
@@ -344,6 +358,8 @@ pub(crate) enum ConfigFooterAction {
     Save,
     SaveAndClose,
     ActivateMcp,
+    LoadSkill,
+    InvokeSkill,
     Close,
 }
 
@@ -355,10 +371,12 @@ impl ConfigFooterAction {
         Self::ActivateMcp,
         Self::Close,
     ];
+    const SKILLS_ORDER: [Self; 3] = [Self::LoadSkill, Self::InvokeSkill, Self::Close];
 
     pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
             ConfigSection::Mcp => &Self::MCP_ORDER,
+            ConfigSection::Skills => &Self::SKILLS_ORDER,
             ConfigSection::Provider
             | ConfigSection::Permissions
             | ConfigSection::Memory
@@ -377,6 +395,8 @@ impl ConfigFooterAction {
             Self::Save => "save",
             Self::SaveAndClose => "save+close",
             Self::ActivateMcp => "activate",
+            Self::LoadSkill => "load",
+            Self::InvokeSkill => "invoke",
             Self::Close => "close",
         }
     }
@@ -386,6 +406,8 @@ impl ConfigFooterAction {
             Self::Save => "save",
             Self::SaveAndClose => "save_and_close",
             Self::ActivateMcp => "activate_mcp",
+            Self::LoadSkill => "load_skill",
+            Self::InvokeSkill => "invoke_skill",
             Self::Close => "close",
         }
     }
@@ -868,6 +890,9 @@ pub(crate) struct ConfigState {
     pub(crate) footer_selected: bool,
     pub(crate) selected_footer_action: ConfigFooterAction,
     pub(crate) selected_mcp_server_index: usize,
+    pub(crate) selected_skill_index: usize,
+    pub(crate) skill_descriptors: Vec<SkillDescriptor>,
+    pub(crate) skill_warnings: Vec<String>,
     pub(crate) draft: ConfigDraft,
     pub(crate) dirty: bool,
     pub(crate) close_guard_armed: bool,
@@ -884,6 +909,9 @@ impl ConfigState {
             footer_selected: false,
             selected_footer_action: ConfigFooterAction::Save,
             selected_mcp_server_index: 0,
+            selected_skill_index: 0,
+            skill_descriptors: Vec::new(),
+            skill_warnings: Vec::new(),
             draft: ConfigDraft::from_root_config(root_config),
             dirty: false,
             close_guard_armed: false,
@@ -893,12 +921,13 @@ impl ConfigState {
     pub(crate) fn set_section(&mut self, section: ConfigSection) {
         self.selected_section = section;
         self.sync_mcp_selection();
+        self.sync_skill_selection();
         self.footer_selected = false;
         self.selected_field = self.first_field_for_section(section);
     }
 
     fn first_field_for_section(&self, section: ConfigSection) -> Option<ConfigField> {
-        if section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
+        if self.section_collection_is_empty(section) {
             None
         } else {
             ConfigField::fields_for_section(section).first().copied()
@@ -906,7 +935,7 @@ impl ConfigState {
     }
 
     fn last_field_for_current_section(&self) -> Option<ConfigField> {
-        if self.selected_section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
+        if self.section_collection_is_empty(self.selected_section) {
             None
         } else {
             ConfigField::fields_for_section(self.selected_section)
@@ -915,8 +944,16 @@ impl ConfigState {
         }
     }
 
+    fn section_collection_is_empty(&self, section: ConfigSection) -> bool {
+        match section {
+            ConfigSection::Mcp => self.draft.mcp_servers.is_empty(),
+            ConfigSection::Skills => self.skill_descriptors.is_empty(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn move_field(&mut self, forward: bool) -> ConfigFieldMove {
-        if self.selected_section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
+        if self.section_collection_is_empty(self.selected_section) {
             return ConfigFieldMove::Unavailable;
         }
         let fields = ConfigField::fields_for_section(self.selected_section);
@@ -950,7 +987,7 @@ impl ConfigState {
     }
 
     pub(crate) fn focus_field(&mut self, field: ConfigField) -> bool {
-        if self.selected_section == ConfigSection::Mcp && self.draft.mcp_servers.is_empty() {
+        if self.section_collection_is_empty(self.selected_section) {
             return false;
         }
         if !ConfigField::fields_for_section(self.selected_section).contains(&field) {
@@ -992,6 +1029,51 @@ impl ConfigState {
         self.selected_mcp_server_index = self
             .selected_mcp_server_index
             .min(self.draft.mcp_servers.len().saturating_sub(1));
+    }
+
+    pub(crate) fn set_skill_discovery(
+        &mut self,
+        descriptors: Vec<SkillDescriptor>,
+        warnings: Vec<String>,
+    ) {
+        self.skill_descriptors = descriptors;
+        self.skill_warnings = warnings;
+        self.sync_skill_selection();
+        if self.selected_section == ConfigSection::Skills {
+            self.selected_field = self.first_field_for_section(ConfigSection::Skills);
+        }
+    }
+
+    pub(crate) fn sync_skill_selection(&mut self) {
+        if self.skill_descriptors.is_empty() {
+            self.selected_skill_index = 0;
+            if self.selected_section == ConfigSection::Skills {
+                self.selected_field = None;
+            }
+            return;
+        }
+        self.selected_skill_index = self
+            .selected_skill_index
+            .min(self.skill_descriptors.len().saturating_sub(1));
+    }
+
+    pub(crate) fn selected_skill(&self) -> Option<&SkillDescriptor> {
+        self.skill_descriptors.get(self.selected_skill_index)
+    }
+
+    pub(crate) fn cycle_skill(&mut self, forward: bool) -> bool {
+        if self.skill_descriptors.is_empty() {
+            return false;
+        }
+        let len = self.skill_descriptors.len();
+        if forward {
+            self.selected_skill_index = (self.selected_skill_index + 1) % len;
+        } else if self.selected_skill_index == 0 {
+            self.selected_skill_index = len - 1;
+        } else {
+            self.selected_skill_index -= 1;
+        }
+        true
     }
 
     pub(crate) fn selected_mcp_server(&self) -> Option<&McpServerDraft> {
@@ -1072,6 +1154,7 @@ impl ConfigState {
             }
             ConfigField::CompactionTailMessages => Some(&self.draft.compaction_tail_messages),
             ConfigField::TerminalScrollSensitivity => Some(&self.draft.terminal_scroll_sensitivity),
+            ConfigField::SkillId => self.selected_skill().map(|skill| skill.id.as_str()),
             ConfigField::McpName => self
                 .selected_mcp_server()
                 .map(|server| server.name.as_str()),
@@ -1116,6 +1199,7 @@ impl ConfigState {
             ConfigField::TerminalScrollSensitivity => {
                 Some(&mut self.draft.terminal_scroll_sensitivity)
             }
+            ConfigField::SkillId => None,
             ConfigField::McpName => self
                 .selected_mcp_server_mut()
                 .map(|server| &mut server.name),
@@ -1148,6 +1232,12 @@ impl ConfigState {
                 return "not supported".to_owned();
             }
             ConfigField::ProviderApiKey => return mask_secret(&self.draft.provider_api_key),
+            ConfigField::SkillId => {
+                return self
+                    .selected_skill()
+                    .map(|skill| skill.id.clone())
+                    .unwrap_or_else(|| "none".to_owned());
+            }
             ConfigField::PermissionsDefaultMode => {
                 return self.draft.permission_default_mode.as_str().to_owned();
             }
@@ -1372,6 +1462,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::McpName
         | ConfigField::McpCommand
         | ConfigField::McpArgsCsv => !character.is_control(),
+        ConfigField::SkillId => false,
         ConfigField::ProviderApiKey
         | ConfigField::ProviderName
         | ConfigField::PermissionsDefaultMode

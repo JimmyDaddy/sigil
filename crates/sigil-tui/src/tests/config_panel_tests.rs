@@ -22,6 +22,28 @@ fn test_root_config() -> RootConfig {
     }
 }
 
+fn test_skill(id: &str) -> sigil_kernel::SkillDescriptor {
+    sigil_kernel::SkillDescriptor {
+        id: id.to_owned(),
+        name: id.to_owned(),
+        description: "test skill".to_owned(),
+        when_to_use: None,
+        root: format!(".sigil/skills/{id}").into(),
+        entrypoint: format!(".sigil/skills/{id}/SKILL.md").into(),
+        source: sigil_kernel::SkillSource::Workspace,
+        sha256: format!("{id}-sha"),
+        enabled: true,
+        trust: sigil_kernel::SkillTrustState::Trusted,
+        model_invocable: true,
+        user_invocable: true,
+        run_as: sigil_kernel::SkillRunMode::Inline,
+        argument_hint: Some("target path".to_owned()),
+        allowed_tools: Default::default(),
+        disallowed_tools: Default::default(),
+        path_patterns: vec!["crates/**".to_owned()],
+    }
+}
+
 #[test]
 fn config_section_flow_wraps() {
     assert_eq!(
@@ -36,7 +58,8 @@ fn config_section_flow_wraps() {
         ConfigSection::CodeIntelligence.next_flow(),
         ConfigSection::Terminal
     );
-    assert_eq!(ConfigSection::Terminal.next_flow(), ConfigSection::Mcp);
+    assert_eq!(ConfigSection::Terminal.next_flow(), ConfigSection::Skills);
+    assert_eq!(ConfigSection::Skills.next_flow(), ConfigSection::Mcp);
     assert_eq!(ConfigSection::Mcp.next_flow(), ConfigSection::Provider);
     assert_eq!(ConfigSection::Provider.previous_flow(), ConfigSection::Mcp);
 }
@@ -62,6 +85,14 @@ fn config_footer_action_navigation_wraps() {
     assert_eq!(
         ConfigFooterAction::ActivateMcp.next_for_section(ConfigSection::Mcp),
         ConfigFooterAction::Close
+    );
+    assert_eq!(
+        ConfigFooterAction::LoadSkill.next_for_section(ConfigSection::Skills),
+        ConfigFooterAction::InvokeSkill
+    );
+    assert_eq!(
+        ConfigFooterAction::Close.next_for_section(ConfigSection::Skills),
+        ConfigFooterAction::LoadSkill
     );
 }
 
@@ -305,7 +336,8 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));
     assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(4));
     assert_eq!(ConfigSection::Terminal.flow_index(), Some(5));
-    assert_eq!(ConfigSection::Mcp.flow_index(), Some(6));
+    assert_eq!(ConfigSection::Skills.flow_index(), Some(6));
+    assert_eq!(ConfigSection::Mcp.flow_index(), Some(7));
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
         &[
@@ -332,8 +364,13 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             ConfigField::McpStartupTimeoutSecs,
         ]
     );
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Skills),
+        &[ConfigField::SkillId]
+    );
 
     assert_eq!(ConfigField::McpCommand.label(), "command");
+    assert_eq!(ConfigField::SkillId.label(), "skill");
     assert_eq!(ConfigField::McpArgsCsv.label(), "args_csv");
     assert_eq!(ConfigField::CodeIntelStartup.label(), "startup");
     assert_eq!(
@@ -352,7 +389,13 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         "Enter input"
     );
     assert_eq!(ConfigField::McpCommand.action_label(), "Enter input");
+    assert_eq!(ConfigField::SkillId.action_label(), "");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
+    assert_eq!(ConfigFooterAction::LoadSkill.button_label(), "load");
+    assert_eq!(
+        ConfigFooterAction::InvokeSkill.field_label(),
+        "invoke_skill"
+    );
     assert_eq!(
         ConfigFooterAction::SaveAndClose.field_label(),
         "save_and_close"
@@ -455,6 +498,41 @@ fn config_state_handles_mcp_collection_navigation_and_mutation() {
     assert_eq!(state.selected_mcp_server_index, 1);
     assert!(state.remove_selected_mcp_server());
     assert_eq!(state.selected_mcp_server_index, 0);
+}
+
+#[test]
+fn config_state_handles_skill_collection_navigation() {
+    let mut state = ConfigState::from_root_config(&test_root_config());
+
+    state.set_section(ConfigSection::Skills);
+    assert_eq!(state.selected_field, None);
+    assert_eq!(state.move_field(true), ConfigFieldMove::Unavailable);
+    assert!(!state.focus_last_field());
+    assert!(!state.cycle_skill(true));
+
+    state.set_skill_discovery(
+        vec![test_skill("review"), test_skill("release")],
+        vec!["invalid skill ignored".to_owned()],
+    );
+    assert_eq!(state.selected_field, Some(ConfigField::SkillId));
+    assert_eq!(state.selected_skill_index, 0);
+    assert_eq!(
+        state.skill_warnings,
+        vec!["invalid skill ignored".to_owned()]
+    );
+    assert_eq!(state.field_text_value(ConfigField::SkillId), Some("review"));
+    assert_eq!(state.display_value(ConfigField::SkillId), "review");
+    assert!(state.field_text_value_mut(ConfigField::SkillId).is_none());
+    assert!(!config_field_accepts_char(ConfigField::SkillId, 'x'));
+
+    assert!(state.cycle_skill(true));
+    assert_eq!(state.selected_skill_index, 1);
+    assert_eq!(
+        state.field_text_value(ConfigField::SkillId),
+        Some("release")
+    );
+    assert!(state.cycle_skill(false));
+    assert_eq!(state.selected_skill_index, 0);
 }
 
 #[test]

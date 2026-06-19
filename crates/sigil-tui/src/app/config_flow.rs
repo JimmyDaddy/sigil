@@ -6,7 +6,10 @@ use crate::config_panel::{
 };
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sigil_kernel::{ApprovalMode, CodeIntelStartup, McpServerConfig, McpServerStartup, RootConfig};
+use sigil_kernel::{
+    ApprovalMode, CodeIntelStartup, McpServerConfig, McpServerStartup, RootConfig, SkillDescriptor,
+    SkillSource, SkillTrustState, ToolRegistryScope, default_user_config_dir,
+};
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
 use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
@@ -21,7 +24,8 @@ use super::{
     formatting::{format_token_count, persisted_root_config},
     initial_mcp_server_status, initial_mcp_server_statuses,
     modal_flow::{
-        ModalState, ModelPickerTarget, SecretInputTarget, TextInputState, TextInputTarget,
+        ModalOutcome, ModalState, ModelPickerTarget, SecretInputTarget, TextInputState,
+        TextInputTarget,
     },
 };
 use crate::context_window::{ContextWindowSource, resolve_context_window_tokens};
@@ -149,6 +153,9 @@ impl AppState {
             lines.push("MCP: Ctrl-D drop".to_owned());
             lines.push("MCP: PgUp/PgDn switch".to_owned());
             lines.push("MCP: footer activate lazy".to_owned());
+        } else if state.selected_section == ConfigSection::Skills {
+            lines.push("Skills: PgUp/PgDn switch".to_owned());
+            lines.push("Skills: footer load/invoke".to_owned());
         }
         lines
     }
@@ -332,6 +339,58 @@ impl AppState {
                 ));
                 lines.extend(render_config_selection_details(config_state));
             }
+            ConfigSection::Skills => {
+                lines.push("[discovery]".to_owned());
+                lines.push(render_config_readonly_row(
+                    "Enabled",
+                    bool_summary(config_state.draft.base_root_config.skills.enabled),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Configured",
+                    &format!("{} skills", config_state.skill_descriptors.len()),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Warnings",
+                    &format!("{} warnings", config_state.skill_warnings.len()),
+                ));
+                if config_state.skill_descriptors.is_empty() {
+                    lines.push(render_config_hint_row("No skills discovered"));
+                    lines.push(render_config_hint_row(
+                        "Workspace skills live under the configured skills.workspace_dir",
+                    ));
+                } else {
+                    lines.push(render_config_readonly_row(
+                        "Selected",
+                        &format!(
+                            "{} of {}",
+                            config_state.selected_skill_index + 1,
+                            config_state.skill_descriptors.len()
+                        ),
+                    ));
+                    if let Some(skill) = config_state.selected_skill() {
+                        lines.push(String::new());
+                        lines.push("[skill]".to_owned());
+                        lines.push(render_config_value_row(config_state, ConfigField::SkillId));
+                        lines.extend(render_skill_detail_lines(skill));
+                    }
+                }
+                if !config_state.skill_warnings.is_empty() {
+                    lines.push(String::new());
+                    lines.push("[warnings]".to_owned());
+                    for warning in config_state.skill_warnings.iter().take(4) {
+                        lines.push(render_config_hint_row(warning));
+                    }
+                    if config_state.skill_warnings.len() > 4 {
+                        lines.push(format!(
+                            "... {} more warnings",
+                            config_state.skill_warnings.len() - 4
+                        ));
+                    }
+                }
+                lines.push(String::new());
+                lines.push("PgUp/PgDn skill  footer load/invoke".to_owned());
+                lines.extend(render_config_selection_details(config_state));
+            }
             ConfigSection::Mcp => {
                 lines.push("[servers]".to_owned());
                 lines.push(render_config_readonly_row(
@@ -396,17 +455,20 @@ impl AppState {
                 || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL))
             {
                 let outcome = self.submit_modal();
-                self.apply_modal_outcome(outcome);
+                if let Some(action) = self.apply_config_modal_outcome(outcome)? {
+                    return Ok(Some(action));
+                }
                 return self.save_config_draft();
             }
             if key.code == KeyCode::F(3) {
                 let outcome = self.submit_modal();
-                self.apply_modal_outcome(outcome);
+                if let Some(action) = self.apply_config_modal_outcome(outcome)? {
+                    return Ok(Some(action));
+                }
                 return self.save_config_draft_and_close();
             }
             let outcome = self.handle_modal_key_event(key);
-            self.apply_modal_outcome(outcome);
-            return Ok(None);
+            return self.apply_config_modal_outcome(outcome);
         }
 
         let keep_close_guard = matches!(key.code, KeyCode::Esc)
@@ -528,32 +590,60 @@ impl AppState {
                 }
             }
             KeyCode::PageUp => {
-                if let Some(config_state) = self.config_state.as_mut()
-                    && config_state.selected_section == ConfigSection::Mcp
-                {
-                    if config_state.cycle_mcp_server(false) {
-                        self.last_notice = Some(format!(
-                            "mcp server {}/{}",
-                            config_state.selected_mcp_server_index + 1,
-                            config_state.draft.mcp_servers.len()
-                        ));
-                    } else {
-                        self.last_notice = Some("no MCP server to select".to_owned());
+                if let Some(config_state) = self.config_state.as_mut() {
+                    match config_state.selected_section {
+                        ConfigSection::Mcp => {
+                            if config_state.cycle_mcp_server(false) {
+                                self.last_notice = Some(format!(
+                                    "mcp server {}/{}",
+                                    config_state.selected_mcp_server_index + 1,
+                                    config_state.draft.mcp_servers.len()
+                                ));
+                            } else {
+                                self.last_notice = Some("no MCP server to select".to_owned());
+                            }
+                        }
+                        ConfigSection::Skills => {
+                            if config_state.cycle_skill(false) {
+                                self.last_notice = Some(format!(
+                                    "skill {}/{}",
+                                    config_state.selected_skill_index + 1,
+                                    config_state.skill_descriptors.len()
+                                ));
+                            } else {
+                                self.last_notice = Some("no skill to select".to_owned());
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
             KeyCode::PageDown => {
-                if let Some(config_state) = self.config_state.as_mut()
-                    && config_state.selected_section == ConfigSection::Mcp
-                {
-                    if config_state.cycle_mcp_server(true) {
-                        self.last_notice = Some(format!(
-                            "mcp server {}/{}",
-                            config_state.selected_mcp_server_index + 1,
-                            config_state.draft.mcp_servers.len()
-                        ));
-                    } else {
-                        self.last_notice = Some("no MCP server to select".to_owned());
+                if let Some(config_state) = self.config_state.as_mut() {
+                    match config_state.selected_section {
+                        ConfigSection::Mcp => {
+                            if config_state.cycle_mcp_server(true) {
+                                self.last_notice = Some(format!(
+                                    "mcp server {}/{}",
+                                    config_state.selected_mcp_server_index + 1,
+                                    config_state.draft.mcp_servers.len()
+                                ));
+                            } else {
+                                self.last_notice = Some("no MCP server to select".to_owned());
+                            }
+                        }
+                        ConfigSection::Skills => {
+                            if config_state.cycle_skill(true) {
+                                self.last_notice = Some(format!(
+                                    "skill {}/{}",
+                                    config_state.selected_skill_index + 1,
+                                    config_state.skill_descriptors.len()
+                                ));
+                            } else {
+                                self.last_notice = Some("no skill to select".to_owned());
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -590,8 +680,14 @@ impl AppState {
                             }
                         }
                         ConfigFieldMove::Boundary | ConfigFieldMove::Unavailable => {
-                            config_state.focus_footer(ConfigFooterAction::Save);
-                            self.last_notice = Some("action save".to_owned());
+                            let action = ConfigFooterAction::actions_for_section(
+                                config_state.selected_section,
+                            )
+                            .first()
+                            .copied()
+                            .unwrap_or(ConfigFooterAction::Close);
+                            config_state.focus_footer(action);
+                            self.last_notice = Some(format!("action {}", action.field_label()));
                         }
                     }
                 }
@@ -604,6 +700,8 @@ impl AppState {
                         ConfigFooterAction::Save => self.save_config_draft(),
                         ConfigFooterAction::SaveAndClose => self.save_config_draft_and_close(),
                         ConfigFooterAction::ActivateMcp => self.activate_selected_mcp_server(),
+                        ConfigFooterAction::LoadSkill => self.load_selected_skill(),
+                        ConfigFooterAction::InvokeSkill => self.open_selected_skill_arguments(),
                         ConfigFooterAction::Close => self.attempt_close_config(),
                     };
                 }
@@ -779,9 +877,124 @@ impl AppState {
             return;
         };
 
-        self.config_state = Some(ConfigState::from_root_config(root_config));
+        let mut config_state = ConfigState::from_root_config(root_config);
+        let (skills, warnings) = self.discover_config_skills(root_config);
+        config_state.set_skill_discovery(skills, warnings);
+        self.config_state = Some(config_state);
         self.last_notice = Some("opened config".to_owned());
         self.push_event("mode", "config");
+    }
+
+    fn apply_config_modal_outcome(&mut self, outcome: ModalOutcome) -> Result<Option<AppAction>> {
+        match outcome {
+            ModalOutcome::TextSubmitted {
+                target: TextInputTarget::SkillArguments,
+                value,
+            } => self.submit_selected_skill_invocation(value),
+            other => {
+                self.apply_modal_outcome(other);
+                Ok(None)
+            }
+        }
+    }
+
+    fn discover_config_skills(
+        &self,
+        root_config: &RootConfig,
+    ) -> (Vec<SkillDescriptor>, Vec<String>) {
+        let user_config_dir = default_user_config_dir().ok();
+        match sigil_runtime::discover_skill_index_with_user_dir(
+            &self.workspace_root,
+            user_config_dir.as_deref(),
+            &root_config.skills,
+        ) {
+            Ok(report) => {
+                let warnings = report
+                    .warnings
+                    .into_iter()
+                    .map(|warning| format!("{}: {}", warning.path.display(), warning.message))
+                    .collect();
+                (report.snapshot.descriptors, warnings)
+            }
+            Err(error) => (Vec::new(), vec![format!("skill discovery failed: {error}")]),
+        }
+    }
+
+    fn load_selected_skill(&mut self) -> Result<Option<AppAction>> {
+        if self.is_busy {
+            self.last_notice = Some("busy; load skill later".to_owned());
+            return Ok(None);
+        }
+        let Some(skill) = self.selected_config_skill() else {
+            return Ok(None);
+        };
+        if let Some(reason) = skill_load_unavailable_reason(&skill) {
+            self.last_notice = Some(format!("skill {} {reason}", skill.id));
+            return Ok(None);
+        }
+
+        let prompt = skill_load_prompt(&skill);
+        let skill_id = skill.id;
+        self.config_state = None;
+        self.last_notice = Some(format!("loading skill {skill_id}"));
+        self.push_event("skill", format!("load {skill_id}"));
+        Ok(Some(AppAction::SubmitPrompt(prompt)))
+    }
+
+    fn open_selected_skill_arguments(&mut self) -> Result<Option<AppAction>> {
+        if self.is_busy {
+            self.last_notice = Some("busy; invoke skill later".to_owned());
+            return Ok(None);
+        }
+        let Some(skill) = self.selected_config_skill() else {
+            return Ok(None);
+        };
+        if let Some(reason) = skill_invoke_unavailable_reason(&skill) {
+            self.last_notice = Some(format!("skill {} {reason}", skill.id));
+            return Ok(None);
+        }
+        self.open_text_input(
+            TextInputTarget::SkillArguments,
+            skill.argument_hint.as_deref().unwrap_or_default(),
+        );
+        Ok(None)
+    }
+
+    fn submit_selected_skill_invocation(&mut self, arguments: String) -> Result<Option<AppAction>> {
+        if self.is_busy {
+            self.last_notice = Some("busy; invoke skill later".to_owned());
+            return Ok(None);
+        }
+        let Some(skill) = self.selected_config_skill() else {
+            return Ok(None);
+        };
+        if let Some(reason) = skill_invoke_unavailable_reason(&skill) {
+            self.last_notice = Some(format!("skill {} {reason}", skill.id));
+            return Ok(None);
+        }
+
+        let prompt = skill_invoke_prompt(&skill, &arguments);
+        let skill_id = skill.id;
+        self.config_state = None;
+        self.last_notice = Some(format!("invoking skill {skill_id}"));
+        self.push_event("skill", format!("invoke {skill_id}"));
+        Ok(Some(AppAction::SubmitPrompt(prompt)))
+    }
+
+    fn selected_config_skill(&mut self) -> Option<SkillDescriptor> {
+        let Some(config_state) = self.config_state.as_ref() else {
+            self.last_notice = Some("config is unavailable".to_owned());
+            return None;
+        };
+        if config_state.selected_section != ConfigSection::Skills {
+            self.last_notice = Some("skill action is available in Skills config".to_owned());
+            return None;
+        }
+        let Some(skill) = config_state.selected_skill() else {
+            self.last_notice = Some("no skill selected".to_owned());
+            return None;
+        };
+        Some(skill.clone())
     }
 
     fn attempt_close_config(&mut self) -> Result<Option<AppAction>> {
@@ -915,6 +1128,10 @@ impl AppState {
         self.refresh_memory_summary();
         self.recompute_compaction_status(false);
         self.refresh_usage_sidebar_cache();
+        let (skills, warnings) = self.discover_config_skills(root_config);
+        if let Some(config_state) = self.config_state.as_mut() {
+            config_state.set_skill_discovery(skills, warnings);
+        }
     }
 
     #[cfg(test)]
@@ -1045,6 +1262,8 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
         ];
         if config_state.selected_section == ConfigSection::Mcp {
             lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
+        } else if config_state.selected_section == ConfigSection::Skills {
+            lines.push("skills: PgUp/PgDn skill · footer load/invoke".to_owned());
         }
         return lines;
     };
@@ -1069,9 +1288,154 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     }
     if config_state.selected_section == ConfigSection::Mcp {
         lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
+    } else if config_state.selected_section == ConfigSection::Skills {
+        lines.push("skills: PgUp/PgDn skill · footer load/invoke".to_owned());
     }
 
     lines
+}
+
+fn render_skill_detail_lines(skill: &SkillDescriptor) -> Vec<String> {
+    let name = if skill.name.trim().is_empty() {
+        skill.id.as_str()
+    } else {
+        skill.name.as_str()
+    };
+    let description = if skill.description.trim().is_empty() {
+        "none"
+    } else {
+        skill.description.as_str()
+    };
+    let argument_hint = skill.argument_hint.as_deref().unwrap_or("none");
+
+    vec![
+        render_config_readonly_row("Name", name),
+        render_config_readonly_row("Description", description),
+        render_config_readonly_row("Enabled", bool_summary(skill.enabled)),
+        render_config_readonly_row("Model", bool_summary(skill.model_invocable)),
+        render_config_readonly_row("User", bool_summary(skill.user_invocable)),
+        render_config_readonly_row("Run mode", skill.run_as.as_str()),
+        render_config_readonly_row("Trust", skill.trust.as_str()),
+        render_config_readonly_row("Source", &skill_source_summary(&skill.source)),
+        render_config_readonly_row("Hash", &short_hash(&skill.sha256)),
+        render_config_readonly_row("Entrypoint", &skill.entrypoint.display().to_string()),
+        render_config_readonly_row("Root", &skill.root.display().to_string()),
+        render_config_readonly_row("Argument hint", argument_hint),
+        render_config_readonly_row("Allowed tools", &tool_scope_summary(&skill.allowed_tools)),
+        render_config_readonly_row(
+            "Disallowed tools",
+            &tool_scope_summary(&skill.disallowed_tools),
+        ),
+        render_config_readonly_row("Paths", &path_pattern_summary(&skill.path_patterns)),
+        render_config_readonly_row(
+            "Load",
+            skill_action_label(skill_load_unavailable_reason(skill)),
+        ),
+        render_config_readonly_row(
+            "Invoke",
+            skill_action_label(skill_invoke_unavailable_reason(skill)),
+        ),
+    ]
+}
+
+fn skill_action_label(reason: Option<&'static str>) -> &'static str {
+    match reason {
+        Some(reason) => reason,
+        None => "available",
+    }
+}
+
+fn skill_load_unavailable_reason(skill: &SkillDescriptor) -> Option<&'static str> {
+    if !skill.enabled {
+        return Some("is disabled");
+    }
+    if skill.trust != SkillTrustState::Trusted {
+        return Some("is not trusted");
+    }
+    if !skill.model_invocable {
+        return Some("is not model-invocable");
+    }
+    None
+}
+
+fn skill_invoke_unavailable_reason(skill: &SkillDescriptor) -> Option<&'static str> {
+    if let Some(reason) = skill_load_unavailable_reason(skill) {
+        return Some(reason);
+    }
+    if !skill.user_invocable {
+        return Some("is not user-invocable");
+    }
+    None
+}
+
+fn skill_load_prompt(skill: &SkillDescriptor) -> String {
+    format!(
+        "Use the `load_skill` tool to load skill `{}`. Only load the skill instructions into context for this turn.",
+        skill.id
+    )
+}
+
+fn skill_invoke_prompt(skill: &SkillDescriptor, arguments: &str) -> String {
+    let trimmed = arguments.trim();
+    if trimmed.is_empty() {
+        return format!(
+            "Use the `load_skill` tool to load skill `{}`, then apply that skill to the current task. No additional arguments were provided.",
+            skill.id
+        );
+    }
+    format!(
+        "Use the `load_skill` tool to load skill `{}`, then apply that skill to the current task with these arguments:\n\n```text\n{}\n```",
+        skill.id, trimmed
+    )
+}
+
+fn skill_source_summary(source: &SkillSource) -> String {
+    match source {
+        SkillSource::Workspace => "workspace".to_owned(),
+        SkillSource::User => "user".to_owned(),
+        SkillSource::Plugin { plugin_id } => format!("plugin:{plugin_id}"),
+    }
+}
+
+fn short_hash(hash: &str) -> String {
+    if hash.trim().is_empty() {
+        return "none".to_owned();
+    }
+    let prefix = hash.chars().take(12).collect::<String>();
+    if hash.chars().count() > 12 {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
+}
+
+fn tool_scope_summary(scope: &ToolRegistryScope) -> String {
+    if scope.allow_all {
+        return "all".to_owned();
+    }
+    let mut parts = Vec::new();
+    if !scope.names.is_empty() {
+        parts.push(format!(
+            "names={}",
+            scope.names.iter().cloned().collect::<Vec<_>>().join(",")
+        ));
+    }
+    if !scope.prefixes.is_empty() {
+        parts.push(format!("prefixes={}", scope.prefixes.join(",")));
+    }
+    if parts.is_empty() {
+        "none".to_owned()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn path_pattern_summary(patterns: &[String]) -> String {
+    if patterns.is_empty() {
+        "none".to_owned()
+    } else {
+        patterns.join(",")
+    }
 }
 
 fn render_provider_capability_summary(config_state: &ConfigState) -> Vec<String> {

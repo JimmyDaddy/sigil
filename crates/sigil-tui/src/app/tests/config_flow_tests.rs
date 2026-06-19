@@ -1,5 +1,22 @@
 use super::*;
 
+fn config_for_workspace(workspace_root: &Path) -> RootConfig {
+    let mut config = test_config();
+    config.workspace.root = workspace_root.display().to_string();
+    config
+}
+
+fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
+    let path = workspace_root
+        .join(".sigil")
+        .join("skills")
+        .join(id)
+        .join("SKILL.md");
+    std::fs::create_dir_all(path.parent().expect("skill path should have parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 #[test]
 fn config_command_opens_first_editable_step() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -103,8 +120,8 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     assert_eq!(state.selected_field, None);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Terminal"));
-    assert_eq!(app.config_selected_field_label(), Some("Mouse capture"));
+    assert_eq!(app.config_section_title(), Some("Skills"));
+    assert_eq!(app.config_selected_field_label(), None);
 
     app.config_state
         .as_mut()
@@ -113,8 +130,8 @@ fn config_empty_mcp_footer_can_leave_bottom_focus() -> Result<()> {
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.config_selected_field_label(), Some("save"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Terminal"));
-    assert_eq!(app.config_selected_field_label(), Some("Mouse capture"));
+    assert_eq!(app.config_section_title(), Some("Skills"));
+    assert_eq!(app.config_selected_field_label(), None);
 
     app.config_state
         .as_mut()
@@ -329,10 +346,10 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/7 · provider settings");
+    assert_eq!(lines[0], "Provider 1/8 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] permissions memory compaction code intel terminal mcp"
+        "[provider] permissions memory compaction code intel terminal skills mcp"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -490,7 +507,7 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Code Intel 5/7 · LSP readiness"));
+    assert!(detail.contains("Code Intel 5/8 · LSP readiness"));
     assert!(detail.contains("[controls]"));
     assert!(detail.contains("Code intelligence: yes"));
     assert!(detail.contains("Startup: lazy"));
@@ -521,7 +538,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Terminal 6/7 · terminal integration"));
+    assert!(detail.contains("Terminal 6/8 · terminal integration"));
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("Mouse capture: yes"));
     assert!(detail.contains("OSC52 clipboard: yes"));
@@ -530,6 +547,450 @@ fn config_terminal_step_shows_controls_and_compatibility() {
     assert!(detail.contains("Turn mouse_capture off"));
     assert!(detail.contains("Turn osc52_clipboard off"));
     assert!(detail.contains("Requests terminal mouse events"));
+}
+
+#[test]
+fn config_skills_step_discovers_and_renders_skill_metadata() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_skill(
+        &workspace,
+        "review",
+        r#"---
+id: review
+name: Repo Review
+description: Review this repository.
+trust: trusted
+run-as: child-session
+argument-hint: target module
+allowed-tools: [read_file, grep]
+disallowed-tools: [write_file]
+paths: [crates/**]
+---
+
+# Repo Review
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Skills);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Skills 7/8 · skill browser"));
+    assert!(detail.contains("[discovery]"));
+    assert!(detail.contains("- Configured: 1 skills"));
+    assert!(detail.contains("- Selected: 1 of 1"));
+    assert!(detail.contains("[skill]"));
+    assert!(detail.contains("Skill: review"));
+    assert!(detail.contains("- Name: Repo Review"));
+    assert!(detail.contains("- Description: Review this repository."));
+    assert!(detail.contains("- Model: yes"));
+    assert!(detail.contains("- User: yes"));
+    assert!(detail.contains("- Run mode: child_session"));
+    assert!(detail.contains("- Trust: trusted"));
+    assert!(detail.contains("- Source: workspace"));
+    assert!(detail.contains("- Hash:"));
+    assert!(detail.contains("- Entrypoint: .sigil/skills/review/SKILL.md"));
+    assert!(detail.contains("- Argument hint: target module"));
+    assert!(detail.contains("- Allowed tools: names=grep,read_file"));
+    assert!(detail.contains("- Disallowed tools: names=write_file"));
+    assert!(detail.contains("- Paths: crates/**"));
+    assert!(detail.contains("- Load: available"));
+    assert!(detail.contains("- Invoke: available"));
+    assert!(detail.contains("skills: PgUp/PgDn skill · footer load/invoke"));
+
+    let nav = app.config_nav_lines().join("\n");
+    assert!(nav.contains("Skills: PgUp/PgDn switch"));
+    assert!(nav.contains("Skills: footer load/invoke"));
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["load", "invoke", "close"]
+    );
+    Ok(())
+}
+
+#[test]
+fn config_skills_page_keys_cycle_discovered_skills() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    for id in ["alpha", "beta"] {
+        write_workspace_skill(
+            &workspace,
+            id,
+            r#"---
+trust: trusted
+---
+
+# Skill
+"#,
+        )?;
+    }
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Skills);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_skill_index,
+        1
+    );
+    assert_eq!(app.last_notice(), Some("skill 2/2"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_skill_index,
+        0
+    );
+    assert_eq!(app.last_notice(), Some("skill 1/2"));
+
+    let empty_workspace = temp.path().join("empty-workspace");
+    std::fs::create_dir_all(&empty_workspace)?;
+    let mut empty_app = AppState::from_root_config(
+        &temp.path().join("empty-sigil.toml"),
+        &config_for_workspace(&empty_workspace),
+    );
+    empty_app.open_config_panel();
+    empty_app
+        .config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Skills);
+    let _ = empty_app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(empty_app.last_notice(), Some("no skill to select"));
+    let _ = empty_app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(empty_app.last_notice(), Some("no skill to select"));
+
+    let mut provider_app = AppState::from_root_config(
+        &temp.path().join("provider-sigil.toml"),
+        &config_for_workspace(&workspace),
+    );
+    provider_app.open_config_panel();
+    provider_app
+        .config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Provider);
+    let _ = provider_app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    let _ = provider_app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(provider_app.config_section_title(), Some("Provider"));
+    Ok(())
+}
+
+#[test]
+fn config_skills_step_renders_empty_discovery_and_warnings() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    for index in 0..5 {
+        write_workspace_skill(&workspace, &format!("bad skill {index}"), "# Bad")?;
+    }
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Skills);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("- Configured: 0 skills"));
+    assert!(detail.contains("- Warnings: 5 warnings"));
+    assert!(detail.contains("i No skills discovered"));
+    assert!(detail.contains("Workspace skills live under"));
+    assert!(detail.contains("[warnings]"));
+    assert!(detail.contains("... 1 more warnings"));
+    assert!(detail.contains("skills: PgUp/PgDn skill · footer load/invoke"));
+    Ok(())
+}
+
+#[test]
+fn config_skills_load_footer_submits_load_prompt() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_skill(
+        &workspace,
+        "review",
+        r#"---
+trust: trusted
+---
+
+# Review
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist");
+    state.set_section(ConfigSection::Skills);
+    state.focus_footer(ConfigFooterAction::LoadSkill);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    let Some(AppAction::SubmitPrompt(prompt)) = action else {
+        panic!("expected load prompt action");
+    };
+    assert!(prompt.contains("`load_skill`"));
+    assert!(prompt.contains("`review`"));
+    assert_eq!(app.last_notice(), Some("loading skill review"));
+    assert!(!app.is_config_mode());
+    Ok(())
+}
+
+#[test]
+fn config_skills_footer_guards_busy_wrong_section_and_empty_selection() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_skill(
+        &workspace,
+        "review",
+        r#"---
+trust: trusted
+---
+
+# Review
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    app.is_busy = true;
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Skills);
+        state.focus_footer(ConfigFooterAction::LoadSkill);
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("busy; load skill later"));
+
+    app.is_busy = false;
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Provider);
+        state.focus_footer(ConfigFooterAction::LoadSkill);
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("skill action is available in Skills config")
+    );
+
+    let empty_workspace = temp.path().join("empty-workspace");
+    std::fs::create_dir_all(&empty_workspace)?;
+    let mut empty_app = AppState::from_root_config(
+        &temp.path().join("empty-sigil.toml"),
+        &config_for_workspace(&empty_workspace),
+    );
+    empty_app.open_config_panel();
+    {
+        let state = empty_app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Skills);
+        state.focus_footer(ConfigFooterAction::LoadSkill);
+    }
+    let action = empty_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(empty_app.last_notice(), Some("no skill selected"));
+    Ok(())
+}
+
+#[test]
+fn config_skills_invoke_footer_collects_arguments_and_submits_prompt() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_skill(
+        &workspace,
+        "review",
+        r#"---
+trust: trusted
+---
+
+# Review
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist");
+    state.set_section(ConfigSection::Skills);
+    state.focus_footer(ConfigFooterAction::InvokeSkill);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.modal_title(), Some("Skill Arguments"));
+    let modal = app.modal_lines().join("\n");
+    assert!(modal.contains("Arguments passed to the selected skill invocation."));
+    assert!(modal.contains("arguments: |"));
+    assert!(!modal.contains("key:"));
+
+    for character in "crates/sigil-tui".chars() {
+        let _ =
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    let Some(AppAction::SubmitPrompt(prompt)) = action else {
+        panic!("expected invoke prompt action");
+    };
+    assert!(prompt.contains("`load_skill`"));
+    assert!(prompt.contains("`review`"));
+    assert!(prompt.contains("crates/sigil-tui"));
+    assert_eq!(app.last_notice(), Some("invoking skill review"));
+    assert!(!app.is_config_mode());
+    Ok(())
+}
+
+#[test]
+fn config_skills_invoke_empty_arguments_submits_no_argument_prompt() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_skill(
+        &workspace,
+        "review",
+        r#"---
+trust: trusted
+---
+
+# Review
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist");
+    state.set_section(ConfigSection::Skills);
+    state.focus_footer(ConfigFooterAction::InvokeSkill);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    let Some(AppAction::SubmitPrompt(prompt)) = action else {
+        panic!("expected invoke prompt action");
+    };
+    assert!(prompt.contains("No additional arguments were provided."));
+    assert_eq!(app.last_notice(), Some("invoking skill review"));
+    Ok(())
+}
+
+#[test]
+fn config_skills_invoke_modal_shortcuts_submit_prompt_actions() -> Result<()> {
+    for (key_code, expected_notice) in [
+        (KeyCode::F(2), "invoking skill review"),
+        (KeyCode::F(3), "invoking skill review"),
+    ] {
+        let temp = tempdir()?;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace)?;
+        write_workspace_skill(
+            &workspace,
+            "review",
+            r#"---
+trust: trusted
+---
+
+# Review
+"#,
+        )?;
+        let config = config_for_workspace(&workspace);
+        let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+        app.open_config_panel();
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Skills);
+        state.focus_footer(ConfigFooterAction::InvokeSkill);
+
+        let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+        assert!(action.is_none());
+        for character in "target module".chars() {
+            let _ =
+                app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
+        }
+
+        let action = app.handle_key_event(KeyEvent::new(key_code, KeyModifiers::NONE))?;
+
+        let Some(AppAction::SubmitPrompt(prompt)) = action else {
+            panic!("expected invoke prompt action");
+        };
+        assert!(prompt.contains("target module"));
+        assert_eq!(app.last_notice(), Some(expected_notice));
+        assert!(!app.is_config_mode());
+    }
+    Ok(())
+}
+
+#[test]
+fn config_skills_footer_refuses_untrusted_skill_actions() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_skill(
+        &workspace,
+        "draft",
+        r#"---
+description: Needs review before use.
+---
+
+# Draft
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should exist");
+    state.set_section(ConfigSection::Skills);
+    state.focus_footer(ConfigFooterAction::LoadSkill);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("skill draft is not trusted"));
+    assert!(app.is_config_mode());
+    Ok(())
 }
 
 #[test]
