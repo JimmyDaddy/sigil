@@ -2332,6 +2332,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures",
  "serde_json",
  "sha2",
  "sigil-code-intel",

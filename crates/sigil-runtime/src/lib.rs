@@ -10,7 +10,7 @@ use sigil_kernel::{
     ScopedToolRegistry, SecretRedactor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory,
     ToolContext, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
     ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
-    ToolSubjectScope,
+    ToolSubjectScope, default_user_config_dir,
 };
 pub use sigil_mcp::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
@@ -37,8 +37,9 @@ use sigil_provider_openai_compat::{
 pub mod doctor;
 pub mod skills;
 pub use skills::{
-    SkillDiscoveryReport, SkillDiscoveryWarning, SkillDiscoveryWarningKind, discover_skill_index,
-    discover_skill_index_with_user_dir, namespaced_plugin_skill_id,
+    LOAD_SKILL_TOOL_NAME, SkillDiscoveryReport, SkillDiscoveryWarning, SkillDiscoveryWarningKind,
+    discover_skill_index, discover_skill_index_with_user_dir, namespaced_plugin_skill_id,
+    register_skill_tools,
 };
 
 /// Builds the configured model provider for runtime entrypoints.
@@ -515,7 +516,14 @@ fn register_local_tools(
     sigil_code_intel::register_code_intelligence_tools(
         registry,
         &root_config.code_intelligence,
-        workspace_root,
+        workspace_root.clone(),
+    );
+    let user_config_dir = default_user_config_dir().ok();
+    let _ = skills::register_skill_tools(
+        registry,
+        &workspace_root,
+        user_config_dir.as_deref(),
+        &root_config.skills,
     );
 }
 
@@ -1200,6 +1208,7 @@ fn read_only_role_tool_scope() -> ToolRegistryScope {
             "code_definition",
             "code_references",
             "code_diagnostics",
+            LOAD_SKILL_TOOL_NAME,
         ],
         std::iter::empty::<&str>(),
     )

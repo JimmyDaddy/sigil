@@ -179,7 +179,60 @@ impl Provider for CapturingTextProvider {
     }
 }
 
+struct ToolSideEffectProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl Provider for ToolSideEffectProvider {
+    fn name(&self) -> &str {
+        "mock-side-effect"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        if tool_used {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])))
+        } else {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-side-effect".to_owned(),
+                    name: "side_effect".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-side-effect".to_owned(),
+                    delta: "{}".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-side-effect".to_owned(),
+                    name: "side_effect".to_owned(),
+                    args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])))
+        }
+    }
+}
+
 struct EchoTool;
+struct SideEffectTool;
 struct TerminalStartAuditTool;
 struct WriteTool {
     executed: Arc<AtomicBool>,
@@ -223,6 +276,39 @@ impl Tool for EchoTool {
             args["value"].as_str().unwrap_or_default(),
             ToolResultMeta::default(),
         ))
+    }
+}
+
+#[async_trait]
+impl Tool for SideEffectTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "side_effect".to_owned(),
+            description: "returns transient context and control entries".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "side_effect",
+            "side effect materialized",
+            ToolResultMeta::default(),
+        )
+        .with_transient_context(vec![ModelMessage::system("loaded transient skill body")])
+        .with_control_entry(ControlEntry::Note {
+            kind: "side_effect_loaded".to_owned(),
+            data: json!({"id": "repo-review"}),
+        }))
     }
 }
 
@@ -1453,6 +1539,67 @@ async fn agent_run_output_reports_approval_denials() -> Result<()> {
     assert!(output.outcome.tool_errors.iter().any(|error| {
         error.kind == ToolErrorKind::ApprovalDenied
             && error.message.contains("tool execution denied by user")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_materializes_tool_result_transient_context_and_control_entries() -> Result<()> {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(SideEffectTool));
+    let agent = Agent::new(
+        ToolSideEffectProvider {
+            captured: Arc::clone(&captured),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-side-effect", "mock-model");
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("load context"),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "done");
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| {
+        message.role == MessageRole::System
+            && message.content.as_deref() == Some("loaded transient skill body")
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::Note { kind, data })
+                if kind == "side_effect_loaded" && data["id"] == "repo-review"
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::User(message)
+                | SessionLogEntry::Assistant(message)
+                | SessionLogEntry::ToolResult(message)
+                if message.content.as_deref() == Some("loaded transient skill body")
+        )
     }));
     Ok(())
 }

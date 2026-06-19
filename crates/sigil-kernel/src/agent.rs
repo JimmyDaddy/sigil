@@ -232,7 +232,13 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
-        if let Some(message) = input.persisted_user_message {
+        let AgentRunInput {
+            persisted_user_message,
+            mut transient_context,
+            task_plan_update,
+        } = input;
+
+        if let Some(message) = persisted_user_message {
             session.append_user_message(ModelMessage::user(message))?;
         }
 
@@ -262,7 +268,7 @@ where
             model_turns = model_turns.saturating_add(1);
 
             let mut tool_specs = self.tools.specs();
-            if input.task_plan_update.is_some() {
+            if task_plan_update.is_some() {
                 tool_specs.push(task_plan_update_tool_spec());
             }
             let request = session.build_request_with_transient_messages(
@@ -272,7 +278,7 @@ where
                 options.reasoning_effort.clone(),
                 previous_response_handle.clone(),
                 options.traffic_partition_key.clone(),
-                &input.transient_context,
+                &transient_context,
             )?;
 
             let mut stream = self.provider.stream(request).await?;
@@ -374,7 +380,7 @@ where
                 };
                 for call in completed_calls {
                     if call.name == TASK_PLAN_UPDATE_TOOL_NAME {
-                        let Some(context) = input.task_plan_update.as_ref() else {
+                        let Some(context) = task_plan_update.as_ref() else {
                             let mut result = ToolResult::error(
                                 call.id.clone(),
                                 call.name.clone(),
@@ -405,7 +411,7 @@ where
                         continue;
                     }
                     if let Some(mut result) =
-                        direct_task_tool_guidance_result(&call, input.task_plan_update.is_some())
+                        direct_task_tool_guidance_result(&call, task_plan_update.is_some())
                     {
                         attach_tool_call_context(&mut result, &call, &[]);
                         append_tool_execution_audit(
@@ -805,10 +811,13 @@ where
                         duration_ms,
                         Some(&result),
                     )?;
+                    append_tool_control_entries_from_result(session, handler, &mut result)?;
                     append_terminal_task_control_from_result(session, handler, &result)?;
                     record_tool_run_outcome(&mut outcome, &result);
+                    let tool_transient_context = std::mem::take(&mut result.transient_context);
                     session.append_tool_message(result.to_model_message())?;
                     handler.handle(RunEvent::ToolResult(result))?;
+                    transient_context.extend(tool_transient_context);
                 }
                 continue;
             }
@@ -1168,6 +1177,18 @@ fn append_terminal_task_control_from_result(
     let control = ControlEntry::TerminalTask(entry);
     session.append_control(control.clone())?;
     handler.handle(RunEvent::Control(control))
+}
+
+fn append_tool_control_entries_from_result(
+    session: &mut Session,
+    handler: &mut impl EventHandler,
+    result: &mut ToolResult,
+) -> Result<()> {
+    for control in std::mem::take(&mut result.control_entries) {
+        session.append_control(control.clone())?;
+        handler.handle(RunEvent::Control(control))?;
+    }
+    Ok(())
 }
 
 fn tool_egress_control_entry(

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::permission::ApprovalMode;
+use crate::{permission::ApprovalMode, provider::ModelMessage, session::ControlEntry};
 
 /// JSON-schema-backed tool contract exposed to model providers and UI approvals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,6 +248,10 @@ pub struct ToolResult {
     pub content: String,
     pub status: ToolResultStatus,
     pub metadata: ToolResultMeta,
+    #[serde(skip)]
+    pub transient_context: Vec<ModelMessage>,
+    #[serde(skip)]
+    pub control_entries: Vec<ControlEntry>,
 }
 
 impl ToolResult {
@@ -263,6 +267,8 @@ impl ToolResult {
             content: content.into(),
             status: ToolResultStatus::Ok,
             metadata,
+            transient_context: Vec::new(),
+            control_entries: Vec::new(),
         }
     }
 
@@ -284,6 +290,8 @@ impl ToolResult {
                 details: Value::Null,
             }),
             metadata: ToolResultMeta::default(),
+            transient_context: Vec::new(),
+            control_entries: Vec::new(),
         }
     }
 
@@ -292,6 +300,16 @@ impl ToolResult {
             error.retryable = retryable;
             error.details = details;
         }
+        self
+    }
+
+    pub fn with_transient_context(mut self, context: Vec<ModelMessage>) -> Self {
+        self.transient_context = context;
+        self
+    }
+
+    pub fn with_control_entry(mut self, entry: ControlEntry) -> Self {
+        self.control_entries.push(entry);
         self
     }
 

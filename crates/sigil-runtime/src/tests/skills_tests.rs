@@ -1,15 +1,99 @@
-use std::{fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+use anyhow::Result;
+use async_trait::async_trait;
+use futures::{Stream, stream};
 use sha2::{Digest, Sha256};
-use sigil_kernel::{SkillConfig, SkillRunMode, SkillSource, SkillTrustState};
+use sigil_kernel::{
+    Agent, AgentRunInput, AgentRunOptions, AgentRunOutput, ApprovalHandler, ApprovalMode,
+    AutoApproveHandler, CompactionConfig, CompletionRequest, ControlEntry, InteractionMode,
+    MemoryConfig, MessageRole, NoopEventHandler, PermissionConfig, Provider, ProviderCapabilities,
+    ProviderChunk, ReasoningEffort, ReasoningStreamSupport, Session, SessionLogEntry, SkillConfig,
+    SkillIndexSnapshot, SkillRunMode, SkillSource, SkillTrustState, Tool, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolCall, ToolContext, ToolErrorKind, ToolRegistry, ToolResultStatus,
+};
 
 use super::{
-    SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,
-    namespaced_plugin_skill_id,
+    LOAD_SKILL_TOOL_NAME, SkillDiscoveryWarningKind, discover_skill_index,
+    discover_skill_index_with_user_dir, namespaced_plugin_skill_id, register_skill_tools,
 };
+
+struct LoadSkillProvider {
+    captured: Arc<Mutex<Vec<CompletionRequest>>>,
+}
+
+#[async_trait]
+impl Provider for LoadSkillProvider {
+    fn name(&self) -> &str {
+        "mock-load-skill"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            exact_prefix_cache: false,
+            reports_cache_tokens: false,
+            reasoning_stream: ReasoningStreamSupport::Native,
+            supports_reasoning_effort: true,
+            supports_tool_stream: true,
+            supports_background_tasks: false,
+            supports_response_handles: false,
+            supports_reasoning_artifacts: false,
+            supports_structured_output: false,
+            supports_assistant_prefix_seed: false,
+            supports_schema_constrained_tools: false,
+            supports_infill_completion: false,
+            supports_system_fingerprint: false,
+            tool_name_max_chars: 64,
+        }
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_result_seen = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        self.captured
+            .lock()
+            .expect("captured requests lock should not be poisoned")
+            .push(request);
+        let chunks = if tool_result_seen {
+            vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ]
+        } else {
+            vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-load-skill".to_owned(),
+                    name: LOAD_SKILL_TOOL_NAME.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-load-skill".to_owned(),
+                    delta: r#"{"id":"repo-review"}"#.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-load-skill".to_owned(),
+                    name: LOAD_SKILL_TOOL_NAME.to_owned(),
+                    args_json: r#"{"id":"repo-review"}"#.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ]
+        };
+        Ok(Box::pin(stream::iter(chunks)))
+    }
+}
 
 #[test]
 fn discovery_prefers_workspace_native_skills_over_compat_and_user_duplicates() {
@@ -344,6 +428,334 @@ fn plugin_skill_namespace_rejects_invalid_segments() {
     );
     assert!(namespaced_plugin_skill_id("bad plugin", "repo-review").is_err());
     assert!(namespaced_plugin_skill_id("review-pack", "bad/skill").is_err());
+}
+
+#[test]
+fn load_skill_model_index_truncates_and_preserves_absolute_paths() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    for index in 0..80 {
+        let skill_id = format!("skill-{index:03}");
+        write_skill(
+            workspace
+                .path()
+                .join(".sigil/skills")
+                .join(&skill_id)
+                .join("SKILL.md"),
+            &format!(
+                r#"---
+id: {skill_id}
+description: "{}"
+when-to-use: "{}"
+trust: trusted
+---
+
+# {skill_id}
+"#,
+                "long description ".repeat(10),
+                "long usage hint ".repeat(8)
+            ),
+        );
+    }
+
+    let report = discover_skill_index(workspace.path(), &SkillConfig::default())
+        .expect("discovery should succeed");
+    let description = super::model_visible_skill_index_description(&report.snapshot);
+    assert!(description.contains("\n- ..."));
+
+    let absolute = workspace.path().join(".sigil/skills/skill-000/SKILL.md");
+    assert_eq!(
+        super::resolved_descriptor_path(workspace.path(), &absolute),
+        absolute
+    );
+}
+
+#[tokio::test]
+async fn load_skill_tool_filters_model_index_and_loads_trusted_body() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let trusted_body = r#"---
+name: repo-review
+description: Review repositories.
+when-to-use: Before risky commits.
+trust: trusted
+---
+
+# Repo Review
+
+Trusted Body Secret
+"#;
+    write_skill(
+        workspace.path().join(".sigil/skills/repo-review/SKILL.md"),
+        trusted_body,
+    );
+    write_skill(
+        workspace.path().join(".sigil/skills/manual-only/SKILL.md"),
+        r#"---
+name: manual-only
+description: Manual workflow.
+trust: trusted
+disable-model-invocation: true
+---
+
+# Manual
+"#,
+    );
+    write_skill(
+        workspace.path().join(".sigil/skills/needs-review/SKILL.md"),
+        r#"---
+name: needs-review
+description: Needs review.
+---
+
+# Needs Review
+"#,
+    );
+
+    let mut registry = ToolRegistry::new();
+    let report = register_skill_tools(
+        &mut registry,
+        workspace.path(),
+        None,
+        &SkillConfig::default(),
+    )
+    .expect("skill tools should register");
+    assert_eq!(report.snapshot.descriptors.len(), 3);
+
+    let spec = registry
+        .spec_for(LOAD_SKILL_TOOL_NAME)
+        .expect("load_skill spec should register");
+    assert!(spec.description.contains("repo-review"));
+    assert!(spec.description.contains("Review repositories."));
+    assert!(!spec.description.contains("manual-only"));
+    assert!(!spec.description.contains("needs-review"));
+
+    let result = registry
+        .execute(
+            ToolContext {
+                workspace_root: workspace.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            tool_call("call-load-1", r#"{"id":"repo-review"}"#),
+        )
+        .await
+        .expect("load_skill should execute");
+
+    assert!(!result.is_error());
+    assert_eq!(result.transient_context.len(), 1);
+    let context = &result.transient_context[0];
+    assert_eq!(context.role, MessageRole::System);
+    let context_text = context
+        .content
+        .as_deref()
+        .expect("context should have text");
+    assert!(context_text.contains("id: repo-review"));
+    assert!(context_text.contains("Trusted Body Secret"));
+    assert!(!result.to_model_content().contains("Trusted Body Secret"));
+    assert!(result.control_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            ControlEntry::SkillLoaded(loaded)
+                if loaded.skill_id == "repo-review"
+                    && loaded.call_id.as_deref() == Some("call-load-1")
+                    && loaded.byte_count == trusted_body.len() as u64
+        )
+    }));
+
+    let denied = registry
+        .execute(
+            ToolContext {
+                workspace_root: workspace.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            tool_call("call-load-2", r#"{"id":"manual-only"}"#),
+        )
+        .await
+        .expect("load_skill should return structured errors");
+    assert!(matches!(
+        denied.status,
+        ToolResultStatus::Error(ref error)
+            if error.kind == ToolErrorKind::PermissionDenied
+                && error.message.contains("not model-invocable")
+    ));
+}
+
+#[tokio::test]
+async fn load_skill_tool_rejects_untrusted_and_root_escape_entries() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_skill(
+        workspace.path().join(".sigil/skills/needs-review/SKILL.md"),
+        r#"---
+name: needs-review
+description: Needs review.
+---
+
+# Needs Review
+"#,
+    );
+    let mut registry = ToolRegistry::new();
+    register_skill_tools(
+        &mut registry,
+        workspace.path(),
+        None,
+        &SkillConfig::default(),
+    )
+    .expect("skill tools should register");
+
+    let untrusted = registry
+        .execute(
+            ToolContext {
+                workspace_root: workspace.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            tool_call("call-load-untrusted", r#"{"id":"needs-review"}"#),
+        )
+        .await
+        .expect("load_skill should return structured errors");
+    assert!(matches!(
+        untrusted.status,
+        ToolResultStatus::Error(ref error)
+            if error.kind == ToolErrorKind::PermissionDenied
+                && error.message.contains("not trusted")
+    ));
+
+    write_skill(
+        workspace.path().join(".sigil/skills/safe/SKILL.md"),
+        r#"---
+name: safe
+trust: trusted
+---
+
+# Safe
+"#,
+    );
+    write_skill(
+        workspace.path().join(".sigil/skills/other/SKILL.md"),
+        r#"---
+name: other
+trust: trusted
+---
+
+# Other
+"#,
+    );
+    let discovered = discover_skill_index(workspace.path(), &SkillConfig::default())
+        .expect("discovery should succeed");
+    let mut escaped = descriptor(&discovered, "safe").clone();
+    escaped.entrypoint = Path::new(".sigil/skills/other/SKILL.md").to_path_buf();
+    escaped.sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            fs::read(workspace.path().join(".sigil/skills/other/SKILL.md"))
+                .expect("other skill should read")
+        )
+    );
+    let tool = super::LoadSkillTool::new(
+        workspace.path().to_path_buf(),
+        SkillIndexSnapshot::new(vec![escaped]).expect("snapshot should build"),
+    );
+
+    let escaped_result = tool
+        .execute(
+            ToolContext {
+                workspace_root: workspace.path().to_path_buf(),
+                timeout_secs: 5,
+            },
+            "call-load-escape".to_owned(),
+            serde_json::from_str(r#"{"id":"safe"}"#).expect("args should parse"),
+        )
+        .await
+        .expect("load_skill should return structured errors");
+    assert!(matches!(
+        escaped_result.status,
+        ToolResultStatus::Error(ref error)
+            if error.kind == ToolErrorKind::PathOutsideWorkspace
+                && error.message.contains("outside its skill root")
+    ));
+}
+
+#[tokio::test]
+async fn load_skill_agent_permission_modes_allow_ask_and_deny() -> Result<()> {
+    let allow_workspace = tempfile::tempdir()?;
+    write_load_skill_fixture(allow_workspace.path());
+    let mut allow_approval = AutoApproveHandler;
+    let (allow_output, allow_session, allow_requests) = run_load_skill_agent(
+        allow_workspace.path(),
+        PermissionConfig {
+            tools: BTreeMap::from([(LOAD_SKILL_TOOL_NAME.to_owned(), ApprovalMode::Allow)]),
+            ..PermissionConfig::default()
+        },
+        &mut allow_approval,
+    )
+    .await?;
+
+    assert_eq!(allow_output.result.final_text, "done");
+    assert!(allow_output.outcome.tool_errors.is_empty());
+    assert_skill_loaded(&allow_session);
+    assert_request_has_loaded_skill_body(&allow_requests);
+    assert_approval_audit(
+        &allow_session,
+        ToolApprovalAuditAction::PolicyEvaluated,
+        ApprovalMode::Allow,
+        None,
+    );
+
+    let ask_workspace = tempfile::tempdir()?;
+    write_load_skill_fixture(ask_workspace.path());
+    let mut ask_approval = AutoApproveHandler;
+    let (ask_output, ask_session, ask_requests) = run_load_skill_agent(
+        ask_workspace.path(),
+        PermissionConfig {
+            tools: BTreeMap::from([(LOAD_SKILL_TOOL_NAME.to_owned(), ApprovalMode::Ask)]),
+            ..PermissionConfig::default()
+        },
+        &mut ask_approval,
+    )
+    .await?;
+
+    assert_eq!(ask_output.result.final_text, "done");
+    assert!(ask_output.outcome.tool_errors.is_empty());
+    assert_skill_loaded(&ask_session);
+    assert_request_has_loaded_skill_body(&ask_requests);
+    assert_approval_audit(
+        &ask_session,
+        ToolApprovalAuditAction::Requested,
+        ApprovalMode::Ask,
+        None,
+    );
+    assert_approval_audit(
+        &ask_session,
+        ToolApprovalAuditAction::Resolved,
+        ApprovalMode::Ask,
+        Some(ToolApprovalUserDecision::Approved),
+    );
+
+    let deny_workspace = tempfile::tempdir()?;
+    write_load_skill_fixture(deny_workspace.path());
+    let mut deny_approval = AutoApproveHandler;
+    let (deny_output, deny_session, deny_requests) = run_load_skill_agent(
+        deny_workspace.path(),
+        PermissionConfig {
+            tools: BTreeMap::from([(LOAD_SKILL_TOOL_NAME.to_owned(), ApprovalMode::Deny)]),
+            ..PermissionConfig::default()
+        },
+        &mut deny_approval,
+    )
+    .await?;
+
+    assert_eq!(deny_output.result.final_text, "done");
+    assert!(deny_output.outcome.tool_errors.iter().any(|error| {
+        error.kind == ToolErrorKind::PermissionDenied
+            && error.message.contains("denied by permission policy")
+    }));
+    assert_no_skill_loaded(&deny_session);
+    assert_request_omits_loaded_skill_body(&deny_requests);
+    assert_approval_audit(
+        &deny_session,
+        ToolApprovalAuditAction::Resolved,
+        ApprovalMode::Deny,
+        Some(ToolApprovalUserDecision::Denied),
+    );
+
+    Ok(())
 }
 
 #[test]
@@ -769,6 +1181,136 @@ fn restore_permissions(path: &Path) {
     fs::set_permissions(path, permissions).expect("permissions should restore");
 }
 
+async fn run_load_skill_agent<A>(
+    workspace_root: &Path,
+    permission_config: PermissionConfig,
+    approval_handler: &mut A,
+) -> Result<(AgentRunOutput, Session, Vec<CompletionRequest>)>
+where
+    A: ApprovalHandler + Send,
+{
+    let mut registry = ToolRegistry::new();
+    register_skill_tools(&mut registry, workspace_root, None, &SkillConfig::default())?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        LoadSkillProvider {
+            captured: Arc::clone(&captured),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-load-skill", "mock-model");
+    let mut handler = NoopEventHandler;
+    let output = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("load repo review"),
+            AgentRunOptions {
+                workspace_root: workspace_root.to_path_buf(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config,
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            approval_handler,
+        )
+        .await?;
+    let requests = captured
+        .lock()
+        .expect("captured requests lock should not be poisoned")
+        .clone();
+    Ok((output, session, requests))
+}
+
+fn write_load_skill_fixture(workspace_root: &Path) {
+    write_skill(
+        workspace_root.join(".sigil/skills/repo-review/SKILL.md"),
+        r#"---
+name: repo-review
+description: Review repositories.
+trust: trusted
+---
+
+# Repo Review
+
+Agent Body Secret
+"#,
+    );
+}
+
+fn assert_skill_loaded(session: &Session) {
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SkillLoaded(loaded))
+                if loaded.skill_id == "repo-review"
+                    && loaded.call_id.as_deref() == Some("call-load-skill")
+        )
+    }));
+}
+
+fn assert_no_skill_loaded(session: &Session) {
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SkillLoaded(loaded))
+                if loaded.skill_id == "repo-review"
+        )
+    }));
+}
+
+fn assert_request_has_loaded_skill_body(requests: &[CompletionRequest]) {
+    assert!(
+        requests
+            .get(1)
+            .expect("second request should include tool result context")
+            .messages
+            .iter()
+            .any(|message| {
+                message.role == MessageRole::System
+                    && message
+                        .content
+                        .as_deref()
+                        .is_some_and(|content| content.contains("Agent Body Secret"))
+            })
+    );
+}
+
+fn assert_request_omits_loaded_skill_body(requests: &[CompletionRequest]) {
+    assert!(
+        requests
+            .iter()
+            .flat_map(|request| request.messages.iter())
+            .all(|message| !message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("Agent Body Secret")))
+    );
+}
+
+fn assert_approval_audit(
+    session: &Session,
+    action: ToolApprovalAuditAction,
+    policy_decision: ApprovalMode,
+    user_decision: Option<ToolApprovalUserDecision>,
+) {
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-load-skill"
+                    && approval.tool_name == LOAD_SKILL_TOOL_NAME
+                    && approval.action == action
+                    && approval.policy_decision == policy_decision
+                    && approval.user_decision == user_decision
+        )
+    }));
+}
+
 fn descriptor<'a>(
     report: &'a super::SkillDiscoveryReport,
     id: &str,
@@ -779,6 +1321,14 @@ fn descriptor<'a>(
         .iter()
         .find(|descriptor| descriptor.id == id)
         .expect("descriptor should exist")
+}
+
+fn tool_call(id: &str, args_json: &str) -> ToolCall {
+    ToolCall {
+        id: id.to_owned(),
+        name: LOAD_SKILL_TOOL_NAME.to_owned(),
+        args_json: args_json.to_owned(),
+    }
 }
 
 fn write_skill(path: impl AsRef<Path>, content: &str) {

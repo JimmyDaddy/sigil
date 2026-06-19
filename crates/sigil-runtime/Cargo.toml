@@ -19,6 +19,7 @@ sigil-provider-openai-compat = { path = "../sigil-provider-openai-compat" }
 sigil-tools-builtin = { path = "../sigil-tools-builtin" }
 
 [dev-dependencies]
+futures.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 
