@@ -754,6 +754,19 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 entry.byte_count,
                 entry.line_count
             ),
+            ControlEntry::PluginManifestCaptured(snapshot) => format!(
+                "[ctl] plugin {} version={} caps={} trust={}",
+                truncate_session_view_text(&snapshot.plugin_id, 48),
+                truncate_session_view_text(&snapshot.version, 24),
+                snapshot.capabilities.len(),
+                snapshot.trust.as_str()
+            ),
+            ControlEntry::PluginTrustDecision(entry) => format!(
+                "[ctl] plugin {} trust={} hash={}",
+                truncate_session_view_text(&entry.plugin_id, 48),
+                entry.decision.as_str(),
+                truncate_session_view_text(&entry.manifest_hash, 16)
+            ),
             ControlEntry::ChangeSetProposed(change_set) => format!(
                 "[ctl] changeset {} proposed risk={} files={} {}",
                 change_set.id.as_str(),

@@ -14,6 +14,7 @@ use crate::{
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     memory::{apply_memory_report, materialize_memory},
     permission::ApprovalMode,
+    plugin::{PluginManifestSnapshot, PluginStateProjection, PluginTrustEntry},
     provider::{
         CompletionRequest, ModelMessage, PrefixSnapshot, ProviderContinuationState, ResponseHandle,
         SessionStats, UsageStats,
@@ -104,6 +105,10 @@ pub enum ControlEntry {
     SkillIndexCaptured(SkillIndexSnapshot),
     #[serde(alias = "SkillLoaded")]
     SkillLoaded(SkillLoadEntry),
+    #[serde(alias = "PluginManifestCaptured")]
+    PluginManifestCaptured(PluginManifestSnapshot),
+    #[serde(alias = "PluginTrustDecision")]
+    PluginTrustDecision(PluginTrustEntry),
     #[serde(alias = "ChangeSetProposed")]
     ChangeSetProposed(ChangeSet),
     #[serde(alias = "ChangeSetApplied")]
@@ -499,6 +504,11 @@ impl Session {
     /// Returns a durable skill projection reconstructed from append-only control entries.
     pub fn skill_state_projection(&self) -> SkillStateProjection {
         SkillStateProjection::from_entries(&self.entries)
+    }
+
+    /// Returns a durable plugin projection reconstructed from append-only control entries.
+    pub fn plugin_state_projection(&self) -> PluginStateProjection {
+        PluginStateProjection::from_entries(&self.entries)
     }
 
     /// Returns a durable change set projection reconstructed from append-only control entries.

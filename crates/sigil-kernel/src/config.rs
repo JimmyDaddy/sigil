@@ -559,7 +559,7 @@ impl CompactionThresholdStatus {
 }
 
 /// External MCP server process configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct McpServerConfig {
     pub name: String,

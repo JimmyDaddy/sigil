@@ -4,7 +4,8 @@ use crate::{
     AgentRole, ApprovalMode, BackgroundTaskHandle, ChangeSet, ChangeSetId, ChangeSetResult,
     ChangeSetResultStatus, ChangeSetRisk, CompactionRecord, ControlEntry, McpElicitationDecision,
     McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
-    PUBLIC_RUN_EVENT_SCHEMA_VERSION, PrefixSnapshot, ProviderContinuationState, PublicControlEvent,
+    PUBLIC_RUN_EVENT_SCHEMA_VERSION, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
+    PluginTrustEntry, PrefixSnapshot, ProviderContinuationState, PublicControlEvent,
     PublicRunEvent, PublicRunEventKind, ResponseHandle, RunEvent, SessionRef, SkillDescriptor,
     SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState,
     TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
@@ -350,6 +351,31 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 loaded_at_ms: 42,
             }),
             "skill_loaded",
+        ),
+        (
+            ControlEntry::PluginManifestCaptured(PluginManifestSnapshot {
+                plugin_id: "repo-review".to_owned(),
+                name: "Repository Review".to_owned(),
+                version: "0.1.0".to_owned(),
+                description: None,
+                manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
+                manifest_hash: "sha256:manifest".to_owned(),
+                capabilities: vec![PluginCapability::Skill {
+                    path: "skills/review/SKILL.md".into(),
+                }],
+                trust: PluginTrustDecision::NeedsReview,
+            }),
+            "plugin_manifest_captured",
+        ),
+        (
+            ControlEntry::PluginTrustDecision(PluginTrustEntry {
+                plugin_id: "repo-review".to_owned(),
+                manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
+                manifest_hash: "sha256:manifest".to_owned(),
+                decision: PluginTrustDecision::Trusted,
+                reviewed_at_ms: 42,
+            }),
+            "plugin_trust_decision",
         ),
         (
             ControlEntry::ChangeSetProposed(ChangeSet {

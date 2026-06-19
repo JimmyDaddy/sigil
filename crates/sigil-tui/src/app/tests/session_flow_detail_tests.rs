@@ -6,7 +6,8 @@ use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
     ApprovalMode, CompactionConfig, CompactionRecord, McpElicitationDecision, McpElicitationEntry,
-    MemoryConfig, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
+    MemoryConfig, PluginCapability, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry,
+    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
     SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
     ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
 };
@@ -663,6 +664,39 @@ fn render_session_control_entries_cover_remaining_labels() {
     assert_eq!(
         skill_loaded,
         "[ctl] skill repo-review loaded bytes=128 lines=7"
+    );
+
+    let plugin_manifest = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::PluginManifestCaptured(PluginManifestSnapshot {
+            plugin_id: "repo-review".to_owned(),
+            name: "Repository Review".to_owned(),
+            version: "0.1.0".to_owned(),
+            description: None,
+            manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
+            manifest_hash: "sha256:manifest".to_owned(),
+            capabilities: vec![PluginCapability::Skill {
+                path: "skills/review/SKILL.md".into(),
+            }],
+            trust: PluginTrustDecision::NeedsReview,
+        }),
+    ));
+    assert_eq!(
+        plugin_manifest,
+        "[ctl] plugin repo-review version=0.1.0 caps=1 trust=needs_review"
+    );
+
+    let plugin_trust = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::PluginTrustDecision(PluginTrustEntry {
+            plugin_id: "repo-review".to_owned(),
+            manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
+            manifest_hash: "sha256:manifest".to_owned(),
+            decision: PluginTrustDecision::Trusted,
+            reviewed_at_ms: 42,
+        }),
+    ));
+    assert_eq!(
+        plugin_trust,
+        "[ctl] plugin repo-review trust=trusted hash=sha256:manifest"
     );
 
     for decision in [

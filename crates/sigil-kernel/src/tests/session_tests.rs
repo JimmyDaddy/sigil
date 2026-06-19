@@ -4,12 +4,13 @@ use anyhow::Result;
 
 use crate::{
     ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk,
-    CompactionRecord, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
-    ProviderContinuationState, ResponseHandle, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
-    SkillRunMode, SkillSource, SkillTrustState, TerminalTaskEntry, TerminalTaskHandle,
-    TerminalTaskId, TerminalTaskStatus, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
-    ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit,
-    ToolSubjectKind, ToolSubjectScope, UsageStats, provider::ModelMessage,
+    CompactionRecord, McpElicitationDecision, McpElicitationEntry, MemoryConfig, PluginCapability,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, ProviderContinuationState,
+    ResponseHandle, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
+    SkillTrustState, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile,
+    ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope,
+    UsageStats, provider::ModelMessage,
 };
 
 use super::{
@@ -302,6 +303,43 @@ fn session_skill_state_projection_replays_control_entries() -> Result<()> {
         Some("repo-review")
     );
     assert_eq!(latest_loaded.entry.byte_count, 128);
+    Ok(())
+}
+
+#[test]
+fn session_plugin_state_projection_replays_control_entries() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let snapshot = PluginManifestSnapshot {
+        plugin_id: "repo-review".to_owned(),
+        name: "Repository Review".to_owned(),
+        version: "0.1.0".to_owned(),
+        description: None,
+        manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
+        manifest_hash: "sha256:manifest".to_owned(),
+        capabilities: vec![PluginCapability::Skill {
+            path: "skills/review/SKILL.md".into(),
+        }],
+        trust: PluginTrustDecision::NeedsReview,
+    };
+    let trust = PluginTrustEntry {
+        plugin_id: "repo-review".to_owned(),
+        manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
+        manifest_hash: "sha256:manifest".to_owned(),
+        decision: PluginTrustDecision::Trusted,
+        reviewed_at_ms: 42,
+    };
+    session.append_control(ControlEntry::PluginManifestCaptured(snapshot))?;
+    session.append_control(ControlEntry::PluginTrustDecision(trust.clone()))?;
+
+    let projection = session.plugin_state_projection();
+    let latest_manifest = projection
+        .latest_manifest()
+        .expect("latest plugin manifest");
+    let latest_trust = projection.latest_trust().expect("latest plugin trust");
+
+    assert_eq!(latest_manifest.plugin_id, "repo-review");
+    assert_eq!(latest_manifest.trust, PluginTrustDecision::Trusted);
+    assert_eq!(latest_trust, &trust);
     Ok(())
 }
 

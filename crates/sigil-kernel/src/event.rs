@@ -249,6 +249,8 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ToolPreviewCaptured(_) => "tool_preview_captured",
         ControlEntry::SkillIndexCaptured(_) => "skill_index_captured",
         ControlEntry::SkillLoaded(_) => "skill_loaded",
+        ControlEntry::PluginManifestCaptured(_) => "plugin_manifest_captured",
+        ControlEntry::PluginTrustDecision(_) => "plugin_trust_decision",
         ControlEntry::ChangeSetProposed(_) => "change_set_proposed",
         ControlEntry::ChangeSetApplied(_) => "change_set_applied",
         ControlEntry::TerminalTask(_) => "terminal_task",

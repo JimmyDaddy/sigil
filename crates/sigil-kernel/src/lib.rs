@@ -5,6 +5,7 @@ pub mod config;
 pub mod event;
 pub mod memory;
 pub mod permission;
+pub mod plugin;
 pub mod provider;
 pub mod secret;
 pub mod session;
@@ -40,6 +41,10 @@ pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use permission::{
     ApprovalMode, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
     PermissionAccessConfig, PermissionConfig, PermissionDecision, PermissionPolicy, PermissionRule,
+};
+pub use plugin::{
+    PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef,
+    PluginStateProjection, PluginTrustDecision, PluginTrustEntry, validate_plugin_id,
 };
 pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
