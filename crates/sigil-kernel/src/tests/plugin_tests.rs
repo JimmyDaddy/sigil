@@ -1,9 +1,10 @@
 use anyhow::Result;
 
 use crate::{
-    ApprovalMode, ControlEntry, McpServerConfig, McpServerStartup, PluginCapability, PluginHookRef,
-    PluginManifest, PluginManifestSnapshot, PluginSkillRef, PluginStateProjection,
-    PluginTrustDecision, PluginTrustEntry, SessionLogEntry, validate_plugin_id,
+    ApprovalMode, ControlEntry, McpServerConfig, McpServerStartup, PluginAgentRef,
+    PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef,
+    PluginStateProjection, PluginTrustDecision, PluginTrustEntry, SessionLogEntry,
+    validate_plugin_id,
 };
 
 fn sample_manifest() -> PluginManifest {
@@ -13,6 +14,9 @@ fn sample_manifest() -> PluginManifest {
         version: "0.1.0".to_owned(),
         description: Some("Reusable review workflows.".to_owned()),
         root: ".sigil/plugins/repo-review".into(),
+        agents: vec![PluginAgentRef {
+            path: "agents/reviewer/agent.toml".into(),
+        }],
         skills: vec![PluginSkillRef {
             path: "skills/review/SKILL.md".into(),
         }],
@@ -64,13 +68,17 @@ fn plugin_manifest_validation_accepts_reviewable_capabilities() -> Result<()> {
     manifest.validate()?;
     let capabilities = manifest.capabilities();
 
-    assert_eq!(capabilities.len(), 3);
+    assert_eq!(capabilities.len(), 4);
     assert!(matches!(
         &capabilities[0],
-        PluginCapability::Skill { path } if path == std::path::Path::new("skills/review/SKILL.md")
+        PluginCapability::Agent { path } if path == std::path::Path::new("agents/reviewer/agent.toml")
     ));
     assert!(matches!(
         &capabilities[1],
+        PluginCapability::Skill { path } if path == std::path::Path::new("skills/review/SKILL.md")
+    ));
+    assert!(matches!(
+        &capabilities[2],
         PluginCapability::Hook {
             event,
             command,
@@ -82,7 +90,7 @@ fn plugin_manifest_validation_accepts_reviewable_capabilities() -> Result<()> {
             && *approval == ApprovalMode::Ask
     ));
     assert!(matches!(
-        &capabilities[2],
+        &capabilities[3],
         PluginCapability::McpServer {
             name,
             command,
@@ -118,6 +126,14 @@ fn plugin_manifest_validation_rejects_unsafe_edges() {
     let mut empty_skill_path = sample_manifest();
     empty_skill_path.skills[0].path.clear();
     assert!(empty_skill_path.validate().is_err());
+
+    let mut empty_agent_path = sample_manifest();
+    empty_agent_path.agents[0].path.clear();
+    assert!(empty_agent_path.validate().is_err());
+
+    let mut escaping_agent = sample_manifest();
+    escaping_agent.agents[0].path = "../escape/agent.toml".into();
+    assert!(escaping_agent.validate().is_err());
 
     let mut escaping_skill = sample_manifest();
     escaping_skill.skills[0].path = "../escape/SKILL.md".into();

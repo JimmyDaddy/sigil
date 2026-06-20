@@ -7,8 +7,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    McpServerConfig, PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginTrustDecision,
-    PluginTrustEntry, SkillDescriptor, SkillIndexSnapshot, validate_plugin_id,
+    McpServerConfig, PluginAgentRef, PluginHookRef, PluginManifest, PluginManifestSnapshot,
+    PluginTrustDecision, PluginTrustEntry, SkillDescriptor, SkillIndexSnapshot, validate_plugin_id,
 };
 
 use crate::skills::discover_plugin_skill_descriptors;
@@ -24,9 +24,18 @@ pub struct PluginDiscoveryReport {
 /// Runtime registrations emitted by trusted plugin manifests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginRegistrations {
+    pub agents: Vec<PluginAgentRegistration>,
     pub skills: Vec<SkillDescriptor>,
     pub hooks: Vec<PluginHookRegistration>,
     pub mcp_servers: Vec<PluginMcpServerRegistration>,
+}
+
+/// Agent profile registration with explicit plugin source attribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginAgentRegistration {
+    pub plugin_id: String,
+    pub plugin_root: PathBuf,
+    pub agent: PluginAgentRef,
 }
 
 /// Hook registration with explicit plugin source attribution.
@@ -63,7 +72,10 @@ pub enum PluginDiscoveryWarningKind {
 impl PluginRegistrations {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.skills.is_empty() && self.hooks.is_empty() && self.mcp_servers.is_empty()
+        self.agents.is_empty()
+            && self.skills.is_empty()
+            && self.hooks.is_empty()
+            && self.mcp_servers.is_empty()
     }
 
     #[must_use]
@@ -294,6 +306,7 @@ impl PluginDiscovery {
         }
         manifest.root = plugin_root.to_path_buf();
         manifest.validate()?;
+        validate_plugin_agent_paths(&manifest, &canonical_plugin_root)?;
         validate_plugin_skill_paths(&manifest, &canonical_plugin_root)?;
         Ok(PluginManifestReadOutcome {
             manifest,
@@ -302,6 +315,19 @@ impl PluginDiscovery {
     }
 
     fn register_trusted_plugin(&mut self, manifest: &PluginManifest) -> Result<()> {
+        self.registrations
+            .agents
+            .extend(
+                manifest
+                    .agents
+                    .iter()
+                    .cloned()
+                    .map(|agent| PluginAgentRegistration {
+                        plugin_id: manifest.id.clone(),
+                        plugin_root: manifest.root.clone(),
+                        agent,
+                    }),
+            );
         let skills = discover_plugin_skill_descriptors(
             &self.workspace_root,
             &manifest.id,
@@ -361,6 +387,30 @@ impl PluginDiscovery {
 struct PluginManifestReadOutcome {
     manifest: PluginManifest,
     manifest_hash: String,
+}
+
+fn validate_plugin_agent_paths(
+    manifest: &PluginManifest,
+    canonical_plugin_root: &Path,
+) -> Result<()> {
+    for agent in &manifest.agents {
+        let path = manifest.root.join(&agent.path);
+        let canonical_path = path.canonicalize().with_context(|| {
+            format!(
+                "failed to resolve plugin {} agent {}",
+                manifest.id,
+                agent.path.display()
+            )
+        })?;
+        if !canonical_path.starts_with(canonical_plugin_root) {
+            bail!(
+                "plugin {} agent path escapes plugin root: {}",
+                manifest.id,
+                agent.path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_plugin_skill_paths(

@@ -30,6 +30,14 @@ fn write_workspace_agent(workspace_root: &Path, id: &str, body: &str) -> Result<
 
 fn write_workspace_plugin(workspace_root: &Path, id: &str, version: &str) -> Result<()> {
     let plugin_root = workspace_root.join(".sigil").join("plugins").join(id);
+    std::fs::create_dir_all(plugin_root.join("agents/reviewer"))?;
+    std::fs::write(
+        plugin_root.join("agents/reviewer/agent.toml"),
+        r#"description = "Plugin review agent."
+instructions = "Review repository changes."
+trust = "trusted"
+"#,
+    )?;
     std::fs::create_dir_all(plugin_root.join("skills/review"))?;
     std::fs::write(
         plugin_root.join("skills/review/SKILL.md"),
@@ -49,6 +57,9 @@ trust: trusted
 name = "Repository Review"
 version = "{version}"
 description = "Reusable review pack."
+
+[[agents]]
+path = "agents/reviewer/agent.toml"
 
 [[skills]]
 path = "skills/review/SKILL.md"
@@ -1381,9 +1392,11 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
         .expect("plugin should be selected");
     assert!(detail.contains(&format!("- Hash: {}", &manifest_hash[..48])));
     assert!(detail.contains(&format!("- Hash part 2: {}", &manifest_hash[48..])));
-    assert!(
-        detail.contains("- Implications: skill instructions, hook commands, MCP server processes")
-    );
+    assert!(detail.contains(
+        "- Implications: agent profiles, skill instructions, hook commands, MCP server processes"
+    ));
+    assert!(detail.contains("[agents]"));
+    assert!(detail.contains("- Agent 1: agents/reviewer/agent.toml"));
     assert!(detail.contains("[skills]"));
     assert!(detail.contains("- Skill 1: skills/review/SKILL.md"));
     assert!(detail.contains("[hooks]"));

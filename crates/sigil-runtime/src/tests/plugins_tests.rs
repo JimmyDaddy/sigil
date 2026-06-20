@@ -53,6 +53,15 @@ fn plugin_discovery_path_file_reports_invalid_path() {
 #[test]
 fn untrusted_plugin_manifest_is_captured_without_runtime_registrations() {
     let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_agent(
+        workspace.path(),
+        "repo-review",
+        "agents/reviewer/agent.toml",
+        r#"description = "Review agent."
+instructions = "Review repository changes."
+trust = "trusted"
+"#,
+    );
     write_plugin_skill(
         workspace.path(),
         "repo-review",
@@ -73,6 +82,9 @@ trust: trusted
 name = "Repository Review"
 version = "0.1.0"
 description = "Reusable review pack."
+
+[[agents]]
+path = "agents/reviewer/agent.toml"
 
 [[skills]]
 path = "skills/review/SKILL.md"
@@ -104,6 +116,9 @@ required = false
     assert_eq!(
         manifest.capabilities,
         vec![
+            PluginCapability::Agent {
+                path: "agents/reviewer/agent.toml".into()
+            },
             PluginCapability::Skill {
                 path: "skills/review/SKILL.md".into()
             },
@@ -128,6 +143,15 @@ required = false
 #[test]
 fn matching_trust_entry_emits_source_attributed_registrations() {
     let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_agent(
+        workspace.path(),
+        "repo-review",
+        "agents/reviewer/agent.toml",
+        r#"description = "Review agent."
+instructions = "Review repository changes."
+trust = "trusted"
+"#,
+    );
     write_plugin_skill(
         workspace.path(),
         "repo-review",
@@ -148,6 +172,9 @@ trust: trusted
         r#"id = "repo-review"
 name = "Repository Review"
 version = "0.1.0"
+
+[[agents]]
+path = "agents/reviewer/agent.toml"
 
 [[skills]]
 path = "skills/review/SKILL.md"
@@ -181,6 +208,14 @@ required = false
     assert!(manifest_path.is_file());
     assert!(report.warnings.is_empty());
     assert_eq!(report.manifests[0].trust, PluginTrustDecision::Trusted);
+    assert_eq!(report.registrations.agents.len(), 1);
+    let agent = &report.registrations.agents[0];
+    assert_eq!(agent.plugin_id, "repo-review");
+    assert_eq!(agent.agent.path, Path::new("agents/reviewer/agent.toml"));
+    assert_eq!(
+        agent.plugin_root,
+        workspace.path().join(".sigil/plugins/repo-review")
+    );
     assert_eq!(report.registrations.skills.len(), 1);
     let skill = &report.registrations.skills[0];
     assert_eq!(skill.id, "repo-review/review");
@@ -489,6 +524,34 @@ version = "0.1.0"
     }));
 }
 
+#[test]
+fn missing_plugin_agent_entrypoint_is_reported_as_invalid_path() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[agents]]
+path = "agents/reviewer/agent.toml"
+"#,
+    );
+
+    let report =
+        discover_workspace_plugins(workspace.path(), &[]).expect("plugin discovery should succeed");
+
+    assert!(report.manifests.is_empty());
+    assert!(report.registrations.is_empty());
+    assert!(report.warnings.iter().any(|warning| {
+        warning.kind == PluginDiscoveryWarningKind::InvalidPath
+            && warning
+                .message
+                .contains("failed to resolve plugin repo-review agent")
+    }));
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinked_skill_entrypoint_escape_is_rejected_as_invalid_path() {
@@ -521,6 +584,44 @@ path = "skills/review/SKILL.md"
     assert!(report.warnings.iter().any(|warning| {
         warning.kind == PluginDiscoveryWarningKind::InvalidPath
             && warning.message.contains("escapes plugin root")
+    }));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_agent_entrypoint_escape_is_rejected_as_invalid_path() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let outside = tempfile::tempdir().expect("outside should create");
+    fs::create_dir_all(outside.path().join("agent")).expect("outside agent dir should create");
+    fs::write(
+        outside.path().join("agent/agent.toml"),
+        "description = \"Outside\"",
+    )
+    .expect("outside agent should write");
+    let link_parent = workspace.path().join(".sigil/plugins/repo-review/agents");
+    fs::create_dir_all(&link_parent).expect("link parent should create");
+    symlink(outside.path().join("agent"), link_parent.join("reviewer"))
+        .expect("symlink should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[agents]]
+path = "agents/reviewer/agent.toml"
+"#,
+    );
+
+    let report =
+        discover_workspace_plugins(workspace.path(), &[]).expect("plugin discovery should succeed");
+
+    assert!(report.manifests.is_empty());
+    assert!(report.registrations.is_empty());
+    assert!(report.warnings.iter().any(|warning| {
+        warning.kind == PluginDiscoveryWarningKind::InvalidPath
+            && warning.message.contains("agent path escapes plugin root")
     }));
 }
 
@@ -784,6 +885,16 @@ fn write_plugin_manifest(workspace: &Path, plugin_id: &str, manifest: &str) -> s
 }
 
 fn write_plugin_skill(workspace: &Path, plugin_id: &str, relative_path: &str, body: &str) {
+    write_file(
+        &workspace
+            .join(".sigil/plugins")
+            .join(plugin_id)
+            .join(relative_path),
+        body,
+    );
+}
+
+fn write_plugin_agent(workspace: &Path, plugin_id: &str, relative_path: &str, body: &str) {
     write_file(
         &workspace
             .join(".sigil/plugins")

@@ -26,6 +26,8 @@ pub struct PluginManifest {
     #[serde(default)]
     pub root: PathBuf,
     #[serde(default)]
+    pub agents: Vec<PluginAgentRef>,
+    #[serde(default)]
     pub skills: Vec<PluginSkillRef>,
     #[serde(default)]
     pub hooks: Vec<PluginHookRef>,
@@ -48,6 +50,9 @@ impl PluginManifest {
         if self.version.trim().is_empty() {
             bail!("plugin {} has empty version", self.id);
         }
+        for agent in &self.agents {
+            agent.validate()?;
+        }
         for skill in &self.skills {
             skill.validate()?;
         }
@@ -69,6 +74,9 @@ impl PluginManifest {
 
     /// Projects manifest entries into reviewable capability summaries.
     pub fn capabilities(&self) -> Vec<PluginCapability> {
+        let agent_capabilities = self.agents.iter().map(|agent| PluginCapability::Agent {
+            path: agent.path.clone(),
+        });
         let skill_capabilities = self.skills.iter().map(|skill| PluginCapability::Skill {
             path: skill.path.clone(),
         });
@@ -88,10 +96,29 @@ impl PluginManifest {
                 startup: server.startup,
                 required: server.required,
             });
-        skill_capabilities
+        agent_capabilities
+            .chain(skill_capabilities)
             .chain(hook_capabilities)
             .chain(mcp_capabilities)
             .collect()
+    }
+}
+
+/// One agent profile entry declared by a plugin manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginAgentRef {
+    pub path: PathBuf,
+}
+
+impl PluginAgentRef {
+    /// Validates that the agent profile path is manifest-relative and cannot escape the plugin root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path is empty, absolute, or contains parent traversal.
+    pub fn validate(&self) -> Result<()> {
+        validate_manifest_relative_path("agent", &self.path)
     }
 }
 
@@ -146,6 +173,9 @@ impl PluginHookRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PluginCapability {
+    Agent {
+        path: PathBuf,
+    },
     Skill {
         path: PathBuf,
     },
@@ -174,6 +204,7 @@ impl PluginCapability {
     /// Returns an error when the capability contains unsafe paths or empty command metadata.
     pub fn validate(&self) -> Result<()> {
         match self {
+            Self::Agent { path } => validate_manifest_relative_path("agent", path),
             Self::Skill { path } => validate_manifest_relative_path("skill", path),
             Self::Hook { event, command, .. } => {
                 if event.trim().is_empty() {

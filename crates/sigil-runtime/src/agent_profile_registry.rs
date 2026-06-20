@@ -11,12 +11,15 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentInvocationPolicy, AgentProfile, AgentProfileId, AgentProfileKind,
     AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
-    AgentProfileTrustProjection, AgentResultPolicy, AgentRole, AgentTrustState, ReasoningEffort,
-    RootConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState,
-    ToolRegistryScope,
+    AgentProfileTrustProjection, AgentResultPolicy, AgentRole, AgentTrustState,
+    PluginStateProjection, ReasoningEffort, RootConfig, SessionLogEntry, SkillDescriptor,
+    SkillRunMode, SkillSource, SkillTrustState, ToolRegistryScope,
 };
 
-use crate::{LOAD_SKILL_TOOL_NAME, provider_config_key, skills::discover_skill_index};
+use crate::{
+    LOAD_SKILL_TOOL_NAME, plugins::discover_workspace_plugins, provider_config_key,
+    skills::discover_skill_index,
+};
 
 pub const BUILD_PROFILE_ID: &str = "build";
 pub const PLAN_PROFILE_ID: &str = "plan";
@@ -113,7 +116,7 @@ impl AgentProfileRegistry {
     ///
     /// Returns an error if a built-in profile id or captured profile hash cannot be produced.
     pub fn from_root_config(root_config: &RootConfig) -> Result<Self> {
-        Self::from_root_config_inner(root_config, None)
+        Self::from_root_config_inner(root_config, None, None)
     }
 
     /// Builds the registry and overlays durable profile trust decisions from session entries.
@@ -125,7 +128,7 @@ impl AgentProfileRegistry {
         root_config: &RootConfig,
         entries: &[SessionLogEntry],
     ) -> Result<Self> {
-        let mut registry = Self::from_root_config(root_config)?;
+        let mut registry = Self::from_root_config_inner(root_config, None, Some(entries))?;
         registry.apply_session_entry_projections(entries)?;
         Ok(registry)
     }
@@ -143,7 +146,7 @@ impl AgentProfileRegistry {
         root_config: &RootConfig,
         workspace_root: &Path,
     ) -> Result<Self> {
-        Self::from_root_config_inner(root_config, Some(workspace_root))
+        Self::from_root_config_inner(root_config, Some(workspace_root), None)
     }
 
     /// Builds the workspace-aware registry and overlays durable profile trust decisions.
@@ -156,7 +159,8 @@ impl AgentProfileRegistry {
         workspace_root: &Path,
         entries: &[SessionLogEntry],
     ) -> Result<Self> {
-        let mut registry = Self::from_root_config_with_workspace(root_config, workspace_root)?;
+        let mut registry =
+            Self::from_root_config_inner(root_config, Some(workspace_root), Some(entries))?;
         registry.apply_session_entry_projections(entries)?;
         Ok(registry)
     }
@@ -164,6 +168,7 @@ impl AgentProfileRegistry {
     fn from_root_config_inner(
         root_config: &RootConfig,
         workspace_root: Option<&Path>,
+        entries: Option<&[SessionLogEntry]>,
     ) -> Result<Self> {
         let mut profiles = vec![
             builtin_profile(
@@ -228,6 +233,13 @@ impl AgentProfileRegistry {
             discover_workspace_agent_profiles(
                 root_config,
                 workspace_root,
+                &mut profiles,
+                &mut warnings,
+            )?;
+            discover_plugin_agent_profiles(
+                root_config,
+                workspace_root,
+                entries.unwrap_or(&[]),
                 &mut profiles,
                 &mut warnings,
             )?;
@@ -549,6 +561,110 @@ fn discover_workspace_agent_profiles(
     Ok(())
 }
 
+fn discover_plugin_agent_profiles(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    entries: &[SessionLogEntry],
+    profiles: &mut Vec<ResolvedAgentProfile>,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let plugin_projection = PluginStateProjection::from_entries(entries);
+    let trust_entries = plugin_projection
+        .trust_entries
+        .into_values()
+        .collect::<Vec<_>>();
+    let report = discover_workspace_plugins(workspace_root, &trust_entries)?;
+    warnings.extend(report.warnings.into_iter().map(|warning| {
+        format!(
+            "plugin discovery warning while projecting agent profiles: {}: {}",
+            warning.path.display(),
+            warning.message
+        )
+    }));
+    let mut claimed_ids = profiles
+        .iter()
+        .map(|profile| {
+            (
+                profile.profile.id.as_str().to_owned(),
+                agent_profile_source_label(&profile.source).to_owned(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for registration in report.registrations.agents {
+        let entrypoint = registration.plugin_root.join(&registration.agent.path);
+        let format = match plugin_agent_profile_format(&entrypoint) {
+            Ok(format) => format,
+            Err(error) => {
+                warnings.push(format!(
+                    "invalid plugin agent profile {} from plugin {}: {error}",
+                    registration.agent.path.display(),
+                    registration.plugin_id
+                ));
+                continue;
+            }
+        };
+        let fallback_id = match fallback_plugin_agent_id(&registration.agent.path) {
+            Ok(id) => id,
+            Err(error) => {
+                warnings.push(format!(
+                    "invalid plugin agent profile {} from plugin {}: {error}",
+                    registration.agent.path.display(),
+                    registration.plugin_id
+                ));
+                continue;
+            }
+        };
+        let raw = match fs::read_to_string(&entrypoint) {
+            Ok(raw) => raw,
+            Err(error) => {
+                warnings.push(format!(
+                    "failed to read plugin agent profile {} from plugin {}: {error}",
+                    registration.agent.path.display(),
+                    registration.plugin_id
+                ));
+                continue;
+            }
+        };
+        let resolved = match plugin_agent_profile_from_raw(
+            root_config,
+            workspace_root,
+            &registration.plugin_id,
+            &registration.plugin_root,
+            &entrypoint,
+            &fallback_id,
+            &raw,
+            format,
+        ) {
+            Ok(profile) => profile,
+            Err(error) => {
+                warnings.push(format!(
+                    "invalid plugin agent profile {} from plugin {}: {error}",
+                    registration.agent.path.display(),
+                    registration.plugin_id
+                ));
+                continue;
+            }
+        };
+        let id = resolved.profile.id.as_str().to_owned();
+        if let Some(existing) = claimed_ids.get(&id) {
+            warnings.push(format!(
+                "plugin agent profile id {id:?} from {} is shadowed by {existing}",
+                display_path(workspace_root, &entrypoint).display()
+            ));
+            continue;
+        }
+        claimed_ids.insert(
+            id,
+            display_path(workspace_root, &entrypoint)
+                .display()
+                .to_string(),
+        );
+        profiles.push(resolved);
+    }
+    Ok(())
+}
+
 fn discover_child_session_skill_profiles(
     root_config: &RootConfig,
     workspace_root: &Path,
@@ -632,6 +748,59 @@ fn native_agent_entrypoint(dir: &Path) -> Option<(PathBuf, NativeAgentProfileFor
     markdown
         .is_file()
         .then_some((markdown, NativeAgentProfileFormat::Markdown))
+}
+
+fn plugin_agent_profile_format(entrypoint: &Path) -> Result<NativeAgentProfileFormat> {
+    match entrypoint.file_name().and_then(|name| name.to_str()) {
+        Some("agent.toml") => Ok(NativeAgentProfileFormat::Toml),
+        Some("AGENT.md") => Ok(NativeAgentProfileFormat::Markdown),
+        Some(name) if name.ends_with(".toml") => Ok(NativeAgentProfileFormat::Toml),
+        Some(name) if name.ends_with(".md") => Ok(NativeAgentProfileFormat::Markdown),
+        _ => bail!("plugin agent path must point to agent.toml, AGENT.md, .toml, or .md"),
+    }
+}
+
+fn fallback_plugin_agent_id(path: &Path) -> Result<String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let fallback = if matches!(file_name, "agent.toml" | "AGENT.md") {
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+    } else {
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("")
+    };
+    AgentProfileId::new(fallback.to_owned())
+        .with_context(|| format!("invalid plugin agent fallback id {fallback:?}"))?;
+    Ok(fallback.to_owned())
+}
+
+fn namespaced_plugin_agent_profile_id(plugin_id: &str, local_id: &str) -> Result<AgentProfileId> {
+    let plugin_segment = plugin_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let candidate = format!("{plugin_segment}-{local_id}");
+    if candidate.len() <= 96 {
+        return AgentProfileId::new(candidate);
+    }
+
+    let hash = hash_bytes(format!("{plugin_id}\0{local_id}").as_bytes());
+    let prefix = format!("plugin-{}-", &hash[..12]);
+    let max_local_len = 96usize.saturating_sub(prefix.len());
+    let local_part = &local_id[..local_id.len().min(max_local_len)];
+    AgentProfileId::new(format!("{prefix}{local_part}"))
 }
 
 fn workspace_agent_profile_from_raw(
@@ -719,6 +888,99 @@ fn workspace_agent_profile_from_raw(
         user_invocable_override: None,
         model_invocable_override: None,
         source: AgentProfileSource::Workspace,
+        trust_state: wire.trust.or(wire.trust_state).unwrap_or_default(),
+    })
+}
+
+fn plugin_agent_profile_from_raw(
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    plugin_id: &str,
+    plugin_root: &Path,
+    entrypoint: &Path,
+    fallback_id: &str,
+    raw: &str,
+    format: NativeAgentProfileFormat,
+) -> Result<ResolvedAgentProfile> {
+    let (wire, markdown_body) = match format {
+        NativeAgentProfileFormat::Toml => (toml::from_str::<NativeAgentProfileWire>(raw)?, None),
+        NativeAgentProfileFormat::Markdown => markdown_agent_profile_wire(raw)?,
+    };
+    let local_id = wire.id.as_deref().unwrap_or(fallback_id);
+    if local_id != fallback_id {
+        bail!("agent profile id {local_id:?} must match file-derived id {fallback_id:?}");
+    }
+    let profile_id = namespaced_plugin_agent_profile_id(plugin_id, local_id)?;
+    let invocation_policy = wire.invocation_policy.unwrap_or_else(|| {
+        AgentInvocationPolicy::from_invocability(
+            wire.user_invocable.unwrap_or(true),
+            wire.model_invocable.unwrap_or(false),
+        )
+    });
+    let user_invocable = wire
+        .user_invocable
+        .unwrap_or_else(|| invocation_policy.default_user_invocable());
+    let model_invocable = wire
+        .model_invocable
+        .unwrap_or_else(|| invocation_policy.default_model_invocable());
+    let tool_scope = wire
+        .tool_scope
+        .or_else(|| {
+            wire.allowed_tools
+                .clone()
+                .or_else(|| wire.tools.clone())
+                .map(|tools| {
+                    ToolRegistryScope::from_names_and_prefixes(tools, Vec::<String>::new())
+                })
+        })
+        .unwrap_or_else(read_only_role_tool_scope);
+    let instructions = wire
+        .instructions
+        .or(markdown_body)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let aliases = normalize_profile_name_list(wire.aliases.unwrap_or_default(), "agent alias")?;
+    let slash_names =
+        normalize_profile_name_list(wire.slash_names.unwrap_or_default(), "agent slash name")?;
+    let profile = AgentProfile {
+        id: profile_id,
+        kind: wire.kind.unwrap_or(AgentProfileKind::Subagent),
+        description: wire.description.unwrap_or_default(),
+        instructions,
+        model: wire.model.or_else(|| Some(root_config.agent.model.clone())),
+        provider: wire
+            .provider
+            .or_else(|| Some(root_config.agent.provider.clone())),
+        reasoning_effort: wire.reasoning_effort,
+        tool_scope,
+        permission_policy: root_config.permission.clone(),
+        invocation_policy,
+        result_policy: wire.result_policy.unwrap_or_default(),
+        user_invocable,
+        model_invocable,
+        skills: wire.skills.unwrap_or_default(),
+        mcp_servers: wire.mcp_servers.unwrap_or_default(),
+        nickname_candidates: wire.nickname_candidates.unwrap_or_default(),
+        aliases,
+        slash_names,
+    };
+    Ok(ResolvedAgentProfile {
+        source_hash: hash_json(&json!({
+            "kind": "plugin_agent_profile",
+            "plugin_id": plugin_id,
+            "root": display_path(workspace_root, plugin_root),
+            "entrypoint": display_path(workspace_root, entrypoint),
+            "sha256": hash_bytes(raw.as_bytes()),
+        }))?,
+        profile,
+        enabled: wire.enabled.unwrap_or(true),
+        enabled_override: None,
+        user_invocable_override: None,
+        model_invocable_override: None,
+        source: AgentProfileSource::Plugin {
+            plugin_id: plugin_id.to_owned(),
+        },
         trust_state: wire.trust.or(wire.trust_state).unwrap_or_default(),
     })
 }

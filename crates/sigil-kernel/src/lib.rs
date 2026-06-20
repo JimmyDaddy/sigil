@@ -64,8 +64,9 @@ pub use plan::{
     PlanApprovalScope, PlanApprovedEntry, plan_text_hash, plan_workspace_paths,
 };
 pub use plugin::{
-    PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef,
-    PluginStateProjection, PluginTrustDecision, PluginTrustEntry, validate_plugin_id,
+    PluginAgentRef, PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot,
+    PluginSkillRef, PluginStateProjection, PluginTrustDecision, PluginTrustEntry,
+    validate_plugin_id,
 };
 pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,

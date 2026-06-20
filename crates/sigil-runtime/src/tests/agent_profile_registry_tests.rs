@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    path::Path,
 };
 
 use anyhow::Result;
@@ -8,17 +9,19 @@ use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentInvocationPolicy, AgentProfileId, AgentProfilePolicyEntry,
     AgentProfileSource, AgentProfileTrustEntry, AgentResultPolicy, AgentTrustState, ControlEntry,
-    MemoryConfig, PermissionConfig, RootConfig, SessionConfig, SessionLogEntry, SkillDescriptor,
-    SkillRunMode, SkillSource, SkillTrustState, TaskConfig, ToolAllowlistConfig, ToolRegistryScope,
-    WorkspaceConfig,
+    MemoryConfig, PermissionConfig, PluginTrustDecision, PluginTrustEntry, RootConfig,
+    SessionConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState,
+    TaskConfig, ToolAllowlistConfig, ToolRegistryScope, WorkspaceConfig,
 };
 
 use super::{
     AgentProfileIndexContext, AgentProfileRegistry, BUILD_PROFILE_ID, EXPLORE_PROFILE_ID,
-    PLAN_PROFILE_ID, WORKER_PROFILE_ID, agent_profile_source_label, child_session_skill_profile,
-    configured_dir, markdown_agent_profile_wire, markdown_body_without_frontmatter,
-    parse_agent_kind, parse_bool, parse_invocation_policy, parse_reasoning_effort,
-    parse_result_policy, parse_trust_state, sorted_dir_entries, workspace_path,
+    NativeAgentProfileFormat, PLAN_PROFILE_ID, WORKER_PROFILE_ID, agent_profile_source_label,
+    child_session_skill_profile, configured_dir, fallback_plugin_agent_id,
+    markdown_agent_profile_wire, markdown_body_without_frontmatter,
+    namespaced_plugin_agent_profile_id, parse_agent_kind, parse_bool, parse_invocation_policy,
+    parse_reasoning_effort, parse_result_policy, parse_trust_state, plugin_agent_profile_format,
+    plugin_agent_profile_from_raw, sorted_dir_entries, workspace_path,
 };
 
 fn root_config() -> RootConfig {
@@ -272,6 +275,266 @@ trust = "trusted"
             && warning.contains("self-alias")
             && warning.contains("review-agent")
     }));
+    Ok(())
+}
+
+#[test]
+fn registry_discovers_trusted_plugin_agent_profiles() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let plugin_root = workspace.join(".sigil").join("plugins").join("repo.review");
+    let agent_dir = plugin_root.join("agents").join("reviewer");
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(
+        agent_dir.join("agent.toml"),
+        r#"
+description = "Plugin review agent."
+instructions = "Review repository changes with grep."
+trust = "trusted"
+invocation_policy = "model_allowed"
+allowed_tools = ["grep"]
+aliases = ["plugin-reviewer"]
+slash_names = ["plugin-review"]
+"#,
+    )?;
+    fs::write(
+        plugin_root.join("plugin.toml"),
+        r#"id = "repo.review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[agents]]
+path = "agents/reviewer/agent.toml"
+"#,
+    )?;
+    let pending = crate::discover_workspace_plugins(&workspace, &[])?;
+    let trust = SessionLogEntry::Control(ControlEntry::PluginTrustDecision(PluginTrustEntry {
+        plugin_id: "repo.review".to_owned(),
+        manifest_path: pending.manifests[0].manifest_path.clone(),
+        manifest_hash: pending.manifests[0].manifest_hash.clone(),
+        decision: PluginTrustDecision::Trusted,
+        reviewed_at_ms: 42,
+    }));
+
+    let registry = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+        &root_config(),
+        &workspace,
+        &[trust],
+    )?;
+    let profile_id = AgentProfileId::new("repo_review-reviewer")?;
+    let profile = registry
+        .get(&profile_id)
+        .expect("trusted plugin agent profile should be registered");
+
+    assert_eq!(
+        profile.source,
+        AgentProfileSource::Plugin {
+            plugin_id: "repo.review".to_owned()
+        }
+    );
+    assert_eq!(profile.trust_state, AgentTrustState::Trusted);
+    assert!(profile.profile.tool_scope.allows("grep"));
+    assert!(!profile.profile.tool_scope.allows("write_file"));
+    assert_eq!(profile.profile.aliases, vec!["plugin-reviewer"]);
+    assert_eq!(profile.profile.slash_names, vec!["plugin-review"]);
+
+    let visible = registry.model_visible_index(&AgentProfileIndexContext::default())?;
+    assert!(
+        visible
+            .entries
+            .iter()
+            .any(|entry| entry.profile_id == profile_id)
+    );
+    Ok(())
+}
+
+#[test]
+fn registry_reports_plugin_agent_profile_warning_edges() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+
+    let invalid_format_root = workspace.join(".sigil/plugins/invalid-format");
+    fs::create_dir_all(invalid_format_root.join("agents"))?;
+    fs::write(
+        invalid_format_root.join("agents/reviewer.txt"),
+        "not an agent",
+    )?;
+    fs::write(
+        invalid_format_root.join("plugin.toml"),
+        r#"id = "invalid-format"
+name = "Invalid Format"
+version = "0.1.0"
+
+[[agents]]
+path = "agents/reviewer.txt"
+"#,
+    )?;
+
+    let id_mismatch_root = workspace.join(".sigil/plugins/id-mismatch");
+    fs::create_dir_all(id_mismatch_root.join("agents/reviewer"))?;
+    fs::write(
+        id_mismatch_root.join("agents/reviewer/agent.toml"),
+        r#"id = "other"
+description = "Mismatched id."
+"#,
+    )?;
+    fs::write(
+        id_mismatch_root.join("plugin.toml"),
+        r#"id = "id-mismatch"
+name = "ID Mismatch"
+version = "0.1.0"
+
+[[agents]]
+path = "agents/reviewer/agent.toml"
+"#,
+    )?;
+
+    let duplicate_root = workspace.join(".sigil/plugins/duplicate");
+    fs::create_dir_all(duplicate_root.join("agents/one"))?;
+    fs::write(
+        duplicate_root.join("agents/one/agent.toml"),
+        r#"description = "First duplicate."
+trust = "trusted"
+"#,
+    )?;
+    fs::write(
+        duplicate_root.join("agents/one.toml"),
+        r#"description = "Second duplicate."
+trust = "trusted"
+"#,
+    )?;
+    fs::write(
+        duplicate_root.join("plugin.toml"),
+        r#"id = "duplicate"
+name = "Duplicate"
+version = "0.1.0"
+
+[[agents]]
+path = "agents/one/agent.toml"
+
+[[agents]]
+path = "agents/one.toml"
+"#,
+    )?;
+
+    let invalid_fallback_root = workspace.join(".sigil/plugins/invalid-fallback");
+    fs::create_dir_all(invalid_fallback_root.join("agents"))?;
+    fs::write(
+        invalid_fallback_root.join("agents/.toml"),
+        r#"description = "Invalid fallback id."
+trust = "trusted"
+"#,
+    )?;
+    fs::write(
+        invalid_fallback_root.join("plugin.toml"),
+        r#"id = "invalid-fallback"
+name = "Invalid Fallback"
+version = "0.1.0"
+
+[[agents]]
+path = "agents/.toml"
+"#,
+    )?;
+
+    let unreadable_root = workspace.join(".sigil/plugins/unreadable");
+    fs::create_dir_all(unreadable_root.join("agents/unreadable/agent.toml"))?;
+    fs::write(
+        unreadable_root.join("plugin.toml"),
+        r#"id = "unreadable"
+name = "Unreadable"
+version = "0.1.0"
+
+[[agents]]
+path = "agents/unreadable/agent.toml"
+"#,
+    )?;
+
+    let pending = crate::discover_workspace_plugins(&workspace, &[])?;
+    let entries = pending
+        .manifests
+        .iter()
+        .map(|manifest| {
+            SessionLogEntry::Control(ControlEntry::PluginTrustDecision(PluginTrustEntry {
+                plugin_id: manifest.plugin_id.clone(),
+                manifest_path: manifest.manifest_path.clone(),
+                manifest_hash: manifest.manifest_hash.clone(),
+                decision: PluginTrustDecision::Trusted,
+                reviewed_at_ms: 42,
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    let registry = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+        &root_config(),
+        &workspace,
+        &entries,
+    )?;
+    let warnings = registry.warnings().join("\n");
+
+    assert!(warnings.contains("agents/reviewer.txt"));
+    assert!(warnings.contains("must point to agent.toml"));
+    assert!(warnings.contains("must match file-derived id"));
+    assert!(warnings.contains("plugin agent profile id \"duplicate-one\""));
+    assert!(warnings.contains("invalid plugin agent fallback id"));
+    assert!(warnings.contains("failed to read plugin agent profile agents/unreadable/agent.toml"));
+    Ok(())
+}
+
+#[test]
+fn plugin_agent_profile_helpers_cover_markdown_and_id_edges() -> Result<()> {
+    assert!(plugin_agent_profile_format(Path::new("agents/reviewer.txt")).is_err());
+    assert_eq!(
+        plugin_agent_profile_format(Path::new("agents/reviewer.md"))?,
+        NativeAgentProfileFormat::Markdown
+    );
+    assert!(fallback_plugin_agent_id(Path::new(".toml")).is_err());
+    let long_local_id = "a".repeat(96);
+    let namespaced = namespaced_plugin_agent_profile_id("plugin.with.dot", &long_local_id)?;
+    assert!(namespaced.as_str().len() <= 96);
+    assert!(namespaced.as_str().starts_with("plugin-"));
+
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let plugin_root = workspace.join(".sigil/plugins/pack");
+    let entrypoint = plugin_root.join("agents/reviewer/AGENT.md");
+    let profile = plugin_agent_profile_from_raw(
+        &root_config(),
+        &workspace,
+        "pack",
+        &plugin_root,
+        &entrypoint,
+        "reviewer",
+        r#"---
+description: Markdown plugin agent.
+trust: trusted
+allowed_tools: [grep]
+---
+Use grep only.
+"#,
+        NativeAgentProfileFormat::Markdown,
+    )?;
+    assert_eq!(profile.profile.id.as_str(), "pack-reviewer");
+    assert_eq!(profile.profile.instructions, "Use grep only.");
+    assert!(profile.profile.tool_scope.allows("grep"));
+    assert_eq!(
+        profile.source,
+        AgentProfileSource::Plugin {
+            plugin_id: "pack".to_owned()
+        }
+    );
+
+    let mismatch = plugin_agent_profile_from_raw(
+        &root_config(),
+        &workspace,
+        "pack",
+        &plugin_root,
+        &entrypoint,
+        "reviewer",
+        r#"id = "other""#,
+        NativeAgentProfileFormat::Toml,
+    )
+    .expect_err("plugin profile id must match fallback id");
+    assert!(mismatch.to_string().contains("file-derived id"));
     Ok(())
 }
 

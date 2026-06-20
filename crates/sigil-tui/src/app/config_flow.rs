@@ -1776,9 +1776,11 @@ impl AppState {
         self.refresh_memory_summary();
         self.recompute_compaction_status(false);
         self.refresh_usage_sidebar_cache();
+        let (agents, agent_warnings) = self.discover_config_agents(root_config);
         let (skills, warnings) = self.discover_config_skills(root_config);
         let (plugins, plugin_warnings) = self.discover_config_plugins();
         if let Some(config_state) = self.config_state.as_mut() {
+            config_state.set_agent_discovery(agents, agent_warnings);
             config_state.set_skill_discovery(skills, warnings);
             config_state.set_plugin_discovery(plugins, plugin_warnings);
         }
@@ -2079,6 +2081,7 @@ fn render_plugin_detail_lines(plugin: &PluginManifestSnapshot) -> Vec<String> {
         "Implications",
         &plugin_implication_summary(&plugin.capabilities),
     ));
+    lines.extend(render_plugin_agent_lines(&plugin.capabilities));
     lines.extend(render_plugin_skill_lines(&plugin.capabilities));
     lines.extend(render_plugin_hook_lines(&plugin.capabilities));
     lines.extend(render_plugin_mcp_lines(&plugin.capabilities));
@@ -2423,6 +2426,12 @@ fn plugin_implication_summary(capabilities: &[PluginCapability]) -> String {
     let mut parts = Vec::new();
     if capabilities
         .iter()
+        .any(|capability| matches!(capability, PluginCapability::Agent { .. }))
+    {
+        parts.push("agent profiles");
+    }
+    if capabilities
+        .iter()
         .any(|capability| matches!(capability, PluginCapability::Skill { .. }))
     {
         parts.push("skill instructions");
@@ -2444,6 +2453,25 @@ fn plugin_implication_summary(capabilities: &[PluginCapability]) -> String {
     } else {
         parts.join(", ")
     }
+}
+
+fn render_plugin_agent_lines(capabilities: &[PluginCapability]) -> Vec<String> {
+    let agents = capabilities
+        .iter()
+        .filter_map(|capability| match capability {
+            PluginCapability::Agent { path } => Some(path.display().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut lines = vec![String::new(), "[agents]".to_owned()];
+    if agents.is_empty() {
+        lines.push(render_config_readonly_row("Agent count", "0"));
+        return lines;
+    }
+    for (index, path) in agents.iter().enumerate() {
+        push_wrapped_readonly_rows(&mut lines, &format!("Agent {}", index + 1), path);
+    }
+    lines
 }
 
 fn render_plugin_skill_lines(capabilities: &[PluginCapability]) -> Vec<String> {
