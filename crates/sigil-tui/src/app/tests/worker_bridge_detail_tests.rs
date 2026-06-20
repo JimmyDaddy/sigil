@@ -24,6 +24,20 @@ fn mcp_activation_event_detail_formats_scope_and_errors() {
 }
 
 #[test]
+fn agent_tool_name_matches_all_agent_tool_surfaces() {
+    for name in [
+        "spawn_agent",
+        "wait_agent",
+        "read_agent_result",
+        "message_agent",
+        "close_agent",
+    ] {
+        assert!(agent_tool_name(name));
+    }
+    assert!(!agent_tool_name("read_file"));
+}
+
+#[test]
 fn code_intelligence_server_lines_format_languages_and_statuses() {
     let result = ToolResult::ok(
         "call-1",

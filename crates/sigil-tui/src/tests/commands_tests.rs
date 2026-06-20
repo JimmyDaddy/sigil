@@ -82,6 +82,9 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(help.iter().any(|line| {
         line == "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer."
     }));
+    assert!(help.iter().any(|line| {
+        line == "Paste: Insert pasted text without submitting; large pastes are folded in the composer display."
+    }));
     assert!(
         help.iter().any(|line| {
             line == "Ctrl-A/E: Move to the start/end of the current composer line."
@@ -130,9 +133,11 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(slash.iter().any(|line| line.starts_with("/config:")));
     assert!(slash.iter().any(|line| line.starts_with("/new:")));
     assert!(slash.iter().any(|line| line.starts_with("/plan:")));
+    assert!(slash.iter().any(|line| line.starts_with("/task:")));
     assert!(metadata_slash_commands().any(|command| command == "/compact"));
     assert!(metadata_slash_commands().any(|command| command == "/agent"));
     assert!(metadata_slash_commands().any(|command| command == "/doctor"));
     assert!(metadata_slash_commands().any(|command| command == "/new"));
     assert!(metadata_slash_commands().any(|command| command == "/plan"));
+    assert!(metadata_slash_commands().any(|command| command == "/task"));
 }

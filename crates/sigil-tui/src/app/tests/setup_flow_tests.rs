@@ -241,6 +241,50 @@ fn typing_in_setup_model_field_opens_text_modal() -> Result<()> {
 }
 
 #[test]
+fn setup_paste_updates_model_and_api_key_fields() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_setup_paste_text("ignored");
+    assert!(app.last_notice().is_none());
+
+    let mut app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+    app.handle_setup_paste_text("\n\u{0007}");
+    assert!(app.last_notice().is_none());
+
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist")
+        .selected_field = SetupField::Model;
+    app.handle_setup_paste_text("deepseek\nv4");
+    assert_eq!(app.last_notice(), Some("updated model deepseekv4"));
+    assert_eq!(
+        app.setup_state.as_ref().map(|state| state.model.as_str()),
+        Some("deepseekv4")
+    );
+
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist")
+        .selected_field = SetupField::ApiKey;
+    app.handle_setup_paste_text("sk-test\n");
+    assert_eq!(app.last_notice(), Some("updated api key"));
+    assert_eq!(
+        app.setup_state.as_ref().map(|state| state.api_key.as_str()),
+        Some("sk-test")
+    );
+
+    app.setup_state
+        .as_mut()
+        .expect("setup state should exist")
+        .selected_field = SetupField::Save;
+    app.handle_setup_paste_text("ignored");
+    assert_eq!(app.last_notice(), Some("updated api key"));
+}
+
+#[test]
 fn setup_validation_and_builder_reject_empty_model_and_auth() {
     let mut state = SetupState::new(Path::new("sigil.toml").to_path_buf(), None);
     state.trusted_current_folder = true;

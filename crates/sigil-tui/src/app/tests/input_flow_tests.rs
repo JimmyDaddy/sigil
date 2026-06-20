@@ -248,6 +248,175 @@ fn composer_ctrl_j_and_alt_enter_insert_newlines() -> Result<()> {
 }
 
 #[test]
+fn composer_paste_inserts_multiline_text_without_submitting() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_input_and_cursor("prefix ".to_owned());
+    let timeline_len = app.timeline.len();
+
+    app.handle_paste_text("one\r\ntwo\rthree");
+
+    assert_eq!(app.input, "prefix one\ntwo\nthree");
+    assert_eq!(app.input_cursor, app.input_char_len());
+    assert_eq!(app.timeline.len(), timeline_len);
+    assert_eq!(app.composer_input_rows(), 3);
+}
+
+#[test]
+fn large_composer_paste_collapses_display_but_submits_full_text() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_terminal_size(180, 24);
+    let pasted = format!("{}\n{}", "x".repeat(10_000), "tail");
+
+    app.handle_paste_text(&pasted);
+
+    let view_model = crate::view_model::UiViewModel::from_app(&app);
+    assert_eq!(app.input, pasted);
+    assert!(view_model.composer.input.contains("[Pasted text #1:"));
+    assert!(!view_model.composer.input.contains(&"x".repeat(80)));
+    assert!(view_model.composer.input_rows < 3);
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == pasted
+    ));
+    Ok(())
+}
+
+#[test]
+fn editing_after_large_paste_restores_full_display_mapping() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let pasted = "x".repeat(10_000);
+    app.handle_paste_text(&pasted);
+    assert!(
+        crate::view_model::UiViewModel::from_app(&app)
+            .composer
+            .input
+            .contains("[Pasted text #1:")
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+
+    assert_eq!(
+        crate::view_model::UiViewModel::from_app(&app)
+            .composer
+            .input,
+        pasted
+    );
+    Ok(())
+}
+
+#[test]
+fn modal_paste_does_not_submit_text_input() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_text_input(
+        super::super::modal_flow::TextInputTarget::SkillArguments,
+        "pre",
+    );
+
+    app.handle_paste_text(" one\ntwo");
+
+    let Some(ModalState::TextInput(state)) = &app.modal_state else {
+        panic!("text input modal should stay open after paste");
+    };
+    assert_eq!(state.buffer, "pre onetwo");
+}
+
+#[test]
+fn setup_field_paste_updates_selected_text_without_saving() {
+    let mut app = AppState::from_setup(
+        Path::new("sigil.toml").to_path_buf(),
+        Path::new(".").to_path_buf(),
+        None,
+    );
+    app.setup_state
+        .as_mut()
+        .expect("setup state exists")
+        .selected_field = SetupField::ApiKey;
+
+    app.handle_paste_text("sk-test\n");
+
+    let state = app.setup_state.as_ref().expect("setup state remains open");
+    assert_eq!(state.api_key, "sk-test");
+    assert!(!matches!(app.last_notice(), Some(notice) if notice.contains("saved config")));
+}
+
+#[test]
+fn config_field_paste_updates_selected_text_without_submitting() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state exists")
+        .selected_field = Some(ConfigField::ProviderModel);
+
+    app.handle_paste_text("custom\nmodel");
+
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state remains open");
+    assert_eq!(state.draft.provider_model, "custommodel");
+    assert!(state.dirty);
+    assert_eq!(app.last_notice(), Some("updated model"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state exists")
+        .selected_field = Some(ConfigField::ProviderApiKey);
+    app.handle_paste_text("sk-test\nwith-control\u{0007}");
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state remains open");
+    assert_eq!(state.draft.provider_api_key, "sk-testwith-control");
+    assert_eq!(app.last_notice(), Some("updated api_key"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state exists")
+        .footer_selected = true;
+    app.handle_paste_text("ignored");
+    assert_eq!(app.last_notice(), Some("updated api_key"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state exists")
+        .footer_selected = false;
+    app.config_state
+        .as_mut()
+        .expect("config state exists")
+        .selected_field = None;
+    app.handle_paste_text("ignored");
+    assert_eq!(app.last_notice(), Some("updated api_key"));
+}
+
+#[test]
+fn paste_empty_pending_and_collapsed_cursor_edges_are_noops_or_bounded() {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_paste_text("");
+    assert_eq!(app.input, "");
+
+    inject_write_file_approval(&mut app, sample_approval_preview())
+        .expect("approval should inject");
+    app.handle_paste_text("ignored");
+    assert_eq!(app.input, "");
+    app.pending_approval = None;
+
+    let pasted = "x".repeat(10_000);
+    app.handle_paste_text(&pasted);
+    app.input_cursor = 1;
+    let display = app.composer_display_input();
+    assert!(display.contains("[Pasted text #1:"));
+    assert!(app.input_cursor_visual_position().0 > 0);
+
+    app.input_paste_spans[0].end = pasted.len() + 1;
+    let display = app.composer_display_input();
+    assert_eq!(display, pasted);
+}
+
+#[test]
 fn composer_ctrl_z_restores_last_esc_cleared_draft_once() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_input_and_cursor("draft text".to_owned());
@@ -371,7 +540,7 @@ fn plain_prompt_after_final_task_starts_new_conversation() -> Result<()> {
 }
 
 #[test]
-fn plain_prompt_with_unfinished_task_continues_plan() -> Result<()> {
+fn plain_prompt_with_unfinished_task_starts_new_chat() -> Result<()> {
     for status in [
         sigil_kernel::TaskRunStatus::Started,
         sigil_kernel::TaskRunStatus::Running,
@@ -388,12 +557,9 @@ fn plain_prompt_with_unfinished_task_continues_plan() -> Result<()> {
 
         assert!(matches!(
             action,
-            Some(AppAction::ContinuePlan {
-                task_id: None,
-                guidance: Some(prompt),
-            }) if prompt == "continue with the review"
+            Some(AppAction::SubmitPrompt(prompt)) if prompt == "continue with the review"
         ));
-        assert_eq!(app.last_notice(), Some("continuing task"));
+        assert_eq!(app.last_notice(), Some("thinking"));
     }
     Ok(())
 }

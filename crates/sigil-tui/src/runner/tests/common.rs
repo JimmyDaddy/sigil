@@ -114,7 +114,7 @@ where
     let (message_tx, message_rx) = mpsc::channel();
     let options = sigil_runtime::build_run_options(
         &root_config,
-        workspace_root,
+        workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
     );
     let provider_capabilities = agent.provider_capabilities();
@@ -135,6 +135,7 @@ where
                 agent,
                 root_config,
                 provider_capabilities,
+                workspace_root,
                 session_log_path,
                 options,
                 command_rx,

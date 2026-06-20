@@ -10,8 +10,9 @@ use anyhow::Result;
 #[cfg(not(test))]
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyEventKind,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event as CrosstermEvent, KeyEventKind, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -64,6 +65,7 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     let inline_viewport_height = current_inline_viewport_height()?;
     let mut stdout = io::stdout();
     let keyboard_enhancement_enabled = enable_keyboard_enhancement(&mut stdout)?;
+    let bracketed_paste_enabled = enable_bracketed_paste(&mut stdout)?;
     let mut mouse_capture_active = app.terminal_mouse_capture_enabled();
     if mouse_capture_active {
         execute!(stdout, EnableMouseCapture)?;
@@ -85,6 +87,9 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     if keyboard_enhancement_enabled {
         execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     }
+    if bracketed_paste_enabled {
+        execute!(terminal.backend_mut(), DisableBracketedPaste)?;
+    }
     if mouse_capture_active {
         execute!(terminal.backend_mut(), DisableMouseCapture)?;
     }
@@ -100,6 +105,12 @@ fn enable_keyboard_enhancement<W: io::Write>(writer: &mut W) -> io::Result<bool>
         writer,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
+    Ok(true)
+}
+
+#[cfg(not(test))]
+fn enable_bracketed_paste<W: io::Write>(writer: &mut W) -> io::Result<bool> {
+    execute!(writer, EnableBracketedPaste)?;
     Ok(true)
 }
 
@@ -174,6 +185,10 @@ fn run_app(
                     let layout = mouse_layout_snapshot(latest_frame_area, size.into(), app);
                     let outcome = app.handle_mouse_event(mouse.into(), &layout)?;
                     needs_render |= apply_mouse_outcome(app, worker, outcome, spawn_worker)?;
+                }
+                CrosstermEvent::Paste(text) => {
+                    app.handle_paste_text(&text);
+                    needs_render = true;
                 }
                 CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
                     let action = app.handle_key_event(key)?;

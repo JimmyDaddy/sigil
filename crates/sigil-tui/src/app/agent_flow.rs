@@ -1,17 +1,31 @@
-use std::path::Path;
+use std::{
+    fs::{self, File},
+    io::{self, Read, Seek, SeekFrom},
+    path::Path,
+    str,
+};
 
 use crate::{
     slash::{ResolvedSlashCommand, SlashSelectorEntry},
-    timeline::{SidebarAgentRow, TimelineRole, agent_status_symbol, compact_agent_detail},
+    timeline::{
+        SidebarAgentRow, TimelineEntry, TimelineRole, agent_status_symbol, compact_agent_detail,
+    },
 };
+use anyhow::Context;
 use sigil_kernel::{
-    AgentRole, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadProjection, AgentThreadStatus, ControlEntry, JsonlSessionStore,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskRunProjection,
-    normalize_task_agent_display_name,
+    AgentRole, AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadProjection,
+    AgentThreadStatus, ControlEntry, SessionLogEntry, TaskChildSessionDisplayNameEntry,
+    TaskChildSessionEntry, TaskRunProjection, normalize_task_agent_display_name,
 };
 
-use super::{ActiveAgentChildTranscript, AgentSidebarItem, AgentView, AppState};
+use super::{
+    ActiveAgentChildTranscript, AgentSidebarItem, AgentView, AppAction, AppState,
+    ChildTranscriptFileSignature,
+};
+
+const CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT: usize = 80;
+const CHILD_AGENT_TRANSCRIPT_RAW_LINE_LIMIT: usize = CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT * 16;
+const CHILD_AGENT_TRANSCRIPT_TAIL_CHUNK_SIZE: usize = 32 * 1024;
 
 impl AppState {
     pub(crate) fn active_agent_label(&self) -> String {
@@ -199,39 +213,44 @@ impl AppState {
         entries
     }
 
-    pub(super) fn activate_agent_from_command(&mut self, arg: &str) -> anyhow::Result<()> {
+    pub(super) fn activate_agent_from_command(
+        &mut self,
+        arg: &str,
+    ) -> anyhow::Result<Option<AppAction>> {
         let value = arg.trim();
         if value.is_empty() {
             self.last_notice =
                 Some("usage: /agent <main|next|prev|child-id|rename target name>".to_owned());
-            return Ok(());
+            return Ok(None);
         }
         if agent_rename_prefix(value) {
             if let Some(rename_args) = agent_rename_args(value) {
-                return self.rename_agent_from_command(rename_args);
+                self.rename_agent_from_command(rename_args)?;
+                return Ok(None);
             }
             self.last_notice = Some("usage: /agent rename <child-id|current> <name>".to_owned());
-            return Ok(());
+            return Ok(None);
         }
         if agent_close_prefix(value) {
             if let Some(target) = agent_action_target(value, "close") {
                 return self.close_agent_from_command(target);
             }
             self.last_notice = Some("usage: /agent close <agent|current>".to_owned());
-            return Ok(());
+            return Ok(None);
         }
         if agent_cancel_prefix(value) {
             if let Some(target) = agent_action_target(value, "cancel") {
-                return self.cancel_agent_from_command(target);
+                self.cancel_agent_from_command(target)?;
+                return Ok(None);
             }
             self.last_notice = Some("usage: /agent cancel <agent|current>".to_owned());
-            return Ok(());
+            return Ok(None);
         }
         if agent_message_prefix(value) {
             self.last_notice = Some(
                 "agent messaging will be enabled with message_agent in the next phase".to_owned(),
             );
-            return Ok(());
+            return Ok(None);
         }
         match value.to_ascii_lowercase().as_str() {
             "next" | "n" => {
@@ -246,17 +265,17 @@ impl AppState {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 
-    fn close_agent_from_command(&mut self, target: &str) -> anyhow::Result<()> {
+    fn close_agent_from_command(&mut self, target: &str) -> anyhow::Result<Option<AppAction>> {
         let Some(view) = self.agent_view_for_action_target(target) else {
             self.last_notice = Some(format!("agent not found: {target}"));
-            return Ok(());
+            return Ok(None);
         };
         let Some(thread) = self.agent_thread_projection_for_view(&view) else {
             self.last_notice = Some(format!("agent close unavailable: {target}"));
-            return Ok(());
+            return Ok(None);
         };
         let thread_id = thread.thread_id.clone();
         if !thread.status.is_terminal() {
@@ -265,21 +284,32 @@ impl AppState {
                 thread_id.as_str()
             ));
             self.push_event("agent:close-unavailable", thread_id.as_str());
-            return Ok(());
+            return Ok(None);
         }
-        self.append_control_to_current_session(ControlEntry::AgentThreadClosed(
-            AgentThreadClosedEntry {
-                thread_id: thread_id.clone(),
-                reason: Some("closed from TUI /agent".to_owned()),
-            },
-        ))?;
-        if self.active_agent_view == view {
+        self.last_notice = Some(format!("agent close requested: {}", thread_id.as_str()));
+        self.push_event("agent:close-requested", thread_id.as_str());
+        Ok(Some(AppAction::CloseAgent {
+            thread_id,
+            reason: Some("closed from TUI /agent".to_owned()),
+        }))
+    }
+
+    pub(super) fn apply_agent_thread_closed(
+        &mut self,
+        thread_id: AgentThreadId,
+        entries: Vec<SessionLogEntry>,
+    ) {
+        let closing_active = self
+            .agent_thread_id_for_view(&self.active_agent_view)
+            .as_ref()
+            .is_some_and(|active_thread_id| active_thread_id == &thread_id);
+        self.sync_current_session_state(entries);
+        if closing_active {
             self.active_agent_view = AgentView::Main;
             self.active_agent_child_transcript = None;
         }
         self.last_notice = Some(format!("agent closed: {}", thread_id.as_str()));
         self.push_event("agent:close", thread_id.as_str());
-        Ok(())
     }
 
     fn cancel_agent_from_command(&mut self, target: &str) -> anyhow::Result<()> {
@@ -354,11 +384,30 @@ impl AppState {
             .filter_map(|item| item.target.as_ref())
             .any(|target| target == &self.active_agent_view);
         if still_available {
-            self.reload_active_agent_child_transcript();
+            if self.active_agent_child_transcript.is_none() || self.active_agent_view_is_terminal()
+            {
+                self.reload_active_agent_child_transcript();
+            }
         } else {
             self.active_agent_view = AgentView::Main;
             self.active_agent_child_transcript = None;
         }
+    }
+
+    fn active_agent_view_is_terminal(&self) -> bool {
+        if let Some(thread) = self.active_agent_thread_projection() {
+            return thread.status.is_terminal();
+        }
+        self.active_agent_child_entry().is_some_and(|child| {
+            matches!(
+                child.status,
+                sigil_kernel::TaskChildSessionStatus::Completed
+                    | sigil_kernel::TaskChildSessionStatus::Failed
+                    | sigil_kernel::TaskChildSessionStatus::Cancelled
+                    | sigil_kernel::TaskChildSessionStatus::Interrupted
+                    | sigil_kernel::TaskChildSessionStatus::Unavailable
+            )
+        })
     }
 
     pub(super) fn active_agent_child_entry(&self) -> Option<sigil_kernel::TaskChildSessionEntry> {
@@ -607,7 +656,7 @@ impl AppState {
         }
     }
 
-    fn reload_active_agent_child_transcript(&mut self) {
+    pub(super) fn reload_active_agent_child_transcript(&mut self) {
         let AgentView::Child {
             child_session_ref, ..
         } = &self.active_agent_view
@@ -620,20 +669,193 @@ impl AppState {
             .parent()
             .unwrap_or_else(|| Path::new("."));
         let path = child_session_ref.resolve(parent_dir);
-        let load_result = JsonlSessionStore::read_entries(&path);
+        let file_signature = match child_transcript_file_signature(&path) {
+            Ok(file_signature) => file_signature,
+            Err(error) => {
+                self.active_agent_child_transcript = Some(ActiveAgentChildTranscript {
+                    path,
+                    file_signature: ChildTranscriptFileSignature::empty(),
+                    timeline_entries: Vec::new(),
+                    rendered_body_lines: Vec::new(),
+                    total_timeline_entries: 0,
+                    transcript_truncated: false,
+                    load_error: Some(error.to_string()),
+                });
+                return;
+            }
+        };
+        if self
+            .active_agent_child_transcript
+            .as_ref()
+            .is_some_and(|transcript| {
+                transcript.path == path && transcript.file_signature == file_signature
+            })
+        {
+            return;
+        }
+        let load_result = read_recent_session_entries(
+            &path,
+            CHILD_AGENT_TRANSCRIPT_RAW_LINE_LIMIT,
+            file_signature.clone(),
+        );
         self.active_agent_child_transcript = Some(match load_result {
-            Ok(entries) => ActiveAgentChildTranscript {
-                path,
-                entries,
-                load_error: None,
-            },
+            Ok(recent) => {
+                let (timeline_entries, total_timeline_entries) =
+                    self.bounded_child_timeline_entries(&recent.entries);
+                let rendered_body_lines = self.render_child_timeline_body_lines(&timeline_entries);
+                ActiveAgentChildTranscript {
+                    path,
+                    file_signature: recent.file_signature,
+                    timeline_entries,
+                    rendered_body_lines,
+                    total_timeline_entries,
+                    transcript_truncated: recent.truncated,
+                    load_error: None,
+                }
+            }
             Err(error) => ActiveAgentChildTranscript {
                 path,
-                entries: Vec::new(),
+                file_signature,
+                timeline_entries: Vec::new(),
+                rendered_body_lines: Vec::new(),
+                total_timeline_entries: 0,
+                transcript_truncated: false,
                 load_error: Some(error.to_string()),
             },
         });
     }
+
+    pub(super) fn rerender_active_agent_child_transcript(&mut self) {
+        let Some(timeline_entries) = self
+            .active_agent_child_transcript
+            .as_ref()
+            .map(|transcript| transcript.timeline_entries.clone())
+        else {
+            return;
+        };
+        let rendered_body_lines = self.render_child_timeline_body_lines(&timeline_entries);
+        if let Some(transcript) = self.active_agent_child_transcript.as_mut() {
+            transcript.rendered_body_lines = rendered_body_lines;
+        }
+    }
+
+    fn bounded_child_timeline_entries(
+        &self,
+        entries: &[SessionLogEntry],
+    ) -> (Vec<TimelineEntry>, usize) {
+        let timeline_entries = self.restored_timeline_entries_from_session_entries(entries);
+        let total_timeline_entries = timeline_entries.len();
+        if total_timeline_entries <= CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT {
+            return (timeline_entries, total_timeline_entries);
+        }
+        (
+            timeline_entries
+                .into_iter()
+                .skip(total_timeline_entries - CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT)
+                .collect(),
+            total_timeline_entries,
+        )
+    }
+}
+
+#[derive(Debug)]
+struct RecentSessionEntries {
+    entries: Vec<SessionLogEntry>,
+    file_signature: ChildTranscriptFileSignature,
+    truncated: bool,
+}
+
+fn child_transcript_file_signature(path: &Path) -> anyhow::Result<ChildTranscriptFileSignature> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(ChildTranscriptFileSignature {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(ChildTranscriptFileSignature::empty())
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to stat child session {}", path.display()))
+        }
+    }
+}
+
+fn read_recent_session_entries(
+    path: &Path,
+    max_lines: usize,
+    file_signature: ChildTranscriptFileSignature,
+) -> anyhow::Result<RecentSessionEntries> {
+    if file_signature == ChildTranscriptFileSignature::empty() || max_lines == 0 {
+        return Ok(RecentSessionEntries {
+            entries: Vec::new(),
+            file_signature,
+            truncated: false,
+        });
+    }
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let (bytes, truncated_by_seek) =
+        read_tail_jsonl_bytes(&mut file, file_signature.len, max_lines)
+            .with_context(|| format!("failed to read recent entries from {}", path.display()))?;
+    let mut lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        let _ = lines.pop();
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    let truncated = truncated_by_seek || start > 0;
+    let mut entries = Vec::new();
+    for raw_line in lines.into_iter().skip(start) {
+        let line = str::from_utf8(raw_line)
+            .with_context(|| format!("failed to decode recent entry from {}", path.display()))?
+            .trim_end_matches('\r');
+        if line.trim().is_empty() {
+            continue;
+        }
+        entries.push(serde_json::from_str(line).with_context(|| {
+            format!(
+                "failed to parse recent session entry from {}",
+                path.display()
+            )
+        })?);
+    }
+    Ok(RecentSessionEntries {
+        entries,
+        file_signature,
+        truncated,
+    })
+}
+
+fn read_tail_jsonl_bytes(
+    file: &mut File,
+    file_len: u64,
+    max_lines: usize,
+) -> anyhow::Result<(Vec<u8>, bool)> {
+    let mut position = file_len;
+    let mut newline_count = 0usize;
+    let mut chunks = Vec::new();
+    while position > 0 && newline_count <= max_lines {
+        let read_size = position.min(CHILD_AGENT_TRANSCRIPT_TAIL_CHUNK_SIZE as u64) as usize;
+        position = position.saturating_sub(read_size as u64);
+        file.seek(SeekFrom::Start(position))?;
+        let mut chunk = vec![0; read_size];
+        file.read_exact(&mut chunk)?;
+        newline_count =
+            newline_count.saturating_add(chunk.iter().filter(|byte| **byte == b'\n').count());
+        chunks.push(chunk);
+    }
+    let truncated = position > 0;
+    let mut bytes = Vec::new();
+    for chunk in chunks.into_iter().rev() {
+        bytes.extend(chunk);
+    }
+    if truncated {
+        if let Some(first_newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=first_newline);
+        } else {
+            bytes.clear();
+        }
+    }
+    Ok((bytes, truncated))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -876,10 +1098,54 @@ fn fallback_agent_display_name(role: AgentRole, ordinal: usize) -> String {
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[path = "tests/agent_flow_detail_tests.rs"]
+mod detail_tests;
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+        path::Path,
+    };
 
     use super::*;
+    use sigil_kernel::{
+        AgentConfig, CompactionConfig, MemoryConfig, ModelMessage, PermissionConfig, RootConfig,
+        SessionConfig, SkillConfig, WorkspaceConfig,
+    };
+    use tempfile::tempdir;
+
+    fn test_root_config() -> RootConfig {
+        RootConfig {
+            workspace: WorkspaceConfig {
+                root: ".".to_owned(),
+            },
+            session: SessionConfig {
+                log_dir: ".sigil/sessions".to_owned(),
+            },
+            agent: AgentConfig {
+                provider: "deepseek".to_owned(),
+                model: "deepseek-v4-flash".to_owned(),
+                max_turns: None,
+                tool_timeout_secs: 30,
+            },
+            permission: PermissionConfig::default(),
+            memory: MemoryConfig { enabled: true },
+            skills: SkillConfig {
+                user_skills: false,
+                user_agents: false,
+                compatibility_sources: Vec::new(),
+                ..Default::default()
+            },
+            compaction: CompactionConfig::default(),
+            code_intelligence: Default::default(),
+            terminal: Default::default(),
+            task: Default::default(),
+            providers: BTreeMap::new(),
+            mcp_servers: Vec::new(),
+        }
+    }
 
     fn test_thread(
         thread_id: &str,
@@ -961,6 +1227,101 @@ mod tests {
         };
 
         assert!(legacy_child_for_thread(&task, &thread).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn active_agent_view_terminal_uses_child_session_status() -> anyhow::Result<()> {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_root_config());
+        let task_id = sigil_kernel::TaskId::new("task_1")?;
+        let step_id = sigil_kernel::TaskStepId::new("step_1")?;
+        let child_ref = sigil_kernel::SessionRef::new_relative("children/child.jsonl")?;
+        app.sync_current_session_state(vec![
+            SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+                task_id: task_id.clone(),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                objective: "review".to_owned(),
+                status: sigil_kernel::TaskRunStatus::Running,
+                reason: None,
+            })),
+            SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                status: sigil_kernel::TaskPlanStatus::Accepted,
+                steps: vec![sigil_kernel::TaskStepSpec {
+                    step_id: step_id.clone(),
+                    title: "inspect".to_owned(),
+                    display_name: None,
+                    detail: None,
+                    role: sigil_kernel::AgentRole::SubagentRead,
+                }],
+                reason: None,
+            })),
+            SessionLogEntry::Control(ControlEntry::TaskChildSession(
+                sigil_kernel::TaskChildSessionEntry {
+                    task_id,
+                    plan_version: 1,
+                    step_id,
+                    child_task_id: sigil_kernel::TaskId::new("child_1")?,
+                    child_session_ref: child_ref.clone(),
+                    role: sigil_kernel::AgentRole::SubagentRead,
+                    status: sigil_kernel::TaskChildSessionStatus::Failed,
+                    summary_hash: None,
+                },
+            )),
+        ]);
+        app.active_agent_view = AgentView::Child {
+            child_task_id: "child_1".to_owned(),
+            child_session_ref: child_ref,
+        };
+
+        assert!(app.active_agent_view_is_terminal());
+        Ok(())
+    }
+
+    #[test]
+    fn recent_child_session_entries_cover_empty_valid_and_invalid_files() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let missing = temp.path().join("missing.jsonl");
+        let missing_signature = child_transcript_file_signature(&missing)?;
+        let missing_recent = read_recent_session_entries(&missing, 16, missing_signature)?;
+        assert!(missing_recent.entries.is_empty());
+        assert!(!missing_recent.truncated);
+
+        let valid = temp.path().join("valid.jsonl");
+        let lines = (0..4)
+            .map(|index| {
+                serde_json::to_string(&SessionLogEntry::User(ModelMessage::user(format!(
+                    "child prompt {index}"
+                ))))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+        fs::write(&valid, format!("{lines}\n"))?;
+        let valid_signature = child_transcript_file_signature(&valid)?;
+        let recent = read_recent_session_entries(&valid, 2, valid_signature)?;
+        assert_eq!(recent.entries.len(), 2);
+        assert!(recent.truncated);
+
+        let invalid_utf8 = temp.path().join("invalid-utf8.jsonl");
+        fs::write(&invalid_utf8, [0xff, b'\n'])?;
+        let error = read_recent_session_entries(
+            &invalid_utf8,
+            2,
+            child_transcript_file_signature(&invalid_utf8)?,
+        )
+        .expect_err("invalid utf8 should fail");
+        assert!(error.to_string().contains("decode recent entry"));
+
+        let invalid_json = temp.path().join("invalid-json.jsonl");
+        fs::write(&invalid_json, "not-json\n")?;
+        let error = read_recent_session_entries(
+            &invalid_json,
+            2,
+            child_transcript_file_signature(&invalid_json)?,
+        )
+        .expect_err("invalid json should fail");
+        assert!(error.to_string().contains("parse recent session entry"));
         Ok(())
     }
 

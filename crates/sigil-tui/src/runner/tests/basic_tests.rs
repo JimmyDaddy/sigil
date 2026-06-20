@@ -2,9 +2,9 @@ use std::{fs, time::Duration};
 
 use anyhow::Result;
 use sigil_kernel::{
-    Agent, AgentRole, McpServerConfig, McpServerStartup, ProviderChunk, ReasoningEffort, RunEvent,
-    SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, ToolCall,
-    ToolErrorKind, ToolRegistry, ToolResultStatus,
+    Agent, AgentRole, ControlEntry, McpServerConfig, McpServerStartup, ProviderChunk,
+    ReasoningEffort, RunEvent, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
+    SkillTrustState, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolRegistry, ToolResultStatus,
 };
 use tempfile::tempdir;
 
@@ -156,6 +156,90 @@ fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
                 && result.tool_calls == 0
                 && entries.iter().any(|entry| matches!(entry, SessionLogEntry::User(message) if message.content.as_deref() == Some("hello")))
     ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-plan.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![
+        StreamPlan::Chunks(vec![
+            ProviderChunk::ToolCallStart {
+                id: "call-write".to_owned(),
+                name: "write_file".to_owned(),
+            },
+            ProviderChunk::ToolCallArgsDelta {
+                id: "call-write".to_owned(),
+                delta: r#"{"path":"note.txt"}"#.to_owned(),
+            },
+            ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-write".to_owned(),
+                name: "write_file".to_owned(),
+                args_json: r#"{"path":"note.txt"}"#.to_owned(),
+            }),
+            ProviderChunk::Done,
+        ]),
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("plan after blocked write".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let mut registry = ToolRegistry::new();
+    registry.register(std::sync::Arc::new(WriteTool));
+    let agent = Agent::new(provider, registry);
+    let note_path = workspace_root.join("note.txt");
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "inspect first".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let started = worker.recv()?;
+    assert!(matches!(
+        started,
+        WorkerMessage::PlanRunStarted { ref prompt } if prompt == "inspect first"
+    ));
+
+    let tool_result = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::Event(event)
+                if matches!(event.as_ref(), RunEvent::ToolResult(result)
+                    if result.tool_name == "write_file"
+                        && result.content.contains("not available in this role scope"))
+        )
+    })?;
+    assert!(matches!(
+        tool_result,
+        WorkerMessage::Event(event)
+            if matches!(event.as_ref(), RunEvent::ToolResult(result)
+                if result.tool_name == "write_file"
+                    && result.is_error()
+                    && result.content.contains("not available in this role scope"))
+    ));
+
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::PlanRunFinished { .. }))?;
+    let WorkerMessage::PlanRunFinished { result, entries } = finished else {
+        unreachable!("recv_until only returns PlanRunFinished");
+    };
+    assert_eq!(result.final_text, "plan after blocked write");
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ToolExecution(execution))
+            if execution.tool_name == "write_file"
+                && execution.status == ToolExecutionStatus::Failed
+    )));
+    assert!(!entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::User(message) if message.content.as_deref() == Some("inspect first")
+    )));
+    assert!(!note_path.exists());
 
     worker.shutdown()?;
     Ok(())

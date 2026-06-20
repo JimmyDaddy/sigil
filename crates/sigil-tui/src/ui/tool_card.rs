@@ -16,7 +16,7 @@ use super::{
         MarkdownRenderOptions, render_code_line_spans_with_bg, render_markdown_timeline_lines,
     },
     primitives::{section_badge, timeline_badge, timeline_content_line, timeline_section_line},
-    status_indicator::{StatusIndicator, StatusKind},
+    status_indicator::{StatusIndicator, StatusKind, status_kind_from_label},
     text::truncate_inline_text,
     theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink},
 };
@@ -220,6 +220,9 @@ fn render_tool_preview_body(
     }
     if terminal_task_tool(summary) {
         return render_terminal_task_preview(summary, accent);
+    }
+    if agent_tool(summary) {
+        return render_agent_tool_preview(summary, accent, max_content_width);
     }
     if file_change_tool(summary)
         && let Some(lines) = render_file_change_preview(summary, accent)
@@ -900,6 +903,250 @@ fn code_intelligence_tool(summary: &ToolCardRender) -> bool {
         || tool_name_matches(&summary.tool_name, "code_actions")
 }
 
+fn agent_tool(summary: &ToolCardRender) -> bool {
+    tool_name_matches(&summary.tool_name, "spawn_agent")
+        || tool_name_matches(&summary.tool_name, "wait_agent")
+        || tool_name_matches(&summary.tool_name, "read_agent_result")
+        || tool_name_matches(&summary.tool_name, "message_agent")
+        || tool_name_matches(&summary.tool_name, "close_agent")
+}
+
+fn render_agent_tool_preview(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+) -> Vec<Line<'static>> {
+    if tool_name_matches(&summary.tool_name, "read_agent_result") {
+        return render_agent_result_page_preview(summary, accent, max_content_width);
+    }
+    if tool_name_matches(&summary.tool_name, "spawn_agent") && !summary.preview_lines.is_empty() {
+        return render_agent_summary_preview(summary, accent, max_content_width);
+    }
+    render_agent_status_preview(summary, accent)
+}
+
+fn render_agent_result_page_preview(
+    summary: &ToolCardRender,
+    accent: Color,
+    _max_content_width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![timeline_section_line(
+        accent,
+        "result",
+        accent_blue(),
+        vec![Span::styled(
+            agent_result_page_summary(summary).unwrap_or_else(|| "agent result page".to_owned()),
+            Style::default().fg(dim()),
+        )],
+    )];
+    lines.extend(render_agent_status_preview(summary, accent));
+    lines
+}
+
+fn render_agent_summary_preview(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![timeline_section_line(
+        accent,
+        "summary",
+        accent_blue(),
+        vec![Span::styled(
+            agent_status_detail(summary),
+            Style::default().fg(dim()),
+        )],
+    )];
+    lines.extend(render_markdown_timeline_lines(
+        accent,
+        Style::default().fg(ink()),
+        &summary.preview_lines.join("\n"),
+        MarkdownRenderOptions::tool_preview(max_content_width),
+    ));
+    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    if agent_payload_bool(summary, "summary_truncated").unwrap_or(false) {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                "Use read_agent_result for the complete result.",
+                Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
+            )],
+        ));
+    }
+    lines
+}
+
+fn render_agent_status_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'static>> {
+    let mut details = vec![Span::styled(
+        agent_status_detail(summary),
+        Style::default().fg(dim()),
+    )];
+    if agent_payload_bool(summary, "result_available").unwrap_or(false) {
+        details.push(Span::raw(" · "));
+        details.push(Span::styled(
+            "result ready",
+            Style::default()
+                .fg(accent_lime())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let mut lines = vec![timeline_section_line(
+        accent,
+        "agent",
+        accent_blue(),
+        details,
+    )];
+    if let Some(reason) =
+        agent_payload_string(summary, "reason").filter(|reason| !reason.is_empty())
+    {
+        lines.push(timeline_content_line(
+            accent,
+            vec![Span::styled(
+                reason,
+                Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
+            )],
+        ));
+    }
+    if agent_result_read_tool(summary).is_some() {
+        lines.push(timeline_content_line(
+            accent,
+            vec![
+                Span::styled("read", Style::default().fg(dim())),
+                Span::raw(" "),
+                Span::styled("read_agent_result", Style::default().fg(accent_blue())),
+            ],
+        ));
+    }
+    lines
+}
+
+fn agent_tool_display_status(status: &str) -> ToolCardDisplayStatus {
+    let status = status.trim();
+    let kind = status_kind_from_label(status);
+    ToolCardDisplayStatus {
+        label: agent_status_display_label(status),
+        detail: None,
+        kind,
+        is_error: kind == StatusKind::Error,
+    }
+}
+
+fn agent_tool_display_summary(summary: &ToolCardRender) -> Option<String> {
+    if tool_name_matches(&summary.tool_name, "read_agent_result") {
+        return agent_result_page_summary(summary);
+    }
+    if tool_name_matches(&summary.tool_name, "wait_agent") {
+        if agent_payload_bool(summary, "result_available").unwrap_or(false) {
+            return Some("result ready".to_owned());
+        }
+        return Some("result pending".to_owned());
+    }
+    if tool_name_matches(&summary.tool_name, "spawn_agent")
+        && agent_payload_bool(summary, "summary_truncated").unwrap_or(false)
+    {
+        return Some("summary truncated · read_agent_result available".to_owned());
+    }
+    None
+}
+
+fn agent_tool_title(summary: &ToolCardRender) -> ToolCardTitle {
+    let thread = agent_thread_label(summary);
+    if tool_name_matches(&summary.tool_name, "spawn_agent") {
+        return ToolCardTitle::new("Started", "agent", Some(thread));
+    }
+    if tool_name_matches(&summary.tool_name, "wait_agent") {
+        return ToolCardTitle::new("Checked", "agent", Some(thread));
+    }
+    if tool_name_matches(&summary.tool_name, "read_agent_result") {
+        return ToolCardTitle::new("Read", "agent result", Some(thread));
+    }
+    if tool_name_matches(&summary.tool_name, "message_agent") {
+        return ToolCardTitle::new("Messaged", "agent", Some(thread));
+    }
+    if tool_name_matches(&summary.tool_name, "close_agent") {
+        return ToolCardTitle::new("Closed", "agent", Some(thread));
+    }
+    ToolCardTitle::new("Called", "agent", Some(thread))
+}
+
+fn agent_status_display_label(status: &str) -> &'static str {
+    match status {
+        "idle" => "IDLE",
+        "started" => "STARTED",
+        "running" => "RUNNING",
+        "completed" => "DONE",
+        "failed" => "FAILED",
+        "blocked" => "BLOCKED",
+        "cancelled" => "CANCELLED",
+        "interrupted" => "INTERRUPTED",
+        "closed" => "CLOSED",
+        "unavailable" => "UNAVAILABLE",
+        "unknown" => "UNKNOWN",
+        _ => "AGENT",
+    }
+}
+
+fn agent_status_detail(summary: &ToolCardRender) -> String {
+    let status = agent_payload_string(summary, "status").unwrap_or_else(|| "unknown".to_owned());
+    format!("{} · {}", status, agent_thread_label(summary))
+}
+
+fn agent_result_page_summary(summary: &ToolCardRender) -> Option<String> {
+    let page = agent_payload_value(summary)?.get("page")?;
+    let offset = page.get("offset_chars").and_then(Value::as_u64)?;
+    let returned = page.get("returned_chars").and_then(Value::as_u64)?;
+    let total = page.get("total_chars").and_then(Value::as_u64)?;
+    let more = if page
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        " · more"
+    } else {
+        ""
+    };
+    Some(format!("chars {offset}+{returned}/{total}{more}"))
+}
+
+fn agent_result_read_tool(summary: &ToolCardRender) -> Option<String> {
+    let value = agent_payload_value(summary)?;
+    value
+        .get("result_ref")
+        .and_then(|result_ref| result_ref.get("read_tool"))
+        .or_else(|| {
+            value
+                .get("result_fetch")
+                .and_then(|result_fetch| result_fetch.get("tool"))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn agent_thread_label(summary: &ToolCardRender) -> String {
+    agent_payload_string(summary, "thread_id")
+        .or_else(|| call_argument(summary, "thread_id"))
+        .or_else(|| call_argument(summary, "profile_id"))
+        .map(|value| truncate_inline_text(&value, 48))
+        .unwrap_or_else(|| "agent".to_owned())
+}
+
+fn agent_payload_value(summary: &ToolCardRender) -> Option<&Value> {
+    summary.preview_value.as_ref()
+}
+
+fn agent_payload_string(summary: &ToolCardRender, key: &str) -> Option<String> {
+    let value = agent_payload_value(summary)?.get(key)?;
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Null => None,
+        _ => Some(value.to_string()),
+    }
+}
+
+fn agent_payload_bool(summary: &ToolCardRender, key: &str) -> Option<bool> {
+    agent_payload_value(summary)?.get(key)?.as_bool()
+}
+
 fn file_change_count_label(summary: &ToolCardRender) -> &'static str {
     if summary.metadata.action.as_deref() == Some("delete")
         || tool_name_matches(&summary.tool_name, "delete_file")
@@ -1416,6 +1663,12 @@ fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
     if terminal_task_tool(summary) {
         return terminal_task_display_status(summary);
     }
+    if agent_tool(summary)
+        && !summary.is_error
+        && let Some(status) = agent_payload_string(summary, "status")
+    {
+        return agent_tool_display_status(&status);
+    }
     let label = if summary.is_error {
         match summary.error_kind.as_deref() {
             Some("approval_denied") | Some("permission_denied") => "DENIED",
@@ -1450,6 +1703,11 @@ fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
 }
 
 fn tool_display_summary(summary: &ToolCardRender) -> Option<String> {
+    if agent_tool(summary)
+        && let Some(summary) = agent_tool_display_summary(summary)
+    {
+        return Some(summary);
+    }
     if tool_name_matches(&summary.tool_name, "bash")
         && !summary.is_error
         && summary.preview_lines.is_empty()
@@ -1573,6 +1831,9 @@ fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
             primary_path(summary),
             Some("diagnostics".to_owned()),
         );
+    }
+    if agent_tool(summary) {
+        return agent_tool_title(summary);
     }
     if let Some(mcp) = mcp_tool_display(summary) {
         return ToolCardTitle::new("Called", mcp.tool, Some(format!("on {}", mcp.server)));

@@ -7,8 +7,12 @@ use crate::slash::{
     EFFORT_SELECTOR_OPTIONS, MODEL_SELECTOR_OPTIONS, ResolvedSlashCommand, SLASH_COMMANDS,
     SlashArgumentOption, SlashCommandSpec, SlashSelectorEntry,
 };
-use anyhow::Result;
-use sigil_kernel::{SkillDescriptor, SkillRunMode, SkillTrustState, default_user_config_dir};
+use anyhow::{Result, anyhow};
+use sigil_kernel::{
+    AgentProfileKind, AgentProfileSource, AgentTrustState, SkillDescriptor, SkillRunMode,
+    SkillTrustState, default_user_config_dir,
+};
+use sigil_runtime::{AgentProfileRegistry, ResolvedAgentProfile};
 
 impl AppState {
     fn slash_query(prompt: &str) -> Option<(&str, String)> {
@@ -18,6 +22,15 @@ impl AppState {
         }
 
         Some(Self::command_token_and_arg(trimmed))
+    }
+
+    fn agent_mention_query(prompt: &str) -> Option<&str> {
+        let trimmed = prompt.trim_start();
+        let query = trimmed.strip_prefix('@')?;
+        if query.chars().any(char::is_whitespace) {
+            return None;
+        }
+        Some(query)
     }
 
     fn command_token_and_arg(prompt: &str) -> (&str, String) {
@@ -242,10 +255,62 @@ impl AppState {
         .unwrap_or_default()
     }
 
+    fn user_invocable_agent_profiles(&self) -> Vec<ResolvedAgentProfile> {
+        let Some(root_config) = self.root_config_snapshot() else {
+            return Vec::new();
+        };
+        AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            &self.workspace_root,
+            &self.current_session_entries,
+        )
+        .map(|registry| {
+            registry
+                .profiles()
+                .iter()
+                .filter(|profile| profile.effective_enabled())
+                .filter(|profile| profile.effective_user_invocation_allowed())
+                .filter(|profile| profile.trust_state == AgentTrustState::Trusted)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     pub(super) fn exact_skill_descriptor(&self, skill_id: &str) -> Option<SkillDescriptor> {
         self.user_invocable_skill_descriptors()
             .into_iter()
             .find(|descriptor| descriptor.id == skill_id)
+    }
+
+    pub(super) fn resolve_agent_mention_invocation(
+        &self,
+        prompt: &str,
+    ) -> Result<(String, String)> {
+        let trimmed = prompt.trim_start();
+        let Some(stripped) = trimmed.strip_prefix('@') else {
+            return Err(anyhow!("not an agent mention"));
+        };
+        if stripped.trim().is_empty() {
+            return Err(anyhow!("usage: @agent <prompt>"));
+        }
+        let (token, arg) = Self::command_token_and_arg(trimmed);
+        let profile_id = token
+            .strip_prefix('@')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("usage: @agent <prompt>"))?;
+        if arg.trim().is_empty() {
+            return Err(anyhow!("usage: @{profile_id} <prompt>"));
+        }
+        let Some(profile) = self
+            .user_invocable_agent_profiles()
+            .into_iter()
+            .find(|profile| profile.profile.id.as_str() == profile_id)
+        else {
+            return Err(anyhow!("unknown agent {profile_id}"));
+        };
+        Ok((profile.profile.id.as_str().to_owned(), arg))
     }
 
     pub(super) fn slash_skill_entries(&self, token: &str, arg: &str) -> Vec<SlashSelectorEntry> {
@@ -257,9 +322,7 @@ impl AppState {
         }
         self.user_invocable_skill_descriptors()
             .into_iter()
-            .filter(|descriptor| descriptor.enabled)
-            .filter(|descriptor| descriptor.user_invocable)
-            .filter(|descriptor| descriptor.trust == SkillTrustState::Trusted)
+            .filter(slash_skill_is_visible)
             .filter(|descriptor| query.is_empty() || descriptor.id.starts_with(query))
             .map(|descriptor| {
                 let fill = if arg.is_empty() {
@@ -290,9 +353,33 @@ impl AppState {
             .collect()
     }
 
+    fn agent_mention_entries(&self, query: &str) -> Vec<SlashSelectorEntry> {
+        let query = query.to_ascii_lowercase();
+        self.user_invocable_agent_profiles()
+            .into_iter()
+            .filter(|profile| agent_profile_matches_query(profile, &query))
+            .map(|profile| {
+                let profile_id = profile.profile.id.as_str();
+                let description = agent_mention_description(&profile);
+                SlashSelectorEntry {
+                    fill: format!("@{profile_id} "),
+                    label: format!("@{profile_id}"),
+                    description,
+                    resolved: ResolvedSlashCommand {
+                        canonical: "@agent".to_owned(),
+                        arg: profile_id.to_owned(),
+                    },
+                }
+            })
+            .collect()
+    }
+
     fn slash_selector_entries(&self) -> Vec<SlashSelectorEntry> {
         if !self.slash_selector_context_allows_popup() {
             return Vec::new();
+        }
+        if let Some(query) = Self::agent_mention_query(&self.input) {
+            return self.agent_mention_entries(query);
         }
         let Some((token, arg)) = Self::slash_query(&self.input) else {
             return Vec::new();
@@ -315,6 +402,9 @@ impl AppState {
     }
 
     fn slash_selector_context_allows_popup(&self) -> bool {
+        if Self::agent_mention_query(&self.input).is_some() {
+            return true;
+        }
         let Some((token, arg)) = Self::slash_query(&self.input) else {
             return false;
         };
@@ -371,7 +461,7 @@ impl AppState {
         }
         let skill_id = token.strip_prefix('/')?;
         self.exact_skill_descriptor(skill_id)
-            .filter(|descriptor| descriptor.enabled && descriptor.user_invocable)
+            .filter(slash_skill_is_resolvable)
             .map(|descriptor| ResolvedSlashCommand {
                 canonical: format!("/{}", descriptor.id),
                 arg,
@@ -489,10 +579,15 @@ impl AppState {
         };
 
         entry.label.starts_with('/') && self.input.trim_start() != entry.fill.trim_end()
+            || entry.label.starts_with('@') && self.input.trim_start() != entry.fill.trim_end()
     }
 
     pub fn has_slash_selector(&self) -> bool {
         self.slash_selector_context_allows_popup()
+    }
+
+    pub fn has_agent_mention_selector(&self) -> bool {
+        Self::agent_mention_query(&self.input).is_some()
     }
 
     pub fn slash_selector_selected_index(&self) -> Option<usize> {
@@ -514,6 +609,12 @@ impl AppState {
     pub fn slash_selector_empty_message(&self) -> Option<&'static str> {
         if !self.slash_selector_context_allows_popup() {
             return None;
+        }
+        if Self::agent_mention_query(&self.input).is_some() {
+            return self
+                .slash_selector_entries()
+                .is_empty()
+                .then_some("no matching agent");
         }
         let (token, _) = Self::slash_query(&self.input)?;
         if !self.slash_selector_entries().is_empty() {
@@ -553,6 +654,9 @@ impl AppState {
     }
 
     pub(crate) fn slash_selector_title(&self) -> Option<&'static str> {
+        if Self::agent_mention_query(&self.input).is_some() {
+            return Some("Agent");
+        }
         let (token, _) = Self::slash_query(&self.input)?;
         match Self::exact_slash_command(token).map(|spec| spec.canonical) {
             Some("/agent") => Some("Agent"),
@@ -569,3 +673,64 @@ fn slash_skill_display_kind(skill: &SkillDescriptor) -> &'static str {
         "skill"
     }
 }
+
+fn slash_skill_is_visible(skill: &SkillDescriptor) -> bool {
+    slash_skill_is_resolvable(skill) && skill.trust == SkillTrustState::Trusted
+}
+
+fn slash_skill_is_resolvable(skill: &SkillDescriptor) -> bool {
+    skill.enabled && skill.user_invocable && matches!(skill.run_as, SkillRunMode::Inline)
+}
+
+fn agent_profile_matches_query(profile: &ResolvedAgentProfile, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let mut search = format!(
+        "{} {} {}",
+        profile.profile.id.as_str().to_ascii_lowercase(),
+        profile.profile.description.to_ascii_lowercase(),
+        agent_profile_source_label(&profile.source)
+    );
+    for nickname in &profile.profile.nickname_candidates {
+        search.push(' ');
+        search.push_str(&nickname.to_ascii_lowercase());
+    }
+    search.contains(query)
+}
+
+fn agent_mention_description(profile: &ResolvedAgentProfile) -> String {
+    let kind = agent_profile_kind_label(profile.profile.kind);
+    let source = agent_profile_source_label(&profile.source);
+    let description = profile.profile.description.trim();
+    if description.is_empty() {
+        format!("{kind} · {source}")
+    } else {
+        format!("{kind} · {source} · {description}")
+    }
+}
+
+fn agent_profile_kind_label(kind: AgentProfileKind) -> &'static str {
+    match kind {
+        AgentProfileKind::Primary => "primary",
+        AgentProfileKind::Subagent => "subagent",
+        AgentProfileKind::System => "system",
+        AgentProfileKind::Unknown => "unknown",
+    }
+}
+
+fn agent_profile_source_label(source: &AgentProfileSource) -> String {
+    match source {
+        AgentProfileSource::Workspace => "workspace".to_owned(),
+        AgentProfileSource::User => "user".to_owned(),
+        AgentProfileSource::Plugin { plugin_id } => format!("plugin:{plugin_id}"),
+        AgentProfileSource::Compatibility { provider } => format!("compat:{provider}"),
+        AgentProfileSource::System => "system".to_owned(),
+        AgentProfileSource::LegacyTask => "legacy_task".to_owned(),
+        AgentProfileSource::Unknown => "unknown".to_owned(),
+    }
+}
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[path = "tests/slash_flow_detail_tests.rs"]
+mod tests;

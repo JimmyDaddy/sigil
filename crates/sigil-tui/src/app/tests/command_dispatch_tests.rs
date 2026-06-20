@@ -94,10 +94,10 @@ fn pending_approval_blocks_agent_cycle_commands() -> Result<()> {
 }
 
 #[test]
-fn submit_plan_ui_command_is_not_handled_by_global_dispatch() {
+fn enter_plan_mode_ui_command_is_not_handled_by_global_dispatch() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
-    assert!(!app.handle_ui_command(crate::commands::UiCommand::SubmitPlan));
+    assert!(!app.handle_ui_command(crate::commands::UiCommand::EnterPlanMode));
 }
 
 #[test]

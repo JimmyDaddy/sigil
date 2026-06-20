@@ -138,6 +138,20 @@ impl AppState {
                 self.push_phase_marker(format!("thinking|{}", self.model_name));
                 self.push_event("run:start", prompt);
             }
+            WorkerMessage::PlanRunStarted { prompt } => {
+                self.run_phase = RunPhase::Thinking;
+                self.mcp_progress = None;
+                self.last_notice = Some("planning".to_owned());
+                self.push_phase_marker(format!("plan|{}", self.model_name));
+                self.push_event("plan:start", prompt);
+            }
+            WorkerMessage::AgentRunStarted { profile_id, prompt } => {
+                self.run_phase = RunPhase::Thinking;
+                self.mcp_progress = None;
+                self.last_notice = Some(format!("invoking agent {profile_id}"));
+                self.push_phase_marker(format!("agent|{profile_id}"));
+                self.push_event("agent:start", prompt);
+            }
             WorkerMessage::TaskRunStarted { task_id, objective } => {
                 self.run_phase = RunPhase::Thinking;
                 self.mcp_progress = None;
@@ -166,6 +180,49 @@ impl AppState {
                         result.tool_calls,
                         result.final_text.len()
                     ),
+                );
+            }
+            WorkerMessage::PlanRunFinished { result, entries } => {
+                self.is_busy = false;
+                self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
+                self.pending_approval = None;
+                self.modal_state = None;
+                self.last_phase_marker = None;
+                self.finish_streaming_assistant_entry();
+                self.finish_streaming_reasoning_entry();
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.recompute_compaction_status(false);
+                self.schedule_balance_refresh();
+                self.set_pending_plan_approval_from_text(&result.final_text);
+                self.last_notice = if self.pending_plan_approval().is_some() {
+                    Some("plan ready".to_owned())
+                } else {
+                    Some("plan finished".to_owned())
+                };
+                self.push_event(
+                    "plan:finish",
+                    format!(
+                        "tool_calls={} final_text_bytes={}",
+                        result.tool_calls,
+                        result.final_text.len()
+                    ),
+                );
+            }
+            WorkerMessage::PlanApproved { entry, entries } => {
+                self.is_busy = false;
+                self.pending_approval = None;
+                self.clear_pending_plan_approval();
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.last_notice = Some(format!(
+                    "plan approved: {}",
+                    plan_approval_permission_label(entry.permission)
+                ));
+                self.push_event(
+                    "plan:approved",
+                    format!("v{} {}", entry.plan_version, entry.plan_hash),
                 );
             }
             WorkerMessage::TaskRunFinished {
@@ -235,6 +292,9 @@ impl AppState {
                         entry.status.as_str()
                     ),
                 );
+            }
+            WorkerMessage::AgentThreadClosed { thread_id, entries } => {
+                self.apply_agent_thread_closed(thread_id, entries);
             }
             WorkerMessage::SessionSwitched {
                 session_log_path,
@@ -449,6 +509,21 @@ impl AppState {
                 prompt,
                 reasoning_effort: self.reasoning_effort.clone(),
             },
+            AppAction::SubmitPlanPrompt(prompt) => WorkerCommand::SubmitPlanPrompt {
+                prompt,
+                reasoning_effort: self.reasoning_effort.clone(),
+            },
+            AppAction::ApprovePlan {
+                plan_text,
+                permission,
+                scope_summary,
+                clear_planning_context,
+            } => WorkerCommand::ApprovePlan {
+                plan_text,
+                permission,
+                scope_summary,
+                clear_planning_context,
+            },
             AppAction::InvokeInlineSkill {
                 skill_id,
                 arguments,
@@ -464,8 +539,11 @@ impl AppState {
                 skill_id,
                 arguments,
             },
-            AppAction::SubmitPlan(prompt) => WorkerCommand::SubmitTask { prompt },
-            AppAction::ContinuePlan { task_id, guidance } => {
+            AppAction::InvokeAgentProfile { profile_id, prompt } => {
+                WorkerCommand::InvokeAgentProfile { profile_id, prompt }
+            }
+            AppAction::SubmitTask(prompt) => WorkerCommand::SubmitTask { prompt },
+            AppAction::ContinueTask { task_id, guidance } => {
                 WorkerCommand::ContinueTask { task_id, guidance }
             }
             AppAction::ApprovalDecision { call_id, approved } => {
@@ -474,6 +552,9 @@ impl AppState {
             AppAction::CancelRun => WorkerCommand::CancelRun,
             AppAction::CancelTerminalTask { task_id } => {
                 WorkerCommand::CancelTerminalTask { task_id }
+            }
+            AppAction::CloseAgent { thread_id, reason } => {
+                WorkerCommand::CloseAgent { thread_id, reason }
             }
             AppAction::CompactNow => WorkerCommand::CompactNow,
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
@@ -804,6 +885,9 @@ impl EventHandler for AppState {
             }
             RunEvent::ToolCallStarted(call) => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
+                if agent_tool_name(&call.name) {
+                    self.downgrade_streaming_assistant_entry_to_thinking();
+                }
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 self.push_phase_marker(format!("tool|{}", call.name));
@@ -816,6 +900,9 @@ impl EventHandler for AppState {
             }
             RunEvent::ToolCallCompleted(call) => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
+                if agent_tool_name(&call.name) {
+                    self.downgrade_streaming_assistant_entry_to_thinking();
+                }
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
                 self.push_phase_marker(format!("tool|{}", call.name));
@@ -987,6 +1074,22 @@ impl EventHandler for AppState {
         }
         Ok(())
     }
+}
+
+fn plan_approval_permission_label(
+    permission: sigil_kernel::PlanApprovalPermission,
+) -> &'static str {
+    match permission {
+        sigil_kernel::PlanApprovalPermission::Ask => "ask",
+        sigil_kernel::PlanApprovalPermission::WorkspaceEdits => "workspace_edits",
+    }
+}
+
+fn agent_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "spawn_agent" | "wait_agent" | "read_agent_result" | "message_agent" | "close_agent"
+    )
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

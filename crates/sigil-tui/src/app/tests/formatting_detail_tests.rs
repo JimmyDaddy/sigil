@@ -136,3 +136,59 @@ fn preview_helpers_cover_json_markdown_and_limits() {
     assert!(looks_like_markdown_document("| a | b |\n| --- | --- |"));
     assert!(!looks_like_markdown_document("plain text"));
 }
+
+#[test]
+fn agent_result_tools_use_agent_preview_sources() -> anyhow::Result<()> {
+    let read_payload = serde_json::json!({
+        "thread_id": "thread_1",
+        "status": "completed",
+        "session_ref": "children/thread_1.jsonl",
+        "output_hash": "hash",
+        "page": {
+            "offset_chars": 0,
+            "returned_chars": 31,
+            "total_chars": 31,
+            "next_offset_chars": null,
+            "truncated": false,
+            "text_omitted": true,
+            "text_delivery": "transient_context"
+        }
+    });
+    let read_result = ToolResult::ok(
+        "call-read-agent-result",
+        "read_agent_result",
+        read_payload.to_string(),
+        ToolResultMeta::default(),
+    );
+    let read_display: serde_json::Value = serde_json::from_str(
+        &format_tool_result_block_redacted(&read_result, None, &SecretRedactor::empty()),
+    )?;
+
+    assert_eq!(read_display["preview_kind"], "agent_result");
+    assert_eq!(
+        read_display["preview_lines"].as_array().map(Vec::len),
+        Some(0)
+    );
+    assert!(read_display["preview_value"]["page"].get("text").is_none());
+    assert_eq!(read_display["preview_value"]["page"]["text_omitted"], true);
+
+    let spawn_payload = serde_json::json!({
+        "thread_id": "thread_2",
+        "status": "completed",
+        "summary": "## Summary\n\nDone",
+        "summary_truncated": false
+    });
+    let spawn_result = ToolResult::ok(
+        "call-spawn-agent",
+        "spawn_agent",
+        spawn_payload.to_string(),
+        ToolResultMeta::default(),
+    );
+    let spawn_display: serde_json::Value = serde_json::from_str(
+        &format_tool_result_block_redacted(&spawn_result, None, &SecretRedactor::empty()),
+    )?;
+
+    assert_eq!(spawn_display["preview_kind"], "markdown");
+    assert_eq!(spawn_display["preview_lines"][0], "## Summary");
+    Ok(())
+}

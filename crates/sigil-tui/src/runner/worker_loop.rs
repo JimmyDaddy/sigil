@@ -2,19 +2,21 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentRole, AgentRunInput, AgentRunOptions, AgentRunResult, ControlEntry, ModelMessage,
-    ProviderCapabilities, RootConfig, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection,
-    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
-    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
-    ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, default_user_config_dir,
+    Agent, AgentDelegationRequirement, AgentProfileId, AgentRole, AgentRunInput, AgentRunOptions,
+    AgentRunResult, AgentThreadId, ControlEntry, ModelMessage, PlanApprovalExpiry,
+    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, ProviderCapabilities, RootConfig,
+    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
+    SkillDescriptor, SkillRunMode, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry,
+    TaskStepId, TaskStepSpec, TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
+    TerminalTaskId, ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
+    ToolSubjectAudit, default_user_config_dir, plan_text_hash, plan_workspace_paths,
 };
 
 use crate::{
@@ -37,6 +39,7 @@ pub(super) fn run_worker_loop<P>(
     mut agent: Arc<Agent<P>>,
     root_config: RootConfig,
     provider_capabilities: ProviderCapabilities,
+    workspace_root: PathBuf,
     session_log_path: PathBuf,
     options: AgentRunOptions,
     command_rx: mpsc::Receiver<WorkerCommand>,
@@ -71,18 +74,26 @@ pub(super) fn run_worker_loop<P>(
     let mut next_run_id = 1_u64;
     let mut discarded_run_ids = BTreeSet::new();
     let mut pending_mcp_refreshes = BTreeSet::new();
-    let agent_supervisor = match sigil_runtime::AgentProfileRegistry::from_root_config(&root_config)
-    {
-        Ok(registry) => sigil_runtime::AgentSupervisor::new(
-            registry,
-            sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
-            provider_capabilities.clone(),
-        ),
-        Err(error) => {
-            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-            return;
-        }
-    };
+    let session_entries = current_session
+        .as_ref()
+        .map(Session::entries)
+        .unwrap_or(&[]);
+    let agent_supervisor =
+        match sigil_runtime::AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            &workspace_root,
+            session_entries,
+        ) {
+            Ok(registry) => sigil_runtime::AgentSupervisor::new(
+                registry,
+                sigil_runtime::AgentBudgetPolicy::from_root_config(&root_config),
+                provider_capabilities.clone(),
+            ),
+            Err(error) => {
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                return;
+            }
+        };
 
     loop {
         while let Ok(event) = mcp_event_rx.try_recv() {
@@ -175,17 +186,30 @@ pub(super) fn run_worker_loop<P>(
                 None => None,
             };
             match task_result.payload {
-                RunTaskPayload::Chat(Ok(run_result)) => {
+                RunTaskPayload::Chat {
+                    result: Ok(run_result),
+                    plan_mode,
+                } => {
                     let entries = current_session
                         .as_ref()
                         .map(|session| session.entries().to_vec())
                         .unwrap_or_default();
-                    let _ = message_tx.send(WorkerMessage::RunFinished {
-                        result: run_result,
-                        entries,
-                    });
+                    let message = if plan_mode {
+                        WorkerMessage::PlanRunFinished {
+                            result: run_result,
+                            entries,
+                        }
+                    } else {
+                        WorkerMessage::RunFinished {
+                            result: run_result,
+                            entries,
+                        }
+                    };
+                    let _ = message_tx.send(message);
                 }
-                RunTaskPayload::Chat(Err(error)) => {
+                RunTaskPayload::Chat {
+                    result: Err(error), ..
+                } => {
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
                 }
                 RunTaskPayload::Task {
@@ -220,10 +244,21 @@ pub(super) fn run_worker_loop<P>(
         }
 
         match command_rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(WorkerCommand::SubmitPrompt {
-                prompt,
-                reasoning_effort,
-            }) => {
+            Ok(
+                command @ (WorkerCommand::SubmitPrompt { .. }
+                | WorkerCommand::SubmitPlanPrompt { .. }),
+            ) => {
+                let (prompt, reasoning_effort, plan_mode) = match command {
+                    WorkerCommand::SubmitPrompt {
+                        prompt,
+                        reasoning_effort,
+                    } => (prompt, reasoning_effort, false),
+                    WorkerCommand::SubmitPlanPrompt {
+                        prompt,
+                        reasoning_effort,
+                    } => (prompt, reasoning_effort, true),
+                    _ => unreachable!("matched submit prompt commands above"),
+                };
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -238,9 +273,16 @@ pub(super) fn run_worker_loop<P>(
                     continue;
                 };
 
-                let _ = message_tx.send(WorkerMessage::RunStarted {
-                    prompt: prompt.clone(),
-                });
+                let started = if plan_mode {
+                    WorkerMessage::PlanRunStarted {
+                        prompt: prompt.clone(),
+                    }
+                } else {
+                    WorkerMessage::RunStarted {
+                        prompt: prompt.clone(),
+                    }
+                };
+                let _ = message_tx.send(started);
 
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
                 let (approval_tx, approval_rx) = mpsc::channel();
@@ -257,26 +299,58 @@ pub(super) fn run_worker_loop<P>(
                     root_config.clone(),
                     agent.tool_registry().clone(),
                 );
+                let plan_tools = plan_mode.then(|| {
+                    sigil_runtime::build_plan_prompt_tool_registry(
+                        agent.tool_registry(),
+                        &root_config,
+                    )
+                    .into_registry()
+                });
                 let task_result_tx = task_result_tx.clone();
                 let run_id = next_run_id;
                 next_run_id += 1;
+                let delegation_requirement = agent_delegation_requirement_for_prompt(&prompt);
 
                 let handle = runtime.spawn(async move {
                     let mut run_session = run_session;
                     let result = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
-                        agent
-                            .run_with_approval_input_and_agent_delegate(
-                                &mut run_session,
-                                AgentRunInput::user(prompt),
-                                options,
-                                &mut handler,
-                                &mut approval_handler,
-                                &mut agent_delegate,
+                        let mut input = if plan_mode {
+                            AgentRunInput::without_persisted_user_message(
+                                plan_mode_transient_context(prompt),
                             )
-                            .await
-                            .map(|output| output.result)
-                            .map_err(|error| format!("{error:#}"))
+                        } else {
+                            AgentRunInput::user(prompt)
+                        };
+                        if let Some(requirement) = delegation_requirement {
+                            input = input.with_agent_delegation_requirement(requirement);
+                        }
+                        if let Some(tools) = plan_tools {
+                            agent
+                                .run_with_approval_input_tool_registry_and_agent_delegate(
+                                    &mut run_session,
+                                    input,
+                                    options,
+                                    tools,
+                                    &mut handler,
+                                    &mut approval_handler,
+                                    &mut agent_delegate,
+                                )
+                                .await
+                        } else {
+                            agent
+                                .run_with_approval_input_and_agent_delegate(
+                                    &mut run_session,
+                                    input,
+                                    options,
+                                    &mut handler,
+                                    &mut approval_handler,
+                                    &mut agent_delegate,
+                                )
+                                .await
+                        }
+                        .map(|output| output.result)
+                        .map_err(|error| format!("{error:#}"))
                     };
                     let result = match append_mcp_elicitation_audits(
                         &mut run_session,
@@ -288,7 +362,88 @@ pub(super) fn run_worker_loop<P>(
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
-                        payload: RunTaskPayload::Chat(result),
+                        payload: RunTaskPayload::Chat { result, plan_mode },
+                    });
+                });
+
+                active_run = Some(ActiveRun {
+                    run_id,
+                    handle,
+                    approval_tx,
+                    elicitation_audit_buffer,
+                });
+            }
+            Ok(WorkerCommand::InvokeAgentProfile { profile_id, prompt }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "agent is already running".to_owned(),
+                    ));
+                    continue;
+                }
+
+                let Some(run_session) = current_session.take() else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "session state is unavailable".to_owned(),
+                    ));
+                    continue;
+                };
+
+                let _ = message_tx.send(WorkerMessage::AgentRunStarted {
+                    profile_id: profile_id.clone(),
+                    prompt: prompt.clone(),
+                });
+
+                let mut handler = ChannelEventHandler::new(message_tx.clone());
+                let (approval_tx, approval_rx) = mpsc::channel();
+                let elicitation_audit_buffer: McpElicitationAuditBuffer =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+                let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+                agent_supervisor.reset_turn_budget();
+                let agent_delegate = sigil_runtime::AgentToolRuntime::new(
+                    agent_supervisor.clone(),
+                    root_config.clone(),
+                    agent.tool_registry().clone(),
+                );
+                let options = options.clone();
+                let task_result_tx = task_result_tx.clone();
+                let run_id = next_run_id;
+                next_run_id += 1;
+
+                let handle = runtime.spawn(async move {
+                    let mut run_session = run_session;
+                    let result = {
+                        let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+                        match AgentProfileId::new(profile_id.clone()) {
+                            Ok(profile_id_value) => agent_delegate
+                                .invoke_agent_profile(
+                                    &mut run_session,
+                                    profile_id_value,
+                                    prompt,
+                                    &options,
+                                    &mut handler,
+                                    &mut approval_handler,
+                                )
+                                .await
+                                .map(manual_agent_invocation_result)
+                                .map_err(|error| format!("{error:#}")),
+                            Err(error) => Err(format!("{error:#}")),
+                        }
+                    };
+                    let result = match append_mcp_elicitation_audits(
+                        &mut run_session,
+                        &run_elicitation_audit_buffer,
+                    ) {
+                        Ok(()) => result,
+                        Err(error) => Err(error),
+                    };
+                    let _ = task_result_tx.send(RunTaskResult {
+                        run_id,
+                        session: run_session,
+                        payload: RunTaskPayload::Chat {
+                            result,
+                            plan_mode: false,
+                        },
                     });
                 });
 
@@ -388,7 +543,10 @@ pub(super) fn run_worker_loop<P>(
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
-                        payload: RunTaskPayload::Chat(result),
+                        payload: RunTaskPayload::Chat {
+                            result,
+                            plan_mode: false,
+                        },
                     });
                 });
 
@@ -763,6 +921,60 @@ pub(super) fn run_worker_loop<P>(
                     Ok((entry, entries)) => {
                         let _ =
                             message_tx.send(WorkerMessage::TerminalTaskUpdated { entry, entries });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::ApprovePlan {
+                plan_text,
+                permission,
+                scope_summary,
+                clear_planning_context,
+            }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before approving a plan".to_owned(),
+                    ));
+                    continue;
+                }
+                match approve_plan(
+                    &root_config,
+                    &current_session_log_path,
+                    &mut current_session,
+                    PlanApprovalRequest {
+                        plan_text,
+                        permission,
+                        scope_summary,
+                        clear_planning_context,
+                    },
+                ) {
+                    Ok((entry, entries)) => {
+                        let _ = message_tx.send(WorkerMessage::PlanApproved { entry, entries });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::CloseAgent { thread_id, reason }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before closing agent".to_owned(),
+                    ));
+                    continue;
+                }
+                match close_agent_thread(
+                    &root_config,
+                    &current_session_log_path,
+                    &mut current_session,
+                    thread_id,
+                    reason,
+                ) {
+                    Ok((thread_id, entries)) => {
+                        let _ = message_tx
+                            .send(WorkerMessage::AgentThreadClosed { thread_id, entries });
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::Notice(error));
@@ -1802,11 +2014,30 @@ struct RunTaskResult {
 }
 
 enum RunTaskPayload {
-    Chat(std::result::Result<AgentRunResult, String>),
+    Chat {
+        result: std::result::Result<AgentRunResult, String>,
+        plan_mode: bool,
+    },
     Task {
         task_id: String,
         result: std::result::Result<TaskRunStatus, String>,
     },
+}
+
+fn manual_agent_invocation_result(
+    invocation: sigil_runtime::ManualAgentInvocationResult,
+) -> AgentRunResult {
+    let final_text = invocation
+        .result
+        .as_ref()
+        .map(|result| result.summary.trim())
+        .filter(|summary| !summary.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("agent {} completed", invocation.thread_id.as_str()));
+    AgentRunResult {
+        final_text,
+        tool_calls: 0,
+    }
 }
 
 struct ActiveProviderStatusTask {
@@ -2019,6 +2250,101 @@ pub(super) fn cancel_terminal_task(
     Ok((entry, entries))
 }
 
+pub(super) fn close_agent_thread(
+    root_config: &RootConfig,
+    current_session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    thread_id: AgentThreadId,
+    reason: Option<String>,
+) -> std::result::Result<(AgentThreadId, Vec<SessionLogEntry>), String> {
+    let mut session = load_session(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+        current_session_log_path,
+    )
+    .map_err(|error| format!("failed to load session before agent close: {error:#}"))?;
+    let mut result = sigil_runtime::close_agent_thread(&session, thread_id.clone(), reason);
+    if result.is_error() {
+        *current_session = Some(session);
+        return Err(format!("agent close failed: {}", result.content));
+    }
+
+    let mut closed_thread_id = None;
+    for control in std::mem::take(&mut result.control_entries) {
+        if let ControlEntry::AgentThreadClosed(close) = &control {
+            closed_thread_id = Some(close.thread_id.clone());
+        }
+        session
+            .append_control(control)
+            .map_err(|error| format!("failed to append agent close state: {error:#}"))?;
+    }
+    let entries = session.entries().to_vec();
+    *current_session = Some(session);
+    Ok((closed_thread_id.unwrap_or(thread_id), entries))
+}
+
+pub(super) struct PlanApprovalRequest {
+    pub(super) plan_text: String,
+    pub(super) permission: PlanApprovalPermission,
+    pub(super) scope_summary: String,
+    pub(super) clear_planning_context: bool,
+}
+
+pub(super) fn approve_plan(
+    root_config: &RootConfig,
+    current_session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    request: PlanApprovalRequest,
+) -> std::result::Result<(PlanApprovedEntry, Vec<SessionLogEntry>), String> {
+    let plan_text = request.plan_text.trim();
+    if plan_text.is_empty() {
+        return Err("plan approval failed: plan text is empty".to_owned());
+    }
+    let mut session = load_session(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+        current_session_log_path,
+    )
+    .map_err(|error| format!("failed to load session before plan approval: {error:#}"))?;
+    let next_version = session
+        .plan_approval_projection()
+        .latest_approval
+        .as_ref()
+        .map(|entry| entry.plan_version.saturating_add(1))
+        .unwrap_or(1);
+    let scope_summary = if request.scope_summary.trim().is_empty() {
+        "approved plan scope".to_owned()
+    } else {
+        request.scope_summary.trim().to_owned()
+    };
+    let workspace_paths = plan_workspace_paths(plan_text);
+    let entry = PlanApprovedEntry {
+        plan_version: next_version,
+        plan_hash: plan_text_hash(plan_text),
+        approved_at_ms: unix_time_ms(),
+        permission: request.permission,
+        scope: PlanApprovalScope {
+            summary: scope_summary,
+            workspace_paths,
+        },
+        expires: PlanApprovalExpiry::NextUserPrompt,
+        clear_planning_context: request.clear_planning_context,
+    };
+    session
+        .append_control(ControlEntry::PlanApproved(entry.clone()))
+        .map_err(|error| format!("failed to append plan approval state: {error:#}"))?;
+    let entries = session.entries().to_vec();
+    *current_session = Some(session);
+    Ok((entry, entries))
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 fn terminal_cancel_entry_from_result(
     previous: &sigil_kernel::TerminalTaskSummary,
     result: &ToolResult,
@@ -2175,6 +2501,90 @@ fn session_ref_for_log_path(path: &Path) -> std::result::Result<SessionRef, Stri
         .unwrap_or("session.jsonl");
     SessionRef::new_relative(file_name)
         .map_err(|error| format!("failed to build parent session ref: {error:#}"))
+}
+
+fn plan_mode_transient_context(prompt: String) -> Vec<ModelMessage> {
+    vec![
+        ModelMessage::system(
+            "Plan mode is active for this turn. Research, inspect, and propose a concrete plan, but do not modify files, run write-capable tools, or execute the plan. Use read-only tools and read-only agent delegation when helpful. End with the plan and any open questions needed before implementation.",
+        ),
+        ModelMessage::user(prompt),
+    ]
+}
+
+pub(super) fn agent_delegation_requirement_for_prompt(
+    prompt: &str,
+) -> Option<AgentDelegationRequirement> {
+    let normalized = prompt.to_lowercase().replace(
+        ['\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}'],
+        "-",
+    );
+    let compact = normalized
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let mentions_subagent = normalized.contains("subagent")
+        || normalized.contains("sub-agent")
+        || normalized.contains("sub agent")
+        || compact.contains("子agent")
+        || compact.contains("子代理");
+    if !mentions_subagent {
+        return None;
+    }
+    let compact_negations = [
+        "不要用子agent",
+        "不用子agent",
+        "别用子agent",
+        "不要使用子agent",
+        "不使用子agent",
+        "不需要子agent",
+        "无需子agent",
+        "别开子agent",
+        "不要开子agent",
+        "不要启动子agent",
+    ];
+    let normalized_negations = [
+        "do not use subagent",
+        "do not use sub-agent",
+        "don't use subagent",
+        "don't use sub-agent",
+        "don't use a subagent",
+        "don't use a sub-agent",
+        "without subagent",
+        "without sub-agent",
+        "without a subagent",
+        "without a sub-agent",
+        "do not spawn subagent",
+        "do not spawn a sub-agent",
+    ];
+    let negated = compact_negations
+        .iter()
+        .any(|phrase| compact.contains(phrase))
+        || normalized_negations
+            .iter()
+            .any(|phrase| normalized.contains(phrase));
+    if negated {
+        return None;
+    }
+    let explicit = compact.contains("必须用子agent")
+        || compact.contains("必须使用子agent")
+        || compact.contains("同时用子agent")
+        || compact.contains("让子agent")
+        || compact.contains("用子agent")
+        || compact.contains("使用子agent")
+        || normalized.contains("must use subagent")
+        || normalized.contains("must use sub-agent")
+        || normalized.contains("use a subagent")
+        || normalized.contains("use a sub-agent")
+        || normalized.contains("use subagent")
+        || normalized.contains("use sub-agent")
+        || normalized.contains("delegate to a subagent")
+        || normalized.contains("delegate to a sub-agent");
+    explicit.then(|| {
+        AgentDelegationRequirement::new(
+            "the user explicitly requested sub-agent delegation in the current prompt",
+        )
+    })
 }
 
 pub(super) fn next_task_id(session: &Session) -> std::result::Result<TaskId, String> {

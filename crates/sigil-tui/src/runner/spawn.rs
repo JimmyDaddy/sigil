@@ -5,7 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use sigil_kernel::{Agent, InteractionMode, McpServerStartup, ProviderCapabilities, RootConfig};
+use sigil_kernel::{
+    Agent, InteractionMode, JsonlSessionStore, McpServerStartup, ProviderCapabilities, RootConfig,
+};
 use sigil_runtime::{McpElicitationHandler, McpRuntimeEventHandler};
 use tokio::runtime::Runtime;
 
@@ -55,7 +57,19 @@ pub fn spawn_agent_worker(
                 elicitation_handler.clone(),
                 mcp_event_handler.clone(),
             );
-            if let Err(error) = sigil_runtime::register_agent_tools(&mut registry, &root_config) {
+            let session_entries = match JsonlSessionStore::read_entries(&session_log_path) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    return;
+                }
+            };
+            if let Err(error) = sigil_runtime::register_agent_tools_with_workspace_and_entries(
+                &mut registry,
+                &root_config,
+                &workspace_root,
+                &session_entries,
+            ) {
                 let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                 return;
             }
@@ -75,6 +89,7 @@ pub fn spawn_agent_worker(
                 agent,
                 root_config,
                 provider_capabilities,
+                workspace_root,
                 session_log_path,
                 options,
                 command_rx,

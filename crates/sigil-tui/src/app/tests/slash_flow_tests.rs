@@ -17,6 +17,17 @@ fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<
     Ok(())
 }
 
+fn write_workspace_agent(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
+    let path = workspace_root
+        .join(".sigil")
+        .join("agents")
+        .join(id)
+        .join("agent.toml");
+    std::fs::create_dir_all(path.parent().expect("agent path should have parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 #[test]
 fn compact_command_dispatches_worker_action_when_idle() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
@@ -40,7 +51,7 @@ fn compact_command_prefix_is_resolved_to_exact_command() -> Result<()> {
 }
 
 #[test]
-fn plan_command_dispatches_task_action_when_idle() -> Result<()> {
+fn plan_command_dispatches_plan_prompt_when_idle() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/plan implement task mode".to_owned();
 
@@ -48,12 +59,53 @@ fn plan_command_dispatches_task_action_when_idle() -> Result<()> {
 
     assert!(matches!(
         action,
-        Some(AppAction::SubmitPlan(prompt)) if prompt == "implement task mode"
+        Some(AppAction::SubmitPlanPrompt(prompt)) if prompt == "implement task mode"
     ));
     assert!(app.is_busy);
+    assert_eq!(app.last_notice(), Some("planning"));
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "/plan implement task mode"
     }));
+    Ok(())
+}
+
+#[test]
+fn task_command_dispatches_durable_task_when_idle() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/task implement task mode".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitTask(prompt)) if prompt == "implement task mode"
+    ));
+    assert!(app.is_busy);
+    assert_eq!(app.last_notice(), Some("planning task"));
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::User && entry.text == "/task implement task mode"
+    }));
+    Ok(())
+}
+
+#[test]
+fn empty_plan_command_enters_one_shot_plan_mode() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/plan".to_owned();
+
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.composer_mode_label(), "Plan");
+    assert_eq!(app.last_notice(), Some("plan mode"));
+
+    app.input = "inspect crates/sigil-tui".to_owned();
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::SubmitPlanPrompt(prompt)) if prompt == "inspect crates/sigil-tui"
+    ));
+    assert_eq!(app.composer_mode_label(), "Build");
+    assert_eq!(app.last_notice(), Some("planning"));
     Ok(())
 }
 
@@ -76,20 +128,21 @@ fn plan_command_body_hides_slash_selector_after_command_boundary() {
 }
 
 #[test]
-fn plan_continue_command_dispatches_continue_action() -> Result<()> {
+fn plan_continue_command_points_to_task_continue() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/plan continue".to_owned();
 
     let action = app.submit_input()?;
 
-    assert!(matches!(
-        action,
-        Some(AppAction::ContinuePlan {
-            task_id: None,
-            guidance: None
-        })
-    ));
-    assert!(app.is_busy);
+    assert!(action.is_none());
+    assert!(!app.is_busy);
+    assert_eq!(app.last_notice(), Some("use /task continue"));
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry
+                .text
+                .contains("plan mode cannot continue durable tasks")
+    }));
     Ok(())
 }
 
@@ -347,7 +400,126 @@ fn agent_command_selector_lists_main_child_and_navigation() -> Result<()> {
 }
 
 #[test]
-fn plain_prompt_dispatches_continue_action_when_session_has_unfinished_task() -> Result<()> {
+fn agent_mention_selector_lists_only_trusted_enabled_user_invocable_profiles() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_agent(
+        workspace.path(),
+        "repo-review",
+        r#"
+description = "Review repository changes."
+instructions = "Use read-only tools."
+trust = "trusted"
+nickname_candidates = ["Repo Review"]
+"#,
+    )?;
+    write_workspace_agent(
+        workspace.path(),
+        "repo-disabled",
+        r#"
+description = "Disabled review agent."
+instructions = "Use read-only tools."
+trust = "trusted"
+enabled = false
+"#,
+    )?;
+    write_workspace_agent(
+        workspace.path(),
+        "repo-private",
+        r#"
+description = "Private review agent."
+instructions = "Use read-only tools."
+trust = "trusted"
+user_invocable = false
+"#,
+    )?;
+    write_workspace_agent(
+        workspace.path(),
+        "repo-draft",
+        r#"
+description = "Needs review agent."
+instructions = "Use read-only tools."
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "@repo".to_owned();
+
+    assert!(app.has_slash_selector());
+    assert!(app.has_agent_mention_selector());
+    assert_eq!(app.slash_selector_title(), Some("Agent"));
+    let rows = app.slash_selector_rows();
+    assert!(
+        rows.iter()
+            .any(|(label, description)| label == "@repo-review"
+                && description.contains("subagent · workspace · Review repository changes."))
+    );
+    assert!(!rows.iter().any(|(label, _)| label == "@repo-disabled"));
+    assert!(!rows.iter().any(|(label, _)| label == "@repo-private"));
+    assert!(!rows.iter().any(|(label, _)| label == "@repo-draft"));
+
+    app.accept_slash_selector();
+    assert_eq!(app.input, "@repo-review ");
+
+    app.input = "@missing".to_owned();
+    app.reset_slash_selector();
+    assert!(app.slash_selector_rows().is_empty());
+    assert_eq!(
+        app.slash_selector_empty_message(),
+        Some("no matching agent")
+    );
+    Ok(())
+}
+
+#[test]
+fn agent_mention_submit_dispatches_agent_invocation() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_agent(
+        workspace.path(),
+        "repo-review",
+        r#"
+description = "Review repository changes."
+instructions = "Use read-only tools."
+trust = "trusted"
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "@repo-review audit crates/sigil-tui".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::InvokeAgentProfile { profile_id, prompt })
+            if profile_id == "repo-review" && prompt == "audit crates/sigil-tui"
+    ));
+    assert!(app.is_busy);
+    assert_eq!(app.last_notice(), Some("invoking agent repo-review"));
+    assert_eq!(app.input, "");
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::User && entry.text == "@repo-review audit crates/sigil-tui"
+    }));
+    Ok(())
+}
+
+#[test]
+fn agent_mention_submit_rejects_unknown_agent_without_clearing_input() -> Result<()> {
+    let workspace = tempdir()?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "@missing audit crates".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    assert!(!app.is_busy);
+    assert_eq!(app.last_notice(), Some("unknown agent missing"));
+    assert_eq!(app.input, "@missing audit crates");
+    Ok(())
+}
+
+#[test]
+fn plain_prompt_remains_chat_when_session_has_unfinished_task() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
@@ -365,15 +537,13 @@ fn plain_prompt_dispatches_continue_action_when_session_has_unfinished_task() ->
 
     assert!(matches!(
         action,
-        Some(AppAction::ContinuePlan {
-            task_id: None,
-            guidance: Some(ref guidance)
-        }) if guidance == "优先看 runtime 状态同步"
+        Some(AppAction::SubmitPrompt(ref prompt)) if prompt == "优先看 runtime 状态同步"
     ));
     assert!(app.is_busy);
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "优先看 runtime 状态同步"
     }));
+    assert_eq!(app.last_notice(), Some("thinking"));
     Ok(())
 }
 
@@ -429,15 +599,15 @@ fn new_command_reports_busy_without_dispatching() -> Result<()> {
 }
 
 #[test]
-fn plan_continue_command_can_pass_guidance() -> Result<()> {
+fn task_continue_command_can_pass_guidance() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/plan continue 优先看 runtime 状态同步".to_owned();
+    app.input = "/task continue 优先看 runtime 状态同步".to_owned();
 
     let action = app.submit_input()?;
 
     assert!(matches!(
         action,
-        Some(AppAction::ContinuePlan {
+        Some(AppAction::ContinueTask {
             task_id: None,
             guidance: Some(ref guidance)
         }) if guidance == "优先看 runtime 状态同步"
@@ -463,9 +633,8 @@ fn plan_command_reports_busy_and_usage_without_dispatching() -> Result<()> {
     app.input = "/plan   ".to_owned();
 
     assert!(app.submit_input()?.is_none());
-    assert!(app.timeline.iter().any(|entry| {
-        entry.role == TimelineRole::Notice && entry.text == "usage: /plan <task>"
-    }));
+    assert_eq!(app.last_notice(), Some("plan mode"));
+    assert_eq!(app.composer_mode_label(), "Plan");
     Ok(())
 }
 
@@ -559,7 +728,7 @@ run-as: inline
 }
 
 #[test]
-fn slash_skill_invocation_resolves_child_session_skill() -> Result<()> {
+fn slash_skill_invocation_excludes_child_session_skill() -> Result<()> {
     let workspace = tempdir()?;
     write_workspace_skill(
         workspace.path(),
@@ -580,18 +749,12 @@ run-as: child-session
     app.input = "/repo-audit --depth full".to_owned();
 
     let rows = app.slash_selector_rows();
-    assert!(rows.iter().any(|(label, description)| {
-        label == "/repo-audit" && description.contains("agent · child_session")
-    }));
+    assert!(!rows.iter().any(|(label, _)| label == "/repo-audit"));
     let action = app.submit_input()?;
 
-    assert!(matches!(
-        action,
-        Some(AppAction::InvokeChildSessionSkill { skill_id, arguments })
-            if skill_id == "repo-audit" && arguments == "--depth full"
-    ));
-    assert!(app.is_busy);
-    assert_eq!(app.last_notice(), Some("invoking agent repo-audit"));
+    assert!(action.is_none());
+    assert!(!app.is_busy);
+    assert_eq!(app.last_notice(), Some("unknown slash command"));
     Ok(())
 }
 

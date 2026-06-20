@@ -672,6 +672,46 @@ impl AppState {
         }
     }
 
+    pub(super) fn handle_modal_paste_text(&mut self, text: &str) -> ModalOutcome {
+        let Some(modal_state) = self.modal_state.as_mut() else {
+            return ModalOutcome::None;
+        };
+
+        match modal_state {
+            ModalState::SecretInput(state) => {
+                let accepted = text.chars().filter(|character| !character.is_control());
+                let mut count = 0usize;
+                for character in accepted {
+                    state.buffer.push(character);
+                    count += 1;
+                }
+                if count > 0 {
+                    self.last_notice = Some("editing api key".to_owned());
+                }
+                ModalOutcome::None
+            }
+            ModalState::TextInput(state) => {
+                let mut count = 0usize;
+                for character in text.chars() {
+                    if character.is_control()
+                        || !text_input_target_accepts_char(state.target, character)
+                    {
+                        continue;
+                    }
+                    state.buffer.push(character);
+                    count += 1;
+                }
+                if count > 0 {
+                    self.last_notice = Some(format!("editing {}", state.target.prompt_label()));
+                }
+                ModalOutcome::None
+            }
+            ModalState::ModelPicker(_)
+            | ModalState::McpElicitation(_)
+            | ModalState::KeyboardHelp => ModalOutcome::None,
+        }
+    }
+
     pub(super) fn submit_modal(&mut self) -> ModalOutcome {
         let Some(modal_state) = self.modal_state.as_ref() else {
             return ModalOutcome::None;

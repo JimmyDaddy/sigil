@@ -589,6 +589,7 @@ impl AppState {
         if next_cursor == self.input_cursor {
             return false;
         }
+        self.input_paste_spans.clear();
         self.input_cursor = next_cursor;
         self.reset_input_history_navigation();
         self.reset_slash_selector();

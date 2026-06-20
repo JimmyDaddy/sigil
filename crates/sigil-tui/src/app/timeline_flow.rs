@@ -338,6 +338,17 @@ impl AppState {
         }
     }
 
+    pub(super) fn downgrade_streaming_assistant_entry_to_thinking(&mut self) {
+        let Some(index) = self.streaming_assistant_index else {
+            return;
+        };
+        if let Some(entry) = self.timeline.get_mut(index)
+            && entry.role == TimelineRole::Assistant
+        {
+            entry.role = TimelineRole::Thinking;
+        }
+    }
+
     pub(super) fn flush_deferred_timeline_renders(&mut self) -> bool {
         if self.deferred_timeline_render_indexes.is_empty() {
             return false;
@@ -693,12 +704,31 @@ impl AppState {
             )));
             return (header, body);
         }
-        let timeline_entries =
-            self.restored_timeline_entries_from_session_entries(&transcript.entries);
-        if timeline_entries.is_empty() {
+        if transcript.rendered_body_lines.is_empty() {
             body.push(Line::from("child session has no transcript messages yet"));
             return (header, body);
         }
+        if transcript.transcript_truncated {
+            header.push(Line::from(format!(
+                "showing latest {} child transcript entries",
+                transcript.timeline_entries.len()
+            )));
+        } else if transcript.total_timeline_entries > transcript.timeline_entries.len() {
+            header.push(Line::from(format!(
+                "showing latest {} of {} child transcript entries",
+                transcript.timeline_entries.len(),
+                transcript.total_timeline_entries
+            )));
+        }
+        body = transcript.rendered_body_lines.clone();
+        (header, body)
+    }
+
+    pub(super) fn render_child_timeline_body_lines(
+        &self,
+        timeline_entries: &[TimelineEntry],
+    ) -> Vec<Line<'static>> {
+        let mut body = Vec::new();
         let mut options = self.timeline_render_options();
         options.selected_tool_activity_key = None;
         options.hovered_tool_activity_key = None;
@@ -717,7 +747,7 @@ impl AppState {
         {
             let _ = body.pop();
         }
-        (header, body)
+        body
     }
 
     pub(crate) fn selected_timeline_line_range(&self) -> Option<Range<usize>> {

@@ -50,13 +50,38 @@ fn activate_lazy_mcp_action_maps_to_worker_command() {
 fn plan_actions_map_to_worker_commands() {
     let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
-    let submit = app.into_worker_command(AppAction::SubmitPlan("ship task".to_owned()));
+    let submit = app.into_worker_command(AppAction::SubmitTask("ship task".to_owned()));
     assert!(matches!(
         submit,
         WorkerCommand::SubmitTask { ref prompt } if prompt == "ship task"
     ));
 
-    let continue_task = app.into_worker_command(AppAction::ContinuePlan {
+    let plan_prompt = app.into_worker_command(AppAction::SubmitPlanPrompt(
+        "inspect before editing".to_owned(),
+    ));
+    assert!(matches!(
+        plan_prompt,
+        WorkerCommand::SubmitPlanPrompt { ref prompt, .. }
+            if prompt == "inspect before editing"
+    ));
+
+    let approve_plan = app.into_worker_command(AppAction::ApprovePlan {
+        plan_text: "do the safe thing".to_owned(),
+        permission: sigil_kernel::PlanApprovalPermission::WorkspaceEdits,
+        scope_summary: "safe thing".to_owned(),
+        clear_planning_context: true,
+    });
+    assert!(matches!(
+        approve_plan,
+        WorkerCommand::ApprovePlan {
+            ref plan_text,
+            permission: sigil_kernel::PlanApprovalPermission::WorkspaceEdits,
+            ref scope_summary,
+            clear_planning_context: true,
+        } if plan_text == "do the safe thing" && scope_summary == "safe thing"
+    ));
+
+    let continue_task = app.into_worker_command(AppAction::ContinueTask {
         task_id: Some("task_1".to_owned()),
         guidance: Some("focus runtime".to_owned()),
     });
@@ -67,6 +92,132 @@ fn plan_actions_map_to_worker_commands() {
             guidance: Some(ref guidance)
         } if task_id == "task_1" && guidance == "focus runtime"
     ));
+}
+
+#[test]
+fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle_worker_message(WorkerMessage::PlanRunFinished {
+        result: sigil_kernel::AgentRunResult {
+            final_text: "1. inspect\n2. edit with preview".to_owned(),
+            tool_calls: 0,
+        },
+        entries: Vec::new(),
+    })?;
+
+    let pending = app
+        .pending_plan_approval()
+        .expect("plan output should create a pending approval");
+    assert!(pending.plan_hash.starts_with("sha256:"));
+    assert_eq!(pending.scope_summary, "1. inspect");
+    assert_eq!(app.last_notice(), Some("plan ready"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE))?;
+    assert!(app.pending_plan_approval().is_none());
+    assert!(matches!(
+        action,
+        Some(AppAction::ApprovePlan {
+            permission: sigil_kernel::PlanApprovalPermission::WorkspaceEdits,
+            clear_planning_context: true,
+            ..
+        })
+    ));
+
+    app.handle_worker_message(WorkerMessage::PlanRunFinished {
+        result: sigil_kernel::AgentRunResult {
+            final_text: "   ".to_owned(),
+            tool_calls: 1,
+        },
+        entries: Vec::new(),
+    })?;
+    assert!(app.pending_plan_approval().is_none());
+    assert_eq!(app.last_notice(), Some("plan finished"));
+    Ok(())
+}
+
+#[test]
+fn pending_plan_approval_continue_returns_to_plan_composer_without_worker_action() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::PlanRunFinished {
+        result: sigil_kernel::AgentRunResult {
+            final_text: "1. inspect\n2. revise plan".to_owned(),
+            tool_calls: 0,
+        },
+        entries: Vec::new(),
+    })?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.pending_plan_approval().is_none());
+    assert_eq!(app.composer_mode_label(), "Plan");
+    assert_eq!(app.last_notice(), Some("continue planning"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| { event.label == "plan" && event.detail == "continue" })
+    );
+    Ok(())
+}
+
+#[test]
+fn pending_plan_approval_discard_clears_surface_without_worker_action() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::PlanRunFinished {
+        result: sigil_kernel::AgentRunResult {
+            final_text: "1. inspect\n2. revise plan".to_owned(),
+            tool_calls: 0,
+        },
+        entries: Vec::new(),
+    })?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.pending_plan_approval().is_none());
+    assert_eq!(app.composer_mode_label(), "Build");
+    assert_eq!(app.last_notice(), Some("plan approval dismissed"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| { event.label == "plan" && event.detail == "dismissed" })
+    );
+    Ok(())
+}
+
+#[test]
+fn plan_approved_message_syncs_session_and_clears_pending_surface() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.set_pending_plan_approval_from_text("approved plan");
+    let entry = sigil_kernel::PlanApprovedEntry {
+        plan_version: 1,
+        plan_hash: sigil_kernel::plan_text_hash("approved plan"),
+        approved_at_ms: 42,
+        permission: sigil_kernel::PlanApprovalPermission::Ask,
+        scope: sigil_kernel::PlanApprovalScope {
+            summary: "approved plan".to_owned(),
+            workspace_paths: Vec::new(),
+        },
+        expires: sigil_kernel::PlanApprovalExpiry::NextUserPrompt,
+        clear_planning_context: true,
+    };
+
+    app.handle_worker_message(WorkerMessage::PlanApproved {
+        entry: entry.clone(),
+        entries: vec![SessionLogEntry::Control(ControlEntry::PlanApproved(
+            entry.clone(),
+        ))],
+    })?;
+
+    assert!(app.pending_plan_approval().is_none());
+    assert_eq!(app.last_notice(), Some("plan approved: ask"));
+    assert_eq!(
+        sigil_kernel::PlanApprovalProjection::from_entries(&app.current_session_entries)
+            .latest_approval,
+        Some(entry)
+    );
+    Ok(())
 }
 
 #[test]
@@ -471,6 +622,27 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             .iter()
             .any(|event| event.label == "run:start" && event.detail == "draft plan")
     );
+    app.handle_worker_message(WorkerMessage::PlanRunStarted {
+        prompt: "inspect before editing".to_owned(),
+    })?;
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.last_notice(), Some("planning"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "plan:start" && event.detail == "inspect before editing")
+    );
+    app.handle_worker_message(WorkerMessage::AgentRunStarted {
+        profile_id: "review".to_owned(),
+        prompt: "inspect kernel".to_owned(),
+    })?;
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.last_notice(), Some("invoking agent review"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "agent:start" && event.detail == "inspect kernel")
+    );
 
     app.handle_worker_message(WorkerMessage::McpActivationStatus {
         server_name: None,
@@ -731,6 +903,17 @@ fn worker_events_cover_completion_continuation_and_duplicate_assistant_messages(
             .iter()
             .any(|event| event.label == "tool:complete" && event.detail == "read_file call-1")
     );
+    app.handle(RunEvent::ToolCallCompleted(ToolCall {
+        id: "call-agent".to_owned(),
+        name: "wait_agent".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+    assert_eq!(app.run_phase(), RunPhase::Tool("wait_agent".to_owned()));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "tool:complete" && event.detail == "wait_agent call-agent")
+    );
 
     app.handle(RunEvent::Control(ControlEntry::Note {
         kind: "custom".to_owned(),
@@ -808,6 +991,14 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         } if skill_id == "repo-audit" && arguments == "--depth full"
     ));
     assert!(matches!(
+        app.into_worker_command(AppAction::InvokeAgentProfile {
+            profile_id: "repo-review".to_owned(),
+            prompt: "audit crates".to_owned(),
+        }),
+        WorkerCommand::InvokeAgentProfile { profile_id, prompt }
+            if profile_id == "repo-review" && prompt == "audit crates"
+    ));
+    assert!(matches!(
         app.into_worker_command(AppAction::ApprovalDecision {
             call_id: "call-1".to_owned(),
             approved: true,
@@ -824,6 +1015,17 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
             task_id: "terminal-1".to_owned(),
         }),
         WorkerCommand::CancelTerminalTask { task_id } if task_id == "terminal-1"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::CloseAgent {
+            thread_id: sigil_kernel::AgentThreadId::new("thread-1")
+                .expect("test thread id should be valid"),
+            reason: Some("done".to_owned()),
+        }),
+        WorkerCommand::CloseAgent {
+            thread_id,
+            reason: Some(reason),
+        } if thread_id.as_str() == "thread-1" && reason == "done"
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::CompactNow),

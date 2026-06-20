@@ -1,4 +1,63 @@
+use super::super::ComposerMode;
 use super::*;
+
+#[test]
+fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
+    assert_eq!(ComposerMode::Build.notice(), "thinking");
+    assert_eq!(ComposerMode::Plan.notice(), "planning");
+    assert_eq!(ComposerMode::Build.phase_marker(), "thinking");
+    assert_eq!(ComposerMode::Plan.phase_marker(), "plan");
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.composer_mode = ComposerMode::Plan;
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.composer_mode_label(), "Build");
+    assert_eq!(app.last_notice(), Some("build mode"));
+
+    app.set_pending_plan_approval_from_text("  ");
+    assert!(app.pending_plan_approval().is_none());
+    app.set_pending_plan_approval_from_text("1. inspect");
+    let ignored = app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))?;
+    assert!(ignored.is_none());
+    assert!(app.pending_plan_approval().is_some());
+    let ignored = app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE))?;
+    assert!(ignored.is_none());
+    assert!(app.pending_plan_approval().is_some());
+    let approved = app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))?;
+    assert!(matches!(
+        approved,
+        Some(AppAction::ApprovePlan {
+            permission: sigil_kernel::PlanApprovalPermission::Ask,
+            clear_planning_context: true,
+            ..
+        })
+    ));
+
+    app.is_busy = true;
+    app.input = "@review inspect".to_owned();
+    let action = app.submit_input()?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.timeline.last().map(|entry| entry.text.as_str()),
+        Some("busy; submit later")
+    );
+
+    app.input = "/task implement".to_owned();
+    let action = app.submit_input()?;
+    assert!(action.is_none());
+    assert_eq!(
+        app.timeline.last().map(|entry| entry.text.as_str()),
+        Some("busy; task later")
+    );
+
+    app.is_busy = false;
+    app.input = "/task".to_owned();
+    let action = app.submit_input()?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("usage: /task <task|continue>"));
+    Ok(())
+}
 
 #[test]
 fn from_root_config_initializes_mcp_statuses_from_startup_mode() {
@@ -690,38 +749,153 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     app.sync_current_session_state(terminal_entries.clone());
 
     app.input = "/agent close current".to_owned();
-    assert!(app.submit_input()?.is_none());
-    assert_eq!(app.active_agent_label(), "main");
+    let action = app.submit_input()?;
+    assert!(matches!(
+        action,
+        Some(AppAction::CloseAgent {
+            ref thread_id,
+            reason: Some(ref reason),
+        }) if thread_id.as_str() == "thread_1" && reason == "closed from TUI /agent"
+    ));
+    assert_eq!(
+        app.last_notice.as_deref(),
+        Some("agent close requested: thread_1")
+    );
+    assert_eq!(app.active_agent_label(), "Kernel Mapper");
     let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
-    assert!(persisted.iter().any(|entry| {
+    assert!(!persisted.iter().any(|entry| {
         matches!(
             entry,
             SessionLogEntry::Control(ControlEntry::AgentThreadClosed(closed))
                 if closed.thread_id == thread_id
         )
     }));
-    assert!(
-        !app.agent_sidebar_rows()
-            .iter()
-            .any(|row| row.label == "agent Kernel Mapper")
-    );
 
-    app.sync_current_session_state(terminal_entries);
-    assert!(
-        app.current_session_entries.iter().any(|entry| {
-            matches!(
-                entry,
-                SessionLogEntry::Control(ControlEntry::AgentThreadClosed(closed))
-                    if closed.thread_id == thread_id
-            )
-        }),
-        "worker sync should not discard locally appended agent close"
-    );
+    let mut closed_entries = terminal_entries.clone();
+    closed_entries.push(SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
+        sigil_kernel::AgentThreadClosedEntry {
+            thread_id: thread_id.clone(),
+            reason: Some("closed from TUI /agent".to_owned()),
+        },
+    )));
+    app.handle_worker_message(WorkerMessage::AgentThreadClosed {
+        thread_id: thread_id.clone(),
+        entries: closed_entries,
+    })?;
+    assert_eq!(app.active_agent_label(), "main");
     assert!(
         !app.agent_sidebar_rows()
             .iter()
             .any(|row| row.label == "agent Kernel Mapper")
     );
+    Ok(())
+}
+
+#[test]
+fn agent_sidebar_rows_keep_completed_status_when_read_agent_result_fails() -> Result<()> {
+    let temp = tempdir()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join(".sigil/sessions/parent.jsonl");
+
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore_1")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("thread_1")?;
+    let session_ref = sigil_kernel::SessionRef::new_relative("children/thread_1.jsonl")?;
+    let run_context = sigil_kernel::AgentRunContextSnapshot {
+        profile_snapshot_id: snapshot_id.clone(),
+        provider: "deepseek".to_owned(),
+        model: "deepseek-v4-pro".to_owned(),
+        reasoning_effort: None,
+        workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
+            temp.path().display().to_string(),
+        )?,
+        effective_tool_scope_hash: "sha256:tools".to_owned(),
+        effective_permission_policy_hash: "sha256:permissions".to_owned(),
+        effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+        provider_capability_hash: "sha256:provider".to_owned(),
+        model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+        budget_policy_hash: "sha256:budget".to_owned(),
+        provider_background_handle_ref: None,
+    };
+    let read_failure = ToolResult::error(
+        "call-read-failed",
+        "read_agent_result",
+        ToolErrorKind::Internal,
+        "child agent session has no assistant final answer",
+    )
+    .to_model_message();
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            sigil_kernel::AgentProfileCapturedEntry {
+                snapshot: sigil_kernel::AgentProfileSnapshot {
+                    snapshot_id: snapshot_id.clone(),
+                    profile_id: profile_id.clone(),
+                    source: sigil_kernel::AgentProfileSource::System,
+                    source_hash: "sha256:source".to_owned(),
+                    profile_hash: "sha256:profile".to_owned(),
+                    resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                    resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                    resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    resolved_skill_hashes: Vec::new(),
+                    trust_state: sigil_kernel::AgentTrustState::Trusted,
+                },
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: session_ref.clone(),
+                profile_id,
+                profile_snapshot_id: snapshot_id,
+                run_context,
+                objective: "inspect kernel".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Foreground,
+                invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+                display_name: Some("kernel map".to_owned()),
+                created_at_ms: Some(42),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id: thread_id.clone(),
+                status: sigil_kernel::AgentThreadStatus::Completed,
+                reason: None,
+                updated_at_ms: Some(120),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadResultRecorded(
+            sigil_kernel::AgentThreadResultRecordedEntry {
+                result: sigil_kernel::AgentThreadResult {
+                    thread_id,
+                    session_ref,
+                    status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                    summary: "done".to_owned(),
+                    summary_truncated: false,
+                    original_summary_chars: None,
+                    artifacts: Vec::new(),
+                    changed_paths: Vec::new(),
+                    risks: Vec::new(),
+                    followups: Vec::new(),
+                    usage: None,
+                    output_hash: "sha256:done".to_owned(),
+                },
+            },
+        )),
+        SessionLogEntry::ToolResult(read_failure),
+    ]);
+
+    let rows = app.agent_sidebar_rows();
+    let row = rows
+        .iter()
+        .find(|row| row.label == "agent kernel map")
+        .expect("agent row");
+    assert_eq!(row.detail, "completed · explore · chat");
+    assert_eq!(row.status_symbol(), "✓");
+    assert!(!row.detail.contains("failed"));
     Ok(())
 }
 

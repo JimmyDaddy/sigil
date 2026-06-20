@@ -197,6 +197,190 @@ fn tool_card_render_path_and_generic_previews_cover_fallbacks() {
 }
 
 #[test]
+fn tool_card_renders_agent_tool_status_and_result_pages() {
+    let read_result = parsed_summary(json!({
+        "tool_name": "read_agent_result",
+        "status": "ok",
+        "summary": "first 4/4 lines · 260 B",
+        "preview_kind": "markdown",
+        "preview_lines": ["# Child result", "", "- detailed result"],
+        "preview_value": {
+            "thread_id": "thread_1",
+            "status": "completed",
+            "session_ref": "children/thread_1.jsonl",
+            "output_hash": "hash",
+            "page": {
+                "text": "# Child result\n\n- detailed result",
+                "offset_chars": 4000,
+                "returned_chars": 260,
+                "total_chars": 4260,
+                "next_offset_chars": null,
+                "truncated": false
+            }
+        }
+    }));
+    let wait_result = parsed_summary(json!({
+        "tool_name": "wait_agent",
+        "status": "ok",
+        "preview_kind": "json",
+        "preview_value": {
+            "thread_id": "thread_1",
+            "status": "running",
+            "terminal": false,
+            "reason": null,
+            "result_available": false,
+            "result_ref": null
+        }
+    }));
+    let spawn_result = parsed_summary(json!({
+        "tool_name": "spawn_agent",
+        "status": "ok",
+        "preview_kind": "markdown",
+        "preview_lines": ["## Summary", "Done"],
+        "preview_value": {
+            "thread_id": "thread_2",
+            "status": "completed",
+            "summary": "## Summary\nDone",
+            "summary_truncated": true,
+            "result_fetch": {
+                "tool": "read_agent_result",
+                "thread_id": "thread_2"
+            }
+        }
+    }));
+    let wait_ready = parsed_summary(json!({
+        "tool_name": "wait_agent",
+        "status": "ok",
+        "preview_kind": "json",
+        "preview_value": {
+            "thread_id": "thread_ready",
+            "status": "completed",
+            "terminal": true,
+            "reason": "finished cleanly",
+            "result_available": true,
+            "result_ref": {
+                "read_tool": "read_agent_result",
+                "thread_id": "thread_ready"
+            }
+        }
+    }));
+    let message_result = parsed_summary(json!({
+        "tool_name": "message_agent",
+        "status": "ok",
+        "preview_kind": "json",
+        "preview_value": {
+            "thread_id": "thread_msg",
+            "status": "failed"
+        }
+    }));
+    let close_result = parsed_summary(json!({
+        "tool_name": "close_agent",
+        "status": "ok",
+        "preview_kind": "json",
+        "preview_value": {
+            "thread_id": "thread_close",
+            "status": "closed"
+        }
+    }));
+    let fallback_result = parsed_summary(json!({
+        "tool_name": "agent_custom",
+        "status": "ok",
+        "metadata": {
+            "details": {
+                "call": {
+                    "summary": "profile_id=profile-thread"
+                }
+            }
+        },
+        "preview_kind": "json",
+        "preview_value": {
+            "status": 404
+        }
+    }));
+    let missing_payload = parsed_summary(json!({
+        "tool_name": "wait_agent",
+        "status": "ok",
+        "metadata": {
+            "details": {
+                "call": {
+                    "summary": "thread_id=thread_arg"
+                }
+            }
+        },
+        "preview_kind": "json"
+    }));
+
+    let read_display = build_tool_card_display(&read_result);
+    let wait_display = build_tool_card_display(&wait_result);
+    let spawn_display = build_tool_card_display(&spawn_result);
+    let wait_ready_display = build_tool_card_display(&wait_ready);
+    let message_display = build_tool_card_display(&message_result);
+    let close_display = build_tool_card_display(&close_result);
+    let fallback_display = build_tool_card_display(&fallback_result);
+    let missing_payload_display = build_tool_card_display(&missing_payload);
+    let read_text = plain_text(&render_tool_preview_body(&read_result, accent_rose(), 96));
+    let wait_text = plain_text(&render_tool_preview_body(&wait_result, accent_rose(), 96));
+    let spawn_text = plain_text(&render_tool_preview_body(&spawn_result, accent_rose(), 96));
+    let wait_ready_text = plain_text(&render_tool_preview_body(&wait_ready, accent_rose(), 96));
+    let missing_payload_text = plain_text(&render_tool_preview_body(
+        &missing_payload,
+        accent_rose(),
+        96,
+    ));
+
+    assert_eq!(read_display.title.plain(), "Read agent result thread_1");
+    assert_eq!(read_display.status.label, "DONE");
+    assert_eq!(read_display.summary.as_deref(), Some("chars 4000+260/4260"));
+    assert!(read_text.contains("result"));
+    assert!(read_text.contains("completed · thread_1"));
+    assert!(!read_text.contains("Child result"));
+    assert!(!read_text.contains("detailed result"));
+    assert!(!read_text.contains("structured payload"));
+
+    assert_eq!(wait_display.title.plain(), "Checked agent thread_1");
+    assert_eq!(wait_display.status.label, "RUNNING");
+    assert_eq!(wait_display.summary.as_deref(), Some("result pending"));
+    assert!(wait_text.contains("running · thread_1"));
+
+    assert_eq!(spawn_display.title.plain(), "Started agent thread_2");
+    assert_eq!(spawn_display.status.label, "DONE");
+    assert_eq!(
+        spawn_display.summary.as_deref(),
+        Some("summary truncated · read_agent_result available")
+    );
+    assert!(spawn_text.contains("Use read_agent_result"));
+
+    assert_eq!(wait_ready_display.status.label, "DONE");
+    assert_eq!(wait_ready_display.summary.as_deref(), Some("result ready"));
+    assert!(wait_ready_text.contains("completed · thread_ready"));
+    assert!(wait_ready_text.contains("result ready"));
+    assert!(wait_ready_text.contains("finished cleanly"));
+    assert!(wait_ready_text.contains("read_agent_result"));
+
+    assert_eq!(message_display.title.plain(), "Messaged agent thread_msg");
+    assert_eq!(message_display.status.label, "FAILED");
+    assert!(message_display.status.is_error);
+    assert_eq!(close_display.title.plain(), "Closed agent thread_close");
+    assert_eq!(close_display.status.label, "CLOSED");
+    assert_eq!(
+        agent_tool_title(&fallback_result).plain(),
+        "Called agent profile-thread"
+    );
+    assert_eq!(
+        fallback_display.title.plain(),
+        "Called agent_custom profile_id=profile-thread"
+    );
+    assert_eq!(agent_tool_display_status("custom").label, "AGENT");
+    assert_eq!(fallback_display.status.label, "OK");
+    assert_eq!(
+        missing_payload_display.title.plain(),
+        "Checked agent thread_arg"
+    );
+    assert_eq!(missing_payload_display.status.label, "OK");
+    assert!(missing_payload_text.contains("unknown · thread_arg"));
+}
+
+#[test]
 fn tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation() {
     let bash_error = ToolCardRender {
         is_error: true,

@@ -3,7 +3,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UiCommand {
     SubmitPrompt,
-    SubmitPlan,
+    EnterPlanMode,
+    SubmitTask,
     CancelOrQuit,
     ToggleWriteMode,
     ToggleThinking,
@@ -119,11 +120,19 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
-        command: UiCommand::SubmitPlan,
+        command: UiCommand::EnterPlanMode,
         keys: &[],
         slash: Some("/plan"),
         label: "Plan",
-        help: "Plan and execute a multi-step task.",
+        help: "Enter plan mode for a read-only planning prompt.",
+        surface: CommandSurface::Slash,
+    },
+    UiCommandSpec {
+        command: UiCommand::SubmitTask,
+        keys: &[],
+        slash: Some("/task"),
+        label: "Task",
+        help: "Start or continue a durable multi-step task.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {
@@ -280,6 +289,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
     );
     lines.extend([
         "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer.".to_owned(),
+        "Paste: Insert pasted text without submitting; large pastes are folded in the composer display.".to_owned(),
         "Ctrl-A/E: Move to the start/end of the current composer line.".to_owned(),
         "Ctrl-B/F or Left/Right: Move the composer cursor by character.".to_owned(),
         "Alt-B/F or Ctrl-Left/Right: Move the composer cursor by word.".to_owned(),

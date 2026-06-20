@@ -1,6 +1,53 @@
 use super::*;
 use crate::app::tests::common::test_config;
 
+fn config_for_workspace(workspace_root: &std::path::Path) -> RootConfig {
+    let mut config = test_config();
+    config.workspace.root = workspace_root.display().to_string();
+    config
+}
+
+fn write_workspace_agent(workspace_root: &std::path::Path, id: &str, body: &str) -> Result<()> {
+    let path = workspace_root
+        .join(".sigil")
+        .join("agents")
+        .join(id)
+        .join("agent.toml");
+    std::fs::create_dir_all(path.parent().expect("agent path should have parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
+fn resolved_agent(id: &str) -> sigil_runtime::ResolvedAgentProfile {
+    sigil_runtime::ResolvedAgentProfile {
+        profile: sigil_kernel::AgentProfile {
+            id: sigil_kernel::AgentProfileId::new(id).expect("agent id should parse"),
+            kind: sigil_kernel::AgentProfileKind::Subagent,
+            description: "Review repository changes.".to_owned(),
+            instructions: "Use read-only tools.".to_owned(),
+            model: None,
+            provider: None,
+            reasoning_effort: None,
+            tool_scope: Default::default(),
+            permission_policy: Default::default(),
+            invocation_policy: sigil_kernel::AgentInvocationPolicy::ManualOnly,
+            result_policy: sigil_kernel::AgentResultPolicy::SummaryWithPageRef,
+            user_invocable: true,
+            model_invocable: true,
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            nickname_candidates: Vec::new(),
+        },
+        enabled: true,
+        enabled_override: None,
+        user_invocable_override: None,
+        model_invocable_override: None,
+        source: sigil_kernel::AgentProfileSource::Workspace,
+        source_hash: "sha256:source".to_owned(),
+        trust_state: sigil_kernel::AgentTrustState::NeedsReview,
+    }
+}
+
 #[test]
 fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     let root_config = test_config();
@@ -35,6 +82,16 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     let mcp_details = render_config_selection_details(&state).join("\n");
     assert!(mcp_details.contains("mcp: Ctrl-N add"));
 
+    state.selected_section = ConfigSection::Agents;
+    state.selected_field = None;
+    let agent_details = render_config_selection_details(&state).join("\n");
+    assert!(agent_details.contains("agents: Up/Down agent"));
+
+    state.selected_section = ConfigSection::Skills;
+    state.selected_field = None;
+    let skill_details = render_config_selection_details(&state).join("\n");
+    assert!(skill_details.contains("skills: Up/Down skill"));
+
     assert_eq!(cycle_approval_mode(ApprovalMode::Allow), ApprovalMode::Ask);
     assert_eq!(cycle_approval_mode(ApprovalMode::Ask), ApprovalMode::Deny);
     assert_eq!(cycle_approval_mode(ApprovalMode::Deny), ApprovalMode::Allow);
@@ -60,6 +117,349 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     assert_eq!(
         cycle_code_intel_startup(sigil_kernel::CodeIntelStartup::Eager),
         sigil_kernel::CodeIntelStartup::Off
+    );
+}
+
+#[test]
+fn config_nav_and_paste_edges_cover_agents_skills_and_noops() {
+    let mut setup_app =
+        AppState::from_setup("sigil.toml".into(), std::path::PathBuf::from("."), None);
+    setup_app.handle_config_paste_text("ignored");
+    assert!(setup_app.last_notice().is_none());
+
+    let root_config = test_config();
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Skills);
+    let nav = app.config_nav_lines().join("\n");
+    assert!(nav.contains("Skills: Up/Down select"));
+    assert!(nav.contains("Skills: PgUp/PgDn wrap"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Provider);
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::ProviderName);
+    app.handle_config_paste_text("openai_compat");
+    assert_ne!(app.last_notice(), Some("updated provider"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::ProviderApiKey);
+    app.handle_config_paste_text("\n\t");
+    assert_ne!(app.last_notice(), Some("updated api_key"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Mcp);
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .selected_field = Some(ConfigField::McpName);
+    app.handle_config_paste_text("filesystem");
+    assert_ne!(app.last_notice(), Some("updated name"));
+}
+
+#[test]
+fn agent_review_guard_and_refresh_edges_cover_private_paths() -> Result<()> {
+    let root_config = test_config();
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
+
+    assert!(
+        app.review_selected_agent(sigil_kernel::AgentTrustState::Trusted)?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("config is unavailable"));
+
+    app.open_config_panel();
+    assert!(
+        app.review_selected_agent(sigil_kernel::AgentTrustState::Trusted)?
+            .is_none()
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("agent review is available in Agents config")
+    );
+
+    let mut missing_state = ConfigState::from_root_config(&root_config);
+    missing_state.set_section(ConfigSection::Agents);
+    missing_state.set_agent_discovery(vec![resolved_agent("missing")], Vec::new());
+    app.config_state = Some(missing_state);
+    assert!(
+        app.review_selected_agent(sigil_kernel::AgentTrustState::Trusted)?
+            .is_none()
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("agent missing is no longer available; review refreshed")
+    );
+
+    let mut policy_state = ConfigState::from_root_config(&root_config);
+    policy_state.set_section(ConfigSection::Agents);
+    policy_state.set_agent_discovery(vec![resolved_agent("missing")], Vec::new());
+    app.config_state = Some(policy_state);
+    assert!(
+        app.update_selected_agent_policy(AgentPolicyToggle::Enabled)?
+            .is_none()
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("agent missing is no longer available; review refreshed")
+    );
+
+    let mut setup_app =
+        AppState::from_setup("sigil.toml".into(), std::path::PathBuf::from("."), None);
+    let mut setup_state = ConfigState::from_root_config(&root_config);
+    setup_state.set_section(ConfigSection::Agents);
+    setup_state.set_agent_discovery(vec![resolved_agent("missing")], Vec::new());
+    setup_app.config_state = Some(setup_state);
+    assert!(
+        setup_app
+            .review_selected_agent(sigil_kernel::AgentTrustState::Trusted)?
+            .is_none()
+    );
+    assert_eq!(
+        setup_app.last_notice(),
+        Some("config is unavailable in setup mode")
+    );
+    Ok(())
+}
+
+#[test]
+fn agent_review_records_reviewed_states_and_detects_cached_changes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_agent(
+        &workspace,
+        "review",
+        r#"
+description = "Review repository changes."
+instructions = "Use read-only tools."
+trust = "trusted"
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Agents);
+        state.selected_agent_index = state
+            .agent_profiles
+            .iter()
+            .position(|agent| agent.profile.id.as_str() == "review")
+            .expect("review agent should be discovered");
+    }
+
+    assert!(
+        app.review_selected_agent(sigil_kernel::AgentTrustState::NeedsReview)?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("agent review reviewed"));
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
+            if trust.profile_id.as_str() == "review"
+                && trust.decision == sigil_kernel::AgentTrustState::NeedsReview
+    )));
+
+    assert!(
+        app.review_selected_agent(sigil_kernel::AgentTrustState::Unknown)?
+            .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("agent review reviewed"));
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
+            if trust.profile_id.as_str() == "review"
+                && trust.decision == sigil_kernel::AgentTrustState::Unknown
+    )));
+
+    if let Some(state) = app.config_state.as_mut()
+        && let Some(agent) = state.agent_profiles.get_mut(state.selected_agent_index)
+    {
+        agent.profile.description = "stale cached profile".to_owned();
+    }
+    assert!(
+        app.review_selected_agent(sigil_kernel::AgentTrustState::Trusted)?
+            .is_none()
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("agent review changed; review refreshed")
+    );
+    Ok(())
+}
+
+#[test]
+fn agent_detail_helpers_cover_labels_sources_and_selection_notices() {
+    let root_config = test_config();
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
+    app.open_config_panel();
+    let mut state = app
+        .config_state
+        .clone()
+        .expect("config state should be populated");
+    state.set_section(ConfigSection::Agents);
+    state.selected_field = Some(ConfigField::SkillId);
+
+    let agent_details = render_config_selection_details(&state).join("\n");
+    assert!(agent_details.contains("selected: Agent"));
+    assert!(agent_details.contains("key: agent"));
+    assert!(agent_details.contains("Selected agent profile."));
+    assert_eq!(
+        config_field_display_label(&state, ConfigField::SkillId),
+        "Agent"
+    );
+    assert_eq!(
+        config_field_key_label(&state, ConfigField::SkillId),
+        "agent"
+    );
+    assert!(config_field_help_text(&state, ConfigField::SkillId).contains("Selected agent"));
+    assert!(matches!(
+        move_config_collection_selection(&mut state, true),
+        Some(ConfigFieldMove::Moved)
+    ));
+    assert!(
+        config_collection_selection_notice(&state)
+            .expect("agent notice")
+            .starts_with("agent ")
+    );
+
+    state.agent_profiles.clear();
+    assert_eq!(
+        config_field_display_label(&state, ConfigField::SkillId),
+        "Agent"
+    );
+    assert_eq!(
+        config_field_key_label(&state, ConfigField::SkillId),
+        "agent"
+    );
+    assert!(config_field_help_text(&state, ConfigField::SkillId).contains("child-session agent"));
+    assert!(config_collection_selection_notice(&state).is_none());
+
+    assert_eq!(policy_override(true, true), None);
+    assert_eq!(policy_override(false, true), Some(false));
+    assert_eq!(
+        agent_profile_kind_label(sigil_kernel::AgentProfileKind::Primary),
+        "primary"
+    );
+    assert_eq!(
+        agent_profile_kind_label(sigil_kernel::AgentProfileKind::System),
+        "system"
+    );
+    assert_eq!(
+        agent_profile_kind_label(sigil_kernel::AgentProfileKind::Unknown),
+        "unknown"
+    );
+    assert_eq!(
+        agent_trust_state_label(sigil_kernel::AgentTrustState::Trusted),
+        "trusted"
+    );
+    assert_eq!(
+        agent_trust_state_label(sigil_kernel::AgentTrustState::NeedsReview),
+        "needs_review"
+    );
+    assert_eq!(
+        agent_trust_state_label(sigil_kernel::AgentTrustState::Disabled),
+        "disabled"
+    );
+    assert_eq!(
+        agent_trust_state_label(sigil_kernel::AgentTrustState::Unknown),
+        "unknown"
+    );
+    assert_eq!(
+        agent_profile_source_summary(&sigil_kernel::AgentProfileSource::User),
+        "user"
+    );
+    assert_eq!(
+        agent_profile_source_summary(&sigil_kernel::AgentProfileSource::Plugin {
+            plugin_id: "pack".to_owned()
+        }),
+        "plugin:pack"
+    );
+    assert_eq!(
+        agent_profile_source_summary(&sigil_kernel::AgentProfileSource::Compatibility {
+            provider: "claude".to_owned()
+        }),
+        "compat:claude"
+    );
+    assert_eq!(
+        agent_profile_source_summary(&sigil_kernel::AgentProfileSource::LegacyTask),
+        "legacy_task"
+    );
+    assert_eq!(
+        agent_profile_source_summary(&sigil_kernel::AgentProfileSource::Unknown),
+        "unknown"
+    );
+    assert_eq!(skill_section_noun(ConfigSection::Agents), "agent");
+    assert_eq!(
+        skill_section_noun(ConfigSection::Provider),
+        "skill or agent"
+    );
+}
+
+#[test]
+fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
+    let agent = sigil_runtime::ResolvedAgentProfile {
+        profile: sigil_kernel::AgentProfile {
+            id: sigil_kernel::AgentProfileId::new("empty").expect("agent id should parse"),
+            kind: sigil_kernel::AgentProfileKind::Unknown,
+            description: String::new(),
+            instructions: "inspect only".to_owned(),
+            model: None,
+            provider: None,
+            reasoning_effort: None,
+            tool_scope: Default::default(),
+            permission_policy: sigil_kernel::AgentPermissionPolicy {
+                default_mode: sigil_kernel::ApprovalMode::Ask,
+                ..Default::default()
+            },
+            invocation_policy: sigil_kernel::AgentInvocationPolicy::ManualOnly,
+            result_policy: sigil_kernel::AgentResultPolicy::ArtifactOnly,
+            user_invocable: true,
+            model_invocable: false,
+            skills: vec!["review".to_owned(), "audit".to_owned()],
+            mcp_servers: vec!["filesystem".to_owned()],
+            nickname_candidates: Vec::new(),
+        },
+        enabled: true,
+        enabled_override: Some(false),
+        user_invocable_override: Some(false),
+        model_invocable_override: Some(true),
+        source: sigil_kernel::AgentProfileSource::User,
+        source_hash: "abcdef1234567890".to_owned(),
+        trust_state: sigil_kernel::AgentTrustState::Unknown,
+    };
+
+    let detail = render_agent_detail_lines(&agent).join("\n");
+
+    assert!(detail.contains("- Description: none"));
+    assert!(detail.contains("- Enabled: no (source yes)"));
+    assert!(detail.contains("- User: no (source yes)"));
+    assert!(detail.contains("- Model: yes (source no)"));
+    assert!(detail.contains("- Provider: session"));
+    assert!(detail.contains("- Model name: session"));
+    assert!(detail.contains("- Reasoning: session"));
+    assert!(detail.contains("- Permission: ask"));
+    assert!(detail.contains("- Skills: review,audit"));
+    assert!(detail.contains("- MCP: filesystem"));
+    assert!(detail.contains("- Nicknames: none"));
+    assert_eq!(
+        selected_agent_summary(&ConfigState::from_root_config(&test_config())),
+        "none"
     );
 }
 
@@ -231,7 +631,7 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
     app.is_busy = true;
     let action = app.open_selected_skill_arguments()?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; invoke skill or agent later"));
+    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
 
     app.is_busy = false;
     let action = app.open_selected_skill_arguments()?;
@@ -241,7 +641,7 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
     app.is_busy = true;
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; invoke skill or agent later"));
+    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
 
     app.is_busy = false;
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
@@ -255,11 +655,11 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
 
     let action = app.open_selected_skill_arguments()?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("no skill or agent selected"));
+    assert_eq!(app.last_notice(), Some("no skill selected"));
 
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("no skill or agent selected"));
+    assert_eq!(app.last_notice(), Some("no skill selected"));
     Ok(())
 }
 

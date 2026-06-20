@@ -5,11 +5,14 @@ use crate::app::tests::common::test_config;
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
+    AgentProfileCapturedEntry, AgentProfileId, AgentProfilePolicyEntry, AgentProfileSnapshot,
+    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
     ApprovalMode, CompactionConfig, CompactionRecord, McpElicitationDecision, McpElicitationEntry,
-    MemoryConfig, PluginCapability, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry,
-    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
-    SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
-    ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
+    MemoryConfig, PlanApprovalExpiry, PlanApprovalPermission, PluginCapability,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, SkillDescriptor,
+    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolError, ToolErrorKind,
+    ToolResultMeta, WorkspaceConfig,
 };
 
 #[test]
@@ -355,6 +358,20 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     );
 
     let rendered = [
+        render_session_log_entry(&SessionLogEntry::Control(ControlEntry::PlanApproved(
+            sigil_kernel::PlanApprovedEntry {
+                plan_version: 1,
+                plan_hash: sigil_kernel::plan_text_hash("inspect then edit"),
+                approved_at_ms: 42,
+                permission: sigil_kernel::PlanApprovalPermission::WorkspaceEdits,
+                scope: sigil_kernel::PlanApprovalScope {
+                    summary: "edit workspace files described by the plan".to_owned(),
+                    workspace_paths: vec!["crates/sigil-tui".to_owned()],
+                },
+                expires: sigil_kernel::PlanApprovalExpiry::NextUserPrompt,
+                clear_planning_context: true,
+            },
+        ))),
         render_session_log_entry(&SessionLogEntry::Control(ControlEntry::TaskRun(
             sigil_kernel::TaskRunEntry {
                 task_id: task_id.clone(),
@@ -444,6 +461,9 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     ]
     .join("\n");
 
+    assert!(
+        rendered.contains("[ctl] plan approved v1 permission=workspace_edits expires=next_user")
+    );
     assert!(rendered.contains("[ctl] task task_1 status=running"));
     assert!(rendered.contains("[ctl] plan task_1 v1 status=accepted steps=1"));
     assert!(rendered.contains("[ctl] step task_1 v1:step_1 status=running"));
@@ -451,6 +471,84 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
     assert!(rendered.contains("[ctl] child name child_1 v1:step_1 Repository Reader"));
     assert!(rendered.contains("[ctl] subagent approval route_1 call=call-1 status=requested"));
     assert!(rendered.contains("[ctl] subagent elicitation route_1 server=mcp status=resolved"));
+    Ok(())
+}
+
+#[test]
+fn render_agent_profile_control_entries_and_plan_approval_labels() -> Result<()> {
+    let profile_id = AgentProfileId::new("review")?;
+    let snapshot = AgentProfileSnapshot {
+        snapshot_id: AgentProfileSnapshotId::new("snapshot_1")?,
+        profile_id: profile_id.clone(),
+        source: AgentProfileSource::Workspace,
+        source_hash: "sha256:source".to_owned(),
+        profile_hash: "sha256:profile-hash-long".to_owned(),
+        resolved_tool_scope_hash: "sha256:tools".to_owned(),
+        resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+        resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+        resolved_skill_hashes: vec!["sha256:skill".to_owned()],
+        trust_state: AgentTrustState::NeedsReview,
+    };
+
+    let captured = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
+            snapshot: snapshot.clone(),
+        }),
+    ));
+    assert_eq!(captured, "[ctl] agent profile review trust=needs_review");
+
+    let trusted = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::AgentProfileTrustDecision(AgentProfileTrustEntry {
+            profile_id: profile_id.clone(),
+            source: AgentProfileSource::Workspace,
+            source_hash: "sha256:source".to_owned(),
+            profile_hash: "sha256:profile-hash-long".to_owned(),
+            decision: AgentTrustState::Trusted,
+            reviewed_at_ms: 42,
+        }),
+    ));
+    assert!(trusted.contains("trust=trusted"));
+    assert!(trusted.contains("hash=sha256:profile"));
+
+    let policy = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::AgentProfilePolicyDecision(AgentProfilePolicyEntry {
+            profile_id,
+            source: AgentProfileSource::Workspace,
+            source_hash: "sha256:source".to_owned(),
+            profile_hash: "sha256:profile-hash-long".to_owned(),
+            enabled: Some(true),
+            user_invocable: Some(false),
+            model_invocable: None,
+            reviewed_at_ms: 43,
+        }),
+    ));
+    assert!(policy.contains("enabled=yes user=no model=inherit"));
+
+    assert_eq!(
+        plan_approval_permission_label(PlanApprovalPermission::Ask),
+        "ask"
+    );
+    assert_eq!(
+        plan_approval_permission_label(PlanApprovalPermission::WorkspaceEdits),
+        "workspace_edits"
+    );
+    assert_eq!(
+        plan_approval_expiry_label(&PlanApprovalExpiry::NextUserPrompt),
+        "next_user_prompt"
+    );
+    assert_eq!(
+        plan_approval_expiry_label(&PlanApprovalExpiry::Session),
+        "session"
+    );
+    assert_eq!(
+        plan_approval_expiry_label(&PlanApprovalExpiry::AtUnixMs(123)),
+        "at_unix_ms"
+    );
+    assert_eq!(
+        agent_trust_state_label(AgentTrustState::Disabled),
+        "disabled"
+    );
+    assert_eq!(agent_trust_state_label(AgentTrustState::Unknown), "unknown");
     Ok(())
 }
 

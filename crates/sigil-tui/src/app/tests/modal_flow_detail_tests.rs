@@ -278,6 +278,58 @@ fn modal_titles_lines_and_cursors_cover_secret_text_and_none_states() {
 }
 
 #[test]
+fn modal_paste_text_updates_secret_and_text_inputs() {
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+
+    assert!(matches!(
+        app.handle_modal_paste_text("ignored"),
+        ModalOutcome::None
+    ));
+
+    app.open_secret_input(SecretInputTarget::SetupApiKey, "");
+    assert!(matches!(
+        app.handle_modal_paste_text("sk-test\nwith-control\u{0007}"),
+        ModalOutcome::None
+    ));
+    assert_eq!(app.last_notice.as_deref(), Some("editing api key"));
+    assert!(matches!(
+        app.submit_modal(),
+        ModalOutcome::SecretSubmitted {
+            target: SecretInputTarget::SetupApiKey,
+            value
+        } if value == "sk-testwith-control"
+    ));
+
+    app.open_text_input(
+        TextInputTarget::ConfigField(ConfigField::ProviderModel),
+        "deepseek",
+    );
+    assert!(matches!(
+        app.handle_modal_paste_text("\n-v4-pro\u{0007}"),
+        ModalOutcome::None
+    ));
+    assert_eq!(app.last_notice.as_deref(), Some("editing value"));
+    assert!(matches!(
+        app.submit_modal(),
+        ModalOutcome::TextSubmitted {
+            target: TextInputTarget::ConfigField(ConfigField::ProviderModel),
+            value
+        } if value == "deepseek-v4-pro"
+    ));
+
+    app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");
+    assert!(matches!(
+        app.handle_modal_paste_text("ignored"),
+        ModalOutcome::None
+    ));
+    app.open_keyboard_help();
+    assert!(matches!(
+        app.handle_modal_paste_text("ignored"),
+        ModalOutcome::None
+    ));
+}
+
+#[test]
 fn model_picker_and_input_key_events_cover_wrap_dismiss_and_submission() {
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
     app.open_model_picker(ModelPickerTarget::Provider, "deepseek-v4-flash");

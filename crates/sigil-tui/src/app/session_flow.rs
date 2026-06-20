@@ -975,6 +975,13 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 "[ctl] compacted={} tail={}",
                 record.compacted_message_count, record.retained_tail_message_count
             ),
+            ControlEntry::PlanApproved(entry) => format!(
+                "[ctl] plan approved v{} permission={} expires={} hash={}",
+                entry.plan_version,
+                plan_approval_permission_label(entry.permission),
+                plan_approval_expiry_label(&entry.expires),
+                truncate_session_view_text(&entry.plan_hash, 16)
+            ),
             ControlEntry::TaskRun(run) => format!(
                 "[ctl] task {} status={}",
                 run.task_id.as_str(),
@@ -1024,6 +1031,20 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 "[ctl] agent profile {} trust={}",
                 entry.snapshot.profile_id.as_str(),
                 agent_trust_state_label(entry.snapshot.trust_state)
+            ),
+            ControlEntry::AgentProfileTrustDecision(entry) => format!(
+                "[ctl] agent profile {} trust={} hash={}",
+                entry.profile_id.as_str(),
+                agent_trust_state_label(entry.decision),
+                truncate_session_view_text(&entry.profile_hash, 16)
+            ),
+            ControlEntry::AgentProfilePolicyDecision(entry) => format!(
+                "[ctl] agent profile {} policy enabled={} user={} model={} hash={}",
+                entry.profile_id.as_str(),
+                optional_bool_label(entry.enabled),
+                optional_bool_label(entry.user_invocable),
+                optional_bool_label(entry.model_invocable),
+                truncate_session_view_text(&entry.profile_hash, 16)
             ),
             ControlEntry::AgentThreadStarted(entry) => format!(
                 "[ctl] agent {} started profile={} mode={}",
@@ -1226,6 +1247,23 @@ fn task_plan_status_label(status: sigil_kernel::TaskPlanStatus) -> &'static str 
     }
 }
 
+fn plan_approval_permission_label(
+    permission: sigil_kernel::PlanApprovalPermission,
+) -> &'static str {
+    match permission {
+        sigil_kernel::PlanApprovalPermission::Ask => "ask",
+        sigil_kernel::PlanApprovalPermission::WorkspaceEdits => "workspace_edits",
+    }
+}
+
+fn plan_approval_expiry_label(expiry: &sigil_kernel::PlanApprovalExpiry) -> &'static str {
+    match expiry {
+        sigil_kernel::PlanApprovalExpiry::NextUserPrompt => "next_user_prompt",
+        sigil_kernel::PlanApprovalExpiry::Session => "session",
+        sigil_kernel::PlanApprovalExpiry::AtUnixMs(_) => "at_unix_ms",
+    }
+}
+
 fn task_step_status_label(status: sigil_kernel::TaskStepStatus) -> &'static str {
     match status {
         sigil_kernel::TaskStepStatus::Pending => "pending",
@@ -1266,6 +1304,14 @@ fn agent_trust_state_label(status: sigil_kernel::AgentTrustState) -> &'static st
         sigil_kernel::AgentTrustState::NeedsReview => "needs_review",
         sigil_kernel::AgentTrustState::Disabled => "disabled",
         sigil_kernel::AgentTrustState::Unknown => "unknown",
+    }
+}
+
+fn optional_bool_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "inherit",
     }
 }
 

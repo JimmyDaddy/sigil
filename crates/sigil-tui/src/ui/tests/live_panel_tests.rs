@@ -10,7 +10,8 @@ use sigil_kernel::{
 use crate::{
     app::AppState,
     view_model::{
-        LivePanelViewModel, LiveProgressViewModel, TaskStripRowViewModel, TaskStripViewModel,
+        LivePanelViewModel, LiveProgressViewModel, PlanApprovalViewModel, TaskStripRowViewModel,
+        TaskStripViewModel,
     },
 };
 
@@ -76,6 +77,7 @@ fn render_live_panel_keeps_wrapped_tail_visible() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
         progress: None,
+        plan_approval: None,
         task_strip: None,
         transcript_lines: vec![Line::from(
             "prefix words that wrap across rows before visible TAIL",
@@ -102,6 +104,7 @@ fn render_live_panel_keeps_bottom_padding_clear() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
         progress: None,
+        plan_approval: None,
         task_strip: None,
         transcript_lines: vec![Line::from("visible tail")],
     };
@@ -127,6 +130,7 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
             title: "Thinking".to_owned(),
             detail: "reasoning with deepseek-v4-pro".to_owned(),
         }),
+        plan_approval: None,
         task_strip: Some(TaskStripViewModel {
             title: "Task task_1".to_owned(),
             detail: "running · v1 · 1/2 done".to_owned(),
@@ -169,10 +173,45 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
 }
 
 #[test]
+fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
+    let view_model = LivePanelViewModel {
+        phase: crate::timeline::RunPhase::Idle,
+        progress: None,
+        plan_approval: Some(PlanApprovalViewModel {
+            hash: "sha256:abc123".to_owned(),
+            scope_summary: "inspect and edit with preview".to_owned(),
+        }),
+        task_strip: None,
+        transcript_lines: vec![Line::from("plan body")],
+    };
+    let backend = TestBackend::new(96, 6);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Plan"));
+    assert!(rendered.contains("ready"));
+    assert!(rendered.contains("sha256:abc123"));
+    assert!(rendered.contains("A ask"));
+    assert!(rendered.contains("W workspace edits"));
+    assert!(rendered.contains("C continue"));
+    assert!(rendered.contains("Esc discard"));
+    Ok(())
+}
+
+#[test]
 fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Thinking,
         progress: None,
+        plan_approval: None,
         task_strip: Some(TaskStripViewModel {
             title: "Task task_3".to_owned(),
             detail: "started".to_owned(),

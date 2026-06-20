@@ -2,7 +2,8 @@ use crate::config_panel::{
     ANTHROPIC_PROVIDER_KEY, CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT,
     CONFIG_FIELD_NAV_HINT, CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField,
     ConfigFieldMove, ConfigFooterAction, ConfigSection, ConfigState, GEMINI_PROVIDER_KEY,
-    OPENAI_COMPAT_PROVIDER_KEY, render_config_readonly_row, render_config_value_row,
+    OPENAI_COMPAT_PROVIDER_KEY, config_field_accepts_char, render_config_readonly_row,
+    render_config_value_row,
 };
 use crate::slash::SLASH_COMMANDS;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{
+    AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
+    AgentProfileSnapshot, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
     ApprovalMode, CodeIntelStartup, ControlEntry, JsonlSessionStore, McpServerConfig,
     McpServerStartup, PluginCapability, PluginManifestSnapshot, PluginStateProjection,
     PluginTrustDecision, PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor,
@@ -20,6 +23,7 @@ use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
 use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
 use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 use sigil_runtime::{
+    AgentProfileRegistry, ResolvedAgentProfile,
     doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks},
     provider_capabilities_for_name, provider_capability_view,
 };
@@ -53,7 +57,9 @@ impl AppState {
             if state.footer_selected {
                 Some(state.selected_footer_action.field_label())
             } else {
-                state.selected_field.map(ConfigField::display_label)
+                state
+                    .selected_field
+                    .map(|field| config_field_display_label(state, field))
             }
         })
     }
@@ -158,9 +164,13 @@ impl AppState {
             lines.push("MCP: Ctrl-D drop".to_owned());
             lines.push("MCP: PgUp/PgDn switch".to_owned());
             lines.push("MCP: footer activate lazy".to_owned());
+        } else if state.selected_section == ConfigSection::Agents {
+            lines.push("Agents: Up/Down select".to_owned());
+            lines.push("Agents: PgUp/PgDn wrap".to_owned());
+            lines.push("Agents: footer trust/policy".to_owned());
         } else if state.selected_section == ConfigSection::Skills {
-            lines.push("Skills/agents: Up/Down select".to_owned());
-            lines.push("Skills/agents: PgUp/PgDn wrap".to_owned());
+            lines.push("Skills: Up/Down select".to_owned());
+            lines.push("Skills: PgUp/PgDn wrap".to_owned());
             lines.push("Skills: footer load/invoke".to_owned());
         } else if state.selected_section == ConfigSection::Plugins {
             lines.push("Plugins: Up/Down select".to_owned());
@@ -349,6 +359,70 @@ impl AppState {
                 ));
                 lines.extend(render_config_selection_details(config_state));
             }
+            ConfigSection::Agents => {
+                let (_skill_count, skill_agent_count) = skill_config_counts(config_state);
+                let agent_count = config_state.agent_profiles.len();
+                lines.push("[discovery]".to_owned());
+                lines.push(render_config_readonly_row(
+                    "Enabled",
+                    bool_summary(config_state.draft.base_root_config.skills.enabled),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Configured",
+                    &format!("{} {}", agent_count, pluralize("agent", agent_count)),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Compatibility",
+                    &format!(
+                        "{} {}",
+                        skill_agent_count,
+                        pluralize("agent", skill_agent_count)
+                    ),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Warnings",
+                    &format!("{} warnings", config_state.agent_warnings.len()),
+                ));
+                if agent_count == 0 {
+                    lines.push(render_config_hint_row("No agents discovered"));
+                    lines.push(render_config_hint_row(
+                        "Agents are discovered from built-ins, workspace profiles, plugins, and compatibility sources",
+                    ));
+                } else {
+                    lines.push(render_config_readonly_row(
+                        "Selected",
+                        &selected_agent_summary(config_state),
+                    ));
+                    lines.push(String::new());
+                    lines.push("[agents]".to_owned());
+                    lines.extend(render_agent_index_lines(config_state));
+                    if let Some(agent) = config_state.selected_agent() {
+                        lines.push(String::new());
+                        lines.push("[agent]".to_owned());
+                        lines.push(render_config_readonly_row(
+                            "Agent",
+                            agent.profile.id.as_str(),
+                        ));
+                        lines.extend(render_agent_detail_lines(agent));
+                    }
+                }
+                if !config_state.agent_warnings.is_empty() {
+                    lines.push(String::new());
+                    lines.push("[warnings]".to_owned());
+                    for warning in config_state.agent_warnings.iter().take(4) {
+                        lines.push(render_config_hint_row(warning));
+                    }
+                    if config_state.agent_warnings.len() > 4 {
+                        lines.push(format!(
+                            "... {} more warnings",
+                            config_state.agent_warnings.len() - 4
+                        ));
+                    }
+                }
+                lines.push(String::new());
+                lines.push("Up/Down agent  PgUp/PgDn wrap  footer trust/policy".to_owned());
+                lines.extend(render_config_selection_details(config_state));
+            }
             ConfigSection::Skills => {
                 let (skill_count, agent_count) = skill_config_counts(config_state);
                 lines.push("[discovery]".to_owned());
@@ -358,16 +432,20 @@ impl AppState {
                 ));
                 lines.push(render_config_readonly_row(
                     "Configured",
-                    &skill_agent_count_summary(skill_count, agent_count),
+                    &format!("{} {}", skill_count, pluralize("skill", skill_count)),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Agents",
+                    &format!("{} {}", agent_count, pluralize("agent", agent_count)),
                 ));
                 lines.push(render_config_readonly_row(
                     "Warnings",
                     &format!("{} warnings", config_state.skill_warnings.len()),
                 ));
-                if config_state.skill_descriptors.is_empty() {
-                    lines.push(render_config_hint_row("No skills or agents discovered"));
+                if skill_count == 0 {
+                    lines.push(render_config_hint_row("No skills discovered"));
                     lines.push(render_config_hint_row(
-                        "Workspace skills and agents live under the configured skills.workspace_dir",
+                        "Reusable inline skills are discovered from configured skills directories",
                     ));
                 } else {
                     lines.push(render_config_readonly_row(
@@ -375,14 +453,12 @@ impl AppState {
                         &selected_skill_summary(config_state),
                     ));
                     lines.push(String::new());
-                    lines.extend(render_skill_group_lines(config_state));
+                    lines.push("[skills]".to_owned());
+                    lines.extend(render_skill_index_lines(config_state, false));
                     if let Some(skill) = config_state.selected_skill() {
                         lines.push(String::new());
-                        lines.push(format!("[{}]", skill_display_noun(skill)));
-                        lines.push(render_config_readonly_row(
-                            skill_display_title(skill),
-                            &skill.id,
-                        ));
+                        lines.push("[skill]".to_owned());
+                        lines.push(render_config_readonly_row("Skill", &skill.id));
                         lines.extend(render_skill_detail_lines(skill));
                     }
                 }
@@ -400,7 +476,7 @@ impl AppState {
                     }
                 }
                 lines.push(String::new());
-                lines.push("Up/Down item  PgUp/PgDn wrap  footer load/invoke".to_owned());
+                lines.push("Up/Down skill  PgUp/PgDn wrap  footer load/invoke".to_owned());
                 lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Plugins => {
@@ -666,15 +742,21 @@ impl AppState {
                                 self.last_notice = Some("no MCP server to select".to_owned());
                             }
                         }
+                        ConfigSection::Agents => {
+                            if config_state.cycle_agent(false) {
+                                self.last_notice = Some(selected_agent_summary(config_state));
+                            } else {
+                                self.last_notice = Some("no agent to select".to_owned());
+                            }
+                        }
                         ConfigSection::Skills => {
                             if config_state.cycle_skill(false) {
-                                self.last_notice = Some(format!(
-                                    "skill {}/{}",
-                                    config_state.selected_skill_index + 1,
-                                    config_state.skill_descriptors.len()
-                                ));
+                                self.last_notice = Some(selected_skill_summary(config_state));
                             } else {
-                                self.last_notice = Some("no skill to select".to_owned());
+                                self.last_notice = Some(format!(
+                                    "no {} to select",
+                                    skill_section_noun(config_state.selected_section)
+                                ));
                             }
                         }
                         ConfigSection::Plugins => {
@@ -706,15 +788,21 @@ impl AppState {
                                 self.last_notice = Some("no MCP server to select".to_owned());
                             }
                         }
+                        ConfigSection::Agents => {
+                            if config_state.cycle_agent(true) {
+                                self.last_notice = Some(selected_agent_summary(config_state));
+                            } else {
+                                self.last_notice = Some("no agent to select".to_owned());
+                            }
+                        }
                         ConfigSection::Skills => {
                             if config_state.cycle_skill(true) {
-                                self.last_notice = Some(format!(
-                                    "skill {}/{}",
-                                    config_state.selected_skill_index + 1,
-                                    config_state.skill_descriptors.len()
-                                ));
+                                self.last_notice = Some(selected_skill_summary(config_state));
                             } else {
-                                self.last_notice = Some("no skill to select".to_owned());
+                                self.last_notice = Some(format!(
+                                    "no {} to select",
+                                    skill_section_noun(config_state.selected_section)
+                                ));
                             }
                         }
                         ConfigSection::Plugins => {
@@ -801,6 +889,17 @@ impl AppState {
                         ConfigFooterAction::Save => self.save_config_draft(),
                         ConfigFooterAction::SaveAndClose => self.save_config_draft_and_close(),
                         ConfigFooterAction::ActivateMcp => self.activate_selected_mcp_server(),
+                        ConfigFooterAction::TrustAgent => {
+                            self.review_selected_agent(AgentTrustState::Trusted)
+                        }
+                        ConfigFooterAction::BlockAgent => {
+                            self.review_selected_agent(AgentTrustState::Disabled)
+                        }
+                        ConfigFooterAction::ToggleAgentEnabled => {
+                            self.toggle_selected_agent_enabled()
+                        }
+                        ConfigFooterAction::ToggleAgentUser => self.toggle_selected_agent_user(),
+                        ConfigFooterAction::ToggleAgentModel => self.toggle_selected_agent_model(),
                         ConfigFooterAction::LoadSkill => self.load_selected_skill(),
                         ConfigFooterAction::InvokeSkill => self.open_selected_skill_arguments(),
                         ConfigFooterAction::ApprovePlugin => {
@@ -978,6 +1077,44 @@ impl AppState {
         Ok(None)
     }
 
+    pub(super) fn handle_config_paste_text(&mut self, text: &str) {
+        let Some(config_state) = self.config_state.as_mut() else {
+            return;
+        };
+        if config_state.footer_selected {
+            return;
+        }
+        let Some(field) = config_state.selected_field else {
+            return;
+        };
+
+        let value = if field == ConfigField::ProviderApiKey {
+            text.chars()
+                .filter(|character| !character.is_control())
+                .collect::<String>()
+        } else if field.accepts_text_input() {
+            text.chars()
+                .filter(|character| {
+                    !character.is_control() && config_field_accepts_char(field, *character)
+                })
+                .collect::<String>()
+        } else {
+            return;
+        };
+        if value.is_empty() {
+            return;
+        }
+        let Some(target) = config_state.field_text_value_mut(field) else {
+            return;
+        };
+        let changed = *target != value;
+        *target = value;
+        if changed {
+            config_state.dirty = true;
+        }
+        self.last_notice = Some(format!("updated {}", field.label()));
+    }
+
     pub(super) fn open_config_panel(&mut self) {
         let Some(root_config) = self.config_snapshot.as_ref() else {
             self.last_notice = Some("config is unavailable in setup mode".to_owned());
@@ -985,6 +1122,8 @@ impl AppState {
         };
 
         let mut config_state = ConfigState::from_root_config(root_config);
+        let (agents, agent_warnings) = self.discover_config_agents(root_config);
+        config_state.set_agent_discovery(agents, agent_warnings);
         let (skills, warnings) = self.discover_config_skills(root_config);
         config_state.set_skill_discovery(skills, warnings);
         let (plugins, plugin_warnings) = self.discover_config_plugins();
@@ -1029,6 +1168,20 @@ impl AppState {
         }
     }
 
+    fn discover_config_agents(
+        &self,
+        root_config: &RootConfig,
+    ) -> (Vec<ResolvedAgentProfile>, Vec<String>) {
+        match AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            root_config,
+            &self.workspace_root,
+            &self.current_session_entries,
+        ) {
+            Ok(registry) => (registry.profiles().to_vec(), registry.warnings().to_vec()),
+            Err(error) => (Vec::new(), vec![format!("agent discovery failed: {error}")]),
+        }
+    }
+
     fn discover_config_plugins(&self) -> (Vec<PluginManifestSnapshot>, Vec<String>) {
         let projection = PluginStateProjection::from_entries(&self.current_session_entries);
         let trust_entries = projection
@@ -1053,7 +1206,7 @@ impl AppState {
 
     fn load_selected_skill(&mut self) -> Result<Option<AppAction>> {
         if self.is_busy {
-            self.last_notice = Some("busy; load skill or agent later".to_owned());
+            self.last_notice = Some("busy; load skill later".to_owned());
             return Ok(None);
         }
         let Some(skill) = self.selected_config_skill() else {
@@ -1075,7 +1228,7 @@ impl AppState {
 
     fn open_selected_skill_arguments(&mut self) -> Result<Option<AppAction>> {
         if self.is_busy {
-            self.last_notice = Some("busy; invoke skill or agent later".to_owned());
+            self.last_notice = Some("busy; invoke skill later".to_owned());
             return Ok(None);
         }
         let Some(skill) = self.selected_config_skill() else {
@@ -1095,7 +1248,7 @@ impl AppState {
 
     fn submit_selected_skill_invocation(&mut self, arguments: String) -> Result<Option<AppAction>> {
         if self.is_busy {
-            self.last_notice = Some("busy; invoke skill or agent later".to_owned());
+            self.last_notice = Some("busy; invoke skill later".to_owned());
             return Ok(None);
         }
         let Some(skill) = self.selected_config_skill() else {
@@ -1115,18 +1268,250 @@ impl AppState {
         Ok(Some(AppAction::SubmitPrompt(prompt)))
     }
 
+    fn review_selected_agent(&mut self, decision: AgentTrustState) -> Result<Option<AppAction>> {
+        if self.is_busy {
+            self.last_notice = Some("busy; review agent later".to_owned());
+            return Ok(None);
+        }
+        let Some(cached) = self.selected_config_agent() else {
+            return Ok(None);
+        };
+        let Some((agent, snapshot)) = self.refresh_selected_agent_for_review(&cached) else {
+            return Ok(None);
+        };
+        if agent.source == AgentProfileSource::System {
+            self.last_notice = Some(format!(
+                "agent {} is system-managed",
+                agent.profile.id.as_str()
+            ));
+            return Ok(None);
+        }
+
+        let trust = AgentProfileTrustEntry {
+            profile_id: agent.profile.id.clone(),
+            source: snapshot.source.clone(),
+            source_hash: snapshot.source_hash.clone(),
+            profile_hash: snapshot.profile_hash.clone(),
+            decision,
+            reviewed_at_ms: unix_time_ms(),
+        };
+
+        self.ensure_current_session_identity()?;
+        self.append_agent_profile_snapshot(snapshot)?;
+        self.append_control_to_current_session(ControlEntry::AgentProfileTrustDecision(trust))?;
+        self.refresh_config_agents_for_profile(&agent.profile.id);
+
+        let action = match decision {
+            AgentTrustState::Trusted => "trusted",
+            AgentTrustState::Disabled => "blocked",
+            AgentTrustState::NeedsReview => "reviewed",
+            AgentTrustState::Unknown => "reviewed",
+        };
+        self.last_notice = Some(format!("agent {} {action}", agent.profile.id.as_str()));
+        self.push_event("agent", format!("{} {action}", agent.profile.id.as_str()));
+        Ok(None)
+    }
+
+    fn toggle_selected_agent_enabled(&mut self) -> Result<Option<AppAction>> {
+        self.update_selected_agent_policy(AgentPolicyToggle::Enabled)
+    }
+
+    fn toggle_selected_agent_user(&mut self) -> Result<Option<AppAction>> {
+        self.update_selected_agent_policy(AgentPolicyToggle::UserInvocable)
+    }
+
+    fn toggle_selected_agent_model(&mut self) -> Result<Option<AppAction>> {
+        self.update_selected_agent_policy(AgentPolicyToggle::ModelInvocable)
+    }
+
+    fn update_selected_agent_policy(
+        &mut self,
+        toggle: AgentPolicyToggle,
+    ) -> Result<Option<AppAction>> {
+        if self.is_busy {
+            self.last_notice = Some("busy; update agent policy later".to_owned());
+            return Ok(None);
+        }
+        let Some(cached) = self.selected_config_agent() else {
+            return Ok(None);
+        };
+        let Some((agent, snapshot)) = self.refresh_selected_agent_for_review(&cached) else {
+            return Ok(None);
+        };
+        if agent.source == AgentProfileSource::System {
+            self.last_notice = Some(format!(
+                "agent {} is system-managed",
+                agent.profile.id.as_str()
+            ));
+            return Ok(None);
+        }
+
+        let source_enabled = agent.enabled;
+        let source_user = agent.profile.user_invocation_allowed();
+        let source_model = agent.profile.model_invocation_allowed();
+        let mut target_enabled = agent.effective_enabled();
+        let mut target_user = agent.effective_user_invocation_allowed();
+        let mut target_model = agent.effective_model_invocation_allowed();
+        match toggle {
+            AgentPolicyToggle::Enabled => target_enabled = !target_enabled,
+            AgentPolicyToggle::UserInvocable => target_user = !target_user,
+            AgentPolicyToggle::ModelInvocable => target_model = !target_model,
+        }
+
+        let policy = AgentProfilePolicyEntry {
+            profile_id: agent.profile.id.clone(),
+            source: snapshot.source.clone(),
+            source_hash: snapshot.source_hash.clone(),
+            profile_hash: snapshot.profile_hash.clone(),
+            enabled: policy_override(target_enabled, source_enabled),
+            user_invocable: policy_override(target_user, source_user),
+            model_invocable: policy_override(target_model, source_model),
+            reviewed_at_ms: unix_time_ms(),
+        };
+
+        self.ensure_current_session_identity()?;
+        self.append_agent_profile_snapshot(snapshot)?;
+        self.append_control_to_current_session(ControlEntry::AgentProfilePolicyDecision(policy))?;
+        self.refresh_config_agents_for_profile(&agent.profile.id);
+
+        let label = match toggle {
+            AgentPolicyToggle::Enabled => "enabled",
+            AgentPolicyToggle::UserInvocable => "user",
+            AgentPolicyToggle::ModelInvocable => "model",
+        };
+        self.last_notice = Some(format!(
+            "agent {} {label}={}",
+            agent.profile.id.as_str(),
+            match toggle {
+                AgentPolicyToggle::Enabled => bool_summary(target_enabled),
+                AgentPolicyToggle::UserInvocable => bool_summary(target_user),
+                AgentPolicyToggle::ModelInvocable => bool_summary(target_model),
+            }
+        ));
+        self.push_event(
+            "agent",
+            format!("{} policy {label}", agent.profile.id.as_str()),
+        );
+        Ok(None)
+    }
+
+    fn selected_config_agent(&mut self) -> Option<ResolvedAgentProfile> {
+        let Some(config_state) = self.config_state.as_ref() else {
+            self.last_notice = Some("config is unavailable".to_owned());
+            return None;
+        };
+        if config_state.selected_section != ConfigSection::Agents {
+            self.last_notice = Some("agent review is available in Agents config".to_owned());
+            return None;
+        }
+        let Some(agent) = config_state.selected_agent() else {
+            self.last_notice = Some("no agent selected".to_owned());
+            return None;
+        };
+        Some(agent.clone())
+    }
+
+    fn refresh_selected_agent_for_review(
+        &mut self,
+        cached: &ResolvedAgentProfile,
+    ) -> Option<(ResolvedAgentProfile, AgentProfileSnapshot)> {
+        let Some(root_config) = self.config_snapshot.clone() else {
+            self.last_notice = Some("config is unavailable in setup mode".to_owned());
+            return None;
+        };
+        let profile_id = cached.profile.id.clone();
+        let registry = match AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            &self.workspace_root,
+            &self.current_session_entries,
+        ) {
+            Ok(registry) => registry,
+            Err(error) => {
+                self.last_notice = Some(format!("agent discovery failed: {error}"));
+                return None;
+            }
+        };
+        let refreshed = registry.get(&profile_id).cloned();
+        let snapshot = registry.capture_snapshot(&profile_id);
+        self.refresh_config_agents_from_registry(registry, &profile_id);
+
+        let Some(refreshed) = refreshed else {
+            self.last_notice = Some(format!(
+                "agent {} is no longer available; review refreshed",
+                profile_id.as_str()
+            ));
+            return None;
+        };
+        if refreshed.source_hash != cached.source_hash || refreshed.profile != cached.profile {
+            self.last_notice = Some(format!(
+                "agent {} changed; review refreshed",
+                profile_id.as_str()
+            ));
+            return None;
+        }
+        let snapshot = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                self.last_notice = Some(format!(
+                    "agent {} snapshot failed: {error}",
+                    profile_id.as_str()
+                ));
+                return None;
+            }
+        };
+        Some((refreshed, snapshot))
+    }
+
+    fn refresh_config_agents_for_profile(&mut self, profile_id: &AgentProfileId) {
+        let Some(root_config) = self.config_snapshot.clone() else {
+            return;
+        };
+        let Ok(registry) = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+            &root_config,
+            &self.workspace_root,
+            &self.current_session_entries,
+        ) else {
+            return;
+        };
+        self.refresh_config_agents_from_registry(registry, profile_id);
+    }
+
+    fn refresh_config_agents_from_registry(
+        &mut self,
+        registry: AgentProfileRegistry,
+        profile_id: &AgentProfileId,
+    ) {
+        let profiles = registry.profiles().to_vec();
+        let warnings = registry.warnings().to_vec();
+        if let Some(config_state) = self.config_state.as_mut() {
+            config_state.set_agent_discovery(profiles, warnings);
+            if let Some(index) = config_state
+                .agent_profiles
+                .iter()
+                .position(|agent| agent.profile.id == *profile_id)
+            {
+                config_state.selected_agent_index = index;
+            }
+        }
+    }
+
+    fn append_agent_profile_snapshot(&mut self, snapshot: AgentProfileSnapshot) -> Result<()> {
+        self.append_control_to_current_session(ControlEntry::AgentProfileCaptured(
+            AgentProfileCapturedEntry { snapshot },
+        ))
+    }
+
     fn selected_config_skill(&mut self) -> Option<SkillDescriptor> {
         let Some(config_state) = self.config_state.as_ref() else {
             self.last_notice = Some("config is unavailable".to_owned());
             return None;
         };
-        if config_state.selected_section != ConfigSection::Skills {
-            self.last_notice =
-                Some("skill or agent action is available in Skills config".to_owned());
+        if !matches!(config_state.selected_section, ConfigSection::Skills) {
+            self.last_notice = Some("skill action is available in Skills config".to_owned());
             return None;
         }
         let Some(skill) = config_state.selected_skill() else {
-            self.last_notice = Some("no skill or agent selected".to_owned());
+            self.last_notice = Some("no skill selected".to_owned());
             return None;
         };
         Some(skill.clone())
@@ -1517,11 +1902,23 @@ fn config_context_window_source_label(source: ContextWindowSource) -> &'static s
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum AgentPolicyToggle {
+    Enabled,
+    UserInvocable,
+    ModelInvocable,
+}
+
+fn policy_override(target: bool, source: bool) -> Option<bool> {
+    (target != source).then_some(target)
+}
+
 fn move_config_collection_selection(
     config_state: &mut ConfigState,
     forward: bool,
 ) -> Option<ConfigFieldMove> {
     match config_state.selected_section {
+        ConfigSection::Agents => Some(config_state.move_agent(forward)),
         ConfigSection::Skills => Some(config_state.move_skill(forward)),
         ConfigSection::Plugins => Some(config_state.move_plugin(forward)),
         _ => None,
@@ -1530,7 +1927,10 @@ fn move_config_collection_selection(
 
 fn config_collection_selection_notice(config_state: &ConfigState) -> Option<String> {
     match config_state.selected_section {
-        ConfigSection::Skills if !config_state.skill_descriptors.is_empty() => {
+        ConfigSection::Agents if config_state.selected_agent().is_some() => {
+            Some(selected_agent_summary(config_state))
+        }
+        ConfigSection::Skills if config_state.selected_skill().is_some() => {
             Some(selected_skill_summary(config_state))
         }
         ConfigSection::Plugins if !config_state.plugin_manifests.is_empty() => Some(format!(
@@ -1553,28 +1953,55 @@ fn focus_first_config_footer_action(config_state: &mut ConfigState) -> ConfigFoo
 
 fn config_field_display_label(config_state: &ConfigState, field: ConfigField) -> &'static str {
     if matches!(field, ConfigField::SkillId)
+        && config_state.selected_section == ConfigSection::Agents
+        && config_state.selected_agent().is_some()
+    {
+        return "Agent";
+    } else if matches!(field, ConfigField::SkillId)
         && let Some(skill) = config_state.selected_skill()
     {
         return skill_display_title(skill);
+    } else if matches!(field, ConfigField::SkillId)
+        && config_state.selected_section == ConfigSection::Agents
+    {
+        return "Agent";
     }
     field.display_label()
 }
 
 fn config_field_key_label(config_state: &ConfigState, field: ConfigField) -> &'static str {
     if matches!(field, ConfigField::SkillId)
+        && config_state.selected_section == ConfigSection::Agents
+        && config_state.selected_agent().is_some()
+    {
+        return "agent";
+    } else if matches!(field, ConfigField::SkillId)
         && let Some(skill) = config_state.selected_skill()
     {
         return skill_display_noun(skill);
+    } else if matches!(field, ConfigField::SkillId)
+        && config_state.selected_section == ConfigSection::Agents
+    {
+        return "agent";
     }
     field.label()
 }
 
 fn config_field_help_text(config_state: &ConfigState, field: ConfigField) -> &'static str {
     if matches!(field, ConfigField::SkillId)
+        && config_state.selected_section == ConfigSection::Agents
+        && config_state.selected_agent().is_some()
+    {
+        return "Selected agent profile. Up/Down moves through agents; footer actions write durable trust or policy decisions.";
+    } else if matches!(field, ConfigField::SkillId)
         && let Some(skill) = config_state.selected_skill()
         && skill_is_agent(skill)
     {
-        return "Selected child-session agent. Up/Down moves through agents and skills; footer actions load or invoke it.";
+        return "Selected child-session agent. Up/Down moves through agents; footer actions load or invoke it.";
+    } else if matches!(field, ConfigField::SkillId)
+        && config_state.selected_section == ConfigSection::Agents
+    {
+        return "Selected child-session agent. Up/Down moves through agents; footer actions load or invoke it.";
     }
     field.help_text()
 }
@@ -1589,10 +2016,10 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
         ];
         if config_state.selected_section == ConfigSection::Mcp {
             lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
+        } else if config_state.selected_section == ConfigSection::Agents {
+            lines.push("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/policy".to_owned());
         } else if config_state.selected_section == ConfigSection::Skills {
-            lines.push(
-                "skills/agents: Up/Down item · PgUp/PgDn wrap · footer load/invoke".to_owned(),
-            );
+            lines.push("skills: Up/Down skill · PgUp/PgDn wrap · footer load/invoke".to_owned());
         } else if config_state.selected_section == ConfigSection::Plugins {
             lines.push("plugins: Up/Down plugin · PgUp/PgDn wrap · footer approve/deny".to_owned());
         }
@@ -1622,8 +2049,10 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     }
     if config_state.selected_section == ConfigSection::Mcp {
         lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());
+    } else if config_state.selected_section == ConfigSection::Agents {
+        lines.push("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/policy".to_owned());
     } else if config_state.selected_section == ConfigSection::Skills {
-        lines.push("skills/agents: Up/Down item · PgUp/PgDn wrap · footer load/invoke".to_owned());
+        lines.push("skills: Up/Down skill · PgUp/PgDn wrap · footer load/invoke".to_owned());
     } else if config_state.selected_section == ConfigSection::Plugins {
         lines.push("plugins: Up/Down plugin · PgUp/PgDn wrap · footer approve/deny".to_owned());
     }
@@ -1709,23 +2138,69 @@ fn render_skill_detail_lines(skill: &SkillDescriptor) -> Vec<String> {
     ]
 }
 
-fn render_skill_group_lines(config_state: &ConfigState) -> Vec<String> {
-    let mut lines = vec!["[agents]".to_owned()];
-    let agent_lines = render_skill_index_lines(config_state, true);
-    if agent_lines.is_empty() {
-        lines.push(render_config_hint_row("No agents discovered"));
+fn render_agent_detail_lines(agent: &ResolvedAgentProfile) -> Vec<String> {
+    let description = if agent.profile.description.trim().is_empty() {
+        "none"
     } else {
-        lines.extend(agent_lines);
-    }
-    lines.push(String::new());
-    lines.push("[skills]".to_owned());
-    let skill_lines = render_skill_index_lines(config_state, false);
-    if skill_lines.is_empty() {
-        lines.push(render_config_hint_row("No skills discovered"));
-    } else {
-        lines.extend(skill_lines);
-    }
-    lines
+        agent.profile.description.as_str()
+    };
+    let provider = agent.profile.provider.as_deref().unwrap_or("session");
+    let model = agent.profile.model.as_deref().unwrap_or("session");
+    let reasoning = agent
+        .profile
+        .reasoning_effort
+        .as_ref()
+        .map(|effort| effort.as_str())
+        .unwrap_or("session");
+    vec![
+        render_config_readonly_row("Kind", agent_profile_kind_label(agent.profile.kind)),
+        render_config_readonly_row("Description", description),
+        render_config_readonly_row("Enabled", &agent_enabled_summary(agent)),
+        render_config_readonly_row("User", &agent_user_invocable_summary(agent)),
+        render_config_readonly_row("Model", &agent_model_invocable_summary(agent)),
+        render_config_readonly_row("Trust", agent_trust_state_label(agent.trust_state)),
+        render_config_readonly_row("Source", &agent_profile_source_summary(&agent.source)),
+        render_config_readonly_row("Source hash", &short_hash(&agent.source_hash)),
+        render_config_readonly_row("Provider", provider),
+        render_config_readonly_row("Model name", model),
+        render_config_readonly_row("Reasoning", reasoning),
+        render_config_readonly_row("Invocation", agent.profile.invocation_policy.as_str()),
+        render_config_readonly_row("Result", agent.profile.result_policy.as_str()),
+        render_config_readonly_row("Tools", &tool_scope_summary(&agent.profile.tool_scope)),
+        render_config_readonly_row(
+            "Permission",
+            agent.profile.permission_policy.default_mode.as_str(),
+        ),
+        render_config_readonly_row("Skills", &list_summary(&agent.profile.skills)),
+        render_config_readonly_row("MCP", &list_summary(&agent.profile.mcp_servers)),
+        render_config_readonly_row(
+            "Nicknames",
+            &list_summary(&agent.profile.nickname_candidates),
+        ),
+    ]
+}
+
+fn render_agent_index_lines(config_state: &ConfigState) -> Vec<String> {
+    config_state
+        .agent_profiles
+        .iter()
+        .enumerate()
+        .map(|(index, agent)| {
+            let marker = if index == config_state.selected_agent_index {
+                ">"
+            } else {
+                " "
+            };
+            format!(
+                "{marker} {}: {} · {} · {} · {}",
+                agent.profile.id.as_str(),
+                agent_trust_state_label(agent.trust_state),
+                agent_profile_kind_label(agent.profile.kind),
+                agent_profile_source_summary(&agent.source),
+                agent_policy_flags(agent)
+            )
+        })
+        .collect()
 }
 
 fn render_skill_index_lines(config_state: &ConfigState, agents: bool) -> Vec<String> {
@@ -1765,16 +2240,6 @@ fn skill_config_counts(config_state: &ConfigState) -> (usize, usize) {
     (skill_count, agent_count)
 }
 
-fn skill_agent_count_summary(skill_count: usize, agent_count: usize) -> String {
-    format!(
-        "{} {}, {} {}",
-        skill_count,
-        pluralize("skill", skill_count),
-        agent_count,
-        pluralize("agent", agent_count)
-    )
-}
-
 fn selected_skill_summary(config_state: &ConfigState) -> String {
     let Some(skill) = config_state.selected_skill() else {
         return "none".to_owned();
@@ -1792,6 +2257,100 @@ fn selected_skill_summary(config_state: &ConfigState) -> String {
         .filter(|candidate| skill_is_agent(candidate) == selected_is_agent)
         .count();
     format!("{} {position}/{total}", skill_display_noun(skill))
+}
+
+fn selected_agent_summary(config_state: &ConfigState) -> String {
+    let Some(agent) = config_state.selected_agent() else {
+        return "none".to_owned();
+    };
+    format!(
+        "agent {}/{} · {}",
+        config_state.selected_agent_index + 1,
+        config_state.agent_profiles.len(),
+        agent.profile.id.as_str()
+    )
+}
+
+fn agent_policy_flags(agent: &ResolvedAgentProfile) -> String {
+    format!(
+        "enabled={} user={} model={}",
+        bool_summary(agent.effective_enabled()),
+        bool_summary(agent.effective_user_invocation_allowed()),
+        bool_summary(agent.effective_model_invocation_allowed())
+    )
+}
+
+fn agent_enabled_summary(agent: &ResolvedAgentProfile) -> String {
+    bool_override_summary(
+        agent.effective_enabled(),
+        agent.enabled,
+        agent.enabled_override,
+    )
+}
+
+fn agent_user_invocable_summary(agent: &ResolvedAgentProfile) -> String {
+    bool_override_summary(
+        agent.effective_user_invocation_allowed(),
+        agent.profile.user_invocation_allowed(),
+        agent.user_invocable_override,
+    )
+}
+
+fn agent_model_invocable_summary(agent: &ResolvedAgentProfile) -> String {
+    bool_override_summary(
+        agent.effective_model_invocation_allowed(),
+        agent.profile.model_invocation_allowed(),
+        agent.model_invocable_override,
+    )
+}
+
+fn bool_override_summary(effective: bool, source: bool, override_value: Option<bool>) -> String {
+    match override_value {
+        Some(_) => format!(
+            "{} (source {})",
+            bool_summary(effective),
+            bool_summary(source)
+        ),
+        None => bool_summary(effective).to_owned(),
+    }
+}
+
+fn agent_profile_kind_label(kind: AgentProfileKind) -> &'static str {
+    match kind {
+        AgentProfileKind::Primary => "primary",
+        AgentProfileKind::Subagent => "subagent",
+        AgentProfileKind::System => "system",
+        AgentProfileKind::Unknown => "unknown",
+    }
+}
+
+fn agent_trust_state_label(state: AgentTrustState) -> &'static str {
+    match state {
+        AgentTrustState::Trusted => "trusted",
+        AgentTrustState::NeedsReview => "needs_review",
+        AgentTrustState::Disabled => "disabled",
+        AgentTrustState::Unknown => "unknown",
+    }
+}
+
+fn agent_profile_source_summary(source: &AgentProfileSource) -> String {
+    match source {
+        AgentProfileSource::Workspace => "workspace".to_owned(),
+        AgentProfileSource::User => "user".to_owned(),
+        AgentProfileSource::Plugin { plugin_id } => format!("plugin:{plugin_id}"),
+        AgentProfileSource::Compatibility { provider } => format!("compat:{provider}"),
+        AgentProfileSource::System => "system".to_owned(),
+        AgentProfileSource::LegacyTask => "legacy_task".to_owned(),
+        AgentProfileSource::Unknown => "unknown".to_owned(),
+    }
+}
+
+fn skill_section_noun(section: ConfigSection) -> &'static str {
+    match section {
+        ConfigSection::Agents => "agent",
+        ConfigSection::Skills => "skill",
+        _ => "skill or agent",
+    }
 }
 
 fn skill_is_agent(skill: &SkillDescriptor) -> bool {
@@ -2118,6 +2677,14 @@ fn tool_scope_summary(scope: &ToolRegistryScope) -> String {
         "none".to_owned()
     } else {
         parts.join(" ")
+    }
+}
+
+fn list_summary(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(",")
     }
 }
 

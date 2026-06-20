@@ -45,6 +45,36 @@ fn test_skill(id: &str) -> sigil_kernel::SkillDescriptor {
     }
 }
 
+fn test_agent(id: &str) -> sigil_runtime::ResolvedAgentProfile {
+    sigil_runtime::ResolvedAgentProfile {
+        profile: sigil_kernel::AgentProfile {
+            id: sigil_kernel::AgentProfileId::new(id).expect("agent id should parse"),
+            kind: sigil_kernel::AgentProfileKind::Subagent,
+            description: "test agent".to_owned(),
+            instructions: "inspect only".to_owned(),
+            model: None,
+            provider: None,
+            reasoning_effort: None,
+            tool_scope: Default::default(),
+            permission_policy: Default::default(),
+            invocation_policy: sigil_kernel::AgentInvocationPolicy::ModelAllowed,
+            result_policy: sigil_kernel::AgentResultPolicy::SummaryWithPageRef,
+            user_invocable: true,
+            model_invocable: true,
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            nickname_candidates: vec![id.to_owned()],
+        },
+        enabled: true,
+        enabled_override: None,
+        user_invocable_override: None,
+        model_invocable_override: None,
+        source: sigil_kernel::AgentProfileSource::Workspace,
+        source_hash: format!("{id}-source-sha"),
+        trust_state: sigil_kernel::AgentTrustState::Trusted,
+    }
+}
+
 fn test_plugin(id: &str) -> sigil_kernel::PluginManifestSnapshot {
     sigil_kernel::PluginManifestSnapshot {
         plugin_id: id.to_owned(),
@@ -74,7 +104,8 @@ fn config_section_flow_wraps() {
         ConfigSection::CodeIntelligence.next_flow(),
         ConfigSection::Terminal
     );
-    assert_eq!(ConfigSection::Terminal.next_flow(), ConfigSection::Skills);
+    assert_eq!(ConfigSection::Terminal.next_flow(), ConfigSection::Agents);
+    assert_eq!(ConfigSection::Agents.next_flow(), ConfigSection::Skills);
     assert_eq!(ConfigSection::Skills.next_flow(), ConfigSection::Plugins);
     assert_eq!(ConfigSection::Plugins.next_flow(), ConfigSection::Mcp);
     assert_eq!(ConfigSection::Mcp.next_flow(), ConfigSection::Provider);
@@ -110,6 +141,18 @@ fn config_footer_action_navigation_wraps() {
     assert_eq!(
         ConfigFooterAction::Close.next_for_section(ConfigSection::Skills),
         ConfigFooterAction::LoadSkill
+    );
+    assert_eq!(
+        ConfigFooterAction::TrustAgent.next_for_section(ConfigSection::Agents),
+        ConfigFooterAction::BlockAgent
+    );
+    assert_eq!(
+        ConfigFooterAction::ToggleAgentModel.next_for_section(ConfigSection::Agents),
+        ConfigFooterAction::Close
+    );
+    assert_eq!(
+        ConfigFooterAction::Close.next_for_section(ConfigSection::Agents),
+        ConfigFooterAction::TrustAgent
     );
     assert_eq!(
         ConfigFooterAction::ApprovePlugin.next_for_section(ConfigSection::Plugins),
@@ -361,9 +404,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));
     assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(4));
     assert_eq!(ConfigSection::Terminal.flow_index(), Some(5));
-    assert_eq!(ConfigSection::Skills.flow_index(), Some(6));
-    assert_eq!(ConfigSection::Plugins.flow_index(), Some(7));
-    assert_eq!(ConfigSection::Mcp.flow_index(), Some(8));
+    assert_eq!(ConfigSection::Agents.flow_index(), Some(6));
+    assert_eq!(ConfigSection::Skills.flow_index(), Some(7));
+    assert_eq!(ConfigSection::Plugins.flow_index(), Some(8));
+    assert_eq!(ConfigSection::Mcp.flow_index(), Some(9));
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
         &[
@@ -389,6 +433,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             ConfigField::McpArgsCsv,
             ConfigField::McpStartupTimeoutSecs,
         ]
+    );
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Agents),
+        &[ConfigField::SkillId]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Skills),
@@ -422,6 +470,21 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::McpCommand.action_label(), "Enter input");
     assert_eq!(ConfigField::SkillId.action_label(), "");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
+    assert_eq!(ConfigFooterAction::TrustAgent.button_label(), "trust");
+    assert_eq!(ConfigFooterAction::TrustAgent.field_label(), "trust_agent");
+    assert_eq!(ConfigFooterAction::BlockAgent.field_label(), "block_agent");
+    assert_eq!(
+        ConfigFooterAction::ToggleAgentEnabled.field_label(),
+        "toggle_agent_enabled"
+    );
+    assert_eq!(
+        ConfigFooterAction::ToggleAgentUser.field_label(),
+        "toggle_agent_user"
+    );
+    assert_eq!(
+        ConfigFooterAction::ToggleAgentModel.field_label(),
+        "toggle_agent_model"
+    );
     assert_eq!(ConfigFooterAction::LoadSkill.button_label(), "load");
     assert_eq!(ConfigFooterAction::ApprovePlugin.button_label(), "approve");
     assert_eq!(ConfigFooterAction::DenyPlugin.field_label(), "deny_plugin");
@@ -552,36 +615,81 @@ fn config_state_handles_skill_collection_navigation() {
         vec!["invalid skill ignored".to_owned()],
     );
     assert_eq!(state.selected_field, Some(ConfigField::SkillId));
-    assert_eq!(state.selected_skill_index, 1);
+    assert_eq!(state.selected_skill_index, 0);
     assert_eq!(
         state.skill_warnings,
         vec!["invalid skill ignored".to_owned()]
     );
-    assert_eq!(
-        state.field_text_value(ConfigField::SkillId),
-        Some("audit-agent")
-    );
-    assert_eq!(state.display_value(ConfigField::SkillId), "audit-agent");
+    assert_eq!(state.field_text_value(ConfigField::SkillId), Some("review"));
+    assert_eq!(state.display_value(ConfigField::SkillId), "review");
     assert!(state.field_text_value_mut(ConfigField::SkillId).is_none());
     assert!(!config_field_accepts_char(ConfigField::SkillId, 'x'));
 
     assert_eq!(state.move_skill(true), ConfigFieldMove::Moved);
-    assert_eq!(state.selected_skill_index, 0);
-    assert_eq!(state.field_text_value(ConfigField::SkillId), Some("review"));
-    assert!(state.cycle_skill(true));
     assert_eq!(state.selected_skill_index, 2);
     assert_eq!(
         state.field_text_value(ConfigField::SkillId),
         Some("release")
     );
-    assert!(state.cycle_skill(false));
-    assert_eq!(state.selected_skill_index, 0);
-    assert_eq!(state.move_skill(false), ConfigFieldMove::Moved);
-    assert_eq!(state.selected_skill_index, 1);
-    assert_eq!(state.move_skill(false), ConfigFieldMove::Boundary);
-    assert_eq!(state.move_skill(true), ConfigFieldMove::Moved);
-    assert_eq!(state.move_skill(true), ConfigFieldMove::Moved);
     assert_eq!(state.move_skill(true), ConfigFieldMove::Boundary);
+    assert!(state.cycle_skill(true));
+    assert_eq!(state.selected_skill_index, 0);
+    assert!(state.cycle_skill(false));
+    assert_eq!(state.selected_skill_index, 2);
+    assert_eq!(state.move_skill(false), ConfigFieldMove::Moved);
+    assert_eq!(state.selected_skill_index, 0);
+    assert_eq!(state.move_skill(false), ConfigFieldMove::Boundary);
+
+    state.set_section(ConfigSection::Agents);
+    assert_eq!(state.selected_field, None);
+    state.selected_skill_index = 0;
+    assert!(state.selected_skill().is_none());
+    state.selected_skill_index = 1;
+    assert_eq!(
+        state.selected_skill().map(|skill| skill.id.as_str()),
+        Some("audit-agent")
+    );
+}
+
+#[test]
+fn config_state_handles_agent_collection_navigation() {
+    let mut state = ConfigState::from_root_config(&test_root_config());
+
+    state.set_section(ConfigSection::Agents);
+    assert_eq!(state.selected_field, None);
+    assert_eq!(state.move_field(true), ConfigFieldMove::Unavailable);
+    assert_eq!(state.move_agent(true), ConfigFieldMove::Unavailable);
+    assert!(!state.focus_last_field());
+    assert!(!state.cycle_agent(true));
+
+    state.set_agent_discovery(
+        vec![test_agent("explore"), test_agent("review")],
+        vec!["invalid agent ignored".to_owned()],
+    );
+    assert_eq!(state.selected_field, Some(ConfigField::SkillId));
+    assert_eq!(state.selected_agent_index, 0);
+    assert_eq!(
+        state.agent_warnings,
+        vec!["invalid agent ignored".to_owned()]
+    );
+    assert_eq!(
+        state.field_text_value(ConfigField::SkillId),
+        Some("explore")
+    );
+    assert_eq!(state.display_value(ConfigField::SkillId), "explore");
+    assert!(state.field_text_value_mut(ConfigField::SkillId).is_none());
+
+    assert_eq!(state.move_agent(true), ConfigFieldMove::Moved);
+    assert_eq!(state.selected_agent_index, 1);
+    assert_eq!(state.field_text_value(ConfigField::SkillId), Some("review"));
+    assert_eq!(state.move_agent(true), ConfigFieldMove::Boundary);
+    assert!(state.cycle_agent(true));
+    assert_eq!(state.selected_agent_index, 0);
+    assert!(state.cycle_agent(false));
+    assert_eq!(state.selected_agent_index, 1);
+    assert_eq!(state.move_agent(false), ConfigFieldMove::Moved);
+    assert_eq!(state.selected_agent_index, 0);
+    assert_eq!(state.move_agent(false), ConfigFieldMove::Boundary);
 }
 
 #[test]

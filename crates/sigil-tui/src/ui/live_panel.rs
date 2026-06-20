@@ -11,7 +11,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::AppState,
     view_model::{
-        LivePanelViewModel, LiveProgressViewModel, TaskStripRowViewModel, TaskStripViewModel,
+        LivePanelViewModel, LiveProgressViewModel, PlanApprovalViewModel, TaskStripRowViewModel,
+        TaskStripViewModel,
     },
 };
 
@@ -24,6 +25,7 @@ use super::{
 
 pub(crate) const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
 pub(crate) const LIVE_PROGRESS_ROWS: u16 = 2;
+const LIVE_PLAN_APPROVAL_ROWS: u16 = 2;
 const LIVE_TASK_ROW_LIMIT: usize = 4;
 
 pub(crate) fn render_live_panel(frame: &mut Frame, area: Rect, view_model: &LivePanelViewModel) {
@@ -103,11 +105,20 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
     } else {
         0
     };
+    let plan_rows = if app.pending_plan_approval().is_some() {
+        LIVE_PLAN_APPROVAL_ROWS
+    } else {
+        0
+    };
     let task_rows = app
         .task_strip_view()
         .map(|view| live_task_strip_rows(view.rows.len()))
         .unwrap_or(0);
-    live_status_rows_with_separator(progress_rows.saturating_add(task_rows))
+    live_status_rows_with_separator(
+        progress_rows
+            .saturating_add(plan_rows)
+            .saturating_add(task_rows),
+    )
 }
 
 pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
@@ -116,12 +127,21 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
     } else {
         0
     };
+    let plan_rows = if view_model.plan_approval.is_some() {
+        LIVE_PLAN_APPROVAL_ROWS
+    } else {
+        0
+    };
     let task_rows = view_model
         .task_strip
         .as_ref()
         .map(|view| live_task_strip_rows(view.rows.len()))
         .unwrap_or(0);
-    live_status_rows_with_separator(progress_rows.saturating_add(task_rows))
+    live_status_rows_with_separator(
+        progress_rows
+            .saturating_add(plan_rows)
+            .saturating_add(task_rows),
+    )
 }
 
 fn live_status_rows_with_separator(content_rows: u16) -> u16 {
@@ -162,6 +182,12 @@ fn render_live_status_band(frame: &mut Frame, area: Rect, view_model: &LivePanel
     let mut lines = Vec::new();
     if let Some(progress) = &view_model.progress {
         lines.extend(render_live_progress_lines(progress, accent));
+    }
+    if let Some(plan_approval) = &view_model.plan_approval {
+        lines.extend(render_plan_approval_lines(
+            plan_approval,
+            area.width as usize,
+        ));
     }
     if let Some(task_strip) = &view_model.task_strip {
         lines.extend(render_task_strip_lines(task_strip, area.width as usize));
@@ -214,6 +240,66 @@ fn render_status_left_rail(frame: &mut Frame, area: Rect, accent: Color) {
             area.height.saturating_sub(1),
         ),
     );
+}
+
+fn render_plan_approval_lines(plan: &PlanApprovalViewModel, width: usize) -> Vec<Line<'static>> {
+    let title_width = width.saturating_sub(24);
+    let scope = truncate_display_width(&plan.scope_summary, title_width);
+    vec![
+        Line::from(vec![
+            Span::styled(
+                "Plan",
+                Style::default()
+                    .fg(super::theme::accent_gold())
+                    .bg(status_band_bg())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                "ready",
+                Style::default()
+                    .fg(ink())
+                    .bg(status_band_bg())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ·  {}  ·  {}", plan.hash, scope),
+                Style::default()
+                    .fg(super::theme::muted())
+                    .bg(status_band_bg()),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("A", Style::default().fg(ink()).bg(status_band_bg())),
+            Span::styled(
+                " ask",
+                Style::default()
+                    .fg(super::theme::muted())
+                    .bg(status_band_bg()),
+            ),
+            Span::styled("  W", Style::default().fg(ink()).bg(status_band_bg())),
+            Span::styled(
+                " workspace edits",
+                Style::default()
+                    .fg(super::theme::muted())
+                    .bg(status_band_bg()),
+            ),
+            Span::styled("  C", Style::default().fg(ink()).bg(status_band_bg())),
+            Span::styled(
+                " continue",
+                Style::default()
+                    .fg(super::theme::muted())
+                    .bg(status_band_bg()),
+            ),
+            Span::styled("  Esc", Style::default().fg(ink()).bg(status_band_bg())),
+            Span::styled(
+                " discard",
+                Style::default()
+                    .fg(super::theme::muted())
+                    .bg(status_band_bg()),
+            ),
+        ]),
+    ]
 }
 
 fn render_task_strip_lines(task_strip: &TaskStripViewModel, width: usize) -> Vec<Line<'static>> {

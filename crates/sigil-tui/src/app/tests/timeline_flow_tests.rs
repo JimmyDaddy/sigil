@@ -2,6 +2,7 @@ use super::super::timeline_flow::{selected_timeline_line_columns, text_by_displa
 use super::*;
 use crate::{
     mouse::{AppMouseOutcome, MouseInput, MouseInputKind},
+    timeline::TimelineEntry,
     ui::LayoutSnapshot,
 };
 use ratatui::{
@@ -591,6 +592,27 @@ fn streaming_assistant_defers_code_highlight_until_finished() -> Result<()> {
 }
 
 #[test]
+fn agent_tool_pre_tool_streaming_text_is_thinking_not_assistant() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::TextDelta("parent pre-tool analysis".to_owned()))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-agent-1".to_owned(),
+        name: "spawn_agent".to_owned(),
+        args_json: "{}".to_owned(),
+    }))?;
+
+    let entry = app
+        .timeline
+        .iter()
+        .find(|entry| entry.text == "parent pre-tool analysis")
+        .expect("streaming entry should remain");
+    assert_eq!(entry.role, TimelineRole::Thinking);
+    assert_eq!(entry.text, "parent pre-tool analysis");
+    Ok(())
+}
+
+#[test]
 fn assistant_message_before_tool_remains_visible() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -778,7 +800,11 @@ fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result
 
     app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
-        entries: Vec::new(),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: Vec::new(),
+        rendered_body_lines: Vec::new(),
+        total_timeline_entries: 0,
+        transcript_truncated: false,
         load_error: Some("permission denied opening child session".to_owned()),
     });
     let load_error = transcript_plain(app.transcript_lines(8));
@@ -787,7 +813,11 @@ fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result
 
     app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
-        entries: Vec::new(),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: Vec::new(),
+        rendered_body_lines: Vec::new(),
+        total_timeline_entries: 0,
+        transcript_truncated: false,
         load_error: None,
     });
     let empty = transcript_plain(app.transcript_lines(8));
@@ -795,18 +825,121 @@ fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result
 
     app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
-        entries: vec![
-            SessionLogEntry::User(ModelMessage::user("child prompt")),
-            SessionLogEntry::Assistant(ModelMessage::assistant(
-                Some("child answer".to_owned()),
-                Vec::new(),
-            )),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: vec![
+            TimelineEntry {
+                role: TimelineRole::User,
+                text: "child prompt".to_owned(),
+            },
+            TimelineEntry {
+                role: TimelineRole::Assistant,
+                text: "child answer".to_owned(),
+            },
         ],
+        rendered_body_lines: vec![Line::from("child prompt"), Line::from("child answer")],
+        total_timeline_entries: 2,
+        transcript_truncated: false,
         load_error: None,
     });
     let restored = transcript_plain(app.transcript_lines(12));
     assert!(restored.contains("child prompt"));
     assert!(restored.contains("child answer"));
+    Ok(())
+}
+
+#[test]
+fn child_agent_transcript_uses_cached_bounded_timeline_entries() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let entries = (0..96)
+        .map(|index| TimelineEntry {
+            role: TimelineRole::Assistant,
+            text: format!("child entry {index}"),
+        })
+        .collect::<Vec<_>>();
+    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: entries[16..].to_vec(),
+        rendered_body_lines: entries[16..]
+            .iter()
+            .map(|entry| Line::from(entry.text.clone()))
+            .collect(),
+        total_timeline_entries: entries.len(),
+        transcript_truncated: false,
+        load_error: None,
+    });
+
+    let rendered = transcript_plain(app.transcript_lines(16));
+
+    assert!(rendered.contains("showing latest 80 of 96 child transcript entries"));
+    assert!(!rendered.contains("child entry 0"));
+    assert!(rendered.contains("child entry 95"));
+    Ok(())
+}
+
+#[test]
+fn child_agent_transcript_reload_uses_tail_and_skips_unchanged_files() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join("parent.jsonl");
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let child_path = temp.path().join("children/task_1/step_1-child_1.jsonl");
+    let store = sigil_kernel::JsonlSessionStore::new(&child_path)?;
+    for index in 0..1500 {
+        store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some(format!("child message {index}")),
+            Vec::new(),
+        )))?;
+    }
+
+    app.reload_active_agent_child_transcript();
+    let rendered = transcript_plain(app.transcript_lines(16));
+
+    assert!(rendered.contains("showing latest 80 child transcript entries"));
+    assert!(!rendered.contains("child message 0"));
+    assert!(rendered.contains("child message 1499"));
+
+    let transcript = app
+        .active_agent_child_transcript
+        .as_mut()
+        .expect("child transcript");
+    transcript.rendered_body_lines = vec![Line::from("cached sentinel")];
+    app.reload_active_agent_child_transcript();
+    let unchanged = transcript_plain(app.transcript_lines(16));
+
+    assert!(unchanged.contains("cached sentinel"));
+    Ok(())
+}
+
+#[test]
+fn running_child_agent_parent_sync_does_not_reload_changing_transcript() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join("parent.jsonl");
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let child_path = temp.path().join("children/task_1/step_1-child_1.jsonl");
+    let store = sigil_kernel::JsonlSessionStore::new(&child_path)?;
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("first child line".to_owned()),
+        Vec::new(),
+    )))?;
+    app.reload_active_agent_child_transcript();
+    let transcript = app
+        .active_agent_child_transcript
+        .as_mut()
+        .expect("child transcript");
+    transcript.rendered_body_lines = vec![Line::from("running cached transcript")];
+
+    store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("second child line".to_owned()),
+        Vec::new(),
+    )))?;
+    app.refresh_active_agent_view_after_parent_sync();
+    let rendered = transcript_plain(app.transcript_lines(16));
+
+    assert!(rendered.contains("running cached transcript"));
+    assert!(!rendered.contains("second child line"));
     Ok(())
 }
 

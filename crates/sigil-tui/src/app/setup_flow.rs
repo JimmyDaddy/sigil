@@ -169,6 +169,30 @@ impl AppState {
         Ok(None)
     }
 
+    pub(super) fn handle_setup_paste_text(&mut self, text: &str) {
+        let Some(state) = self.setup_state.as_mut() else {
+            return;
+        };
+        let value = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect::<String>();
+        if value.is_empty() {
+            return;
+        }
+        match state.selected_field {
+            SetupField::Model => {
+                state.model = value.clone();
+                self.last_notice = Some(format!("updated model {value}"));
+            }
+            SetupField::ApiKey => {
+                state.api_key = value;
+                self.last_notice = Some("updated api key".to_owned());
+            }
+            SetupField::TrustCurrentFolder | SetupField::Save => {}
+        }
+    }
+
     pub(super) fn complete_setup(&mut self) -> Result<Option<AppAction>> {
         let Some(state) = &mut self.setup_state else {
             return Ok(None);

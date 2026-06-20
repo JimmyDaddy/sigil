@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::Range,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 mod agent_flow;
@@ -27,9 +28,9 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
-    ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus, MemoryConfig,
-    ReasoningEffort, RootConfig, SecretRedactor, Session, SessionLogEntry, SessionStats,
-    ToolPreviewSnapshot, resolve_workspace_root,
+    AgentThreadId, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
+    MemoryConfig, PlanApprovalPermission, ReasoningEffort, RootConfig, SecretRedactor, Session,
+    SessionLogEntry, SessionStats, ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
 };
 use uuid::Uuid;
 
@@ -81,11 +82,59 @@ enum AgentView {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComposerMode {
+    Build,
+    Plan,
+}
+
+impl ComposerMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Build => "Build",
+            Self::Plan => "Plan",
+        }
+    }
+
+    fn notice(self) -> &'static str {
+        match self {
+            Self::Build => "thinking",
+            Self::Plan => "planning",
+        }
+    }
+
+    fn phase_marker(self) -> &'static str {
+        match self {
+            Self::Build => "thinking",
+            Self::Plan => "plan",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ActiveAgentChildTranscript {
     path: PathBuf,
-    entries: Vec<SessionLogEntry>,
+    file_signature: ChildTranscriptFileSignature,
+    timeline_entries: Vec<TimelineEntry>,
+    rendered_body_lines: Vec<Line<'static>>,
+    total_timeline_entries: usize,
+    transcript_truncated: bool,
     load_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChildTranscriptFileSignature {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+impl ChildTranscriptFileSignature {
+    fn empty() -> Self {
+        Self {
+            len: 0,
+            modified: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +144,21 @@ struct AgentSidebarItem {
     target: Option<AgentView>,
     thread_id: Option<sigil_kernel::AgentThreadId>,
     muted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingPlanApproval {
+    pub(crate) plan_text: String,
+    pub(crate) plan_hash: String,
+    pub(crate) scope_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposerPasteSpan {
+    start: usize,
+    end: usize,
+    char_count: usize,
+    line_count: usize,
 }
 
 #[derive(Debug)]
@@ -117,6 +181,8 @@ pub struct AppState {
     pub(crate) mcp_server_statuses: BTreeMap<String, McpServerRuntimeStatus>,
     pub session_id: String,
     pub input: String,
+    composer_mode: ComposerMode,
+    pending_plan_approval: Option<PendingPlanApproval>,
     pub input_history: Vec<String>,
     pub timeline: Vec<TimelineEntry>,
     pub events: Vec<EventEntry>,
@@ -187,6 +253,7 @@ pub struct AppState {
     terminal_width: u16,
     terminal_height: u16,
     input_cursor: usize,
+    input_paste_spans: Vec<ComposerPasteSpan>,
     input_history_index: Option<usize>,
     input_history_draft: Option<String>,
     cleared_input_draft: Option<String>,
@@ -202,7 +269,14 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub enum AppAction {
     SubmitPrompt(String),
-    SubmitPlan(String),
+    SubmitPlanPrompt(String),
+    ApprovePlan {
+        plan_text: String,
+        permission: PlanApprovalPermission,
+        scope_summary: String,
+        clear_planning_context: bool,
+    },
+    SubmitTask(String),
     InvokeInlineSkill {
         skill_id: String,
         arguments: String,
@@ -211,7 +285,11 @@ pub enum AppAction {
         skill_id: String,
         arguments: String,
     },
-    ContinuePlan {
+    InvokeAgentProfile {
+        profile_id: String,
+        prompt: String,
+    },
+    ContinueTask {
         task_id: Option<String>,
         guidance: Option<String>,
     },
@@ -222,6 +300,10 @@ pub enum AppAction {
     CancelRun,
     CancelTerminalTask {
         task_id: String,
+    },
+    CloseAgent {
+        thread_id: AgentThreadId,
+        reason: Option<String>,
     },
     CopyToClipboard {
         text: String,
@@ -287,6 +369,8 @@ impl AppState {
             mcp_server_statuses: initial_mcp_server_statuses(root_config),
             session_id,
             input: String::new(),
+            composer_mode: ComposerMode::Build,
+            pending_plan_approval: None,
             input_history: Vec::new(),
             timeline: Vec::new(),
             events: Vec::new(),
@@ -360,6 +444,7 @@ impl AppState {
             terminal_width: 120,
             terminal_height: 32,
             input_cursor: 0,
+            input_paste_spans: Vec::new(),
             input_history_index: None,
             input_history_draft: None,
             cleared_input_draft: None,
@@ -410,6 +495,8 @@ impl AppState {
             mcp_server_statuses: BTreeMap::new(),
             session_id,
             input: String::new(),
+            composer_mode: ComposerMode::Build,
+            pending_plan_approval: None,
             input_history: Vec::new(),
             timeline: Vec::new(),
             events: Vec::new(),
@@ -483,6 +570,7 @@ impl AppState {
             terminal_width: 120,
             terminal_height: 32,
             input_cursor: 0,
+            input_paste_spans: Vec::new(),
             input_history_index: None,
             input_history_draft: None,
             cleared_input_draft: None,
@@ -644,6 +732,7 @@ impl AppState {
         self.composer_agent_panel_focused = false;
         self.cleared_input_draft = None;
         self.input_kill_buffer = None;
+        self.input_paste_spans.clear();
         self.bootstrap();
         self.last_notice = Some(notice.clone());
         self.push_timeline(TimelineRole::Notice, notice);
@@ -704,6 +793,10 @@ impl AppState {
 
         if let Some(outcome) = self.handle_pending_approval_key_event(key) {
             return Ok(outcome);
+        }
+
+        if let Some(outcome) = self.handle_pending_plan_approval_key_event(key) {
+            return Ok(Some(outcome));
         }
 
         if self.active_pane == PaneFocus::Activity
@@ -970,6 +1063,12 @@ impl AppState {
                 if self.input.is_empty() && self.handle_ui_command(UiCommand::ClearToolCardFocus) {
                     return Ok(None);
                 }
+                if self.input.is_empty() && self.composer_mode == ComposerMode::Plan {
+                    self.composer_mode = ComposerMode::Build;
+                    self.last_notice = Some("build mode".to_owned());
+                    self.push_event("mode", "build");
+                    return Ok(None);
+                }
                 self.blur_composer_agent_panel();
                 self.clear_input_preserving_draft();
                 self.reset_input_history_navigation();
@@ -1045,6 +1144,50 @@ impl AppState {
         Ok(None)
     }
 
+    fn handle_pending_plan_approval_key_event(&mut self, key: KeyEvent) -> Option<AppAction> {
+        self.pending_plan_approval.as_ref()?;
+        if !key.modifiers.is_empty() {
+            return None;
+        }
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.approve_pending_plan(PlanApprovalPermission::Ask)
+            }
+            KeyCode::Char('w') | KeyCode::Char('W') => {
+                self.approve_pending_plan(PlanApprovalPermission::WorkspaceEdits)
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.clear_pending_plan_approval();
+                self.composer_mode = ComposerMode::Plan;
+                self.last_notice = Some("continue planning".to_owned());
+                self.push_event("plan", "continue");
+                None
+            }
+            KeyCode::Esc | KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.clear_pending_plan_approval();
+                self.last_notice = Some("plan approval dismissed".to_owned());
+                self.push_event("plan", "dismissed");
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn approve_pending_plan(&mut self, permission: PlanApprovalPermission) -> Option<AppAction> {
+        let pending = self.pending_plan_approval.take()?;
+        self.last_notice = Some(match permission {
+            PlanApprovalPermission::Ask => "approving plan: ask".to_owned(),
+            PlanApprovalPermission::WorkspaceEdits => "approving plan: workspace edits".to_owned(),
+        });
+        self.push_event("plan", "approve");
+        Some(AppAction::ApprovePlan {
+            plan_text: pending.plan_text,
+            permission,
+            scope_summary: pending.scope_summary,
+            clear_planning_context: true,
+        })
+    }
+
     pub fn cache_hit_ratio(&self) -> f64 {
         let total = self.stats.cache_hit_tokens + self.stats.cache_miss_tokens;
         if total == 0 {
@@ -1092,6 +1235,7 @@ impl AppState {
         self.clamp_input_cursor();
         if width_changed {
             self.rebuild_timeline_render_cache();
+            self.rerender_active_agent_child_transcript();
         }
         self.timeline_scroll_back = self
             .timeline_scroll_back
@@ -1126,37 +1270,84 @@ impl AppState {
             return self.execute_slash_command(command, prompt);
         }
 
+        if prompt.trim_start().starts_with('@') {
+            if self.is_busy {
+                self.push_timeline(TimelineRole::Notice, "busy; submit later");
+                self.push_event("notice", "agent mention ignored while busy");
+                return Ok(None);
+            }
+            let (profile_id, agent_prompt) = match self.resolve_agent_mention_invocation(&prompt) {
+                Ok(invocation) => invocation,
+                Err(error) => {
+                    let notice = error.to_string();
+                    self.push_timeline(TimelineRole::Notice, notice.clone());
+                    self.push_event("agent:unknown", prompt.clone());
+                    self.last_notice = Some(notice);
+                    return Ok(None);
+                }
+            };
+            self.clear_pending_plan_approval();
+            self.input.clear();
+            self.input_cursor = 0;
+            self.input_paste_spans.clear();
+            self.reset_slash_selector();
+            self.timeline_scroll_back = 0;
+            self.push_timeline(TimelineRole::User, prompt.clone());
+            self.push_event("input", format!("invoked agent {profile_id}"));
+            self.active_pane = PaneFocus::Composer;
+            self.push_event("focus", current_focus_label(self));
+            self.is_busy = true;
+            self.run_phase = RunPhase::Thinking;
+            self.last_notice = Some(format!("invoking agent {profile_id}"));
+            self.last_phase_marker = None;
+            self.push_phase_marker(format!("agent|{profile_id}"));
+            self.streaming_assistant_index = None;
+            self.streaming_reasoning_index = None;
+            self.composer_mode = ComposerMode::Build;
+            self.refresh_usage_sidebar_cache();
+            return Ok(Some(AppAction::InvokeAgentProfile {
+                profile_id,
+                prompt: agent_prompt,
+            }));
+        }
+
         if self.is_busy {
             self.push_timeline(TimelineRole::Notice, "busy; submit later");
             self.push_event("notice", "submit ignored while busy");
             return Ok(None);
         }
 
-        if self.has_task_context_for_plain_prompt() {
+        self.clear_pending_plan_approval();
+
+        if self.composer_mode == ComposerMode::Plan {
             self.input.clear();
             self.input_cursor = 0;
+            self.input_paste_spans.clear();
             self.reset_slash_selector();
             self.timeline_scroll_back = 0;
             self.push_timeline(TimelineRole::User, prompt.clone());
-            self.push_event("input", format!("submitted task continue {prompt}"));
+            self.push_event("input", format!("submitted plan prompt {prompt}"));
             self.active_pane = PaneFocus::Composer;
             self.push_event("focus", current_focus_label(self));
             self.is_busy = true;
             self.run_phase = RunPhase::Thinking;
-            self.last_notice = Some("continuing task".to_owned());
+            self.last_notice = Some(ComposerMode::Plan.notice().to_owned());
             self.last_phase_marker = None;
-            self.push_phase_marker(format!("task|{}", self.model_name));
+            self.push_phase_marker(format!(
+                "{}|{}",
+                ComposerMode::Plan.phase_marker(),
+                self.model_name
+            ));
             self.streaming_assistant_index = None;
             self.streaming_reasoning_index = None;
+            self.composer_mode = ComposerMode::Build;
             self.refresh_usage_sidebar_cache();
-            return Ok(Some(AppAction::ContinuePlan {
-                task_id: None,
-                guidance: Some(prompt),
-            }));
+            return Ok(Some(AppAction::SubmitPlanPrompt(prompt)));
         }
 
         self.input.clear();
         self.input_cursor = 0;
+        self.input_paste_spans.clear();
         self.reset_slash_selector();
         self.timeline_scroll_back = 0;
         self.push_timeline(TimelineRole::User, prompt.clone());
@@ -1181,6 +1372,7 @@ impl AppState {
     ) -> Result<Option<AppAction>> {
         self.input.clear();
         self.input_cursor = 0;
+        self.input_paste_spans.clear();
         self.pending_mouse_slash_confirmation = None;
         self.reset_slash_selector();
         self.push_event("slash", prompt.clone());
@@ -1202,10 +1394,7 @@ impl AppState {
                 self.show_doctor_report();
                 Ok(None)
             }
-            "/agent" => {
-                self.activate_agent_from_command(&command.arg)?;
-                Ok(None)
-            }
+            "/agent" => self.activate_agent_from_command(&command.arg),
             "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
             "/model" => self.set_runtime_model_from_command(&command.arg),
             "/new" => {
@@ -1223,7 +1412,50 @@ impl AppState {
                 }
                 let arg = command.arg.trim();
                 if arg.is_empty() {
-                    self.push_timeline(TimelineRole::Notice, "usage: /plan <task>");
+                    self.composer_mode = ComposerMode::Plan;
+                    self.last_notice = Some("plan mode".to_owned());
+                    self.push_event("mode", "plan");
+                    return Ok(None);
+                }
+                if arg == "continue" || arg.starts_with("continue ") {
+                    self.push_timeline(
+                        TimelineRole::Notice,
+                        "plan mode cannot continue durable tasks; use /task continue",
+                    );
+                    self.last_notice = Some("use /task continue".to_owned());
+                    return Ok(None);
+                }
+
+                let plan_prompt = arg.to_owned();
+                self.clear_pending_plan_approval();
+                self.timeline_scroll_back = 0;
+                self.push_timeline(TimelineRole::User, format!("/plan {plan_prompt}"));
+                self.push_event("input", format!("submitted plan prompt {plan_prompt}"));
+                self.active_pane = PaneFocus::Composer;
+                self.push_event("focus", current_focus_label(self));
+                self.is_busy = true;
+                self.run_phase = RunPhase::Thinking;
+                self.last_notice = Some(ComposerMode::Plan.notice().to_owned());
+                self.last_phase_marker = None;
+                self.push_phase_marker(format!(
+                    "{}|{}",
+                    ComposerMode::Plan.phase_marker(),
+                    self.model_name
+                ));
+                self.streaming_assistant_index = None;
+                self.streaming_reasoning_index = None;
+                self.refresh_usage_sidebar_cache();
+                Ok(Some(AppAction::SubmitPlanPrompt(plan_prompt)))
+            }
+            "/task" => {
+                if self.is_busy {
+                    self.push_timeline(TimelineRole::Notice, "busy; task later");
+                    return Ok(None);
+                }
+                let arg = command.arg.trim();
+                if arg.is_empty() {
+                    self.push_timeline(TimelineRole::Notice, "usage: /task <task|continue>");
+                    self.last_notice = Some("usage: /task <task|continue>".to_owned());
                     return Ok(None);
                 }
                 if arg == "continue" || arg.starts_with("continue ") {
@@ -1240,27 +1472,28 @@ impl AppState {
                     self.streaming_assistant_index = None;
                     self.streaming_reasoning_index = None;
                     self.refresh_usage_sidebar_cache();
-                    return Ok(Some(AppAction::ContinuePlan {
+                    return Ok(Some(AppAction::ContinueTask {
                         task_id: None,
                         guidance,
                     }));
                 }
 
                 let objective = arg.to_owned();
+                self.clear_pending_plan_approval();
                 self.timeline_scroll_back = 0;
-                self.push_timeline(TimelineRole::User, format!("/plan {objective}"));
-                self.push_event("input", format!("submitted plan {objective}"));
+                self.push_timeline(TimelineRole::User, format!("/task {objective}"));
+                self.push_event("input", format!("submitted task {objective}"));
                 self.active_pane = PaneFocus::Composer;
                 self.push_event("focus", current_focus_label(self));
                 self.is_busy = true;
                 self.run_phase = RunPhase::Thinking;
-                self.last_notice = Some("planning".to_owned());
+                self.last_notice = Some("planning task".to_owned());
                 self.last_phase_marker = None;
                 self.push_phase_marker(format!("task|{}", self.model_name));
                 self.streaming_assistant_index = None;
                 self.streaming_reasoning_index = None;
                 self.refresh_usage_sidebar_cache();
-                Ok(Some(AppAction::SubmitPlan(objective)))
+                Ok(Some(AppAction::SubmitTask(objective)))
             }
             "/quit" => {
                 self.should_quit = true;
@@ -1448,10 +1681,30 @@ impl AppState {
         task_sidebar::task_strip_view(&self.current_session_entries)
     }
 
-    fn has_task_context_for_plain_prompt(&self) -> bool {
-        sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries)
-            .latest_unfinished_task()
-            .is_some()
+    pub(crate) fn pending_plan_approval(&self) -> Option<&PendingPlanApproval> {
+        self.pending_plan_approval.as_ref()
+    }
+
+    pub(crate) fn set_pending_plan_approval_from_text(&mut self, plan_text: &str) {
+        let plan_text = plan_text.trim();
+        if plan_text.is_empty() {
+            self.pending_plan_approval = None;
+            return;
+        }
+        self.pending_plan_approval = Some(PendingPlanApproval {
+            plan_text: plan_text.to_owned(),
+            plan_hash: plan_text_hash(plan_text),
+            scope_summary: first_nonempty_plan_line(plan_text)
+                .unwrap_or_else(|| "approved plan scope".to_owned()),
+        });
+    }
+
+    fn clear_pending_plan_approval(&mut self) {
+        self.pending_plan_approval = None;
+    }
+
+    pub(crate) fn composer_mode_label(&self) -> &'static str {
+        self.composer_mode.label()
     }
 
     pub(crate) fn reasoning_effort_label(&self) -> &'static str {
@@ -1885,6 +2138,14 @@ fn context_window_source_label(source: ContextWindowSource) -> &'static str {
         ContextWindowSource::Config => "fallback",
         ContextWindowSource::None => "n/a",
     }
+}
+
+fn first_nonempty_plan_line(plan_text: &str) -> Option<String> {
+    plan_text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| truncate_session_view_text(line, 80))
 }
 
 fn threshold_token_count(cap: u32, ratio: f32) -> u64 {

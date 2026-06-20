@@ -494,7 +494,7 @@ fn process_app_action_restarts_closed_worker_and_retries_command() -> Result<()>
     process_app_action_with_spawner(
         &mut app,
         &mut worker,
-        AppAction::SubmitPlan("review workspace".to_owned()),
+        AppAction::SubmitTask("review workspace".to_owned()),
         |root_config, _app| {
             spawn_count += 1;
             assert_eq!(root_config.agent.provider, "deepseek");
@@ -524,7 +524,7 @@ fn process_app_action_starts_missing_worker_and_sends_command() -> Result<()> {
     process_app_action_with_spawner(
         &mut app,
         &mut worker,
-        AppAction::SubmitPlan("review workspace".to_owned()),
+        AppAction::SubmitTask("review workspace".to_owned()),
         |_root_config, _app| {
             next_runtime
                 .take()
@@ -555,7 +555,7 @@ fn process_app_action_reports_closed_worker_after_restart_without_exiting() -> R
     process_app_action_with_spawner(
         &mut app,
         &mut worker,
-        AppAction::SubmitPlan("review workspace".to_owned()),
+        AppAction::SubmitTask("review workspace".to_owned()),
         |_root_config, _app| {
             let (retry_tx, retry_rx) = mpsc::channel();
             drop(retry_rx);

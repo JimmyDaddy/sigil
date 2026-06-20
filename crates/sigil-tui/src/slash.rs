@@ -68,7 +68,13 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         canonical: "/plan",
         aliases: &[],
-        description: "plan and execute a task",
+        description: "enter plan mode or run one plan prompt",
+        completes_with_space: true,
+    },
+    SlashCommandSpec {
+        canonical: "/task",
+        aliases: &[],
+        description: "start or continue a durable task",
         completes_with_space: true,
     },
     SlashCommandSpec {

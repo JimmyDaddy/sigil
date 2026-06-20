@@ -276,7 +276,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Provider 1/9"));
+    assert!(rendered.contains("Provider 1/10"));
     assert!(rendered.contains("▸ Model"));
     assert!(rendered.contains("key model"));
     assert!(rendered.contains("keys Tab section"));
@@ -293,9 +293,9 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/9", "▸ Model"),
-            (2, "Memory 3/9", "▸ Memory"),
-            (3, "Compaction 4/9", "▸ Auto compact"),
+            (0, "Provider 1/10", "▸ Model"),
+            (2, "Memory 3/10", "▸ Memory"),
+            (3, "Compaction 4/10", "▸ Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.input = "/config".to_owned();
@@ -1045,7 +1045,7 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    for _ in 0..7 {
+    for _ in 0..8 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     }
     let backend = TestBackend::new(96, 80);
@@ -1054,7 +1054,7 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Plugins 8/9"));
+    assert!(rendered.contains("Plugins 9/10"));
     assert!(rendered.contains("Hook 4"));
     assert!(rendered.contains("session_stop"));
     assert!(rendered.contains("scripts/hook-4.sh --flag-4"));
@@ -1168,7 +1168,7 @@ fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Memory 3/9"));
+    assert!(rendered.contains("Memory 3/10"));
     assert!(rendered.contains("◇ Documents"));
     assert!(rendered.contains("Last scan"));
     assert!(rendered.contains("Root files"));

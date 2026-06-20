@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use sigil_kernel::{
-    AgentRunResult, CompactionRecord, ReasoningEffort, RunEvent, SessionLogEntry, TaskRunStatus,
-    TerminalTaskEntry,
+    AgentRunResult, AgentThreadId, CompactionRecord, PlanApprovalPermission, PlanApprovedEntry,
+    ReasoningEffort, RunEvent, SessionLogEntry, TaskRunStatus, TerminalTaskEntry,
 };
 use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::{
@@ -21,6 +21,16 @@ pub enum WorkerCommand {
         prompt: String,
         reasoning_effort: ReasoningEffort,
     },
+    SubmitPlanPrompt {
+        prompt: String,
+        reasoning_effort: ReasoningEffort,
+    },
+    ApprovePlan {
+        plan_text: String,
+        permission: PlanApprovalPermission,
+        scope_summary: String,
+        clear_planning_context: bool,
+    },
     InvokeInlineSkill {
         skill_id: String,
         arguments: String,
@@ -29,6 +39,10 @@ pub enum WorkerCommand {
     InvokeChildSessionSkill {
         skill_id: String,
         arguments: String,
+    },
+    InvokeAgentProfile {
+        profile_id: String,
+        prompt: String,
     },
     SubmitTask {
         prompt: String,
@@ -44,6 +58,10 @@ pub enum WorkerCommand {
     CancelRun,
     CancelTerminalTask {
         task_id: String,
+    },
+    CloseAgent {
+        thread_id: AgentThreadId,
+        reason: Option<String>,
     },
     CompactNow,
     CheckChangedFilesDiagnostics,
@@ -77,12 +95,27 @@ pub enum WorkerMessage {
     RunStarted {
         prompt: String,
     },
+    PlanRunStarted {
+        prompt: String,
+    },
+    AgentRunStarted {
+        profile_id: String,
+        prompt: String,
+    },
     TaskRunStarted {
         task_id: String,
         objective: String,
     },
     RunFinished {
         result: AgentRunResult,
+        entries: Vec<SessionLogEntry>,
+    },
+    PlanRunFinished {
+        result: AgentRunResult,
+        entries: Vec<SessionLogEntry>,
+    },
+    PlanApproved {
+        entry: PlanApprovedEntry,
         entries: Vec<SessionLogEntry>,
     },
     TaskRunFinished {
@@ -98,6 +131,10 @@ pub enum WorkerMessage {
     },
     TerminalTaskUpdated {
         entry: TerminalTaskEntry,
+        entries: Vec<SessionLogEntry>,
+    },
+    AgentThreadClosed {
+        thread_id: AgentThreadId,
         entries: Vec<SessionLogEntry>,
     },
     SessionSwitched {

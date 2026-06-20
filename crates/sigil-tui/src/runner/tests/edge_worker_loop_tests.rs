@@ -8,12 +8,15 @@ use std::{
 
 use anyhow::Result;
 use sigil_kernel::{
-    Agent, AgentRole, ControlEntry, JsonlSessionStore, McpElicitationDecision, McpElicitationEntry,
-    Provider, ReasoningEffort, RootConfig, Session, SessionLogEntry, SessionRef,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
-    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
-    ToolCall, ToolContext, ToolExecutionStatus, ToolRegistry,
+    Agent, AgentInvocationMode, AgentInvocationSource, AgentProfileId, AgentProfileSnapshotId,
+    AgentRole, AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, ControlEntry, JsonlSessionStore, McpElicitationDecision,
+    McpElicitationEntry, PlanApprovalPermission, Provider, ReasoningEffort, RootConfig, Session,
+    SessionLogEntry, SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
+    TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
+    TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext, ToolExecutionStatus, ToolRegistry,
+    WorkspaceRootSnapshot,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
@@ -25,7 +28,8 @@ use super::{
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
         worker_loop::append_cancelled_task_state,
         worker_loop::{
-            WorkerLoopMcpHandlers, append_mcp_elicitation_audits, cancel_terminal_task,
+            PlanApprovalRequest, WorkerLoopMcpHandlers, agent_delegation_requirement_for_prompt,
+            append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
             next_task_id, resolve_continue_task, run_worker_loop,
         },
     },
@@ -67,6 +71,29 @@ fn next_task_id_uses_session_local_counter() -> Result<()> {
         "task_2"
     );
     Ok(())
+}
+
+#[test]
+fn agent_delegation_requirement_detects_explicit_subagent_prompts() {
+    assert!(
+        agent_delegation_requirement_for_prompt(
+            "梳理 crates/sigil-tui，同时必须用子 agent 梳理 kernel"
+        )
+        .is_some()
+    );
+    assert!(
+        agent_delegation_requirement_for_prompt(
+            "Please use a sub-agent to inspect the runtime crate"
+        )
+        .is_some()
+    );
+    assert!(agent_delegation_requirement_for_prompt("讨论一下 subagent 设计").is_none());
+    assert!(agent_delegation_requirement_for_prompt("这次不要用子 agent").is_none());
+    assert!(agent_delegation_requirement_for_prompt("不需要子 agent，主 agent 直接回答").is_none());
+    assert!(agent_delegation_requirement_for_prompt("无需子 agent，直接解释").is_none());
+    assert!(agent_delegation_requirement_for_prompt("别开子 agent，保持单 agent").is_none());
+    assert!(agent_delegation_requirement_for_prompt("answer without sub-agent").is_none());
+    assert!(agent_delegation_requirement_for_prompt("please don't use a subagent").is_none());
 }
 
 #[test]
@@ -209,6 +236,130 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
             entry,
             SessionLogEntry::Control(ControlEntry::TaskRun(run))
                 if run.status == TaskRunStatus::Cancelled
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn close_agent_thread_appends_runtime_close_control() -> Result<()> {
+    let temp = tempdir()?;
+    let root_config = test_root_config(temp.path(), "planned", "planned-model");
+    let session_log_path = temp.path().join(".sigil/sessions/session-agent.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store);
+    let thread_id = AgentThreadId::new("thread_1")?;
+    let snapshot_id = AgentProfileSnapshotId::new("snapshot_1")?;
+
+    session.append_control(ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
+        thread_id: thread_id.clone(),
+        parent_thread_id: None,
+        parent_session_ref: SessionRef::new_relative("session-agent.jsonl")?,
+        thread_session_ref: SessionRef::new_relative("children/thread_1.jsonl")?,
+        profile_id: AgentProfileId::new("explore")?,
+        profile_snapshot_id: snapshot_id.clone(),
+        run_context: AgentRunContextSnapshot {
+            profile_snapshot_id: snapshot_id,
+            provider: "planned".to_owned(),
+            model: "planned-model".to_owned(),
+            reasoning_effort: None,
+            workspace_root: WorkspaceRootSnapshot::new(temp.path().display().to_string())?,
+            effective_tool_scope_hash: String::new(),
+            effective_permission_policy_hash: String::new(),
+            effective_mcp_scope_hash: String::new(),
+            provider_capability_hash: String::new(),
+            model_visible_agent_index_hash: None,
+            budget_policy_hash: String::new(),
+            provider_background_handle_ref: None,
+        },
+        objective: "inspect kernel".to_owned(),
+        prompt_hash: "prompt-hash".to_owned(),
+        invocation_mode: AgentInvocationMode::Foreground,
+        invocation_source: AgentInvocationSource::Chat,
+        display_name: Some("kernel map".to_owned()),
+        created_at_ms: None,
+    }))?;
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: AgentThreadStatus::Completed,
+            reason: None,
+            updated_at_ms: None,
+        },
+    ))?;
+    let mut current_session = None;
+
+    let (closed_thread_id, entries) = close_agent_thread(
+        &root_config,
+        &session_log_path,
+        &mut current_session,
+        thread_id.clone(),
+        Some("closed from TUI /agent".to_owned()),
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    assert_eq!(closed_thread_id, thread_id);
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadClosed(close))
+                if close.thread_id == thread_id
+                    && close.reason.as_deref() == Some("closed from TUI /agent")
+        )
+    }));
+    let persisted = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(persisted.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadClosed(close))
+                if close.thread_id == thread_id
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn approve_plan_appends_plan_approved_control() -> Result<()> {
+    let temp = tempdir()?;
+    let root_config = test_root_config(temp.path(), "planned", "planned-model");
+    let session_log_path = temp.path().join(".sigil/sessions/session-plan.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let session = Session::new("planned", "planned-model").with_store(store);
+    let mut current_session = Some(session);
+
+    let (entry, entries) = approve_plan(
+        &root_config,
+        &session_log_path,
+        &mut current_session,
+        PlanApprovalRequest {
+            plan_text:
+                "1. inspect crates/sigil-tui\n2. edit crates/sigil-tui/src/app.rs with preview"
+                    .to_owned(),
+            permission: PlanApprovalPermission::WorkspaceEdits,
+            scope_summary: "inspect and edit".to_owned(),
+            clear_planning_context: true,
+        },
+    )
+    .map_err(anyhow::Error::msg)?;
+
+    assert_eq!(entry.plan_version, 1);
+    assert_eq!(entry.permission, PlanApprovalPermission::WorkspaceEdits);
+    assert_eq!(entry.scope.summary, "inspect and edit");
+    assert_eq!(entry.scope.workspace_paths, vec!["crates/sigil-tui"]);
+    assert!(entry.clear_planning_context);
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanApproved(approved))
+                if approved.permission == PlanApprovalPermission::WorkspaceEdits
+        )
+    }));
+    let persisted = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(persisted.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::PlanApproved(approved))
+                if approved.scope.summary == "inspect and edit"
         )
     }));
     Ok(())
@@ -593,7 +744,7 @@ fn spawn_loop_with_shared_agent(
     let (message_tx, message_rx) = mpsc::channel();
     let options = sigil_runtime::build_run_options(
         &root_config,
-        workspace_root,
+        workspace_root.clone(),
         sigil_kernel::InteractionMode::Interactive,
     );
     let provider_capabilities = agent.provider_capabilities();
@@ -615,6 +766,7 @@ fn spawn_loop_with_shared_agent(
                 agent_for_loop,
                 root_config,
                 provider_capabilities,
+                workspace_root,
                 session_log_path,
                 options,
                 command_rx,

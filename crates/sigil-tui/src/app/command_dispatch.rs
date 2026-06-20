@@ -112,7 +112,8 @@ impl AppState {
             UiCommand::ClearToolCardFocus => self.clear_tool_card_focus(),
             UiCommand::CancelFocusedTerminalTask => false,
             UiCommand::SubmitPrompt
-            | UiCommand::SubmitPlan
+            | UiCommand::EnterPlanMode
+            | UiCommand::SubmitTask
             | UiCommand::CancelOrQuit
             | UiCommand::ToggleWriteMode
             | UiCommand::ToggleThinking

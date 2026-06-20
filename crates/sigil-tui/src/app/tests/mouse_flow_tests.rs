@@ -1322,7 +1322,7 @@ fn mouse_click_dangerous_slash_candidate_requires_second_click() -> Result<()> {
 fn mouse_click_quit_shows_confirmation_in_slash_row() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.set_terminal_size(120, 20);
-    app.input = "/".to_owned();
+    app.input = "/q".to_owned();
     let layout = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &app);
     let (column, row) = slash_candidate_point_by_label(&app, &layout, "/quit");
 

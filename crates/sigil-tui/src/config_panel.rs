@@ -9,7 +9,7 @@ use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
 use sigil_provider_gemini::GeminiProviderConfig;
 use sigil_provider_openai_compat::OpenAiCompatibleProviderConfig;
-use sigil_runtime::provider_config_key;
+use sigil_runtime::{ResolvedAgentProfile, provider_config_key};
 
 pub(crate) const DEEPSEEK_PROVIDER_KEY: &str = "deepseek";
 pub(crate) const OPENAI_COMPAT_PROVIDER_KEY: &str = "openai_compat";
@@ -33,19 +33,21 @@ pub(crate) enum ConfigSection {
     Compaction,
     CodeIntelligence,
     Terminal,
+    Agents,
     Skills,
     Plugins,
     Mcp,
 }
 
 impl ConfigSection {
-    pub(crate) const FLOW: [Self; 9] = [
+    pub(crate) const FLOW: [Self; 10] = [
         Self::Provider,
         Self::Permissions,
         Self::Memory,
         Self::Compaction,
         Self::CodeIntelligence,
         Self::Terminal,
+        Self::Agents,
         Self::Skills,
         Self::Plugins,
         Self::Mcp,
@@ -59,6 +61,7 @@ impl ConfigSection {
             Self::Compaction => "Compaction",
             Self::CodeIntelligence => "Code Intel",
             Self::Terminal => "Terminal",
+            Self::Agents => "Agents",
             Self::Skills => "Skills",
             Self::Plugins => "Plugins",
             Self::Mcp => "MCP",
@@ -73,7 +76,8 @@ impl ConfigSection {
             Self::Compaction => "context and thresholds",
             Self::CodeIntelligence => "LSP readiness",
             Self::Terminal => "terminal integration",
-            Self::Skills => "skills and agents",
+            Self::Agents => "agent profiles",
+            Self::Skills => "reusable skills",
             Self::Plugins => "plugin trust review",
             Self::Mcp => "MCP servers",
         }
@@ -184,6 +188,7 @@ impl ConfigField {
             ConfigSection::Compaction => &Self::COMPACTION_FIELDS,
             ConfigSection::CodeIntelligence => &Self::CODE_INTELLIGENCE_FIELDS,
             ConfigSection::Terminal => &Self::TERMINAL_FIELDS,
+            ConfigSection::Agents => &Self::SKILL_FIELDS,
             ConfigSection::Skills => &Self::SKILL_FIELDS,
             ConfigSection::Plugins => &Self::PLUGIN_FIELDS,
             ConfigSection::Mcp => &Self::MCP_FIELDS,
@@ -370,6 +375,11 @@ pub(crate) enum ConfigFooterAction {
     Save,
     SaveAndClose,
     ActivateMcp,
+    TrustAgent,
+    BlockAgent,
+    ToggleAgentEnabled,
+    ToggleAgentUser,
+    ToggleAgentModel,
     LoadSkill,
     InvokeSkill,
     ApprovePlugin,
@@ -385,12 +395,21 @@ impl ConfigFooterAction {
         Self::ActivateMcp,
         Self::Close,
     ];
+    const AGENTS_ORDER: [Self; 6] = [
+        Self::TrustAgent,
+        Self::BlockAgent,
+        Self::ToggleAgentEnabled,
+        Self::ToggleAgentUser,
+        Self::ToggleAgentModel,
+        Self::Close,
+    ];
     const SKILLS_ORDER: [Self; 3] = [Self::LoadSkill, Self::InvokeSkill, Self::Close];
     const PLUGINS_ORDER: [Self; 3] = [Self::ApprovePlugin, Self::DenyPlugin, Self::Close];
 
     pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
             ConfigSection::Mcp => &Self::MCP_ORDER,
+            ConfigSection::Agents => &Self::AGENTS_ORDER,
             ConfigSection::Skills => &Self::SKILLS_ORDER,
             ConfigSection::Plugins => &Self::PLUGINS_ORDER,
             ConfigSection::Provider
@@ -411,6 +430,11 @@ impl ConfigFooterAction {
             Self::Save => "save",
             Self::SaveAndClose => "save+close",
             Self::ActivateMcp => "activate",
+            Self::TrustAgent => "trust",
+            Self::BlockAgent => "block",
+            Self::ToggleAgentEnabled => "enable",
+            Self::ToggleAgentUser => "user",
+            Self::ToggleAgentModel => "model",
             Self::LoadSkill => "load",
             Self::InvokeSkill => "invoke",
             Self::ApprovePlugin => "approve",
@@ -424,6 +448,11 @@ impl ConfigFooterAction {
             Self::Save => "save",
             Self::SaveAndClose => "save_and_close",
             Self::ActivateMcp => "activate_mcp",
+            Self::TrustAgent => "trust_agent",
+            Self::BlockAgent => "block_agent",
+            Self::ToggleAgentEnabled => "toggle_agent_enabled",
+            Self::ToggleAgentUser => "toggle_agent_user",
+            Self::ToggleAgentModel => "toggle_agent_model",
             Self::LoadSkill => "load_skill",
             Self::InvokeSkill => "invoke_skill",
             Self::ApprovePlugin => "approve_plugin",
@@ -910,8 +939,11 @@ pub(crate) struct ConfigState {
     pub(crate) footer_selected: bool,
     pub(crate) selected_footer_action: ConfigFooterAction,
     pub(crate) selected_mcp_server_index: usize,
+    pub(crate) selected_agent_index: usize,
     pub(crate) selected_skill_index: usize,
     pub(crate) selected_plugin_index: usize,
+    pub(crate) agent_profiles: Vec<ResolvedAgentProfile>,
+    pub(crate) agent_warnings: Vec<String>,
     pub(crate) skill_descriptors: Vec<SkillDescriptor>,
     pub(crate) skill_warnings: Vec<String>,
     pub(crate) plugin_manifests: Vec<PluginManifestSnapshot>,
@@ -932,8 +964,11 @@ impl ConfigState {
             footer_selected: false,
             selected_footer_action: ConfigFooterAction::Save,
             selected_mcp_server_index: 0,
+            selected_agent_index: 0,
             selected_skill_index: 0,
             selected_plugin_index: 0,
+            agent_profiles: Vec::new(),
+            agent_warnings: Vec::new(),
             skill_descriptors: Vec::new(),
             skill_warnings: Vec::new(),
             plugin_manifests: Vec::new(),
@@ -947,6 +982,7 @@ impl ConfigState {
     pub(crate) fn set_section(&mut self, section: ConfigSection) {
         self.selected_section = section;
         self.sync_mcp_selection();
+        self.sync_agent_selection();
         self.sync_skill_selection();
         self.sync_plugin_selection();
         self.footer_selected = false;
@@ -974,7 +1010,11 @@ impl ConfigState {
     fn section_collection_is_empty(&self, section: ConfigSection) -> bool {
         match section {
             ConfigSection::Mcp => self.draft.mcp_servers.is_empty(),
-            ConfigSection::Skills => self.skill_descriptors.is_empty(),
+            ConfigSection::Agents => self.agent_profiles.is_empty(),
+            ConfigSection::Skills => {
+                skill_display_order_for_section(&self.skill_descriptors, ConfigSection::Skills)
+                    .is_empty()
+            }
             ConfigSection::Plugins => self.plugin_manifests.is_empty(),
             _ => false,
         }
@@ -1059,6 +1099,32 @@ impl ConfigState {
             .min(self.draft.mcp_servers.len().saturating_sub(1));
     }
 
+    pub(crate) fn set_agent_discovery(
+        &mut self,
+        profiles: Vec<ResolvedAgentProfile>,
+        warnings: Vec<String>,
+    ) {
+        self.agent_profiles = profiles;
+        self.agent_warnings = warnings;
+        self.sync_agent_selection();
+        if self.selected_section == ConfigSection::Agents {
+            self.selected_field = self.first_field_for_section(ConfigSection::Agents);
+        }
+    }
+
+    pub(crate) fn sync_agent_selection(&mut self) {
+        if self.agent_profiles.is_empty() {
+            self.selected_agent_index = 0;
+            if self.selected_section == ConfigSection::Agents {
+                self.selected_field = None;
+            }
+            return;
+        }
+        self.selected_agent_index = self
+            .selected_agent_index
+            .min(self.agent_profiles.len().saturating_sub(1));
+    }
+
     pub(crate) fn set_skill_discovery(
         &mut self,
         descriptors: Vec<SkillDescriptor>,
@@ -1066,12 +1132,16 @@ impl ConfigState {
     ) {
         self.skill_descriptors = descriptors;
         self.skill_warnings = warnings;
-        if let Some(first_index) = skill_display_order(&self.skill_descriptors).first() {
+        if let Some(first_index) =
+            skill_display_order_for_section(&self.skill_descriptors, self.selected_section).first()
+        {
+            self.selected_skill_index = *first_index;
+        } else if let Some(first_index) = skill_display_order(&self.skill_descriptors).first() {
             self.selected_skill_index = *first_index;
         }
         self.sync_skill_selection();
         if self.selected_section == ConfigSection::Skills {
-            self.selected_field = self.first_field_for_section(ConfigSection::Skills);
+            self.selected_field = self.first_field_for_section(self.selected_section);
         }
     }
 
@@ -1081,6 +1151,12 @@ impl ConfigState {
             if self.selected_section == ConfigSection::Skills {
                 self.selected_field = None;
             }
+            return;
+        }
+        let section_order =
+            skill_display_order_for_section(&self.skill_descriptors, self.selected_section);
+        if !section_order.is_empty() && !section_order.contains(&self.selected_skill_index) {
+            self.selected_skill_index = section_order[0];
             return;
         }
         self.selected_skill_index = self
@@ -1115,11 +1191,55 @@ impl ConfigState {
     }
 
     pub(crate) fn selected_skill(&self) -> Option<&SkillDescriptor> {
-        self.skill_descriptors.get(self.selected_skill_index)
+        let skill = self.skill_descriptors.get(self.selected_skill_index)?;
+        match self.selected_section {
+            ConfigSection::Agents if !skill_is_agent(skill) => None,
+            ConfigSection::Skills if skill_is_agent(skill) => None,
+            _ => Some(skill),
+        }
+    }
+
+    pub(crate) fn selected_agent(&self) -> Option<&ResolvedAgentProfile> {
+        self.agent_profiles.get(self.selected_agent_index)
+    }
+
+    pub(crate) fn cycle_agent(&mut self, forward: bool) -> bool {
+        if self.agent_profiles.is_empty() {
+            return false;
+        }
+        let len = self.agent_profiles.len();
+        if forward {
+            self.selected_agent_index = (self.selected_agent_index + 1) % len;
+        } else if self.selected_agent_index == 0 {
+            self.selected_agent_index = len - 1;
+        } else {
+            self.selected_agent_index -= 1;
+        }
+        true
+    }
+
+    pub(crate) fn move_agent(&mut self, forward: bool) -> ConfigFieldMove {
+        if self.agent_profiles.is_empty() {
+            return ConfigFieldMove::Unavailable;
+        }
+        if forward {
+            if self.selected_agent_index + 1 >= self.agent_profiles.len() {
+                return ConfigFieldMove::Boundary;
+            }
+            self.selected_agent_index += 1;
+        } else {
+            if self.selected_agent_index == 0 {
+                return ConfigFieldMove::Boundary;
+            }
+            self.selected_agent_index -= 1;
+        }
+        self.selected_field = Some(ConfigField::SkillId);
+        self.footer_selected = false;
+        ConfigFieldMove::Moved
     }
 
     pub(crate) fn cycle_skill(&mut self, forward: bool) -> bool {
-        let order = skill_display_order(&self.skill_descriptors);
+        let order = skill_display_order_for_section(&self.skill_descriptors, self.selected_section);
         if order.is_empty() {
             return false;
         }
@@ -1139,7 +1259,7 @@ impl ConfigState {
     }
 
     pub(crate) fn move_skill(&mut self, forward: bool) -> ConfigFieldMove {
-        let order = skill_display_order(&self.skill_descriptors);
+        let order = skill_display_order_for_section(&self.skill_descriptors, self.selected_section);
         if order.is_empty() {
             return ConfigFieldMove::Unavailable;
         }
@@ -1284,6 +1404,9 @@ impl ConfigState {
             }
             ConfigField::CompactionTailMessages => Some(&self.draft.compaction_tail_messages),
             ConfigField::TerminalScrollSensitivity => Some(&self.draft.terminal_scroll_sensitivity),
+            ConfigField::SkillId if self.selected_section == ConfigSection::Agents => {
+                self.selected_agent().map(|agent| agent.profile.id.as_str())
+            }
             ConfigField::SkillId => self.selected_skill().map(|skill| skill.id.as_str()),
             ConfigField::PluginId => self
                 .selected_plugin()
@@ -1366,6 +1489,12 @@ impl ConfigState {
             }
             ConfigField::ProviderApiKey => return mask_secret(&self.draft.provider_api_key),
             ConfigField::SkillId => {
+                if self.selected_section == ConfigSection::Agents {
+                    return self
+                        .selected_agent()
+                        .map(|agent| agent.profile.id.as_str().to_owned())
+                        .unwrap_or_else(|| "none".to_owned());
+                }
                 return self
                     .selected_skill()
                     .map(|skill| skill.id.clone())
@@ -1639,7 +1768,7 @@ fn skill_display_order(descriptors: &[SkillDescriptor]) -> Vec<usize> {
     let mut agents = Vec::new();
     let mut skills = Vec::new();
     for (index, descriptor) in descriptors.iter().enumerate() {
-        if matches!(descriptor.run_as, SkillRunMode::ChildSession) {
+        if skill_is_agent(descriptor) {
             agents.push(index);
         } else {
             skills.push(index);
@@ -1647,6 +1776,29 @@ fn skill_display_order(descriptors: &[SkillDescriptor]) -> Vec<usize> {
     }
     agents.extend(skills);
     agents
+}
+
+fn skill_display_order_for_section(
+    descriptors: &[SkillDescriptor],
+    section: ConfigSection,
+) -> Vec<usize> {
+    match section {
+        ConfigSection::Agents => descriptors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, descriptor)| skill_is_agent(descriptor).then_some(index))
+            .collect(),
+        ConfigSection::Skills => descriptors
+            .iter()
+            .enumerate()
+            .filter_map(|(index, descriptor)| (!skill_is_agent(descriptor)).then_some(index))
+            .collect(),
+        _ => skill_display_order(descriptors),
+    }
+}
+
+fn skill_is_agent(descriptor: &SkillDescriptor) -> bool {
+    matches!(descriptor.run_as, SkillRunMode::ChildSession)
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

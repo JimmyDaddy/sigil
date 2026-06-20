@@ -664,6 +664,9 @@ fn tool_preview_source(
     content: &str,
     preview_value: Option<&serde_json::Value>,
 ) -> (&'static str, String) {
+    if let Some(source) = agent_tool_preview_source(tool_name, preview_value) {
+        return source;
+    }
     if let Some(value) = preview_value {
         let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| content.to_owned());
         return ("json", pretty);
@@ -672,6 +675,22 @@ fn tool_preview_source(
         return ("markdown", content.to_owned());
     }
     ("text", content.to_owned())
+}
+
+fn agent_tool_preview_source(
+    tool_name: &str,
+    preview_value: Option<&serde_json::Value>,
+) -> Option<(&'static str, String)> {
+    let value = preview_value?;
+    match tool_name {
+        "read_agent_result" => Some(("agent_result", String::new())),
+        "spawn_agent" => value
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .filter(|summary| !summary.trim().is_empty())
+            .map(|summary| ("markdown", summary.to_owned())),
+        _ => None,
+    }
 }
 
 fn compact_preview_value(value: &serde_json::Value, depth: usize) -> serde_json::Value {

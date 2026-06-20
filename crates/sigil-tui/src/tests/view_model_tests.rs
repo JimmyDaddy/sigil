@@ -507,6 +507,75 @@ fn footer_hints_track_slash_selector_state() -> anyhow::Result<()> {
 }
 
 #[test]
+fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Result<()> {
+    let mut plan_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    plan_app.set_pending_plan_approval_from_text("1. inspect\n2. implement");
+    let plan_view = UiViewModel::from_app(&plan_app);
+    assert!(plan_view.footer.hints.contains("A ask"));
+    assert!(plan_view.footer.hints.contains("W workspace edits"));
+    let live_view = LivePanelViewModel::from_app(&plan_app, 4);
+    let approval = live_view
+        .plan_approval
+        .expect("pending plan approval should project");
+    assert!(approval.hash.starts_with("sha256:"));
+    assert!(approval.hash.len() <= 19);
+    assert_eq!(approval.scope_summary, "1. inspect");
+
+    let mut mention_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    mention_app.handle_key_event(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE))?;
+    let mention_view = UiViewModel::from_app(&mention_app);
+    assert!(mention_view.footer.hints.contains("Tab/Enter insert"));
+
+    let mut panel_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let task_id = TaskId::new("task_1")?;
+    let step_id = TaskStepId::new("step_1")?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+            objective: "review workspace".to_owned(),
+            status: TaskRunStatus::Running,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "inspect".to_owned(),
+                display_name: Some("Repo Audit".to_owned()),
+                detail: None,
+                role: AgentRole::SubagentRead,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskChildSession(
+            sigil_kernel::TaskChildSessionEntry {
+                task_id: task_id.clone(),
+                plan_version: 1,
+                step_id,
+                child_task_id: TaskId::new("child_1")?,
+                child_session_ref: SessionRef::new_relative("children/child_1.jsonl")?,
+                role: AgentRole::SubagentRead,
+                status: sigil_kernel::TaskChildSessionStatus::Started,
+                summary_hash: None,
+            },
+        )),
+    ];
+    panel_app.handle_worker_message(WorkerMessage::TaskRunFinished {
+        task_id: task_id.as_str().to_owned(),
+        status: TaskRunStatus::Running,
+        entries,
+    })?;
+    panel_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let panel_view = UiViewModel::from_app(&panel_app);
+    assert!(panel_view.composer.agent_panel_focused);
+    assert!(panel_view.footer.hints.contains("Enter switch"));
+    Ok(())
+}
+
+#[test]
 fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     app.handle(RunEvent::ToolResult(ToolResult::ok(

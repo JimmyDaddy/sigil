@@ -103,14 +103,18 @@ pub(crate) struct ComposerViewModel {
 impl ComposerViewModel {
     fn from_app(app: &AppState) -> Self {
         Self {
-            mode_label: format!("Build · agent: {}", app.active_agent_label()),
+            mode_label: format!(
+                "{} · agent: {}",
+                app.composer_mode_label(),
+                app.active_agent_label()
+            ),
             phase: app.run_phase(),
             provider_name: app.provider_name.clone(),
             model_name: app.model_name.clone(),
             reasoning_effort_label: app.reasoning_effort_label().to_owned(),
             agent_rows: app.composer_agent_rows(),
             agent_panel_focused: app.is_composer_agent_panel_focused(),
-            input: app.input.clone(),
+            input: app.composer_display_input(),
             input_rows: app.composer_input_rows(),
             cursor_position: app.input_cursor_visual_position(),
         }
@@ -179,6 +183,9 @@ fn footer_run_label(app: &AppState) -> String {
 
 fn footer_hints(app: &AppState) -> String {
     let agent = format!("agent: {}", app.active_agent_label());
+    if app.pending_plan_approval().is_some() {
+        return format!("{agent} · A ask · W workspace edits · C continue · Esc discard");
+    }
     if app.pending_approval.is_some() {
         return format!("{agent} · Y allow · N deny · V diff");
     }
@@ -186,6 +193,9 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · Esc interrupt · Ctrl-T details");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
+        if app.has_agent_mention_selector() {
+            return format!("{agent} · ↑↓ choose · Tab/Enter insert · Esc close");
+        }
         return format!("{agent} · ↑↓ choose · Tab accept · Enter run · Esc close");
     }
     if app.is_composer_agent_panel_focused() {
@@ -198,6 +208,7 @@ fn footer_hints(app: &AppState) -> String {
 pub(crate) struct LivePanelViewModel {
     pub phase: RunPhase,
     pub progress: Option<LiveProgressViewModel>,
+    pub plan_approval: Option<PlanApprovalViewModel>,
     pub task_strip: Option<TaskStripViewModel>,
     pub transcript_lines: Vec<Line<'static>>,
 }
@@ -209,10 +220,28 @@ impl LivePanelViewModel {
             progress: app
                 .live_activity_summary()
                 .map(|summary| LiveProgressViewModel::from_parts(&summary.label, &summary.detail)),
+            plan_approval: app
+                .pending_plan_approval()
+                .map(PlanApprovalViewModel::from_pending),
             task_strip: app
                 .task_strip_view()
                 .map(TaskStripViewModel::from_task_strip_view),
             transcript_lines: app.transcript_lines(transcript_rows),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlanApprovalViewModel {
+    pub hash: String,
+    pub scope_summary: String,
+}
+
+impl PlanApprovalViewModel {
+    fn from_pending(pending: &crate::app::PendingPlanApproval) -> Self {
+        Self {
+            hash: short_plan_hash(&pending.plan_hash),
+            scope_summary: pending.scope_summary.clone(),
         }
     }
 }
@@ -238,6 +267,10 @@ impl LiveProgressViewModel {
             detail: detail.to_owned(),
         }
     }
+}
+
+fn short_plan_hash(plan_hash: &str) -> String {
+    plan_hash.chars().take(19).collect()
 }
 
 fn tool_progress_title(detail: &str) -> String {

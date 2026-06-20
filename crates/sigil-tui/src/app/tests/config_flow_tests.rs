@@ -17,6 +17,17 @@ fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<
     Ok(())
 }
 
+fn write_workspace_agent(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
+    let path = workspace_root
+        .join(".sigil")
+        .join("agents")
+        .join(id)
+        .join("agent.toml");
+    std::fs::create_dir_all(path.parent().expect("agent path should have parent"))?;
+    std::fs::write(path, body)?;
+    Ok(())
+}
+
 fn write_workspace_plugin(workspace_root: &Path, id: &str, version: &str) -> Result<()> {
     let plugin_root = workspace_root.join(".sigil").join("plugins").join(id);
     std::fs::create_dir_all(plugin_root.join("skills/review"))?;
@@ -396,10 +407,10 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/9 · provider settings");
+    assert_eq!(lines[0], "Provider 1/10 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] permissions memory compaction code intel terminal skills plugins mcp"
+        "[provider] permissions memory compaction code intel terminal agents skills plugins mcp"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -557,7 +568,7 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Code Intel 5/9 · LSP readiness"));
+    assert!(detail.contains("Code Intel 5/10 · LSP readiness"));
     assert!(detail.contains("[controls]"));
     assert!(detail.contains("Code intelligence: yes"));
     assert!(detail.contains("Startup: lazy"));
@@ -588,7 +599,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Terminal 6/9 · terminal integration"));
+    assert!(detail.contains("Terminal 6/10 · terminal integration"));
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("Mouse capture: yes"));
     assert!(detail.contains("OSC52 clipboard: yes"));
@@ -600,74 +611,313 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 }
 
 #[test]
-fn config_skills_step_discovers_and_renders_skill_metadata() -> Result<()> {
+fn config_agents_step_discovers_and_renders_agent_profile_metadata() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
-    write_workspace_skill(
+    write_workspace_agent(
         &workspace,
         "review",
-        r#"---
-id: review
-name: Repo Review
-description: Review this repository.
-trust: trusted
-run-as: child-session
-argument-hint: target module
-allowed-tools: [read_file, grep]
-disallowed-tools: [write_file]
-paths: [crates/**]
----
-
-# Repo Review
+        r#"
+description = "Review this repository."
+instructions = "Review with grep and read_file."
+trust = "trusted"
+invocation_policy = "model_allowed"
+allowed_tools = ["read_file", "grep"]
+nickname_candidates = ["Repo Review"]
 "#,
     )?;
     let config = config_for_workspace(&workspace);
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.open_config_panel();
-    app.config_state
-        .as_mut()
-        .expect("config state should still exist")
-        .set_section(ConfigSection::Skills);
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Agents);
+        state.selected_agent_index = state
+            .agent_profiles
+            .iter()
+            .position(|agent| agent.profile.id.as_str() == "review")
+            .expect("review agent should be discovered");
+    }
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Skills 7/9 · skills and agents"));
+    assert!(detail.contains("Agents 7/10 · agent profiles"));
     assert!(detail.contains("[discovery]"));
-    assert!(detail.contains("- Configured: 0 skills, 1 agent"));
-    assert!(detail.contains("- Selected: agent 1/1"));
+    assert!(detail.contains("- Configured: 5 agents"));
+    assert!(detail.contains("- Compatibility: 0 agents"));
+    assert!(detail.contains("- Selected: agent 4/5 · review"));
     assert!(detail.contains("[agents]"));
-    assert!(detail.contains("> review: trusted · child_session · workspace · /review"));
-    assert!(detail.contains("[skills]"));
-    assert!(detail.contains("i No skills discovered"));
+    assert!(
+        detail
+            .contains("> review: trusted · subagent · workspace · enabled=yes user=yes model=yes")
+    );
     assert!(detail.contains("[agent]"));
     assert!(detail.contains("Agent: review"));
-    assert!(detail.contains("- Type: agent"));
-    assert!(detail.contains("- Name: Repo Review"));
     assert!(detail.contains("- Description: Review this repository."));
-    assert!(detail.contains("- Model: yes"));
+    assert!(detail.contains("- Kind: subagent"));
+    assert!(detail.contains("- Enabled: yes"));
     assert!(detail.contains("- User: yes"));
-    assert!(detail.contains("- Run mode: child_session"));
+    assert!(detail.contains("- Model: yes"));
     assert!(detail.contains("- Trust: trusted"));
     assert!(detail.contains("- Source: workspace"));
-    assert!(detail.contains("- Hash:"));
-    assert!(detail.contains("- Entrypoint: .sigil/skills/review/SKILL.md"));
-    assert!(detail.contains("- Argument hint: target module"));
-    assert!(detail.contains("- Allowed tools: names=grep,read_file"));
-    assert!(detail.contains("- Disallowed tools: names=write_file"));
-    assert!(detail.contains("- Paths: crates/**"));
-    assert!(detail.contains("- Load: available"));
-    assert!(detail.contains("- Invoke: available"));
-    assert!(detail.contains("skills/agents: Up/Down item · PgUp/PgDn wrap · footer load/invoke"));
+    assert!(detail.contains("- Source hash:"));
+    assert!(detail.contains("- Invocation: model_allowed"));
+    assert!(detail.contains("- Tools: names=grep,read_file"));
+    assert!(detail.contains("- Nicknames: Repo Review"));
+    assert!(detail.contains("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/policy"));
 
     let nav = app.config_nav_lines().join("\n");
-    assert!(nav.contains("Skills/agents: Up/Down select"));
-    assert!(nav.contains("Skills/agents: PgUp/PgDn wrap"));
-    assert!(nav.contains("Skills: footer load/invoke"));
+    assert!(nav.contains("Agents: Up/Down select"));
+    assert!(nav.contains("Agents: PgUp/PgDn wrap"));
+    assert!(nav.contains("Agents: footer trust/policy"));
     assert_eq!(
         app.config_footer_action_labels(),
-        vec!["load", "invoke", "close"]
+        vec!["trust", "block", "enable", "user", "model", "close"]
     );
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.starts_with("agent "))
+    );
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.starts_with("agent "))
+    );
+    Ok(())
+}
+
+#[test]
+fn config_agents_step_renders_empty_and_warning_states() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Agents);
+        state.agent_profiles.clear();
+        state.agent_warnings = vec![
+            "warning one".to_owned(),
+            "warning two".to_owned(),
+            "warning three".to_owned(),
+            "warning four".to_owned(),
+            "warning five".to_owned(),
+        ];
+    }
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("No agents discovered"));
+    assert!(detail.contains("Agents are discovered from built-ins"));
+    assert!(detail.contains("[warnings]"));
+    assert!(detail.contains("i warning one"));
+    assert!(detail.contains("... 1 more warnings"));
+    let nav = app.config_nav_lines().join("\n");
+    assert!(nav.contains("Agents: Up/Down select"));
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("no agent to select"));
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
+    assert_eq!(app.last_notice(), Some("no agent to select"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::TrustAgent);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("no agent selected"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ToggleAgentEnabled);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("no agent selected"));
+    Ok(())
+}
+
+#[test]
+fn config_agents_footer_refuses_system_managed_and_busy_updates() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Agents);
+        state.selected_agent_index = state
+            .agent_profiles
+            .iter()
+            .position(|agent| agent.source == sigil_kernel::AgentProfileSource::System)
+            .expect("built-in system agent should exist");
+        state.focus_footer(ConfigFooterAction::TrustAgent);
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("system-managed"))
+    );
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ToggleAgentModel);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.contains("system-managed"))
+    );
+
+    app.is_busy = true;
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::TrustAgent);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("busy; review agent later"));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ToggleAgentEnabled);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("busy; update agent policy later"));
+    Ok(())
+}
+
+#[test]
+fn config_agents_footer_writes_durable_trust_and_policy_entries() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    write_workspace_agent(
+        &workspace,
+        "review",
+        r#"
+description = "Review this repository."
+instructions = "Review with grep."
+invocation_policy = "model_allowed"
+allowed_tools = ["grep"]
+"#,
+    )?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Agents);
+        state.selected_agent_index = state
+            .agent_profiles
+            .iter()
+            .position(|agent| agent.profile.id.as_str() == "review")
+            .expect("review agent should be discovered");
+        state.focus_footer(ConfigFooterAction::TrustAgent);
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("agent review trusted"));
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(_))
+    )));
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
+            if trust.profile_id.as_str() == "review"
+                && trust.decision == sigil_kernel::AgentTrustState::Trusted
+    )));
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .and_then(|state| state.selected_agent())
+            .map(|agent| agent.trust_state),
+        Some(sigil_kernel::AgentTrustState::Trusted)
+    );
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ToggleAgentModel);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("agent review model=no"));
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(policy))
+            if policy.profile_id.as_str() == "review"
+                && policy.model_invocable == Some(false)
+                && policy.enabled.is_none()
+                && policy.user_invocable.is_none()
+    )));
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .and_then(|state| state.selected_agent())
+            .map(|agent| agent.effective_model_invocation_allowed()),
+        Some(false)
+    );
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::BlockAgent);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("agent review blocked"));
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
+            if trust.profile_id.as_str() == "review"
+                && trust.decision == sigil_kernel::AgentTrustState::Disabled
+    )));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ToggleAgentEnabled);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("agent review enabled=no"));
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(policy))
+            if policy.profile_id.as_str() == "review" && policy.enabled == Some(false)
+    )));
+
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ToggleAgentUser);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("agent review user=no"));
+    assert!(app.current_session_entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(policy))
+            if policy.profile_id.as_str() == "review" && policy.user_invocable == Some(false)
+    )));
+
     Ok(())
 }
 
@@ -807,13 +1057,14 @@ fn config_skills_step_renders_empty_discovery_and_warnings() -> Result<()> {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("- Configured: 0 skills, 0 agents"));
+    assert!(detail.contains("- Configured: 0 skills"));
+    assert!(detail.contains("- Agents: 0 agents"));
     assert!(detail.contains("- Warnings: 5 warnings"));
-    assert!(detail.contains("i No skills or agents discovered"));
-    assert!(detail.contains("Workspace skills and agents live under"));
+    assert!(detail.contains("i No skills discovered"));
+    assert!(detail.contains("Reusable inline skills are discovered"));
     assert!(detail.contains("[warnings]"));
     assert!(detail.contains("... 1 more warnings"));
-    assert!(detail.contains("skills/agents: Up/Down item · PgUp/PgDn wrap · footer load/invoke"));
+    assert!(detail.contains("skills: Up/Down skill · PgUp/PgDn wrap · footer load/invoke"));
     Ok(())
 }
 
@@ -883,7 +1134,7 @@ trust: trusted
     }
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; load skill or agent later"));
+    assert_eq!(app.last_notice(), Some("busy; load skill later"));
 
     app.is_busy = false;
     {
@@ -898,7 +1149,7 @@ trust: trusted
     assert!(action.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("skill or agent action is available in Skills config")
+        Some("skill action is available in Skills config")
     );
 
     let empty_workspace = temp.path().join("empty-workspace");
@@ -918,7 +1169,7 @@ trust: trusted
     }
     let action = empty_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(empty_app.last_notice(), Some("no skill or agent selected"));
+    assert_eq!(empty_app.last_notice(), Some("no skill selected"));
     Ok(())
 }
 
@@ -1105,7 +1356,7 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Plugins 8/9 · plugin trust review"));
+    assert!(detail.contains("Plugins 9/10 · plugin trust review"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 1 plugins"));
     assert!(detail.contains("- Selected: 1 of 1"));
