@@ -6,6 +6,7 @@ pub mod config;
 pub mod event;
 pub mod memory;
 pub mod permission;
+pub mod plan;
 pub mod plugin;
 pub mod provider;
 pub mod secret;
@@ -17,17 +18,19 @@ pub mod terminal_task;
 pub mod tool;
 
 pub use agent::{
-    Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunOutput, AgentRunResult,
-    AgentRunTerminalReason, AgentToolDelegate,
+    Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
+    AgentRunOutput, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate,
 };
 pub use agent_thread::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentInvocationMode,
-    AgentInvocationRequest, AgentInvocationSource, AgentMergeSafePointEntry, AgentPermissionPolicy,
-    AgentProfile, AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind,
-    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentRouteClosedEntry,
-    AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection,
-    AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
-    AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
+    AgentInvocationPolicy, AgentInvocationRequest, AgentInvocationSource, AgentMergeSafePointEntry,
+    AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry, AgentProfileId,
+    AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
+    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
+    AgentProfileTrustProjection, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
+    AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection, AgentRunAttemptStartedEntry,
+    AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
+    AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
     AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
     AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
     AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
@@ -55,6 +58,10 @@ pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use permission::{
     ApprovalMode, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
     PermissionAccessConfig, PermissionConfig, PermissionDecision, PermissionPolicy, PermissionRule,
+};
+pub use plan::{
+    PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,
+    PlanApprovalScope, PlanApprovedEntry, plan_text_hash, plan_workspace_paths,
 };
 pub use plugin::{
     PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef,

@@ -13,15 +13,17 @@ use crate::{
     CompactionConfig, MemoryConfig, MemoryLoadReport,
     agent_thread::{
         AgentApprovalRouteEntry, AgentElicitationRouteEntry, AgentMergeSafePointEntry,
-        AgentProfileCapturedEntry, AgentRouteClosedEntry, AgentRunAttemptStartedEntry,
-        AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
-        AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry, AgentThreadResultRecordedEntry,
-        AgentThreadStartedEntry, AgentThreadStateProjection, AgentThreadStatusChangedEntry,
-        closed_agent_routes, interrupted_agent_attempts,
+        AgentProfileCapturedEntry, AgentProfilePolicyEntry, AgentProfilePolicyProjection,
+        AgentProfileTrustEntry, AgentProfileTrustProjection, AgentRouteClosedEntry,
+        AgentRunAttemptStartedEntry, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
+        AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry,
+        AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
+        AgentThreadStatusChangedEntry, closed_agent_routes, interrupted_agent_attempts,
     },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     memory::{apply_memory_report, materialize_memory},
     permission::ApprovalMode,
+    plan::{PlanApprovalProjection, PlanApprovedEntry},
     plugin::{PluginManifestSnapshot, PluginStateProjection, PluginTrustEntry},
     provider::{
         CompletionRequest, ModelMessage, PrefixSnapshot, ProviderContinuationState, ResponseHandle,
@@ -128,6 +130,8 @@ pub enum ControlEntry {
     TerminalTask(TerminalTaskEntry),
     #[serde(alias = "CompactionApplied")]
     CompactionApplied(CompactionRecord),
+    #[serde(alias = "PlanApproved")]
+    PlanApproved(PlanApprovedEntry),
     #[serde(alias = "TaskRun")]
     TaskRun(TaskRunEntry),
     #[serde(alias = "TaskPlan")]
@@ -144,6 +148,10 @@ pub enum ControlEntry {
     TaskSubagentElicitationRoute(TaskSubagentElicitationRouteEntry),
     #[serde(alias = "AgentProfileCaptured")]
     AgentProfileCaptured(AgentProfileCapturedEntry),
+    #[serde(alias = "AgentProfileTrustDecision")]
+    AgentProfileTrustDecision(AgentProfileTrustEntry),
+    #[serde(alias = "AgentProfilePolicyDecision")]
+    AgentProfilePolicyDecision(AgentProfilePolicyEntry),
     #[serde(alias = "AgentThreadStarted")]
     AgentThreadStarted(AgentThreadStartedEntry),
     #[serde(alias = "AgentThreadStatusChanged")]
@@ -539,6 +547,11 @@ impl Session {
         latest_compaction_record(&self.entries)
     }
 
+    /// Returns durable plan approvals reconstructed from append-only control entries.
+    pub fn plan_approval_projection(&self) -> PlanApprovalProjection {
+        PlanApprovalProjection::from_entries(&self.entries)
+    }
+
     /// Returns a durable task projection reconstructed from append-only control entries.
     pub fn task_state_projection(&self) -> TaskStateProjection {
         TaskStateProjection::from_entries(&self.entries)
@@ -547,6 +560,16 @@ impl Session {
     /// Returns a durable agent thread projection reconstructed from append-only control entries.
     pub fn agent_thread_state_projection(&self) -> AgentThreadStateProjection {
         AgentThreadStateProjection::from_entries(&self.entries)
+    }
+
+    /// Returns durable agent profile trust decisions reconstructed from append-only control entries.
+    pub fn agent_profile_trust_projection(&self) -> AgentProfileTrustProjection {
+        AgentProfileTrustProjection::from_entries(&self.entries)
+    }
+
+    /// Returns durable agent profile policy decisions reconstructed from append-only control entries.
+    pub fn agent_profile_policy_projection(&self) -> AgentProfilePolicyProjection {
+        AgentProfilePolicyProjection::from_entries(&self.entries)
     }
 
     /// Returns a durable skill projection reconstructed from append-only control entries.

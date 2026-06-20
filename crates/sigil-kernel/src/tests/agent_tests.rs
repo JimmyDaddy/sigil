@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -17,20 +17,26 @@ use crate::{
     ApprovalHandler, ApprovalMode, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
     CompactionConfig, CompletionRequest, ControlEntry, EventHandler, ExternalDirectoryConfig,
     ExternalDirectoryRule, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
-    ModelMessage, PermissionConfig, PermissionDecision, Provider, ProviderCapabilities,
-    ProviderChunk, ProviderContinuationState, ReasoningArtifact, ReasoningEffort,
-    ReasoningStreamSupport, ResponseHandle, RunEvent, Session, SessionLogEntry,
-    TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext, TerminalTaskStatus,
-    Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject,
-    ToolSubjectScope, UsageStats,
+    ModelMessage, PermissionConfig, PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission,
+    PlanApprovalScope, PlanApprovedEntry, Provider, ProviderCapabilities, ProviderChunk,
+    ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
+    ResponseHandle, RunEvent, Session, SessionLogEntry, TASK_PLAN_UPDATE_TOOL_NAME, TaskId,
+    TaskPlanStatus, TaskPlanUpdateContext, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope,
+    UsageStats, plan_text_hash,
 };
 
-use super::{Agent, AgentRunInput, AgentRunOptions, AgentRunTerminalReason};
+use super::{
+    Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunTerminalReason,
+};
 
 struct MockProvider;
 struct TerminalToolProvider;
+struct NonDelegatingTextProvider {
+    calls: Arc<AtomicUsize>,
+}
 
 #[async_trait]
 impl Provider for MockProvider {
@@ -138,6 +144,30 @@ impl Provider for TerminalToolProvider {
     }
 }
 
+#[async_trait]
+impl Provider for NonDelegatingTextProvider {
+    fn name(&self) -> &str {
+        "mock-nondelegating"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(
+                "I will answer without delegating.".to_owned(),
+            )),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
 struct CapturingTextProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
@@ -238,6 +268,10 @@ impl Provider for ToolSideEffectProvider {
 }
 
 struct EchoTool;
+struct AgentCategoryTool;
+struct FailingAgentCategoryTool;
+struct RunningSpawnAgentCategoryTool;
+struct RunningAgentCategoryTool;
 struct SideEffectTool;
 struct TerminalStartAuditTool;
 struct WriteTool {
@@ -281,6 +315,150 @@ impl Tool for EchoTool {
             "echo",
             args["value"].as_str().unwrap_or_default(),
             ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for AgentCategoryTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "spawn_agent".to_owned(),
+            description: "spawn an agent".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }),
+            category: ToolCategory::Agent,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "spawn_agent",
+            "spawned",
+            ToolResultMeta {
+                details: json!({"status": "completed"}),
+                ..ToolResultMeta::default()
+            },
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for FailingAgentCategoryTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "spawn_agent".to_owned(),
+            description: "spawn an agent".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }),
+            category: ToolCategory::Agent,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::error(
+            call_id,
+            "spawn_agent",
+            ToolErrorKind::Internal,
+            "agent transport failed before a child result was available",
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for RunningSpawnAgentCategoryTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "spawn_agent".to_owned(),
+            description: "spawn an agent".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }),
+            category: ToolCategory::Agent,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "spawn_agent",
+            "agent thread started",
+            ToolResultMeta {
+                details: json!({
+                    "agent_id": "child-1",
+                    "status": "running",
+                    "result_available": false
+                }),
+                ..ToolResultMeta::default()
+            },
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for RunningAgentCategoryTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "wait_agent".to_owned(),
+            description: "wait for an agent".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": true
+            }),
+            category: ToolCategory::Agent,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "wait_agent",
+            "agent thread is still running",
+            ToolResultMeta {
+                details: json!({
+                    "status": "running",
+                    "result_available": false
+                }),
+                ..ToolResultMeta::default()
+            },
         ))
     }
 }
@@ -1426,6 +1604,347 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn required_agent_delegation_blocks_direct_final_answer() -> Result<()> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = NonDelegatingTextProvider {
+        calls: Arc::clone(&calls),
+    };
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(AgentCategoryTool));
+    let agent = Agent::new(provider, registry);
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("must use a subagent").with_agent_delegation_requirement(
+                AgentDelegationRequirement::new("the user explicitly requested sub-agent work"),
+            ),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::DelegationUnsatisfied
+    );
+    assert!(output.result.final_text.is_empty());
+    assert!(!session.messages().iter().any(|message| {
+        message.role == MessageRole::Assistant
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("without delegating"))
+    }));
+    assert!(handler.events.iter().any(|event| {
+        matches!(
+            event,
+            RunEvent::Notice(message)
+                if message.contains("agent delegation requirement was not satisfied")
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn required_agent_delegation_ignores_failed_agent_tool_before_final_answer() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(FailingAgentCategoryTool));
+    let agent = Agent::new(
+        ScriptedToolProvider {
+            initial_chunks: vec![
+                ProviderChunk::ToolCallStart {
+                    id: "call-agent-failed".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "call-agent-failed".to_owned(),
+                    delta: "{}".to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-agent-failed".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                    args_json: "{}".to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+            final_text: "done without a child result".to_owned(),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("must use a subagent").with_agent_delegation_requirement(
+                AgentDelegationRequirement::new("the user explicitly requested sub-agent work"),
+            ),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(5),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::DelegationUnsatisfied
+    );
+    assert!(output.result.final_text.is_empty());
+    assert!(session.messages().iter().any(|message| {
+        message.role == MessageRole::Tool
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("agent transport failed"))
+    }));
+    assert!(!session.messages().iter().any(|message| {
+        message.role == MessageRole::Assistant
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("done without a child result"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn required_agent_delegation_accepts_terminal_agent_tool_result() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(AgentCategoryTool));
+    let agent = Agent::new(
+        ScriptedToolProvider {
+            initial_chunks: vec![
+                ProviderChunk::ToolCallStart {
+                    id: "call-agent-terminal".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "call-agent-terminal".to_owned(),
+                    delta: "{}".to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-agent-terminal".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                    args_json: "{}".to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+            final_text: "done after terminal child result".to_owned(),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("must use a subagent").with_agent_delegation_requirement(
+                AgentDelegationRequirement::new("the user explicitly requested sub-agent work"),
+            ),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(5),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::FinalAnswer
+    );
+    assert_eq!(output.result.final_text, "done after terminal child result");
+    assert!(session.messages().iter().any(|message| {
+        message.role == MessageRole::Assistant
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("done after terminal child result"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn required_agent_delegation_ignores_spawn_agent_without_terminal_result() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(RunningSpawnAgentCategoryTool));
+    let agent = Agent::new(
+        ScriptedToolProvider {
+            initial_chunks: vec![
+                ProviderChunk::ToolCallStart {
+                    id: "call-agent-started".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "call-agent-started".to_owned(),
+                    delta: "{}".to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-agent-started".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                    args_json: "{}".to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+            final_text: "done immediately after spawn".to_owned(),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("must use a subagent").with_agent_delegation_requirement(
+                AgentDelegationRequirement::new("the user explicitly requested sub-agent work"),
+            ),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(5),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::DelegationUnsatisfied
+    );
+    assert!(output.result.final_text.is_empty());
+    assert!(session.messages().iter().any(|message| {
+        message.role == MessageRole::Tool
+            && message.tool_call_id.as_deref() == Some("call-agent-started")
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("\"status\":\"running\""))
+    }));
+    assert!(!session.messages().iter().any(|message| {
+        message.role == MessageRole::Assistant
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("done immediately after spawn"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn required_agent_delegation_ignores_non_terminal_agent_tool_result() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(RunningAgentCategoryTool));
+    let agent = Agent::new(
+        ScriptedToolProvider {
+            initial_chunks: vec![
+                ProviderChunk::ToolCallStart {
+                    id: "call-agent-running".to_owned(),
+                    name: "wait_agent".to_owned(),
+                },
+                ProviderChunk::ToolCallArgsDelta {
+                    id: "call-agent-running".to_owned(),
+                    delta: "{}".to_owned(),
+                },
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-agent-running".to_owned(),
+                    name: "wait_agent".to_owned(),
+                    args_json: "{}".to_owned(),
+                }),
+                ProviderChunk::Done,
+            ],
+            final_text: "done before child terminal".to_owned(),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock", "mock-model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = agent
+        .run_with_approval_input(
+            &mut session,
+            AgentRunInput::user("must use a subagent").with_agent_delegation_requirement(
+                AgentDelegationRequirement::new("the user explicitly requested sub-agent work"),
+            ),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(5),
+                tool_timeout_secs: 5,
+                reasoning_effort: None,
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::DelegationUnsatisfied
+    );
+    assert!(output.result.final_text.is_empty());
+    assert!(!session.messages().iter().any(|message| {
+        message.role == MessageRole::Assistant
+            && message
+                .content
+                .as_deref()
+                .is_some_and(|content| content.contains("done before child terminal"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_persists_text_before_tool_call_on_assistant_message() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(EchoTool));
@@ -2072,6 +2591,24 @@ impl Provider for LoopingToolProvider {
     }
 }
 
+fn approved_workspace_plan(workspace_paths: Vec<&str>) -> PlanApprovedEntry {
+    PlanApprovedEntry {
+        plan_version: 1,
+        plan_hash: plan_text_hash("approved workspace edits"),
+        approved_at_ms: 42,
+        permission: PlanApprovalPermission::WorkspaceEdits,
+        scope: PlanApprovalScope {
+            summary: "workspace edits approved for the accepted plan".to_owned(),
+            workspace_paths: workspace_paths
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        },
+        expires: PlanApprovalExpiry::NextUserPrompt,
+        clear_planning_context: true,
+    }
+}
+
 #[tokio::test]
 async fn agent_respects_denied_write_approval() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
@@ -2140,6 +2677,143 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
                     && execution.status == ToolExecutionStatus::Started
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn approved_plan_workspace_edits_allows_required_preview_write_without_prompt() -> Result<()>
+{
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(
+        Vec::new(),
+    )))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = PanicApprovalHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "execute the approved plan",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(executed.load(Ordering::SeqCst));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::PolicyEvaluated
+                    && approval.policy_decision == ApprovalMode::Allow
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::Requested
+        )
+    }));
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))
+                if snapshot.call_id == "call-write-1"
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn approved_plan_workspace_edits_keeps_out_of_scope_write_behind_approval() -> Result<()> {
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(vec![
+        "crates/sigil-tui",
+    ])))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = DenyWritesHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "execute the approved plan",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(!executed.load(Ordering::SeqCst));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::Requested
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::Resolved
+                    && approval.user_decision == Some(ToolApprovalUserDecision::Denied)
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn approved_plan_next_user_prompt_expires_after_second_user_message() -> Result<()> {
+    let mut session = Session::new("mock-write", "mock-model");
+    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(
+        Vec::new(),
+    )))?;
+
+    assert!(super::active_plan_approval(&session).is_none());
+    session.append_user_message(ModelMessage::user("first prompt"))?;
+    assert!(super::active_plan_approval(&session).is_some());
+    session.append_user_message(ModelMessage::user("second prompt"))?;
+    assert!(super::active_plan_approval(&session).is_none());
     Ok(())
 }
 
@@ -3027,8 +3701,8 @@ async fn agent_guides_direct_task_tool_calls_without_hard_error() -> Result<()> 
                 content.contains("legacy aliases")
                     && content.contains("spawn_agent")
                     && content.contains("wait_agent")
-                    && content.contains("message_agent")
                     && content.contains("close_agent")
+                    && content.contains("message_agent is reserved")
                     && !content.contains("/plan <objective>")
             })
     }));

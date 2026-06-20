@@ -2,11 +2,13 @@ use anyhow::Result;
 
 use crate::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentInvocationMode,
-    AgentInvocationSource, AgentMergeSafePointEntry, AgentProfile, AgentProfileCapturedEntry,
-    AgentProfileId, AgentProfileKind, AgentProfileSnapshot, AgentProfileSnapshotId,
-    AgentProfileSource, AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
-    AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
-    AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
+    AgentInvocationPolicy, AgentInvocationSource, AgentMergeSafePointEntry, AgentProfile,
+    AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
+    AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
+    AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultPolicy, AgentRouteClosedEntry,
+    AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry,
+    AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
+    AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
     AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultRecordedEntry,
     AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
     AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, ControlEntry, JsonlSessionStore,
@@ -144,6 +146,8 @@ fn agent_profile_defaults_keep_model_invocation_disabled() -> Result<()> {
         reasoning_effort: None,
         tool_scope: Default::default(),
         permission_policy: Default::default(),
+        invocation_policy: AgentInvocationPolicy::ManualOnly,
+        result_policy: AgentResultPolicy::SummaryWithPageRef,
         user_invocable: true,
         model_invocable: false,
         skills: Vec::new(),
@@ -156,8 +160,87 @@ fn agent_profile_defaults_keep_model_invocation_disabled() -> Result<()> {
 
     assert!(decoded.user_invocable);
     assert!(!decoded.model_invocable);
+    assert_eq!(decoded.invocation_policy, AgentInvocationPolicy::ManualOnly);
+    assert_eq!(decoded.result_policy, AgentResultPolicy::SummaryWithPageRef);
     assert_eq!(decoded.nickname_candidates, vec!["Atlas"]);
     Ok(())
+}
+
+#[test]
+fn agent_profile_deserializes_legacy_invocation_flags_into_policy() -> Result<()> {
+    let decoded: AgentProfile = serde_json::from_value(serde_json::json!({
+        "id": "explore",
+        "kind": "subagent",
+        "user_invocable": true,
+        "model_invocable": true
+    }))?;
+
+    assert_eq!(
+        decoded.invocation_policy,
+        AgentInvocationPolicy::ModelAllowed
+    );
+    assert_eq!(decoded.result_policy, AgentResultPolicy::SummaryWithPageRef);
+    assert!(decoded.user_invocation_allowed());
+    assert!(decoded.model_invocation_allowed());
+    Ok(())
+}
+
+#[test]
+fn explicit_agent_invocation_policy_controls_effective_access() -> Result<()> {
+    let manual: AgentProfile = serde_json::from_value(serde_json::json!({
+        "id": "manual",
+        "kind": "subagent",
+        "invocation_policy": "manual_only",
+        "model_invocable": true
+    }))?;
+    assert!(manual.user_invocation_allowed());
+    assert!(!manual.model_invocation_allowed());
+
+    let system: AgentProfile = serde_json::from_value(serde_json::json!({
+        "id": "system",
+        "kind": "system",
+        "invocation_policy": "system_only",
+        "user_invocable": true,
+        "model_invocable": true
+    }))?;
+    assert!(!system.user_invocation_allowed());
+    assert!(!system.model_invocation_allowed());
+    Ok(())
+}
+
+#[test]
+fn agent_invocation_and_result_policy_labels_cover_all_variants() {
+    assert_eq!(
+        AgentInvocationPolicy::default(),
+        AgentInvocationPolicy::ManualOnly
+    );
+    assert_eq!(AgentInvocationPolicy::ManualOnly.as_str(), "manual_only");
+    assert_eq!(
+        AgentInvocationPolicy::ModelAllowed.as_str(),
+        "model_allowed"
+    );
+    assert_eq!(AgentInvocationPolicy::SystemOnly.as_str(), "system_only");
+    assert_eq!(AgentInvocationPolicy::Unknown.as_str(), "unknown");
+    assert_eq!(
+        AgentInvocationPolicy::from_invocability(true, false),
+        AgentInvocationPolicy::ManualOnly
+    );
+    assert_eq!(
+        AgentInvocationPolicy::from_invocability(false, false),
+        AgentInvocationPolicy::SystemOnly
+    );
+
+    assert_eq!(AgentResultPolicy::SummaryOnly.as_str(), "summary_only");
+    assert_eq!(
+        AgentResultPolicy::SummaryWithPageRef.as_str(),
+        "summary_with_page_ref"
+    );
+    assert_eq!(AgentResultPolicy::ArtifactOnly.as_str(), "artifact_only");
+    assert_eq!(
+        AgentResultPolicy::ForegroundMergeRequired.as_str(),
+        "foreground_merge_required"
+    );
+    assert_eq!(AgentResultPolicy::Unknown.as_str(), "unknown");
 }
 
 #[test]
@@ -188,6 +271,24 @@ fn agent_control_entries_roundtrip() -> Result<()> {
     let entries = vec![
         ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
             snapshot: sample_snapshot()?,
+        }),
+        ControlEntry::AgentProfileTrustDecision(AgentProfileTrustEntry {
+            profile_id: profile_id("explore")?,
+            source: AgentProfileSource::Workspace,
+            source_hash: "sha256:source".to_owned(),
+            profile_hash: "sha256:profile".to_owned(),
+            decision: AgentTrustState::Trusted,
+            reviewed_at_ms: 42,
+        }),
+        ControlEntry::AgentProfilePolicyDecision(AgentProfilePolicyEntry {
+            profile_id: profile_id("explore")?,
+            source: AgentProfileSource::Workspace,
+            source_hash: "sha256:source".to_owned(),
+            profile_hash: "sha256:profile".to_owned(),
+            enabled: Some(true),
+            user_invocable: Some(true),
+            model_invocable: Some(false),
+            reviewed_at_ms: 43,
         }),
         ControlEntry::AgentThreadStarted(sample_started_entry()?),
         ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
@@ -262,6 +363,97 @@ fn agent_control_entries_roundtrip() -> Result<()> {
         let decoded: SessionLogEntry = serde_json::from_str(&encoded)?;
         assert!(matches!(decoded, SessionLogEntry::Control(_)));
     }
+    Ok(())
+}
+
+#[test]
+fn agent_profile_trust_projection_invalidates_hash_changes() -> Result<()> {
+    let snapshot = sample_snapshot()?;
+    let matching_trust = AgentProfileTrustEntry {
+        profile_id: snapshot.profile_id.clone(),
+        source: snapshot.source.clone(),
+        source_hash: snapshot.source_hash.clone(),
+        profile_hash: snapshot.profile_hash.clone(),
+        decision: AgentTrustState::Disabled,
+        reviewed_at_ms: 42,
+    };
+    let entries = vec![SessionLogEntry::Control(
+        ControlEntry::AgentProfileTrustDecision(matching_trust),
+    )];
+    let projection = AgentProfileTrustProjection::from_entries(&entries);
+
+    assert_eq!(
+        projection.decision_for_snapshot(&snapshot),
+        Some(AgentTrustState::Disabled)
+    );
+    assert!(projection.has_decision_for_profile(&snapshot.profile_id));
+
+    let mut changed_profile = snapshot.clone();
+    changed_profile.profile_hash = "sha256:changed-profile".to_owned();
+    assert_eq!(projection.decision_for_snapshot(&changed_profile), None);
+    assert!(projection.has_decision_for_profile(&changed_profile.profile_id));
+
+    let mut changed_source = snapshot.clone();
+    changed_source.source_hash = "sha256:changed-source".to_owned();
+    let session = Session::from_entries("deepseek", "deepseek-v4-pro", entries);
+    assert_eq!(
+        session
+            .agent_profile_trust_projection()
+            .decision_for_snapshot(&changed_source),
+        None
+    );
+    assert!(
+        session
+            .agent_profile_trust_projection()
+            .has_decision_for_profile(&changed_source.profile_id)
+    );
+    Ok(())
+}
+
+#[test]
+fn agent_profile_policy_projection_invalidates_hash_changes() -> Result<()> {
+    let snapshot = sample_snapshot()?;
+    let matching_policy = AgentProfilePolicyEntry {
+        profile_id: snapshot.profile_id.clone(),
+        source: snapshot.source.clone(),
+        source_hash: snapshot.source_hash.clone(),
+        profile_hash: snapshot.profile_hash.clone(),
+        enabled: Some(false),
+        user_invocable: None,
+        model_invocable: Some(false),
+        reviewed_at_ms: 42,
+    };
+    let entries = vec![SessionLogEntry::Control(
+        ControlEntry::AgentProfilePolicyDecision(matching_policy),
+    )];
+    let projection = AgentProfilePolicyProjection::from_entries(&entries);
+
+    let policy = projection
+        .policy_for_snapshot(&snapshot)
+        .expect("matching policy should replay");
+    assert_eq!(policy.enabled, Some(false));
+    assert_eq!(policy.model_invocable, Some(false));
+    assert!(projection.has_policy_for_profile(&snapshot.profile_id));
+
+    let mut changed_profile = snapshot.clone();
+    changed_profile.profile_hash = "sha256:changed-profile".to_owned();
+    assert!(projection.policy_for_snapshot(&changed_profile).is_none());
+    assert!(projection.has_policy_for_profile(&changed_profile.profile_id));
+
+    let mut changed_source = snapshot;
+    changed_source.source_hash = "sha256:changed-source".to_owned();
+    let session = Session::from_entries("deepseek", "deepseek-v4-pro", entries);
+    assert!(
+        session
+            .agent_profile_policy_projection()
+            .policy_for_snapshot(&changed_source)
+            .is_none()
+    );
+    assert!(
+        session
+            .agent_profile_policy_projection()
+            .has_policy_for_profile(&changed_source.profile_id)
+    );
     Ok(())
 }
 

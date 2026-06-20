@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     permission::PermissionConfig,
@@ -196,8 +196,81 @@ pub enum AgentTrustState {
 /// Permission policy attached to a profile after runtime resolution.
 pub type AgentPermissionPolicy = PermissionConfig;
 
+/// Policy describing who may invoke an agent profile.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentInvocationPolicy {
+    /// Users may invoke the profile explicitly, but it is hidden from model-facing auto selection.
+    ManualOnly,
+    /// The profile may be shown to the model-facing agent index when trust and scope allow it.
+    ModelAllowed,
+    /// Internal profile that should not be exposed as a user or model invocation target.
+    SystemOnly,
+    #[serde(other)]
+    Unknown,
+}
+
+impl AgentInvocationPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ManualOnly => "manual_only",
+            Self::ModelAllowed => "model_allowed",
+            Self::SystemOnly => "system_only",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub fn from_invocability(user_invocable: bool, model_invocable: bool) -> Self {
+        if model_invocable {
+            Self::ModelAllowed
+        } else if user_invocable {
+            Self::ManualOnly
+        } else {
+            Self::SystemOnly
+        }
+    }
+
+    #[must_use]
+    pub fn default_user_invocable(self) -> bool {
+        matches!(self, Self::ManualOnly | Self::ModelAllowed)
+    }
+
+    #[must_use]
+    pub fn default_model_invocable(self) -> bool {
+        matches!(self, Self::ModelAllowed)
+    }
+}
+
+/// Policy describing how an agent profile returns or merges results.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentResultPolicy {
+    SummaryOnly,
+    #[default]
+    SummaryWithPageRef,
+    ArtifactOnly,
+    ForegroundMergeRequired,
+    #[serde(other)]
+    Unknown,
+}
+
+impl AgentResultPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SummaryOnly => "summary_only",
+            Self::SummaryWithPageRef => "summary_with_page_ref",
+            Self::ArtifactOnly => "artifact_only",
+            Self::ForegroundMergeRequired => "foreground_merge_required",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 /// Runnable provider-neutral agent profile.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct AgentProfile {
     pub id: AgentProfileId,
@@ -216,9 +289,11 @@ pub struct AgentProfile {
     pub tool_scope: ToolRegistryScope,
     #[serde(default)]
     pub permission_policy: AgentPermissionPolicy,
-    #[serde(default = "default_true")]
-    pub user_invocable: bool,
     #[serde(default)]
+    pub invocation_policy: AgentInvocationPolicy,
+    #[serde(default)]
+    pub result_policy: AgentResultPolicy,
+    pub user_invocable: bool,
     pub model_invocable: bool,
     #[serde(default)]
     pub skills: Vec<String>,
@@ -226,6 +301,103 @@ pub struct AgentProfile {
     pub mcp_servers: Vec<String>,
     #[serde(default)]
     pub nickname_candidates: Vec<String>,
+}
+
+impl Default for AgentInvocationPolicy {
+    fn default() -> Self {
+        Self::ManualOnly
+    }
+}
+
+impl AgentProfile {
+    #[must_use]
+    pub fn user_invocation_allowed(&self) -> bool {
+        self.user_invocable
+            && matches!(
+                self.invocation_policy,
+                AgentInvocationPolicy::ManualOnly | AgentInvocationPolicy::ModelAllowed
+            )
+    }
+
+    #[must_use]
+    pub fn model_invocation_allowed(&self) -> bool {
+        self.model_invocable
+            && matches!(self.invocation_policy, AgentInvocationPolicy::ModelAllowed)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct AgentProfileWire {
+    id: AgentProfileId,
+    kind: AgentProfileKind,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    instructions: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    tool_scope: ToolRegistryScope,
+    #[serde(default)]
+    permission_policy: AgentPermissionPolicy,
+    #[serde(default)]
+    invocation_policy: Option<AgentInvocationPolicy>,
+    #[serde(default)]
+    result_policy: AgentResultPolicy,
+    #[serde(default)]
+    user_invocable: Option<bool>,
+    #[serde(default)]
+    model_invocable: Option<bool>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    mcp_servers: Vec<String>,
+    #[serde(default)]
+    nickname_candidates: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for AgentProfile {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = AgentProfileWire::deserialize(deserializer)?;
+        let invocation_policy = wire.invocation_policy.unwrap_or_else(|| {
+            AgentInvocationPolicy::from_invocability(
+                wire.user_invocable.unwrap_or(true),
+                wire.model_invocable.unwrap_or(false),
+            )
+        });
+        let user_invocable = wire
+            .user_invocable
+            .unwrap_or_else(|| invocation_policy.default_user_invocable());
+        let model_invocable = wire
+            .model_invocable
+            .unwrap_or_else(|| invocation_policy.default_model_invocable());
+        Ok(Self {
+            id: wire.id,
+            kind: wire.kind,
+            description: wire.description,
+            instructions: wire.instructions,
+            model: wire.model,
+            provider: wire.provider,
+            reasoning_effort: wire.reasoning_effort,
+            tool_scope: wire.tool_scope,
+            permission_policy: wire.permission_policy,
+            invocation_policy,
+            result_policy: wire.result_policy,
+            user_invocable,
+            model_invocable,
+            skills: wire.skills,
+            mcp_servers: wire.mcp_servers,
+            nickname_candidates: wire.nickname_candidates,
+        })
+    }
 }
 
 /// Immutable snapshot of profile source, trust, and resolved scopes for one run.
@@ -250,6 +422,147 @@ pub struct AgentProfileSnapshot {
     pub resolved_skill_hashes: Vec<String>,
     #[serde(default)]
     pub trust_state: AgentTrustState,
+}
+
+/// Append-only trust review decision for one agent profile source and content hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentProfileTrustEntry {
+    pub profile_id: AgentProfileId,
+    #[serde(default)]
+    pub source: AgentProfileSource,
+    #[serde(default)]
+    pub source_hash: String,
+    #[serde(default)]
+    pub profile_hash: String,
+    pub decision: AgentTrustState,
+    pub reviewed_at_ms: u64,
+}
+
+impl AgentProfileTrustEntry {
+    #[must_use]
+    pub fn matches_snapshot(&self, snapshot: &AgentProfileSnapshot) -> bool {
+        self.profile_id == snapshot.profile_id
+            && self.source == snapshot.source
+            && self.source_hash == snapshot.source_hash
+            && self.profile_hash == snapshot.profile_hash
+    }
+}
+
+/// Latest agent profile trust state reconstructed from append-only control entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfileTrustProjection {
+    pub trust_entries: BTreeMap<AgentProfileId, AgentProfileTrustEntry>,
+    pub trust_replay_order: Vec<AgentProfileId>,
+}
+
+impl AgentProfileTrustProjection {
+    #[must_use]
+    pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
+        let mut projection = Self::default();
+        for entry in entries {
+            let SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(entry)) = entry
+            else {
+                continue;
+            };
+            projection.apply_trust(entry);
+        }
+        projection
+    }
+
+    #[must_use]
+    pub fn decision_for_snapshot(
+        &self,
+        snapshot: &AgentProfileSnapshot,
+    ) -> Option<AgentTrustState> {
+        self.trust_entries
+            .get(&snapshot.profile_id)
+            .and_then(|entry| entry.matches_snapshot(snapshot).then_some(entry.decision))
+    }
+
+    #[must_use]
+    pub fn has_decision_for_profile(&self, profile_id: &AgentProfileId) -> bool {
+        self.trust_entries.contains_key(profile_id)
+    }
+
+    fn apply_trust(&mut self, entry: &AgentProfileTrustEntry) {
+        self.trust_replay_order.push(entry.profile_id.clone());
+        self.trust_entries
+            .insert(entry.profile_id.clone(), entry.clone());
+    }
+}
+
+/// Append-only user policy override for one agent profile source and content hash.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentProfilePolicyEntry {
+    pub profile_id: AgentProfileId,
+    #[serde(default)]
+    pub source: AgentProfileSource,
+    #[serde(default)]
+    pub source_hash: String,
+    #[serde(default)]
+    pub profile_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_invocable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_invocable: Option<bool>,
+    pub reviewed_at_ms: u64,
+}
+
+impl AgentProfilePolicyEntry {
+    #[must_use]
+    pub fn matches_snapshot(&self, snapshot: &AgentProfileSnapshot) -> bool {
+        self.profile_id == snapshot.profile_id
+            && self.source == snapshot.source
+            && self.source_hash == snapshot.source_hash
+            && self.profile_hash == snapshot.profile_hash
+    }
+}
+
+/// Latest agent profile policy overrides reconstructed from append-only control entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProfilePolicyProjection {
+    pub policy_entries: BTreeMap<AgentProfileId, AgentProfilePolicyEntry>,
+    pub policy_replay_order: Vec<AgentProfileId>,
+}
+
+impl AgentProfilePolicyProjection {
+    #[must_use]
+    pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
+        let mut projection = Self::default();
+        for entry in entries {
+            let SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(entry)) = entry
+            else {
+                continue;
+            };
+            projection.apply_policy(entry);
+        }
+        projection
+    }
+
+    #[must_use]
+    pub fn policy_for_snapshot(
+        &self,
+        snapshot: &AgentProfileSnapshot,
+    ) -> Option<&AgentProfilePolicyEntry> {
+        self.policy_entries
+            .get(&snapshot.profile_id)
+            .filter(|entry| entry.matches_snapshot(snapshot))
+    }
+
+    #[must_use]
+    pub fn has_policy_for_profile(&self, profile_id: &AgentProfileId) -> bool {
+        self.policy_entries.contains_key(profile_id)
+    }
+
+    fn apply_policy(&mut self, entry: &AgentProfilePolicyEntry) {
+        self.policy_replay_order.push(entry.profile_id.clone());
+        self.policy_entries
+            .insert(entry.profile_id.clone(), entry.clone());
+    }
 }
 
 /// Immutable runtime context used to restore or audit one agent run.
@@ -1145,10 +1458,6 @@ fn validate_stable_id(label: &str, value: &str) -> Result<()> {
         bail!("{label} contains unsupported characters");
     }
     Ok(())
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[cfg(test)]

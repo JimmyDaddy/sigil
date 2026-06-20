@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -7,6 +11,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    PlanApprovalExpiry,
     approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
     config::{CompactionConfig, MemoryConfig},
     event::{EventHandler, RunEvent},
@@ -26,7 +31,7 @@ use crate::{
     terminal_task::TerminalTaskEntry,
     tool::{
         ToolCategory, ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
-        ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus,
+        ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec,
         ToolSubject, ToolSubjectScope,
     },
 };
@@ -58,6 +63,7 @@ pub struct AgentRunInput {
     pub persisted_user_message: Option<String>,
     pub transient_context: Vec<ModelMessage>,
     pub task_plan_update: Option<TaskPlanUpdateContext>,
+    pub agent_delegation: Option<AgentDelegationRequirement>,
 }
 
 impl AgentRunInput {
@@ -66,6 +72,7 @@ impl AgentRunInput {
             persisted_user_message: Some(prompt.into()),
             transient_context: Vec::new(),
             task_plan_update: None,
+            agent_delegation: None,
         }
     }
 
@@ -74,6 +81,7 @@ impl AgentRunInput {
             persisted_user_message: Some(prompt.into()),
             transient_context,
             task_plan_update: None,
+            agent_delegation: None,
         }
     }
 
@@ -82,12 +90,43 @@ impl AgentRunInput {
             persisted_user_message: None,
             transient_context,
             task_plan_update: None,
+            agent_delegation: None,
         }
     }
 
     pub fn with_task_plan_update(mut self, context: TaskPlanUpdateContext) -> Self {
         self.task_plan_update = Some(context);
         self
+    }
+
+    pub fn with_agent_delegation_requirement(
+        mut self,
+        requirement: AgentDelegationRequirement,
+    ) -> Self {
+        self.agent_delegation = Some(requirement);
+        self
+    }
+}
+
+/// A per-run guard that requires at least one successful model-visible agent-thread tool result
+/// before a final answer can be accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentDelegationRequirement {
+    pub reason: String,
+}
+
+impl AgentDelegationRequirement {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    fn retry_prompt(&self) -> String {
+        format!(
+            "Delegation requirement not yet satisfied: {}. Before giving a final answer, call an agent-thread tool such as spawn_agent for the delegated scope, wait for the result when needed, then summarize.",
+            self.reason
+        )
     }
 }
 
@@ -114,6 +153,7 @@ pub enum AgentRunTerminalReason {
     #[default]
     FinalAnswer,
     MaxTurns,
+    DelegationUnsatisfied,
 }
 
 /// Runtime hook for model-visible agent-thread tools.
@@ -382,6 +422,7 @@ where
             persisted_user_message,
             mut transient_context,
             task_plan_update,
+            agent_delegation,
         } = input;
 
         if let Some(message) = persisted_user_message {
@@ -392,6 +433,10 @@ where
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
         let mut outcome = AgentRunOutcome::default();
+        let agent_delegation_enforced =
+            agent_delegation.filter(|_| tool_registry_has_agent_tools(tools));
+        let mut satisfied_agent_tool_calls = 0usize;
+        let mut delegation_retry_used = false;
 
         let mut model_turns = 0usize;
         loop {
@@ -503,8 +548,12 @@ where
 
             if !completed_calls.is_empty() {
                 total_tool_calls += completed_calls.len();
-                let assistant_content =
-                    (!assistant_text.trim().is_empty()).then(|| assistant_text.clone());
+                let completed_agent_tool_calls = count_agent_tool_calls(tools, &completed_calls);
+                let assistant_content = if completed_agent_tool_calls > 0 {
+                    None
+                } else {
+                    (!assistant_text.trim().is_empty()).then(|| assistant_text.clone())
+                };
                 let assistant_message =
                     ModelMessage::assistant(assistant_content, completed_calls.clone());
                 let assistant_message_id = assistant_message.id.clone();
@@ -670,6 +719,7 @@ where
                             subjects.clone(),
                             tool_default_mode,
                         )?;
+                        let decision = plan_approval_decision_override(session, &spec, decision);
                         let subject_label = if decision.subjects.is_empty() {
                             "-".to_owned()
                         } else {
@@ -997,12 +1047,42 @@ where
                     append_tool_control_entries_from_result(session, handler, &mut result)?;
                     append_terminal_task_control_from_result(session, handler, &result)?;
                     record_tool_run_outcome(&mut outcome, &result);
+                    if tool_is_agent_category && agent_tool_result_satisfies_delegation(&result) {
+                        satisfied_agent_tool_calls = satisfied_agent_tool_calls.saturating_add(1);
+                    }
                     let tool_transient_context = std::mem::take(&mut result.transient_context);
                     session.append_tool_message(result.to_model_message())?;
                     handler.handle(RunEvent::ToolResult(result))?;
                     transient_context.extend(tool_transient_context);
                 }
                 continue;
+            }
+
+            if let Some(requirement) = agent_delegation_enforced.as_ref()
+                && satisfied_agent_tool_calls == 0
+            {
+                if !delegation_retry_used {
+                    delegation_retry_used = true;
+                    handler.handle(RunEvent::Notice(
+                        "agent delegation required before final answer; retrying with explicit agent-tool instruction"
+                            .to_owned(),
+                    ))?;
+                    transient_context.push(ModelMessage::user(requirement.retry_prompt()));
+                    continue;
+                }
+                handler.handle(RunEvent::Notice(
+                    "agent delegation requirement was not satisfied; no final answer was recorded"
+                        .to_owned(),
+                ))?;
+                outcome.terminal_reason = AgentRunTerminalReason::DelegationUnsatisfied;
+                outcome.tool_calls = total_tool_calls;
+                return Ok(AgentRunOutput {
+                    result: AgentRunResult {
+                        final_text: String::new(),
+                        tool_calls: total_tool_calls,
+                    },
+                    outcome,
+                });
             }
 
             let assistant_message =
@@ -1047,7 +1127,7 @@ fn direct_task_tool_guidance_result(
     let content = if task_plan_update_available {
         "direct task/subagent tool calls are not supported in the planner; delegate work by calling task_plan_update with an accepted plan and step roles subagent_read or subagent_write"
     } else {
-        "direct task/subagent tool calls are legacy aliases; use the model-visible agent tools spawn_agent, wait_agent, message_agent, and close_agent when the user explicitly asks for delegation"
+        "direct task/subagent tool calls are legacy aliases; use the model-visible agent tools spawn_agent, wait_agent, read_agent_result, and close_agent when the user explicitly asks for delegation; message_agent is reserved until active child-agent mailbox support is enabled"
     };
     Some(ToolResult::ok(
         call.id.clone(),
@@ -1055,6 +1135,134 @@ fn direct_task_tool_guidance_result(
         content,
         ToolResultMeta::default(),
     ))
+}
+
+fn count_agent_tool_calls(tools: &ToolRegistry, calls: &[ToolCall]) -> usize {
+    calls
+        .iter()
+        .filter(|call| {
+            tools
+                .spec_for(&call.name)
+                .is_some_and(|spec| spec.category == ToolCategory::Agent)
+        })
+        .count()
+}
+
+fn tool_registry_has_agent_tools(tools: &ToolRegistry) -> bool {
+    tools
+        .specs()
+        .iter()
+        .any(|spec| spec.category == ToolCategory::Agent)
+}
+
+fn agent_tool_result_satisfies_delegation(result: &ToolResult) -> bool {
+    if result.is_error() {
+        return false;
+    }
+    let details = &result.metadata.details;
+    if details
+        .get("result_available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    details
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(is_terminal_agent_status)
+}
+
+fn is_terminal_agent_status(status: &str) -> bool {
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "interrupted" | "closed"
+    )
+}
+
+fn plan_approval_decision_override(
+    session: &Session,
+    spec: &ToolSpec,
+    mut decision: PermissionDecision,
+) -> PermissionDecision {
+    if decision.mode != ApprovalMode::Ask || decision.external_directory_required {
+        return decision;
+    }
+    let Some(approval) = active_plan_approval(session) else {
+        return decision;
+    };
+    if approval.permission.covers_tool(spec)
+        && plan_approval_covers_subjects(&approval.scope.workspace_paths, &decision.subjects)
+    {
+        decision.mode = ApprovalMode::Allow;
+    }
+    decision
+}
+
+fn active_plan_approval(session: &Session) -> Option<crate::PlanApprovedEntry> {
+    let entries = session.entries();
+    let (approval_index, approval) =
+        entries
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, entry)| match entry {
+                crate::SessionLogEntry::Control(ControlEntry::PlanApproved(approval)) => {
+                    Some((index, approval.clone()))
+                }
+                _ => None,
+            })?;
+    match approval.expires {
+        PlanApprovalExpiry::NextUserPrompt => {
+            let user_messages_after_approval = entries
+                .iter()
+                .skip(approval_index.saturating_add(1))
+                .filter(|entry| matches!(entry, crate::SessionLogEntry::User(_)))
+                .count();
+            (user_messages_after_approval == 1).then_some(approval)
+        }
+        PlanApprovalExpiry::Session => Some(approval),
+        PlanApprovalExpiry::AtUnixMs(expires_at_ms) => {
+            (unix_time_ms() <= expires_at_ms).then_some(approval)
+        }
+    }
+}
+
+fn plan_approval_covers_subjects(workspace_paths: &[String], subjects: &[ToolSubject]) -> bool {
+    if subjects.is_empty() {
+        return false;
+    }
+    subjects.iter().all(|subject| {
+        subject.scope == ToolSubjectScope::Workspace
+            && plan_approval_covers_subject(workspace_paths, subject)
+    })
+}
+
+fn plan_approval_covers_subject(workspace_paths: &[String], subject: &ToolSubject) -> bool {
+    if workspace_paths.is_empty() {
+        return true;
+    }
+    workspace_paths
+        .iter()
+        .any(|scope_path| path_is_within_scope(&subject.normalized, scope_path))
+}
+
+fn path_is_within_scope(path: &str, scope_path: &str) -> bool {
+    let path_components = Path::new(path).components().collect::<Vec<_>>();
+    let scope_components = Path::new(scope_path).components().collect::<Vec<_>>();
+    !scope_components.is_empty()
+        && path_components.len() >= scope_components.len()
+        && path_components
+            .iter()
+            .zip(scope_components.iter())
+            .all(|(left, right)| left == right)
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 fn record_tool_run_outcome(outcome: &mut AgentRunOutcome, result: &ToolResult) {
