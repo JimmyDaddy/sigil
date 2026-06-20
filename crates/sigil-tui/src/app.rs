@@ -1286,29 +1286,11 @@ impl AppState {
                     return Ok(None);
                 }
             };
-            self.clear_pending_plan_approval();
-            self.input.clear();
-            self.input_cursor = 0;
-            self.input_paste_spans.clear();
-            self.reset_slash_selector();
-            self.timeline_scroll_back = 0;
-            self.push_timeline(TimelineRole::User, prompt.clone());
-            self.push_event("input", format!("invoked agent {profile_id}"));
-            self.active_pane = PaneFocus::Composer;
-            self.push_event("focus", current_focus_label(self));
-            self.is_busy = true;
-            self.run_phase = RunPhase::Thinking;
-            self.last_notice = Some(format!("invoking agent {profile_id}"));
-            self.last_phase_marker = None;
-            self.push_phase_marker(format!("agent|{profile_id}"));
-            self.streaming_assistant_index = None;
-            self.streaming_reasoning_index = None;
-            self.composer_mode = ComposerMode::Build;
-            self.refresh_usage_sidebar_cache();
-            return Ok(Some(AppAction::InvokeAgentProfile {
+            return Ok(Some(self.start_agent_profile_invocation(
                 profile_id,
-                prompt: agent_prompt,
-            }));
+                agent_prompt,
+                prompt,
+            )));
         }
 
         if self.is_busy {
@@ -1394,6 +1376,7 @@ impl AppState {
                 self.show_doctor_report();
                 Ok(None)
             }
+            "@agent" => self.execute_agent_slash_command(&command, &prompt),
             "/agent" => self.activate_agent_from_command(&command.arg),
             "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
             "/model" => self.set_runtime_model_from_command(&command.arg),
@@ -1524,6 +1507,67 @@ impl AppState {
                 self.push_timeline(TimelineRole::Notice, "unknown slash command");
                 Ok(None)
             }
+        }
+    }
+
+    fn execute_agent_slash_command(
+        &mut self,
+        command: &ResolvedSlashCommand,
+        prompt: &str,
+    ) -> Result<Option<AppAction>> {
+        if self.is_busy {
+            self.push_timeline(TimelineRole::Notice, "busy; invoke agent later");
+            self.last_notice = Some("busy; invoke agent later".to_owned());
+            return Ok(None);
+        }
+        let Some((profile_id, agent_prompt)) =
+            command.arg.trim_start().split_once(char::is_whitespace)
+        else {
+            self.push_timeline(TimelineRole::Notice, "usage: /agent-name <prompt>");
+            self.last_notice = Some("usage: /agent-name <prompt>".to_owned());
+            return Ok(None);
+        };
+        let agent_prompt = agent_prompt.trim();
+        if agent_prompt.is_empty() {
+            self.push_timeline(TimelineRole::Notice, "usage: /agent-name <prompt>");
+            self.last_notice = Some("usage: /agent-name <prompt>".to_owned());
+            return Ok(None);
+        }
+        Ok(Some(self.start_agent_profile_invocation(
+            profile_id.to_owned(),
+            agent_prompt.to_owned(),
+            prompt.to_owned(),
+        )))
+    }
+
+    fn start_agent_profile_invocation(
+        &mut self,
+        profile_id: String,
+        agent_prompt: String,
+        prompt: String,
+    ) -> AppAction {
+        self.clear_pending_plan_approval();
+        self.input.clear();
+        self.input_cursor = 0;
+        self.input_paste_spans.clear();
+        self.reset_slash_selector();
+        self.timeline_scroll_back = 0;
+        self.push_timeline(TimelineRole::User, prompt);
+        self.push_event("input", format!("invoked agent {profile_id}"));
+        self.active_pane = PaneFocus::Composer;
+        self.push_event("focus", current_focus_label(self));
+        self.is_busy = true;
+        self.run_phase = RunPhase::Thinking;
+        self.last_notice = Some(format!("invoking agent {profile_id}"));
+        self.last_phase_marker = None;
+        self.push_phase_marker(format!("agent|{profile_id}"));
+        self.streaming_assistant_index = None;
+        self.streaming_reasoning_index = None;
+        self.composer_mode = ComposerMode::Build;
+        self.refresh_usage_sidebar_cache();
+        AppAction::InvokeAgentProfile {
+            profile_id,
+            prompt: agent_prompt,
         }
     }
 

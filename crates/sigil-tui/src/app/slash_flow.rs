@@ -306,7 +306,7 @@ impl AppState {
         let Some(profile) = self
             .user_invocable_agent_profiles()
             .into_iter()
-            .find(|profile| profile.profile.id.as_str() == profile_id)
+            .find(|profile| agent_profile_matches_token(profile, profile_id))
         else {
             return Err(anyhow!("unknown agent {profile_id}"));
         };
@@ -353,17 +353,63 @@ impl AppState {
             .collect()
     }
 
+    pub(super) fn slash_agent_entries(&self, token: &str, arg: &str) -> Vec<SlashSelectorEntry> {
+        let Some(query) = token.strip_prefix('/') else {
+            return Vec::new();
+        };
+        if query.is_empty() && token != "/" {
+            return Vec::new();
+        }
+        self.user_invocable_agent_profiles()
+            .into_iter()
+            .flat_map(|profile| {
+                profile
+                    .profile
+                    .slash_names
+                    .iter()
+                    .filter(|slash_name| query.is_empty() || slash_name.starts_with(query))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(move |slash_name| (profile.clone(), slash_name))
+            })
+            .map(|(profile, slash_name)| {
+                let profile_id = profile.profile.id.as_str();
+                let fill = if arg.is_empty() {
+                    format!("/{slash_name} ")
+                } else {
+                    format!("/{slash_name} {arg}")
+                };
+                SlashSelectorEntry {
+                    fill,
+                    label: format!("/{slash_name}"),
+                    description: agent_mention_description(&profile),
+                    resolved: ResolvedSlashCommand {
+                        canonical: "@agent".to_owned(),
+                        arg: format!("{profile_id} {arg}"),
+                    },
+                }
+            })
+            .collect()
+    }
+
     fn agent_mention_entries(&self, query: &str) -> Vec<SlashSelectorEntry> {
         let query = query.to_ascii_lowercase();
         self.user_invocable_agent_profiles()
             .into_iter()
             .filter(|profile| agent_profile_matches_query(profile, &query))
-            .map(|profile| {
+            .flat_map(|profile| {
+                agent_mention_tokens(&profile)
+                    .into_iter()
+                    .filter(|token| query.is_empty() || token.to_ascii_lowercase().contains(&query))
+                    .map(move |token| (profile.clone(), token))
+            })
+            .map(|(profile, token)| {
                 let profile_id = profile.profile.id.as_str();
                 let description = agent_mention_description(&profile);
                 SlashSelectorEntry {
-                    fill: format!("@{profile_id} "),
-                    label: format!("@{profile_id}"),
+                    fill: format!("@{token} "),
+                    label: format!("@{token}"),
                     description,
                     resolved: ResolvedSlashCommand {
                         canonical: "@agent".to_owned(),
@@ -392,6 +438,7 @@ impl AppState {
         } else {
             let mut entries = Self::slash_command_entries(token, &arg);
             if Self::exact_slash_command(token).is_none() {
+                entries.extend(self.slash_agent_entries(token, &arg));
                 entries.extend(self.slash_skill_entries(token, &arg));
             }
             entries
@@ -459,6 +506,9 @@ impl AppState {
                 arg,
             });
         }
+        if let Some(command) = self.resolve_agent_slash_command(token, &arg) {
+            return Some(command);
+        }
         let skill_id = token.strip_prefix('/')?;
         self.exact_skill_descriptor(skill_id)
             .filter(slash_skill_is_resolvable)
@@ -466,6 +516,24 @@ impl AppState {
                 canonical: format!("/{}", descriptor.id),
                 arg,
             })
+    }
+
+    fn resolve_agent_slash_command(&self, token: &str, arg: &str) -> Option<ResolvedSlashCommand> {
+        let slash_name = token.strip_prefix('/')?;
+        let profile = self
+            .user_invocable_agent_profiles()
+            .into_iter()
+            .find(|profile| {
+                profile
+                    .profile
+                    .slash_names
+                    .iter()
+                    .any(|candidate| candidate == slash_name)
+            })?;
+        Some(ResolvedSlashCommand {
+            canonical: "@agent".to_owned(),
+            arg: format!("{} {}", profile.profile.id.as_str(), arg),
+        })
     }
 
     pub(super) fn reset_slash_selector(&mut self) {
@@ -696,17 +764,42 @@ fn agent_profile_matches_query(profile: &ResolvedAgentProfile, query: &str) -> b
         search.push(' ');
         search.push_str(&nickname.to_ascii_lowercase());
     }
+    for alias in &profile.profile.aliases {
+        search.push(' ');
+        search.push_str(&alias.to_ascii_lowercase());
+    }
     search.contains(query)
+}
+
+fn agent_profile_matches_token(profile: &ResolvedAgentProfile, token: &str) -> bool {
+    profile.profile.id.as_str() == token
+        || profile.profile.aliases.iter().any(|alias| alias == token)
+}
+
+fn agent_mention_tokens(profile: &ResolvedAgentProfile) -> Vec<String> {
+    let mut tokens = vec![profile.profile.id.as_str().to_owned()];
+    for alias in &profile.profile.aliases {
+        if !tokens.iter().any(|token| token == alias) {
+            tokens.push(alias.clone());
+        }
+    }
+    tokens
 }
 
 fn agent_mention_description(profile: &ResolvedAgentProfile) -> String {
     let kind = agent_profile_kind_label(profile.profile.kind);
     let source = agent_profile_source_label(&profile.source);
     let description = profile.profile.description.trim();
-    if description.is_empty() {
-        format!("{kind} · {source}")
+    let aliases = if profile.profile.aliases.is_empty() {
+        None
     } else {
-        format!("{kind} · {source} · {description}")
+        Some(format!("aliases: {}", profile.profile.aliases.join(",")))
+    };
+    match (description.is_empty(), aliases) {
+        (true, None) => format!("{kind} · {source}"),
+        (false, None) => format!("{kind} · {source} · {description}"),
+        (true, Some(aliases)) => format!("{kind} · {source} · {aliases}"),
+        (false, Some(aliases)) => format!("{kind} · {source} · {description} · {aliases}"),
     }
 }
 

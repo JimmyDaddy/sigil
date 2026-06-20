@@ -301,6 +301,10 @@ pub struct AgentProfile {
     pub mcp_servers: Vec<String>,
     #[serde(default)]
     pub nickname_candidates: Vec<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub slash_names: Vec<String>,
 }
 
 impl Default for AgentInvocationPolicy {
@@ -359,6 +363,10 @@ struct AgentProfileWire {
     mcp_servers: Vec<String>,
     #[serde(default)]
     nickname_candidates: Vec<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    slash_names: Vec<String>,
 }
 
 impl<'de> Deserialize<'de> for AgentProfile {
@@ -396,6 +404,8 @@ impl<'de> Deserialize<'de> for AgentProfile {
             skills: wire.skills,
             mcp_servers: wire.mcp_servers,
             nickname_candidates: wire.nickname_candidates,
+            aliases: wire.aliases,
+            slash_names: wire.slash_names,
         })
     }
 }

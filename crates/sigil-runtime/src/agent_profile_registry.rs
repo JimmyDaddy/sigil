@@ -239,6 +239,7 @@ impl AgentProfileRegistry {
             )?;
         }
         profiles.sort_by(|left, right| left.profile.id.cmp(&right.profile.id));
+        disable_conflicting_profile_names(&mut profiles, &mut warnings);
         Ok(Self { profiles, warnings })
     }
 
@@ -422,6 +423,10 @@ struct NativeAgentProfileWire {
     mcp_servers: Option<Vec<String>>,
     #[serde(default)]
     nickname_candidates: Option<Vec<String>>,
+    #[serde(default)]
+    aliases: Option<Vec<String>>,
+    #[serde(default)]
+    slash_names: Option<Vec<String>>,
 }
 
 fn discover_workspace_agent_profiles(
@@ -676,6 +681,9 @@ fn workspace_agent_profile_from_raw(
         .unwrap_or_default()
         .trim()
         .to_owned();
+    let aliases = normalize_profile_name_list(wire.aliases.unwrap_or_default(), "agent alias")?;
+    let slash_names =
+        normalize_profile_name_list(wire.slash_names.unwrap_or_default(), "agent slash name")?;
     let profile = AgentProfile {
         id: profile_id,
         kind: wire.kind.unwrap_or(AgentProfileKind::Subagent),
@@ -695,6 +703,8 @@ fn workspace_agent_profile_from_raw(
         skills: wire.skills.unwrap_or_default(),
         mcp_servers: wire.mcp_servers.unwrap_or_default(),
         nickname_candidates: wire.nickname_candidates.unwrap_or_default(),
+        aliases,
+        slash_names,
     };
     Ok(ResolvedAgentProfile {
         source_hash: hash_json(&json!({
@@ -757,6 +767,8 @@ fn child_session_skill_profile(
         } else {
             vec![descriptor.name.clone()]
         },
+        aliases: Vec::new(),
+        slash_names: Vec::new(),
     };
     Ok(ResolvedAgentProfile {
         source_hash: hash_json(&json!({
@@ -952,6 +964,8 @@ fn wire_from_frontmatter_fields(
         skills: list("skills"),
         mcp_servers: list("mcp_servers"),
         nickname_candidates: list("nickname_candidates"),
+        aliases: list("aliases").or_else(|| list("alias")),
+        slash_names: list("slash_names").or_else(|| list("slash_name")),
     })
 }
 
@@ -1103,6 +1117,120 @@ fn agent_profile_source_label(source: &AgentProfileSource) -> &'static str {
     }
 }
 
+fn normalize_profile_name_list(values: Vec<String>, label: &str) -> Result<Vec<String>> {
+    let mut names = BTreeSet::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let name = trimmed
+            .strip_prefix('@')
+            .or_else(|| trimmed.strip_prefix('/'))
+            .unwrap_or(trimmed)
+            .trim();
+        AgentProfileId::new(name.to_owned())
+            .with_context(|| format!("invalid {label} {value:?}"))?;
+        names.insert(name.to_owned());
+    }
+    Ok(names.into_iter().collect())
+}
+
+fn disable_conflicting_profile_names(
+    profiles: &mut [ResolvedAgentProfile],
+    warnings: &mut Vec<String>,
+) {
+    disable_conflicting_profile_name_kind(
+        profiles,
+        warnings,
+        ProfileNameKind::Alias,
+        |profile| &profile.profile.aliases,
+        |profile| &mut profile.profile.aliases,
+    );
+    disable_conflicting_profile_name_kind(
+        profiles,
+        warnings,
+        ProfileNameKind::SlashName,
+        |profile| &profile.profile.slash_names,
+        |profile| &mut profile.profile.slash_names,
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProfileNameKind {
+    Alias,
+    SlashName,
+}
+
+impl ProfileNameKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Alias => "alias",
+            Self::SlashName => "slash name",
+        }
+    }
+}
+
+fn disable_conflicting_profile_name_kind(
+    profiles: &mut [ResolvedAgentProfile],
+    warnings: &mut Vec<String>,
+    kind: ProfileNameKind,
+    names: fn(&ResolvedAgentProfile) -> &Vec<String>,
+    names_mut: fn(&mut ResolvedAgentProfile) -> &mut Vec<String>,
+) {
+    let profile_ids = profiles
+        .iter()
+        .map(|profile| profile.profile.id.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut claims = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut blocked = BTreeSet::<String>::new();
+
+    for profile in profiles.iter() {
+        let profile_id = profile.profile.id.as_str();
+        for name in names(profile) {
+            if name == profile_id {
+                continue;
+            }
+            if profile_ids.contains(name) {
+                blocked.insert(name.clone());
+            }
+            claims
+                .entry(name.clone())
+                .or_default()
+                .insert(profile_id.to_owned());
+        }
+    }
+
+    for (name, owners) in &claims {
+        if owners.len() > 1 {
+            blocked.insert(name.clone());
+        }
+    }
+
+    for name in &blocked {
+        let mut owners = claims
+            .get(name)
+            .map(|owners| owners.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if profile_ids.contains(name) && !owners.iter().any(|owner| owner == name) {
+            owners.push(name.clone());
+            owners.sort();
+        }
+        warnings.push(format!(
+            "agent profile {} {:?} is ambiguous across {}; {} disabled",
+            kind.label(),
+            name,
+            owners.join(","),
+            kind.label()
+        ));
+    }
+
+    for profile in profiles.iter_mut() {
+        let profile_id = profile.profile.id.as_str().to_owned();
+        names_mut(profile).retain(|name| name == &profile_id || !blocked.contains(name));
+    }
+}
+
 fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1156,6 +1284,8 @@ fn builtin_profile(
             .iter()
             .map(|value| (*value).to_owned())
             .collect(),
+        aliases: Vec::new(),
+        slash_names: Vec::new(),
     };
     Ok(ResolvedAgentProfile {
         source_hash: hash_json(&json!({

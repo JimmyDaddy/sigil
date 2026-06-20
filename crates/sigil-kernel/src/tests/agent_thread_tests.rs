@@ -153,6 +153,8 @@ fn agent_profile_defaults_keep_model_invocation_disabled() -> Result<()> {
         skills: Vec::new(),
         mcp_servers: Vec::new(),
         nickname_candidates: vec!["Atlas".to_owned()],
+        aliases: Vec::new(),
+        slash_names: Vec::new(),
     };
 
     let encoded = serde_json::to_string(&profile)?;
@@ -163,6 +165,8 @@ fn agent_profile_defaults_keep_model_invocation_disabled() -> Result<()> {
     assert_eq!(decoded.invocation_policy, AgentInvocationPolicy::ManualOnly);
     assert_eq!(decoded.result_policy, AgentResultPolicy::SummaryWithPageRef);
     assert_eq!(decoded.nickname_candidates, vec!["Atlas"]);
+    assert!(decoded.aliases.is_empty());
+    assert!(decoded.slash_names.is_empty());
     Ok(())
 }
 

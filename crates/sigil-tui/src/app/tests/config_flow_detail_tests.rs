@@ -37,6 +37,8 @@ fn resolved_agent(id: &str) -> sigil_runtime::ResolvedAgentProfile {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             nickname_candidates: Vec::new(),
+            aliases: Vec::new(),
+            slash_names: Vec::new(),
         },
         enabled: true,
         enabled_override: None,
@@ -434,6 +436,8 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
             skills: vec!["review".to_owned(), "audit".to_owned()],
             mcp_servers: vec!["filesystem".to_owned()],
             nickname_candidates: Vec::new(),
+            aliases: Vec::new(),
+            slash_names: Vec::new(),
         },
         enabled: true,
         enabled_override: Some(false),
@@ -457,6 +461,8 @@ fn agent_detail_helpers_cover_empty_values_and_policy_overrides() {
     assert!(detail.contains("- Skills: review,audit"));
     assert!(detail.contains("- MCP: filesystem"));
     assert!(detail.contains("- Nicknames: none"));
+    assert!(detail.contains("- Aliases: none"));
+    assert!(detail.contains("- Slash: none"));
     assert_eq!(
         selected_agent_summary(&ConfigState::from_root_config(&test_config())),
         "none"

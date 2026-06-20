@@ -625,6 +625,8 @@ trust = "trusted"
 invocation_policy = "model_allowed"
 allowed_tools = ["read_file", "grep"]
 nickname_candidates = ["Repo Review"]
+aliases = ["rr"]
+slash_names = ["review-agent"]
 "#,
     )?;
     let config = config_for_workspace(&workspace);
@@ -668,6 +670,8 @@ nickname_candidates = ["Repo Review"]
     assert!(detail.contains("- Invocation: model_allowed"));
     assert!(detail.contains("- Tools: names=grep,read_file"));
     assert!(detail.contains("- Nicknames: Repo Review"));
+    assert!(detail.contains("- Aliases: rr"));
+    assert!(detail.contains("- Slash: /review-agent"));
     assert!(detail.contains("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/policy"));
 
     let nav = app.config_nav_lines().join("\n");

@@ -1,4 +1,5 @@
 use super::*;
+use crate::slash::ResolvedSlashCommand;
 
 fn config_for_workspace(workspace_root: &Path) -> RootConfig {
     let mut config = test_config();
@@ -410,6 +411,7 @@ description = "Review repository changes."
 instructions = "Use read-only tools."
 trust = "trusted"
 nickname_candidates = ["Repo Review"]
+aliases = ["rr"]
 "#,
     )?;
     write_workspace_agent(
@@ -460,6 +462,17 @@ instructions = "Use read-only tools."
     app.accept_slash_selector();
     assert_eq!(app.input, "@repo-review ");
 
+    app.input = "@rr".to_owned();
+    app.reset_slash_selector();
+    let alias_rows = app.slash_selector_rows();
+    assert!(
+        alias_rows
+            .iter()
+            .any(|(label, description)| { label == "@rr" && description.contains("aliases: rr") })
+    );
+    app.accept_slash_selector();
+    assert_eq!(app.input, "@rr ");
+
     app.input = "@missing".to_owned();
     app.reset_slash_selector();
     assert!(app.slash_selector_rows().is_empty());
@@ -480,6 +493,7 @@ fn agent_mention_submit_dispatches_agent_invocation() -> Result<()> {
 description = "Review repository changes."
 instructions = "Use read-only tools."
 trust = "trusted"
+aliases = ["rr"]
 "#,
     )?;
     let config = config_for_workspace(workspace.path());
@@ -499,6 +513,134 @@ trust = "trusted"
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "@repo-review audit crates/sigil-tui"
     }));
+    Ok(())
+}
+
+#[test]
+fn agent_mention_alias_submit_dispatches_canonical_profile() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_agent(
+        workspace.path(),
+        "repo-review",
+        r#"
+description = "Review repository changes."
+instructions = "Use read-only tools."
+trust = "trusted"
+aliases = ["rr"]
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "@rr audit crates/sigil-tui".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::InvokeAgentProfile { profile_id, prompt })
+            if profile_id == "repo-review" && prompt == "audit crates/sigil-tui"
+    ));
+    Ok(())
+}
+
+#[test]
+fn agent_slash_name_submit_dispatches_canonical_profile() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_agent(
+        workspace.path(),
+        "repo-review",
+        r#"
+description = "Review repository changes."
+instructions = "Use read-only tools."
+trust = "trusted"
+slash_names = ["review-agent"]
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+    app.input = "/review-agent audit crates/sigil-tui".to_owned();
+
+    assert!(app.has_slash_selector());
+    assert!(
+        app.slash_selector_rows()
+            .iter()
+            .any(|(label, _)| label == "/review-agent")
+    );
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::InvokeAgentProfile { profile_id, prompt })
+            if profile_id == "repo-review" && prompt == "audit crates/sigil-tui"
+    ));
+    assert_eq!(app.last_notice(), Some("invoking agent repo-review"));
+    Ok(())
+}
+
+#[test]
+fn agent_slash_name_covers_selector_edges_and_fallback_resolution() -> Result<()> {
+    let workspace = tempdir()?;
+    write_workspace_agent(
+        workspace.path(),
+        "repo-review",
+        r#"
+description = "Review repository changes."
+instructions = "Use read-only tools."
+trust = "trusted"
+aliases = ["rr"]
+slash_names = ["review-agent"]
+"#,
+    )?;
+    let config = config_for_workspace(workspace.path());
+    let mut app = AppState::from_root_config(&workspace.path().join("sigil.toml"), &config);
+
+    assert!(app.slash_agent_entries("review", "").is_empty());
+    assert!(app.slash_agent_entries("", "").is_empty());
+    let slash_rows = app.slash_agent_entries("/review", "");
+    assert_eq!(slash_rows.len(), 1);
+    assert_eq!(slash_rows[0].fill, "/review-agent ");
+
+    let command = app
+        .resolve_slash_command("/review-agent audit crates/sigil-tui")
+        .expect("direct slash alias should resolve without selector state");
+    assert_eq!(command.canonical, "@agent");
+    assert_eq!(command.arg, "repo-review audit crates/sigil-tui");
+
+    app.input = "/review-agent audit crates/sigil-tui".to_owned();
+    app.is_busy = true;
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.last_notice(), Some("busy; invoke agent later"));
+    Ok(())
+}
+
+#[test]
+fn agent_slash_command_reports_usage_for_missing_agent_prompt() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    assert!(
+        app.execute_slash_command(
+            ResolvedSlashCommand {
+                canonical: "@agent".to_owned(),
+                arg: "repo-review".to_owned(),
+            },
+            "@repo-review".to_owned(),
+        )?
+        .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("usage: /agent-name <prompt>"));
+
+    assert!(
+        app.execute_slash_command(
+            ResolvedSlashCommand {
+                canonical: "@agent".to_owned(),
+                arg: "repo-review ".to_owned(),
+            },
+            "/review-agent".to_owned(),
+        )?
+        .is_none()
+    );
+    assert_eq!(app.last_notice(), Some("usage: /agent-name <prompt>"));
     Ok(())
 }
 

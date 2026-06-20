@@ -91,6 +91,8 @@ trust = "trusted"
 invocation_policy = "model_allowed"
 allowed_tools = ["grep", "read_file"]
 nickname_candidates = ["Scout", "Review"]
+aliases = ["repo-reviewer"]
+slash_names = ["review-agent"]
 "#,
     )?;
 
@@ -116,6 +118,8 @@ nickname_candidates = ["Scout", "Review"]
     );
     assert!(review.profile.model_invocation_allowed());
     assert_eq!(review.profile.nickname_candidates, vec!["Scout", "Review"]);
+    assert_eq!(review.profile.aliases, vec!["repo-reviewer"]);
+    assert_eq!(review.profile.slash_names, vec!["review-agent"]);
     assert!(registry.warnings().is_empty());
 
     let visible = registry.model_visible_index(&AgentProfileIndexContext::default())?;
@@ -144,6 +148,10 @@ allowed_tools: [grep]
 nickname_candidates:
   - Audit
   - Probe
+aliases:
+  - audit-reader
+slash_names:
+  - audit-agent
 ---
 Use grep to audit the requested scope.
 "#,
@@ -163,7 +171,107 @@ Use grep to audit the requested scope.
     assert!(audit.profile.tool_scope.allows("grep"));
     assert!(!audit.profile.tool_scope.allows("read_file"));
     assert_eq!(audit.profile.nickname_candidates, vec!["Audit", "Probe"]);
+    assert_eq!(audit.profile.aliases, vec!["audit-reader"]);
+    assert_eq!(audit.profile.slash_names, vec!["audit-agent"]);
     assert!(audit.profile.model_invocation_allowed());
+    Ok(())
+}
+
+#[test]
+fn registry_disables_conflicting_agent_aliases_without_dropping_profiles() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    for (id, alias) in [
+        ("review-a", "review"),
+        ("review-b", "review"),
+        ("review", "self"),
+    ] {
+        let agent_dir = workspace.join(".sigil").join("agents").join(id);
+        fs::create_dir_all(&agent_dir)?;
+        fs::write(
+            agent_dir.join("agent.toml"),
+            format!(
+                r#"
+description = "{id}."
+instructions = "Inspect only."
+trust = "trusted"
+aliases = ["{alias}"]
+"#
+            ),
+        )?;
+    }
+
+    let registry =
+        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+
+    assert!(registry.get(&AgentProfileId::new("review-a")?).is_some());
+    assert!(registry.get(&AgentProfileId::new("review-b")?).is_some());
+    assert!(registry.get(&AgentProfileId::new("review")?).is_some());
+    assert!(
+        registry
+            .get(&AgentProfileId::new("review-a")?)
+            .expect("profile should remain")
+            .profile
+            .aliases
+            .is_empty()
+    );
+    assert!(
+        registry
+            .get(&AgentProfileId::new("review-b")?)
+            .expect("profile should remain")
+            .profile
+            .aliases
+            .is_empty()
+    );
+    assert!(registry.warnings().iter().any(|warning| {
+        warning.contains("agent profile alias \"review\" is ambiguous")
+            && warning.contains("review-a")
+            && warning.contains("review-b")
+            && warning.contains("review")
+    }));
+    Ok(())
+}
+
+#[test]
+fn registry_normalizes_agent_alias_and_slash_name_edges() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let self_alias_dir = workspace.join(".sigil").join("agents").join("self-alias");
+    fs::create_dir_all(&self_alias_dir)?;
+    fs::write(
+        self_alias_dir.join("agent.toml"),
+        r#"
+description = "Self alias."
+instructions = "Inspect only."
+trust = "trusted"
+aliases = ["", " @reviewer ", "self-alias"]
+slash_names = [" /self-alias ", "/review-agent"]
+"#,
+    )?;
+    let slash_conflict_dir = workspace.join(".sigil").join("agents").join("review-agent");
+    fs::create_dir_all(&slash_conflict_dir)?;
+    fs::write(
+        slash_conflict_dir.join("agent.toml"),
+        r#"
+description = "Slash conflict."
+instructions = "Inspect only."
+trust = "trusted"
+"#,
+    )?;
+
+    let registry =
+        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let self_alias = registry
+        .get(&AgentProfileId::new("self-alias")?)
+        .expect("self-alias profile should remain");
+
+    assert_eq!(self_alias.profile.aliases, vec!["reviewer", "self-alias"]);
+    assert_eq!(self_alias.profile.slash_names, vec!["self-alias"]);
+    assert!(registry.warnings().iter().any(|warning| {
+        warning.contains("agent profile slash name \"review-agent\" is ambiguous")
+            && warning.contains("self-alias")
+            && warning.contains("review-agent")
+    }));
     Ok(())
 }
 

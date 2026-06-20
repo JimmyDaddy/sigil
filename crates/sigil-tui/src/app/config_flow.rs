@@ -2177,6 +2177,8 @@ fn render_agent_detail_lines(agent: &ResolvedAgentProfile) -> Vec<String> {
             "Nicknames",
             &list_summary(&agent.profile.nickname_candidates),
         ),
+        render_config_readonly_row("Aliases", &list_summary(&agent.profile.aliases)),
+        render_config_readonly_row("Slash", &agent_slash_name_summary(agent)),
     ]
 }
 
@@ -2302,6 +2304,19 @@ fn agent_model_invocable_summary(agent: &ResolvedAgentProfile) -> String {
         agent.profile.model_invocation_allowed(),
         agent.model_invocable_override,
     )
+}
+
+fn agent_slash_name_summary(agent: &ResolvedAgentProfile) -> String {
+    if agent.profile.slash_names.is_empty() {
+        return "none".to_owned();
+    }
+    agent
+        .profile
+        .slash_names
+        .iter()
+        .map(|name| format!("/{name}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn bool_override_summary(effective: bool, source: bool, override_value: Option<bool>) -> String {

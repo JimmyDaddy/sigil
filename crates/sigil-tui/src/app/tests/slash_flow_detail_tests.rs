@@ -24,6 +24,8 @@ fn profile(
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             nickname_candidates: vec!["repo scout".to_owned()],
+            aliases: Vec::new(),
+            slash_names: Vec::new(),
         },
         enabled: true,
         enabled_override: None,
@@ -72,6 +74,12 @@ fn agent_mention_errors_and_private_labels_cover_edge_paths() {
     assert!(agent_profile_matches_query(&user_profile, ""));
     assert!(agent_profile_matches_query(&user_profile, "repo scout"));
     assert_eq!(agent_mention_description(&user_profile), "primary · user");
+    let mut aliased_user_profile = user_profile.clone();
+    aliased_user_profile.profile.aliases = vec!["rr".to_owned()];
+    assert_eq!(
+        agent_mention_description(&aliased_user_profile),
+        "primary · user · aliases: rr"
+    );
     assert_eq!(agent_profile_kind_label(AgentProfileKind::System), "system");
     assert_eq!(
         agent_profile_kind_label(AgentProfileKind::Unknown),

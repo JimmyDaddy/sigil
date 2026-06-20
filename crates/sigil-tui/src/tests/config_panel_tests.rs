@@ -64,6 +64,8 @@ fn test_agent(id: &str) -> sigil_runtime::ResolvedAgentProfile {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             nickname_candidates: vec![id.to_owned()],
+            aliases: Vec::new(),
+            slash_names: Vec::new(),
         },
         enabled: true,
         enabled_override: None,
