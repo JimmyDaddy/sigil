@@ -53,7 +53,9 @@ sigil doctor
 - 让 agent 通过结构化工具读取、搜索、编辑文件和运行命令。
 - 在高风险写操作前展示 approval card、受影响文件和有边界的 diff。
 - 从 `.sigil/sessions/` 下的 append-only JSONL 恢复 session。
-- 用 `/plan` 执行 durable 多步骤任务，进入 planner、executor 和可选 subagent 流程。
+- 用 `/plan` 执行只读规划 prompt，用 `/task` 执行 durable 多步骤任务，进入 planner、executor 和可选 subagent 流程。
+- 普通 chat 明确要求子 agent 时，会在最终回答前强制等待有效 agent 结果。
+- 受信任的 agent profile 可通过 `@profile <prompt>` 或受信任的 profile slash name 直接调用。
 - 按显式 trust、approval 和 secret-egress policy 接入 stdio MCP server。
 - 可选开启 code intelligence，支持符号、引用、诊断、code action 和 rename preview。
 
@@ -64,7 +66,12 @@ sigil doctor
 | 需求 | 使用 |
 | --- | --- |
 | 普通提问或编辑 | 直接在 composer 输入 |
-| 规划较大的任务 | `/plan <任务>` |
+| 规划但暂不执行 | `/plan` 后输入 prompt，或 `/plan <prompt>` |
+| 执行 durable 多步骤任务 | `/task <任务>`；未完成任务用 `/task continue` |
+| 要求普通 chat 使用子 agent | 明确说明“使用子 agent ...” |
+| 直接调用受信任 agent profile | `@profile <prompt>` 或 `/review-agent <prompt>` 这类受信任 profile slash name |
+| 切换或重命名主/子 agent transcript | composer 下方 agent 面板（`Down`、`Up/Down`、`Enter`）、`Alt-A`、`Shift-Alt-A`、`/agent` 或 `/agent rename <child-id|current> <name>` |
+| 查看较长子 agent 结果 | 切到子 agent transcript，或让 `read_agent_result` 分页读取子 agent final answer |
 | 新建或切换 session | `/new`、`/resume` |
 | 修改常用设置 | `/config` |
 | 诊断 setup/auth/MCP/LSP | `/doctor` |

@@ -85,6 +85,9 @@ fn command_metadata_generates_help_and_control_hints() {
     assert!(help.iter().any(|line| {
         line == "Paste: Insert pasted text without submitting; large pastes are folded in the composer display."
     }));
+    assert!(help.iter().any(|line| {
+        line == "@agent or trusted /agent-name: Invoke an enabled trusted agent profile with a prompt."
+    }));
     assert!(
         help.iter().any(|line| {
             line == "Ctrl-A/E: Move to the start/end of the current composer line."

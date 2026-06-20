@@ -2,6 +2,7 @@
 /dist
 /_site
 /.sigil
+/.reasonix
 sigil.toml
 .repo-local-dev
 __pycache__/

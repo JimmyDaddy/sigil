@@ -55,6 +55,7 @@ sigil doctor
 - Restores sessions from append-only JSONL records under `.sigil/sessions/`.
 - Supports `/plan` for read-only planning prompts and `/task` for durable multi-step work with planner, executor, and optional subagent roles.
 - Honors explicit ordinary-chat requests to delegate to a subagent before accepting a final answer.
+- Lets trusted agent profiles be invoked directly with `@profile <prompt>` or trusted profile slash names.
 - Connects stdio MCP servers under explicit trust, approval, and secret-egress policy.
 - Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
 
@@ -70,6 +71,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Plan before editing | `/plan` then type a prompt, or `/plan <prompt>` |
 | Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |
 | Require a child agent from chat | Say so explicitly, for example "use a sub-agent for ..." |
+| Invoke a trusted agent profile directly | `@profile <prompt>` or a trusted profile slash name such as `/review-agent <prompt>` |
 | Switch or rename visible parent/child agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A`, `/agent`, or `/agent rename <child-id|current> <name>` |
 | Inspect long child-agent results | Switch to the child transcript, or let `read_agent_result` explicitly page through the child final answer when extra detail is needed |
 | Start or switch sessions | `/new`, `/resume` |
