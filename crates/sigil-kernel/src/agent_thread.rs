@@ -197,10 +197,11 @@ pub enum AgentTrustState {
 pub type AgentPermissionPolicy = PermissionConfig;
 
 /// Policy describing who may invoke an agent profile.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentInvocationPolicy {
     /// Users may invoke the profile explicitly, but it is hidden from model-facing auto selection.
+    #[default]
     ManualOnly,
     /// The profile may be shown to the model-facing agent index when trust and scope allow it.
     ModelAllowed,
@@ -305,12 +306,6 @@ pub struct AgentProfile {
     pub aliases: Vec<String>,
     #[serde(default)]
     pub slash_names: Vec<String>,
-}
-
-impl Default for AgentInvocationPolicy {
-    fn default() -> Self {
-        Self::ManualOnly
-    }
 }
 
 impl AgentProfile {

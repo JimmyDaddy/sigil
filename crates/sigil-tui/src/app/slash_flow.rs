@@ -260,7 +260,7 @@ impl AppState {
             return Vec::new();
         };
         AgentProfileRegistry::from_root_config_with_workspace_and_entries(
-            &root_config,
+            root_config,
             &self.workspace_root,
             &self.current_session_entries,
         )
