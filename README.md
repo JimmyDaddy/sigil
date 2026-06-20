@@ -53,7 +53,8 @@ sigil doctor
 - Lets the agent read, search, edit, and run commands through structured tools.
 - Shows risky write operations through approval cards, affected files, and bounded diffs.
 - Restores sessions from append-only JSONL records under `.sigil/sessions/`.
-- Supports `/plan` for durable multi-step work with planner, executor, and optional subagent roles.
+- Supports `/plan` for read-only planning prompts and `/task` for durable multi-step work with planner, executor, and optional subagent roles.
+- Honors explicit ordinary-chat requests to delegate to a subagent before accepting a final answer.
 - Connects stdio MCP servers under explicit trust, approval, and secret-egress policy.
 - Optionally enables code intelligence for symbols, references, diagnostics, code actions, and rename previews.
 
@@ -64,9 +65,13 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Need | Use |
 | --- | --- |
 | Ask or edit normally | Type in the composer |
+| Paste multiline text or code | Paste into the composer; large pastes fold visually and submit in full |
 | Edit long composer drafts | `Ctrl-A/E`, `Alt-B/F`, `Ctrl-K/Y`, `Ctrl-Z` |
-| Plan a larger task | `/plan <task>` |
+| Plan before editing | `/plan` then type a prompt, or `/plan <prompt>` |
+| Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |
+| Require a child agent from chat | Say so explicitly, for example "use a sub-agent for ..." |
 | Switch or rename visible parent/child agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A`, `/agent`, or `/agent rename <child-id|current> <name>` |
+| Inspect long child-agent results | Switch to the child transcript, or let `read_agent_result` explicitly page through the child final answer when extra detail is needed |
 | Start or switch sessions | `/new`, `/resume` |
 | Change common settings | `/config` |
 | Diagnose setup/auth/MCP/LSP | `/doctor` |

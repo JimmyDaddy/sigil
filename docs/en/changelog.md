@@ -23,7 +23,7 @@ Sigil currently documents these user-facing capabilities:
 - Source install from repository checkout.
 - Quick Setup and `/config`.
 - `sigil doctor` and `/doctor`.
-- Durable planning through `/plan`.
+- Durable multi-step tasks through `/task`, with `/plan` reserved for read-only planning prompts.
 - Session restore from append-only logs.
 - Approval-backed file changes, shell execution, MCP, and LSP edits.
 - DeepSeek, OpenAI-compatible, Anthropic, and Gemini providers.

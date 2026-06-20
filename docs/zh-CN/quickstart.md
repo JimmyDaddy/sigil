@@ -109,13 +109,13 @@ git diff
 跨多个文件或需要顺序执行的任务，用：
 
 ```text
-/plan improve installation docs for macOS, Linux, and Windows users
+/task improve installation docs for macOS, Linux, and Windows users
 ```
 
 Sigil 会写入 durable task plan。你可以在 composer 里指导或纠正下一步。如果不需要额外说明，使用：
 
 ```text
-/plan continue
+/task continue
 ```
 
 计划任务状态会写入 append-only control records，重新打开 session 后可以恢复。

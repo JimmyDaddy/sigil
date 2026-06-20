@@ -159,7 +159,7 @@ tmux、screen、SSH、WSL 和手工 smoke check 见 [terminal-compatibility.md](
 用 `/resume` 选择 session。如果计划任务仍未完成，可以在 composer 里输入 guidance，或运行：
 
 ```text
-/plan continue
+/task continue
 ```
 
 ## Context Usage 很高

@@ -15,7 +15,7 @@
 | Chat workflow | 用户可以通过 composer 工作，并查看可见 tool activity。 |
 | Tool approvals | 文件变更、shell execution、外部路径和外部工具可在执行前 review。 |
 | Session recovery | Session 和 control records 是 append-only，可在重启后恢复可见状态。 |
-| Planning | `/plan <task>` 创建 durable 多步骤任务，`/plan continue` 继续最新任务。 |
+| Planning | `/plan` 运行只读 planning prompt；`/task <task>` 创建 durable 多步骤任务，`/task continue` 继续最新任务。 |
 | DeepSeek provider | DeepSeek 是默认 Quick Setup 路径。 |
 | OpenAI-compatible provider | 通过 `[providers.openai_compat]` 支持兼容 Chat Completions endpoint。 |
 | Anthropic provider | 通过 `[providers.anthropic]` 支持 Anthropic Messages streaming。 |

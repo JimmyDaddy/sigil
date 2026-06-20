@@ -32,7 +32,7 @@
 
 ![Sigil config panel preview](../../site/assets/screenshots/config-panel.svg)
 
-使用 `/config` 修改常见 provider、permission、memory、compaction、code intelligence、terminal、Skills、插件信任审查和 MCP settings。低频 provider 细节仍留在 `sigil.toml` 和环境变量中。
+使用 `/config` 修改常见 provider、permission、memory、compaction、code intelligence、terminal、Agents、Skills、插件信任审查和 MCP settings。低频 provider 细节仍留在 `sigil.toml` 和环境变量中。
 
 ## 重新生成这些截图
 

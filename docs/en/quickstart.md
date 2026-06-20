@@ -109,13 +109,13 @@ git diff
 For work that needs multiple steps, start with:
 
 ```text
-/plan improve installation docs for macOS, Linux, and Windows users
+/task improve installation docs for macOS, Linux, and Windows users
 ```
 
 Sigil writes a durable task plan. You can guide or correct the next step in the composer. To continue without extra guidance:
 
 ```text
-/plan continue
+/task continue
 ```
 
 Planned task state is stored in append-only control records and is restored when you reopen the session.

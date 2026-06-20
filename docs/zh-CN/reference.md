@@ -40,8 +40,9 @@
 | `/resume` | 选择并恢复历史 session |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
 | `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
-| `/plan <task>` | 创建 durable plan，并分步骤执行任务 |
-| `/plan continue` | 不带额外 guidance 继续最新 planned task |
+| `/plan` / `/plan <prompt>` | 进入 plan mode，或运行一次只读 planning prompt |
+| `/task <task>` | 创建 durable plan，并分步骤执行任务 |
+| `/task continue` | 不带额外 guidance 继续最新 planned task |
 | `/model <flash|pro|id>` | 切换下一轮 run 的 model，并开始新 session |
 | `/effort <low|medium|high|max>` | 切换下一轮 run 的 reasoning effort |
 | `/compact` | 手动 compact 当前 session 的 provider-visible context |
@@ -169,4 +170,4 @@ Gemini:
 - 恢复不会静默重放未完成工具。
 - `/new` 会开始一条新的 append-only session log。
 - `/resume` 选择历史 session。
-- 存在未完成 planned task 时，`/plan continue` 会继续最新任务。
+- 存在未完成 planned task 时，`/task continue` 会继续最新任务。

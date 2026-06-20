@@ -169,7 +169,7 @@ allow_write_subagents = true
 # 只有 allow_write_subagents = true 时才使用完整工具面。
 ```
 
-计划任务通过 TUI 里的 `/plan <任务>` 发起。`default_mode = "chat"` 会让普通 composer 提交在当前 session 没有 task context 时继续走 chat-first；已有 task context 后，composer 输入会作为 guidance 继续最近 task。只有明确想把计划任务作为默认流程时才改成 `plan`。
+计划任务通过 TUI 里的 `/task <任务>` 发起。`/plan` 只用于只读 planning prompt，不创建 durable task state。`default_mode = "chat"` 会让普通 composer 提交始终保持 chat-first，即使当前 session 里还有未完成 task；需要继续任务时使用 `/task continue` 或 task UI action。只有明确想把计划任务作为默认流程时才改成 `plan`。
 
 各 role 的 provider/model 未配置时继承 `[agent]`。Planner 和 subagent-read 默认只看到只读文件/搜索/code-intelligence 工具。Executor 可以看到完整 runtime registry。Subagent-write 只有在 `allow_write_subagents = true` 时才能看到完整 registry；否则回退到只读工具面。写工具仍然按正常审批策略执行。
 

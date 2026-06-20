@@ -65,8 +65,9 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
-| `/plan <task>` | Create a durable plan and execute the task step by step |
-| `/plan continue` | Continue the latest planned task without extra guidance |
+| `/plan` / `/plan <prompt>` | Enter plan mode or run one read-only planning prompt |
+| `/task <task>` | Create a durable plan and execute the task step by step |
+| `/task continue` | Continue the latest planned task without extra guidance |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
 | `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |
 | `/compact` | Manually compact the provider-visible context for the current session |
@@ -76,13 +77,13 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 
 ## Config Panel
 
-The `/config` panel groups provider, permission, memory, compaction, code intelligence, terminal, Skills, Plugins, and MCP settings. In the `Plugins` section, Sigil discovers workspace plugin manifests under `.sigil/plugins/<id>/plugin.toml`.
+The `/config` panel groups provider, permission, memory, compaction, code intelligence, terminal, Agents, Skills, Plugins, and MCP settings. In the `Plugins` section, Sigil discovers workspace plugin manifests under `.sigil/plugins/<id>/plugin.toml`.
 
 Use `PgUp/PgDn` to move between discovered plugins. The detail view shows the current trust state, manifest path, full manifest hash, skills, hook commands with args and approval mode, and MCP server commands with args, startup, and required status. Footer `approve` trusts the currently displayed manifest hash; footer `deny` disables that hash. Sigil refreshes the manifest before writing the review decision and appends the review to the session log.
 
 ## Planned Tasks
 
-Normal composer input stays chat-first until the current session has a planned task. After that, composer input continues the latest planned task and is passed to the active executor/subagent step as continuation guidance. Use `/plan <task>` when you want Sigil to break a larger request into durable steps before execution.
+Normal composer input always stays chat-first and no longer auto-continues a durable task just because the current session has unfinished task state. Use `/task continue` or a task UI action when you want to continue a task. Use `/plan` or `/plan <prompt>` when you want a read-only planning answer before editing. Use `/task <task>` when you want Sigil to break a larger request into durable steps before execution.
 
 Planned tasks use role-specific agents:
 
@@ -92,7 +93,7 @@ Planned tasks use role-specific agents:
 
 Task runs, plans, step status, child-session links, and subagent approval route summaries are stored as append-only control entries. The info rail shows the latest task status, plan version, and current step from that durable state. When child agents exist, the composer shows a compact agent panel under the input with each agent's status. Press `Down` from the last composer input row to focus that panel, use `Up/Down` to choose an agent, and press `Enter` to switch the main chat area. `Alt-A` / `Shift-Alt-A` still cycle the visible transcript between `main` and concrete child agents, and `/agent` picks a specific target. Child agent display names come from explicit plan metadata, then persisted `/agent rename` overrides, and otherwise fall back to generic role labels such as `read 1` or `write 1`.
 
-Session restore only rebuilds the visible task state. It does not automatically continue unfinished work. Type the next instruction in the composer to continue the latest task with guidance, or use `/plan continue` to continue without extra guidance.
+Session restore only rebuilds the visible task state. It does not automatically continue unfinished work. Type the next instruction in the composer to continue the latest task with guidance, or use `/task continue` to continue without extra guidance.
 
 ## Approvals and File Changes
 

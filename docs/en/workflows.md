@@ -49,13 +49,13 @@ If the edit is too broad, deny it and restate the scope.
 
 ## Plan A Larger Feature Or Refactor
 
-Use `/plan` when the task crosses multiple files or needs sequencing:
+Use `/task` when the task crosses multiple files or needs durable sequencing:
 
 ```text
-/plan add a troubleshooting section for terminal copy failures and link it from the TUI guide
+/task add a troubleshooting section for terminal copy failures and link it from the TUI guide
 ```
 
-Then review the plan before letting the executor continue. You can steer the next step:
+Then review the generated task plan before letting execution continue. You can steer the next step:
 
 ```text
 Keep this docs-only. Do not edit Rust code. Update both English and Chinese docs.
@@ -64,7 +64,7 @@ Keep this docs-only. Do not edit Rust code. Update both English and Chinese docs
 Use:
 
 ```text
-/plan continue
+/task continue
 ```
 
 when the latest task should continue without extra guidance.
@@ -111,7 +111,7 @@ Select a session from the list. Restored sessions rebuild visible conversation a
 If the latest planned task is still unfinished:
 
 ```text
-/plan continue
+/task continue
 ```
 
 or type guidance in the composer.

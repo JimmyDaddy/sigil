@@ -40,8 +40,9 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
-| `/plan <task>` | Create a durable plan and execute the task step by step |
-| `/plan continue` | Continue the latest planned task without extra guidance |
+| `/plan` / `/plan <prompt>` | Enter plan mode or run one read-only planning prompt |
+| `/task <task>` | Create a durable plan and execute the task step by step |
+| `/task continue` | Continue the latest planned task without extra guidance |
 | `/model <flash|pro|id>` | Switch the next run's model and start a fresh session |
 | `/effort <low|medium|high|max>` | Switch the next run's reasoning effort |
 | `/compact` | Manually compact the provider-visible context for the current session |
@@ -169,4 +170,4 @@ See [configuration.md](configuration.md) for examples.
 - Restore does not silently replay unfinished tools.
 - `/new` starts a fresh append-only session log.
 - `/resume` selects older sessions.
-- `/plan continue` continues the latest unfinished planned task when one exists.
+- `/task continue` continues the latest unfinished planned task when one exists.

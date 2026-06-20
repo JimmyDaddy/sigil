@@ -159,7 +159,7 @@ That is expected after a process exit, crash, terminal close, or cancellation wh
 Use `/resume` to select a session. If a planned task is still unfinished, continue with guidance in the composer or run:
 
 ```text
-/plan continue
+/task continue
 ```
 
 ## Context Usage Is High

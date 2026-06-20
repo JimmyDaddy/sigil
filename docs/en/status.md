@@ -15,7 +15,7 @@ This page separates what users can rely on today from what is experimental, limi
 | Chat workflow | Users can work through the composer with visible tool activity. |
 | Tool approvals | File writes, shell execution, external paths, and external tools can be reviewed before execution. |
 | Session recovery | Session and control records are append-only and can restore visible state after restart. |
-| Planning | `/plan <task>` creates durable multi-step task state, and `/plan continue` resumes the latest task. |
+| Planning | `/plan` runs read-only planning prompts; `/task <task>` creates durable multi-step task state, and `/task continue` resumes the latest task. |
 | DeepSeek provider | DeepSeek is the default Quick Setup path. |
 | OpenAI-compatible provider | Supported through `[providers.openai_compat]` for compatible Chat Completions endpoints. |
 | Anthropic provider | Supported through `[providers.anthropic]` for Anthropic Messages streaming. |

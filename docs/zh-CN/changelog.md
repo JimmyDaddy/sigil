@@ -23,7 +23,7 @@
 - 从 repository checkout 源码安装。
 - Quick Setup 和 `/config`。
 - `sigil doctor` 和 `/doctor`。
-- 通过 `/plan` 使用 durable planning。
+- 通过 `/task` 使用 durable multi-step tasks，`/plan` 保留给只读 planning prompts。
 - 从 append-only logs 恢复 session。
 - 文件变更、shell execution、MCP 和 LSP edits 通过 approval 控制。
 - DeepSeek、OpenAI-compatible、Anthropic 和 Gemini providers。
