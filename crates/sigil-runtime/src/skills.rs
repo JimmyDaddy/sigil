@@ -103,6 +103,12 @@ pub fn discover_skill_index_with_user_dir(
             SkillCandidateKind::ClaudeAgent,
         );
     }
+    if compatibility_source_enabled(config, "reasonix") {
+        discovery.discover_agent_dir(
+            &workspace_root.join(".reasonix").join("agents"),
+            SkillCandidateKind::ReasonixAgent,
+        );
+    }
 
     if let Some(user_config_dir) = user_config_dir {
         if config.user_skills {
@@ -771,6 +777,7 @@ enum SkillCandidateKind {
     WorkspaceAgent,
     ClaudeSkill,
     ClaudeAgent,
+    ReasonixAgent,
     UserSkill,
     UserAgent,
     PluginSkill { plugin_id: String },
@@ -780,7 +787,7 @@ impl SkillCandidateKind {
     fn is_agent(&self) -> bool {
         matches!(
             self,
-            Self::WorkspaceAgent | Self::ClaudeAgent | Self::UserAgent
+            Self::WorkspaceAgent | Self::ClaudeAgent | Self::ReasonixAgent | Self::UserAgent
         )
     }
 
@@ -790,9 +797,11 @@ impl SkillCandidateKind {
 
     fn source(&self) -> SkillSource {
         match self {
-            Self::WorkspaceSkill | Self::WorkspaceAgent | Self::ClaudeSkill | Self::ClaudeAgent => {
-                SkillSource::Workspace
-            }
+            Self::WorkspaceSkill
+            | Self::WorkspaceAgent
+            | Self::ClaudeSkill
+            | Self::ClaudeAgent
+            | Self::ReasonixAgent => SkillSource::Workspace,
             Self::UserSkill | Self::UserAgent => SkillSource::User,
             Self::PluginSkill { plugin_id } => SkillSource::Plugin {
                 plugin_id: plugin_id.clone(),
@@ -1118,7 +1127,16 @@ fn valid_skill_id(value: &str) -> bool {
 }
 
 fn normalize_key(raw_key: &str) -> String {
-    raw_key.trim().replace('-', "_").to_ascii_lowercase()
+    let normalized = raw_key.trim().replace('-', "_").to_ascii_lowercase();
+    match normalized.as_str() {
+        "runas" => "run_as".to_owned(),
+        "disablemodelinvocation" => "disable_model_invocation".to_owned(),
+        "userinvocable" => "user_invocable".to_owned(),
+        "allowedtools" => "allowed_tools".to_owned(),
+        "disallowedtools" => "disallowed_tools".to_owned(),
+        "whentouse" => "when_to_use".to_owned(),
+        _ => normalized,
+    }
 }
 
 fn list_frontmatter_key(key: &str) -> bool {

@@ -52,8 +52,10 @@ pub use agent_supervisor::{
 };
 pub use agent_tools::{
     AgentToolProviderFactory, AgentToolRuntime, CLOSE_AGENT_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME,
-    SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, register_agent_tools,
-    register_agent_tools_with_registry,
+    ManualAgentInvocationResult, READ_AGENT_RESULT_TOOL_NAME, SPAWN_AGENT_TOOL_NAME,
+    WAIT_AGENT_TOOL_NAME, close_agent_thread, register_agent_tools,
+    register_agent_tools_with_registry, register_agent_tools_with_workspace,
+    register_agent_tools_with_workspace_and_entries,
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
@@ -866,6 +868,17 @@ pub fn build_role_tool_registry(
     registry.scoped(role_tool_scope(root_config, role))
 }
 
+/// Builds the tool registry used by plan-mode prompts.
+///
+/// Plan mode uses planner-scoped tools for read-only exploration while keeping agent-thread tools
+/// visible so explicit delegation can still run through the same child-session contract as chat.
+pub fn build_plan_prompt_tool_registry(
+    registry: &ToolRegistry,
+    root_config: &RootConfig,
+) -> ScopedToolRegistry {
+    registry.scoped(role_tool_scope(root_config, AgentRole::Planner).union(&agent_tool_scope()))
+}
+
 /// Builds the current agent registry further constrained by a loaded skill descriptor.
 pub fn build_skill_tool_registry(
     registry: &ToolRegistry,
@@ -905,10 +918,15 @@ pub fn build_role_skill_tool_registry(
 }
 
 fn agent_tool_deny_scope() -> ToolRegistryScope {
+    agent_tool_scope()
+}
+
+fn agent_tool_scope() -> ToolRegistryScope {
     ToolRegistryScope::from_names_and_prefixes(
         [
             agent_tools::SPAWN_AGENT_TOOL_NAME,
             agent_tools::WAIT_AGENT_TOOL_NAME,
+            agent_tools::READ_AGENT_RESULT_TOOL_NAME,
             agent_tools::MESSAGE_AGENT_TOOL_NAME,
             agent_tools::CLOSE_AGENT_TOOL_NAME,
         ],

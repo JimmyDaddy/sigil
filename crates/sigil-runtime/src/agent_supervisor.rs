@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource,
+    Agent, AgentApprovalRouteEntry, AgentArtifactRef, AgentInvocationMode, AgentInvocationSource,
     AgentMergeSafePointEntry, AgentProfileCapturedEntry, AgentProfileId, AgentRole, AgentRouteId,
     AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
     AgentRunInput, AgentRunInterruptedEntry, AgentThreadId, AgentThreadResult,
@@ -378,16 +378,25 @@ impl AgentSupervisor {
                 start.profile_id.as_str()
             )
         })?;
-        if !resolved_profile.enabled {
+        if !resolved_profile.effective_enabled() {
             bail!("agent profile {} is disabled", start.profile_id.as_str());
         }
         if resolved_profile.trust_state != AgentTrustState::Trusted {
             bail!("agent profile {} is not trusted", start.profile_id.as_str());
         }
-        if !resolved_profile.profile.model_invocable {
+        let invocation_allowed = match start.invocation_source {
+            AgentInvocationSource::Mention => resolved_profile.effective_user_invocation_allowed(),
+            _ => resolved_profile.effective_model_invocation_allowed(),
+        };
+        if !invocation_allowed {
+            let requirement = match start.invocation_source {
+                AgentInvocationSource::Mention => "user-invocable",
+                _ => "model-invocable",
+            };
             bail!(
-                "agent profile {} is not model-invocable",
-                start.profile_id.as_str()
+                "agent profile {} is not {}",
+                start.profile_id.as_str(),
+                requirement
             );
         }
 
@@ -531,6 +540,7 @@ impl AgentSupervisor {
             .map_err(|_| anyhow!("agent supervisor state lock poisoned"))?;
         let current_tokens = *state.task_token_usage.get(task_id).unwrap_or(&0);
         let total_tokens = current_tokens.saturating_add(usage.total_tokens);
+        state.task_token_usage.insert(task_id.clone(), total_tokens);
         if total_tokens > self.budget.max_agent_tokens_per_task {
             bail!(
                 "agent token budget exceeded: task_id={} total_tokens={} max_agent_tokens_per_task={}",
@@ -539,7 +549,6 @@ impl AgentSupervisor {
                 self.budget.max_agent_tokens_per_task
             );
         }
-        state.task_token_usage.insert(task_id.clone(), total_tokens);
         Ok(())
     }
 
@@ -565,12 +574,12 @@ impl AgentSupervisor {
             ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry {
                 result: AgentThreadResult {
                     thread_id: thread.thread_id.clone(),
-                    session_ref: child_session_ref,
+                    session_ref: child_session_ref.clone(),
                     status: terminal_status,
                     summary: summary.text,
                     summary_truncated: summary.truncated,
                     original_summary_chars: summary.original_chars,
-                    artifacts: Vec::new(),
+                    artifacts: agent_result_artifacts(&child_session_ref, final_text),
                     changed_paths: outcome.changed_files.clone(),
                     risks: Vec::new(),
                     followups: Vec::new(),
@@ -618,7 +627,7 @@ impl AgentSupervisor {
                     summary: summary.text,
                     summary_truncated: summary.truncated,
                     original_summary_chars: summary.original_chars,
-                    artifacts: Vec::new(),
+                    artifacts: agent_result_artifacts(&thread.child_session_ref, final_text),
                     changed_paths: outcome.changed_files.clone(),
                     risks: Vec::new(),
                     followups: Vec::new(),
@@ -848,6 +857,17 @@ fn bounded_agent_summary(final_text: &str) -> BoundedAgentSummary {
     }
 }
 
+fn agent_result_artifacts(
+    child_session_ref: &SessionRef,
+    final_text: &str,
+) -> Vec<AgentArtifactRef> {
+    vec![AgentArtifactRef {
+        kind: "child_session".to_owned(),
+        path: child_session_ref.as_path().display().to_string(),
+        hash: Some(hash_text(final_text)),
+    }]
+}
+
 #[derive(Debug, Clone)]
 pub struct AgentTaskChildStart {
     pub task_id: TaskId,
@@ -1008,27 +1028,11 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         let final_text = output.result.final_text;
         let outcome = output.outcome;
         let usage = usage_summary_from_stats(child_session.stats());
-        if let Err(error) = self
+        let budget_warning = self
             .supervisor
             .validate_usage_budget(&request.task.task_id, &usage)
-        {
-            append_task_child_session(
-                route_handler.parent_session,
-                handler,
-                &request,
-                &child_task_id,
-                &child_session_ref,
-                TaskChildSessionStatus::Failed,
-                Some(hash_text(&final_text)),
-            )?;
-            self.supervisor.record_task_child_failure(
-                route_handler.parent_session,
-                handler,
-                &child_thread,
-                format!("{error:#}"),
-            )?;
-            return Err(error);
-        }
+            .err()
+            .map(|error| format!("{error:#}"));
         let status = task_child_status_from_outcome(&final_text, &outcome);
         append_task_child_session(
             route_handler.parent_session,
@@ -1049,6 +1053,11 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             &outcome,
             Some(usage),
         )?;
+        if let Some(warning) = budget_warning {
+            let _ = handler.handle(RunEvent::Notice(format!(
+                "agent budget warning after child completion: {warning}"
+            )));
+        }
         Ok(TaskChildSessionRunOutput {
             final_text,
             outcome,

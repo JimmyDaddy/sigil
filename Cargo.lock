@@ -2345,6 +2345,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "serde",
  "serde_json",
  "sha2",
  "sigil-code-intel",

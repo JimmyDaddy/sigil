@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::PathBuf,
     pin::Pin,
     sync::Arc,
@@ -482,6 +483,44 @@ fn chat_child_start_rejects_invalid_disabled_and_model_invisible_profiles() -> R
         )
         .expect_err("disabled profile rejected");
     assert!(error.to_string().contains("is disabled"));
+    Ok(())
+}
+
+#[test]
+fn chat_child_start_rejects_mention_when_profile_is_not_user_invocable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let agent_dir = workspace.join(".sigil").join("agents").join("model-only");
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(
+        agent_dir.join("agent.toml"),
+        r#"
+description = "Model-only helper."
+instructions = "Only the model may invoke this profile."
+trust = "trusted"
+invocation_policy = "model_allowed"
+user_invocable = false
+model_invocable = true
+"#,
+    )?;
+
+    let registry =
+        AgentProfileRegistry::from_root_config_with_workspace(&root_config(), &workspace)?;
+    let supervisor = AgentSupervisor::new(
+        registry,
+        AgentBudgetPolicy::from_root_config(&root_config()),
+        provider_capabilities(),
+    );
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut start = chat_child_start("model-only", workspace)?;
+    start.invocation_source = AgentInvocationSource::Mention;
+
+    let error = supervisor
+        .begin_chat_child_thread(&mut session, &mut handler, start)
+        .expect_err("manual mention rejects non-user-invocable profile");
+
+    assert!(error.to_string().contains("not user-invocable"));
     Ok(())
 }
 
@@ -1103,7 +1142,7 @@ fn provider_background_resume_defaults_to_interrupted() -> Result<()> {
 }
 
 #[tokio::test]
-async fn supervisor_enforces_max_agent_tokens_per_task() -> Result<()> {
+async fn supervisor_records_post_run_token_budget_warning_without_failing_child() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
     budget.max_agent_tokens_per_task = 10;
@@ -1122,7 +1161,7 @@ async fn supervisor_enforces_max_agent_tokens_per_task() -> Result<()> {
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
 
-    let result = runner
+    let output = runner
         .run_child_session(
             &mut session,
             TaskChildSessionRunRequest {
@@ -1141,16 +1180,14 @@ async fn supervisor_enforces_max_agent_tokens_per_task() -> Result<()> {
             &mut handler,
             &mut approval,
         )
-        .await;
+        .await?;
 
-    let error = result.expect_err("usage above budget must fail child session");
-    assert!(error.to_string().contains("agent token budget exceeded"));
+    assert_eq!(output.final_text, "too expensive");
     let projection = session.agent_thread_state_projection();
-    assert!(projection.threads.values().any(|thread| {
-        thread
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("agent token budget exceeded"))
+    let thread = projection.latest_thread().expect("child thread");
+    assert_eq!(thread.status, sigil_kernel::AgentThreadStatus::Completed);
+    assert!(handler.events.iter().any(|event| {
+        matches!(event, RunEvent::Notice(message) if message.contains("agent budget warning after child completion"))
     }));
     Ok(())
 }
@@ -1196,7 +1233,7 @@ async fn supervisor_enforces_cumulative_agent_tokens_per_task() -> Result<()> {
         )
         .await?;
 
-    let result = runner
+    runner
         .run_child_session(
             &mut session,
             TaskChildSessionRunRequest {
@@ -1215,16 +1252,41 @@ async fn supervisor_enforces_cumulative_agent_tokens_per_task() -> Result<()> {
             &mut handler,
             &mut approval,
         )
+        .await?;
+
+    let result = runner
+        .run_child_session(
+            &mut session,
+            TaskChildSessionRunRequest {
+                task: sigil_kernel::SequentialTaskRequest {
+                    task_id: TaskId::new("task_1")?,
+                    parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                    objective: "invoke agent".to_owned(),
+                },
+                plan_version: 1,
+                step: step("usage_three")?,
+                child_input: AgentRunInput::without_persisted_user_message(vec![
+                    ModelMessage::user("apply skill after budget"),
+                ]),
+                options: run_options(temp.path().to_path_buf()),
+            },
+            &mut handler,
+            &mut approval,
+        )
         .await;
 
-    let error = result.expect_err("cumulative task usage above budget must fail");
-    assert!(error.to_string().contains("total_tokens=26"));
+    let error = result.expect_err("cumulative task usage above budget must deny next spawn");
+    assert!(
+        error
+            .to_string()
+            .contains("agent budget denied child session")
+    );
     let projection = session.agent_thread_state_projection();
     assert!(projection.threads.values().any(|thread| {
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("agent token budget exceeded"))
+            .is_some_and(|reason| reason.contains("token budget exceeded before spawn"))
     }));
     Ok(())
 }

@@ -25,15 +25,15 @@ use sigil_provider_gemini::{GEMINI_API_KEY_ENV, GOOGLE_API_KEY_ENV, SIGIL_GEMINI
 use sigil_provider_openai_compat::{OPENAI_API_KEY_ENV, OPENAI_COMPATIBLE_API_KEY_ENV};
 
 use super::{
-    SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed, build_provider,
-    build_role_provider, build_role_run_options, build_role_skill_tool_registry,
-    build_role_tool_registry, build_run_options, build_skill_tool_registry, build_tool_registry,
-    build_tool_registry_without_eager_mcp, load_anthropic_config, load_deepseek_config,
-    load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
-    provider_capability_view, refresh_mcp_server_tools_with_mcp_handlers,
-    register_lazy_mcp_activation_tool, resolve_anthropic_api_key, resolve_deepseek_api_key,
-    resolve_deepseek_api_key_with_session, resolve_gemini_api_key,
-    resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
+    SecretSource, activate_lazy_mcp_tools, activate_lazy_mcp_tools_detailed,
+    build_plan_prompt_tool_registry, build_provider, build_role_provider, build_role_run_options,
+    build_role_skill_tool_registry, build_role_tool_registry, build_run_options,
+    build_skill_tool_registry, build_tool_registry, build_tool_registry_without_eager_mcp,
+    load_anthropic_config, load_deepseek_config, load_gemini_config, load_openai_compat_config,
+    provider_capabilities_for_name, provider_capability_view,
+    refresh_mcp_server_tools_with_mcp_handlers, register_lazy_mcp_activation_tool,
+    resolve_anthropic_api_key, resolve_deepseek_api_key, resolve_deepseek_api_key_with_session,
+    resolve_gemini_api_key, resolve_gemini_api_key_with_session, resolve_openai_compat_api_key,
     resolve_openai_compat_api_key_with_session, secret_redactor_for_root_config,
 };
 
@@ -651,6 +651,27 @@ async fn build_role_tool_registry_applies_default_and_configured_scopes() -> Res
 }
 
 #[tokio::test]
+async fn build_plan_prompt_tool_registry_keeps_agent_tools_with_readonly_scope() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    sigil_tools_builtin::register_builtin_tools(&mut registry);
+    let config = test_root_config("deepseek");
+    super::register_agent_tools(&mut registry, &config)?;
+
+    let planner = build_plan_prompt_tool_registry(&registry, &config);
+
+    assert!(planner.spec_for("read_file").is_some());
+    assert!(planner.spec_for(super::SPAWN_AGENT_TOOL_NAME).is_some());
+    assert!(planner.spec_for(super::WAIT_AGENT_TOOL_NAME).is_some());
+    assert!(
+        planner
+            .spec_for(super::READ_AGENT_RESULT_TOOL_NAME)
+            .is_some()
+    );
+    assert!(planner.spec_for("write_file").is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<()> {
     let mut registry = ToolRegistry::new();
     sigil_tools_builtin::register_builtin_tools(&mut registry);
@@ -695,6 +716,7 @@ async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<
     assert!(direct_allow_all.spec_for("read_file").is_some());
     assert!(direct_allow_all.spec_for("spawn_agent").is_none());
     assert!(direct_allow_all.spec_for("wait_agent").is_none());
+    assert!(direct_allow_all.spec_for("read_agent_result").is_none());
     assert!(direct_allow_all.spec_for("close_agent").is_none());
 
     let mut write_allowed_skill = skill.clone();

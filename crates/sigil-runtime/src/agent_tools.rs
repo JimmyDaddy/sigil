@@ -10,28 +10,32 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentProfileId,
     AgentRole, AgentRouteId, AgentRouteStatus, AgentThreadClosedEntry, AgentThreadId,
-    AgentThreadStatus, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
-    AgentUsageSummary, ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore,
-    ModelMessage, Provider, RootConfig, RunEvent, Session, SessionRef, TaskChildSessionStatus,
-    TaskId, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
+    AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult, AgentThreadStatus,
+    AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState, AgentUsageSummary,
+    ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, ModelMessage, Provider,
+    RootConfig, RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId,
+    Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
     ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
     ToolSubject,
 };
 
 use crate::{
-    AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, WORKER_PROFILE_ID,
-    build_role_provider, build_role_run_options, build_role_tool_registry,
+    AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, ResolvedAgentProfile,
+    WORKER_PROFILE_ID, build_role_provider, build_role_run_options, build_role_tool_registry,
     chat_agent_thread_id_for_call,
 };
 
 pub const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
 pub const WAIT_AGENT_TOOL_NAME: &str = "wait_agent";
+pub const READ_AGENT_RESULT_TOOL_NAME: &str = "read_agent_result";
 pub const MESSAGE_AGENT_TOOL_NAME: &str = "message_agent";
 pub const CLOSE_AGENT_TOOL_NAME: &str = "close_agent";
 
 const MAIN_THREAD_ID: &str = "main";
 const DEFAULT_RESULT_SUMMARY_LIMIT: usize = 4_000;
 const MIN_RESULT_SUMMARY_LIMIT: usize = 200;
+const DEFAULT_RESULT_PAGE_LIMIT: usize = 4_000;
+const MAX_RESULT_PAGE_LIMIT: usize = 12_000;
 
 /// Registers the model-visible agent tool surface into a runtime tool registry.
 ///
@@ -40,6 +44,32 @@ const MIN_RESULT_SUMMARY_LIMIT: usize = 200;
 /// error if an entrypoint registers them without a delegation hook.
 pub fn register_agent_tools(registry: &mut ToolRegistry, root_config: &RootConfig) -> Result<()> {
     let profile_registry = AgentProfileRegistry::from_root_config(root_config)?;
+    let budget = AgentBudgetPolicy::from_root_config(root_config);
+    register_agent_tools_with_registry(registry, profile_registry, budget)
+}
+
+pub fn register_agent_tools_with_workspace(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    workspace_root: &Path,
+) -> Result<()> {
+    let profile_registry =
+        AgentProfileRegistry::from_root_config_with_workspace(root_config, workspace_root)?;
+    let budget = AgentBudgetPolicy::from_root_config(root_config);
+    register_agent_tools_with_registry(registry, profile_registry, budget)
+}
+
+pub fn register_agent_tools_with_workspace_and_entries(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    entries: &[SessionLogEntry],
+) -> Result<()> {
+    let profile_registry = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
+        root_config,
+        workspace_root,
+        entries,
+    )?;
     let budget = AgentBudgetPolicy::from_root_config(root_config);
     register_agent_tools_with_registry(registry, profile_registry, budget)
 }
@@ -64,12 +94,44 @@ pub fn register_agent_tools_with_registry(
     Ok(())
 }
 
+/// Builds the same close result used by the model-visible `close_agent` tool.
+#[must_use]
+pub fn close_agent_thread(
+    session: &Session,
+    thread_id: AgentThreadId,
+    reason: Option<String>,
+) -> ToolResult {
+    let thread_id_value = thread_id.as_str().to_owned();
+    let args = match reason {
+        Some(reason) => json!({
+            "thread_id": thread_id_value,
+            "reason": reason,
+        }),
+        None => json!({
+            "thread_id": thread_id_value,
+        }),
+    };
+    let call = ToolCall {
+        id: format!("runtime-close-agent-{}", thread_id.as_str()),
+        name: CLOSE_AGENT_TOOL_NAME.to_owned(),
+        args_json: args.to_string(),
+    };
+    close_agent_from_args(session, &call, &args)
+}
+
 /// Runtime delegate that executes approved agent-thread tool calls.
 pub struct AgentToolRuntime {
     supervisor: AgentSupervisor,
     root_config: RootConfig,
     base_registry: ToolRegistry,
     provider_factory: Arc<dyn AgentToolProviderFactory>,
+}
+
+/// Result of a user-directed foreground agent invocation.
+#[derive(Debug, Clone)]
+pub struct ManualAgentInvocationResult {
+    pub thread_id: AgentThreadId,
+    pub result: Option<AgentThreadResult>,
 }
 
 impl AgentToolRuntime {
@@ -102,13 +164,13 @@ impl AgentToolRuntime {
         }
     }
 
-    fn validate_spawn_profile(&self, profile_id: &AgentProfileId) -> Result<()> {
+    fn resolve_spawn_profile(&self, profile_id: &AgentProfileId) -> Result<ResolvedAgentProfile> {
         let resolved = self
             .supervisor
             .registry()
             .get(profile_id)
             .with_context(|| format!("agent profile {} is not registered", profile_id.as_str()))?;
-        if !resolved.enabled {
+        if !resolved.effective_enabled() {
             return Err(anyhow!("agent profile {} is disabled", profile_id.as_str()));
         }
         if resolved.trust_state != AgentTrustState::Trusted {
@@ -117,13 +179,79 @@ impl AgentToolRuntime {
                 profile_id.as_str()
             ));
         }
-        if !resolved.profile.model_invocable {
+        if !resolved.effective_model_invocation_allowed() {
             return Err(anyhow!(
                 "agent profile {} is not model-invocable",
                 profile_id.as_str()
             ));
         }
-        Ok(())
+        Ok(resolved.clone())
+    }
+
+    fn resolve_manual_profile(&self, profile_id: &AgentProfileId) -> Result<ResolvedAgentProfile> {
+        let resolved = self
+            .supervisor
+            .registry()
+            .get(profile_id)
+            .with_context(|| format!("agent profile {} is not registered", profile_id.as_str()))?;
+        if !resolved.effective_enabled() {
+            return Err(anyhow!("agent profile {} is disabled", profile_id.as_str()));
+        }
+        if resolved.trust_state != AgentTrustState::Trusted {
+            return Err(anyhow!(
+                "agent profile {} is not trusted",
+                profile_id.as_str()
+            ));
+        }
+        if !resolved.effective_user_invocation_allowed() {
+            return Err(anyhow!(
+                "agent profile {} is not user-invocable",
+                profile_id.as_str()
+            ));
+        }
+        Ok(resolved.clone())
+    }
+
+    pub async fn invoke_agent_profile(
+        &self,
+        session: &mut Session,
+        profile_id: AgentProfileId,
+        prompt: String,
+        options: &sigil_kernel::AgentRunOptions,
+        handler: &mut (dyn EventHandler + Send),
+        approval_handler: &mut (dyn ApprovalHandler + Send),
+    ) -> Result<ManualAgentInvocationResult> {
+        let resolved_profile = self.resolve_manual_profile(&profile_id)?;
+        let call_id = manual_agent_call_id(session, &profile_id, &prompt);
+        let call = ToolCall {
+            id: call_id,
+            name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+            args_json: json!({
+                "profile_id": profile_id.as_str(),
+                "objective": &prompt,
+                "prompt": &prompt,
+                "mode": "join_before_final",
+            })
+            .to_string(),
+        };
+        let request = ChatAgentRunRequest {
+            profile_id,
+            objective: prompt.clone(),
+            prompt,
+            mode: AgentInvocationMode::JoinBeforeFinal,
+            display_name_hint: None,
+            invocation_source: AgentInvocationSource::Mention,
+            resolved_profile,
+        };
+        let thread_id = self
+            .run_chat_agent(session, &call, request, options, handler, approval_handler)
+            .await?;
+        let result = session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.result.clone());
+        Ok(ManualAgentInvocationResult { thread_id, result })
     }
 }
 
@@ -169,6 +297,7 @@ impl AgentToolDelegate for AgentToolRuntime {
                     .await
             }
             AgentToolKind::Wait => self.wait_agent(session, call, &args),
+            AgentToolKind::ReadResult => self.read_agent_result(session, call, &args),
             AgentToolKind::Message => self.message_agent(session, call, &args),
             AgentToolKind::Close => self.close_agent(session, call, &args),
         };
@@ -206,14 +335,18 @@ impl AgentToolRuntime {
                 "background agent mode requires provider-backed agent mailbox support",
             );
         }
-        if let Err(error) = self.validate_spawn_profile(&parsed.profile_id) {
-            return ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::PermissionDenied,
-                format!("{error:#}"),
-            );
-        }
+        let resolved_profile = match self.resolve_spawn_profile(&parsed.profile_id) {
+            Ok(profile) => profile,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::PermissionDenied,
+                    format!("{error:#}"),
+                );
+            }
+        };
+        let profile_tool_scope = resolved_profile.profile.tool_scope.clone();
         let child_provider =
             match self
                 .provider_factory
@@ -337,13 +470,18 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let child_registry =
-            build_role_tool_registry(&self.base_registry, &self.root_config, role).into_registry();
+        let child_registry = build_role_tool_registry(&self.base_registry, &self.root_config, role)
+            .into_registry()
+            .scoped(profile_tool_scope)
+            .into_registry();
         let child_agent = Agent::new(child_provider, child_registry);
+        let mut child_messages = Vec::new();
+        if let Some(system_prompt) = agent_profile_system_prompt(&resolved_profile) {
+            child_messages.push(ModelMessage::system(system_prompt));
+        }
+        child_messages.push(ModelMessage::user(parsed.prompt.clone()));
         let child_input =
-            sigil_kernel::AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
-                parsed.prompt.clone(),
-            )]);
+            sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages);
         let child_options = build_role_run_options(
             &self.root_config,
             options.workspace_root.clone(),
@@ -387,23 +525,11 @@ impl AgentToolRuntime {
         let final_text = output.result.final_text;
         let outcome = output.outcome;
         let usage = usage_summary_from_stats(child_session.stats());
-        if let Err(error) = self
+        let budget_warning = self
             .supervisor
             .validate_usage_budget(&budget_scope_id, &usage)
-        {
-            let _ = self.supervisor.record_chat_child_failure(
-                session,
-                handler,
-                &child_thread,
-                format!("{error:#}"),
-            );
-            return ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::PermissionDenied,
-                format!("{error:#}"),
-            );
-        }
+            .err()
+            .map(|error| format!("{error:#}"));
         let status = child_status_from_outcome(&final_text, &outcome);
         if let Err(error) = self.supervisor.record_chat_child_result(
             session,
@@ -421,6 +547,11 @@ impl AgentToolRuntime {
                 error.to_string(),
             );
         }
+        if let Some(warning) = budget_warning {
+            let _ = handler.handle(RunEvent::Notice(format!(
+                "agent budget warning after child completion: {warning}"
+            )));
+        }
         let result = session
             .agent_thread_state_projection()
             .threads
@@ -434,18 +565,150 @@ impl AgentToolRuntime {
         )
     }
 
-    fn wait_agent(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
-        let max_summary_chars = match max_summary_chars_arg(args) {
-            Ok(limit) => limit,
+    async fn run_chat_agent(
+        &self,
+        session: &mut Session,
+        call: &ToolCall,
+        request: ChatAgentRunRequest,
+        options: &sigil_kernel::AgentRunOptions,
+        handler: &mut (dyn EventHandler + Send),
+        approval_handler: &mut (dyn ApprovalHandler + Send),
+    ) -> Result<AgentThreadId> {
+        let role = role_for_profile_id(&request.profile_id);
+        if matches!(request.mode, AgentInvocationMode::Background) {
+            return Err(anyhow!(
+                "background agent mode requires provider-backed agent mailbox support"
+            ));
+        }
+
+        let profile_tool_scope = request.resolved_profile.profile.tool_scope.clone();
+        let child_provider = self
+            .provider_factory
+            .build_provider(&self.root_config, role, &request.profile_id)
+            .with_context(|| {
+                format!(
+                    "failed to build child agent provider for {}",
+                    request.profile_id.as_str()
+                )
+            })?;
+        let child_capabilities = child_provider.capabilities();
+        let thread_id = chat_agent_thread_id_for_call(&call.id, &request.profile_id)?;
+        let parent_session_ref = parent_session_ref(session)?;
+        let child_session_ref = agent_child_session_ref(&thread_id)?;
+        let budget_scope_id = chat_budget_scope_id(&call.id)?;
+        let parent_thread_id = AgentThreadId::new(MAIN_THREAD_ID)?;
+        let child_thread = self.supervisor.begin_chat_child_thread(
+            session,
+            handler,
+            crate::AgentChatChildStart {
+                call_id: call.id.clone(),
+                budget_scope_id: budget_scope_id.clone(),
+                parent_thread_id,
+                parent_depth: 0,
+                parent_session_ref,
+                profile_id: request.profile_id.clone(),
+                role,
+                child_session_ref: child_session_ref.clone(),
+                objective: request.objective.clone(),
+                prompt: request.prompt.clone(),
+                workspace_root: options.workspace_root.clone(),
+                provider_capabilities: child_capabilities,
+                invocation_mode: request.mode,
+                invocation_source: request.invocation_source,
+                display_name_hint: request.display_name_hint.clone(),
+            },
+        )?;
+        let _thread_guard = ChatChildThreadGuard {
+            supervisor: self.supervisor.clone(),
+            thread_id: child_thread.thread_id.clone(),
+        };
+
+        let mut child_session = match build_agent_child_session(session, &child_session_ref) {
+            Ok(session) => session,
             Err(error) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::InvalidInput,
-                    error.to_string(),
+                let _ = self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &child_thread,
+                    format!("{error:#}"),
                 );
+                return Err(error);
             }
         };
+        let child_registry = build_role_tool_registry(&self.base_registry, &self.root_config, role)
+            .into_registry()
+            .scoped(profile_tool_scope)
+            .into_registry();
+        let child_agent = Agent::new(child_provider, child_registry);
+        let mut child_messages = Vec::new();
+        if let Some(system_prompt) = agent_profile_system_prompt(&request.resolved_profile) {
+            child_messages.push(ModelMessage::system(system_prompt));
+        }
+        child_messages.push(ModelMessage::user(request.prompt.clone()));
+        let child_input =
+            sigil_kernel::AgentRunInput::without_persisted_user_message(child_messages);
+        let child_options = build_role_run_options(
+            &self.root_config,
+            options.workspace_root.clone(),
+            options.interaction_mode,
+            role,
+        );
+        let output = {
+            let mut child_handler = ForwardEventHandler { inner: handler };
+            let mut route_handler = ChatAgentApprovalRouteHandler {
+                inner: approval_handler,
+                parent_session: session,
+                source_thread_id: child_thread.thread_id.clone(),
+            };
+            child_agent
+                .run_with_approval_input(
+                    &mut child_session,
+                    child_input,
+                    child_options,
+                    &mut child_handler,
+                    &mut route_handler,
+                )
+                .await
+        };
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &child_thread,
+                    format!("{error:#}"),
+                );
+                return Err(error).context("child agent failed");
+            }
+        };
+        let final_text = output.result.final_text;
+        let outcome = output.outcome;
+        let usage = usage_summary_from_stats(child_session.stats());
+        let budget_warning = self
+            .supervisor
+            .validate_usage_budget(&budget_scope_id, &usage)
+            .err()
+            .map(|error| format!("{error:#}"));
+        let status = child_status_from_outcome(&final_text, &outcome);
+        self.supervisor.record_chat_child_result(
+            session,
+            handler,
+            &child_thread,
+            status,
+            &final_text,
+            &outcome,
+            Some(usage),
+        )?;
+        if let Some(warning) = budget_warning {
+            let _ = handler.handle(RunEvent::Notice(format!(
+                "agent budget warning after child completion: {warning}"
+            )));
+        }
+        Ok(child_thread.thread_id)
+    }
+
+    fn wait_agent(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
         let thread_id = match thread_id_arg(args) {
             Ok(thread_id) => thread_id,
             Err(error) => {
@@ -466,7 +729,64 @@ impl AgentToolRuntime {
                 format!("agent thread {} was not found", thread_id.as_str()),
             );
         };
-        agent_result_tool_result(call, &thread_id, thread.result.as_ref(), max_summary_chars)
+        agent_status_tool_result(call, thread)
+    }
+
+    fn read_agent_result(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
+        let thread_id = match thread_id_arg(args) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        let result_page_request = match required_result_page_request_arg(args) {
+            Ok(request) => request,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::InvalidInput,
+                    error.to_string(),
+                );
+            }
+        };
+        let projection = session.agent_thread_state_projection();
+        let Some(thread) = projection.threads.get(&thread_id) else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::NotFound,
+                format!("agent thread {} was not found", thread_id.as_str()),
+            );
+        };
+        let Some(result) = thread.result.as_ref() else {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Unsupported,
+                format!(
+                    "agent thread {} has no terminal result yet",
+                    thread_id.as_str()
+                ),
+            );
+        };
+        let result_page = match read_agent_result_page(session, result, result_page_request) {
+            Ok(page) => page,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        agent_result_page_tool_result(call, result, &result_page)
     }
 
     fn message_agent(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
@@ -501,7 +821,36 @@ impl AgentToolRuntime {
                 format!("agent thread {} was not found", thread_id.as_str()),
             );
         };
-        let _ = prompt;
+        let route_id = match agent_route_id_for_call(&thread_id, &call.id) {
+            Ok(route_id) => route_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        let source_thread_id = match AgentThreadId::new(MAIN_THREAD_ID) {
+            Ok(thread_id) => thread_id,
+            Err(error) => {
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
+        };
+        let prompt_hash = hash_text(&prompt);
+        let rejected = AgentThreadMessageRoutedEntry {
+            route_id: route_id.clone(),
+            source_thread_id: source_thread_id.clone(),
+            target_thread_id: thread_id.clone(),
+            prompt_hash: prompt_hash.clone(),
+            status: AgentRouteStatus::Rejected,
+        };
         ToolResult::error(
             call.id.clone(),
             call.name.clone(),
@@ -512,53 +861,67 @@ impl AgentToolRuntime {
                 thread_status_label(thread.status)
             ),
         )
+        .with_control_entry(ControlEntry::AgentThreadMessageRouted(
+            AgentThreadMessageRoutedEntry {
+                route_id,
+                source_thread_id,
+                target_thread_id: thread_id,
+                prompt_hash,
+                status: AgentRouteStatus::Requested,
+            },
+        ))
+        .with_control_entry(ControlEntry::AgentThreadMessageRouted(rejected))
     }
 
     fn close_agent(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
-        let thread_id = match thread_id_arg(args) {
-            Ok(thread_id) => thread_id,
-            Err(error) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::InvalidInput,
-                    error.to_string(),
-                );
-            }
-        };
-        let projection = session.agent_thread_state_projection();
-        let Some(thread) = projection.threads.get(&thread_id) else {
+        close_agent_from_args(session, call, args)
+    }
+}
+
+fn close_agent_from_args(session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
+    let thread_id = match thread_id_arg(args) {
+        Ok(thread_id) => thread_id,
+        Err(error) => {
             return ToolResult::error(
                 call.id.clone(),
                 call.name.clone(),
-                ToolErrorKind::NotFound,
-                format!("agent thread {} was not found", thread_id.as_str()),
-            );
-        };
-        if !thread.status.is_terminal() {
-            return ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::Unsupported,
-                format!(
-                    "agent thread {} is {}; close_agent only closes terminal threads",
-                    thread_id.as_str(),
-                    thread_status_label(thread.status)
-                ),
+                ToolErrorKind::InvalidInput,
+                error.to_string(),
             );
         }
-        let reason = optional_string(args, "reason");
-        ToolResult::ok(
+    };
+    let projection = session.agent_thread_state_projection();
+    let Some(thread) = projection.threads.get(&thread_id) else {
+        return ToolResult::error(
             call.id.clone(),
             call.name.clone(),
-            format!("agent thread {} closed", thread_id.as_str()),
-            ToolResultMeta::default(),
-        )
-        .with_control_entry(ControlEntry::AgentThreadClosed(AgentThreadClosedEntry {
-            thread_id,
-            reason,
-        }))
+            ToolErrorKind::NotFound,
+            format!("agent thread {} was not found", thread_id.as_str()),
+        );
+    };
+    if !thread.status.is_terminal() {
+        return ToolResult::error(
+            call.id.clone(),
+            call.name.clone(),
+            ToolErrorKind::Unsupported,
+            format!(
+                "agent thread {} is {}; close_agent only closes terminal threads",
+                thread_id.as_str(),
+                thread_status_label(thread.status)
+            ),
+        );
     }
+    let reason = optional_string(args, "reason");
+    ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        format!("agent thread {} closed", thread_id.as_str()),
+        ToolResultMeta::default(),
+    )
+    .with_control_entry(ControlEntry::AgentThreadClosed(AgentThreadClosedEntry {
+        thread_id,
+        reason,
+    }))
 }
 
 struct AgentToolSurface {
@@ -571,17 +934,19 @@ struct AgentToolSurface {
 enum AgentToolKind {
     Spawn,
     Wait,
+    ReadResult,
     Message,
     Close,
 }
 
 impl AgentToolKind {
-    const ALL: [Self; 3] = [Self::Spawn, Self::Wait, Self::Close];
+    const ALL: [Self; 4] = [Self::Spawn, Self::Wait, Self::ReadResult, Self::Close];
 
     fn from_name(name: &str) -> Option<Self> {
         match name {
             SPAWN_AGENT_TOOL_NAME => Some(Self::Spawn),
             WAIT_AGENT_TOOL_NAME => Some(Self::Wait),
+            READ_AGENT_RESULT_TOOL_NAME => Some(Self::ReadResult),
             MESSAGE_AGENT_TOOL_NAME => Some(Self::Message),
             CLOSE_AGENT_TOOL_NAME => Some(Self::Close),
             _ => None,
@@ -592,6 +957,7 @@ impl AgentToolKind {
         match self {
             Self::Spawn => SPAWN_AGENT_TOOL_NAME,
             Self::Wait => WAIT_AGENT_TOOL_NAME,
+            Self::ReadResult => READ_AGENT_RESULT_TOOL_NAME,
             Self::Message => MESSAGE_AGENT_TOOL_NAME,
             Self::Close => CLOSE_AGENT_TOOL_NAME,
         }
@@ -612,16 +978,17 @@ impl Tool for AgentTool {
             input_schema: self.input_schema(),
             category: ToolCategory::Agent,
             access: match self.kind {
-                AgentToolKind::Wait => ToolAccess::Read,
+                AgentToolKind::Wait | AgentToolKind::ReadResult => ToolAccess::Read,
                 AgentToolKind::Spawn | AgentToolKind::Message | AgentToolKind::Close => {
                     ToolAccess::Execute
                 }
             },
             preview: match self.kind {
                 AgentToolKind::Spawn => ToolPreviewCapability::Required,
-                AgentToolKind::Wait | AgentToolKind::Message | AgentToolKind::Close => {
-                    ToolPreviewCapability::Optional
-                }
+                AgentToolKind::Wait
+                | AgentToolKind::ReadResult
+                | AgentToolKind::Message
+                | AgentToolKind::Close => ToolPreviewCapability::Optional,
             },
         }
     }
@@ -629,9 +996,10 @@ impl Tool for AgentTool {
     fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let subject = match self.kind {
             AgentToolKind::Spawn => ToolSubject::agent(required_string(args, "profile_id")?),
-            AgentToolKind::Wait | AgentToolKind::Message | AgentToolKind::Close => {
-                ToolSubject::agent(required_string(args, "thread_id")?)
-            }
+            AgentToolKind::Wait
+            | AgentToolKind::ReadResult
+            | AgentToolKind::Message
+            | AgentToolKind::Close => ToolSubject::agent(required_string(args, "thread_id")?),
         };
         Ok(vec![subject])
     }
@@ -645,7 +1013,9 @@ impl Tool for AgentTool {
             AgentToolKind::Spawn | AgentToolKind::Message | AgentToolKind::Close => {
                 Some(sigil_kernel::ApprovalMode::Ask)
             }
-            AgentToolKind::Wait => Some(sigil_kernel::ApprovalMode::Allow),
+            AgentToolKind::Wait | AgentToolKind::ReadResult => {
+                Some(sigil_kernel::ApprovalMode::Allow)
+            }
         })
     }
 
@@ -654,6 +1024,10 @@ impl Tool for AgentTool {
             AgentToolKind::Spawn => Some(self.spawn_preview(&args)?),
             AgentToolKind::Wait => Some(simple_agent_preview(
                 "Wait for agent",
+                &format!("thread {}", required_string(&args, "thread_id")?),
+            )),
+            AgentToolKind::ReadResult => Some(simple_agent_preview(
+                "Read agent result",
                 &format!("thread {}", required_string(&args, "thread_id")?),
             )),
             AgentToolKind::Message => Some(simple_agent_preview(
@@ -686,11 +1060,15 @@ impl AgentTool {
     fn description(&self) -> String {
         match self.kind {
             AgentToolKind::Spawn => format!(
-                "Spawn a child agent when the user explicitly asks for delegated or parallel work. Use stable profile_id values, not display names.\n{}",
+                "Spawn a child agent when the user explicitly asks for delegated, parallel, sub-agent, or child-agent work. You must delegate the requested non-overlapping scope instead of completing that same scope yourself, and use join_before_final when the child result is needed before your final answer. Use stable profile_id values, not display names.\n{}",
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
-                "Return a bounded result summary for an agent thread; do not request full child transcripts."
+                "Wait for an agent thread status update and return lightweight status plus result references only. Does not return child result text; use read_agent_result when the user explicitly needs result details."
+                    .to_owned()
+            }
+            AgentToolKind::ReadResult => {
+                "Explicitly read a bounded page from a completed child agent final answer. Use only when the parent needs details beyond the bounded agent summary; do not request full child transcripts."
                     .to_owned()
             }
             AgentToolKind::Message => {
@@ -726,12 +1104,27 @@ impl AgentTool {
             AgentToolKind::Wait => json!({
                 "type": "object",
                 "properties": {
+                    "thread_id": { "type": "string" }
+                },
+                "required": ["thread_id"],
+                "additionalProperties": false
+            }),
+            AgentToolKind::ReadResult => json!({
+                "type": "object",
+                "properties": {
                     "thread_id": { "type": "string" },
-                    "max_summary_chars": {
+                    "offset_chars": {
+                        "type": "integer",
+                        "default": 0,
+                        "minimum": 0,
+                        "description": "Character offset into the child agent final answer."
+                    },
+                    "max_chars": {
                         "type": "integer",
                         "minimum": 200,
-                        "maximum": 4000,
-                        "default": 4000
+                        "maximum": 12000,
+                        "default": 4000,
+                        "description": "Maximum characters to return from the child agent final answer."
                     }
                 },
                 "required": ["thread_id"],
@@ -846,6 +1239,16 @@ struct SpawnAgentArgs {
     display_name_hint: Option<String>,
 }
 
+struct ChatAgentRunRequest {
+    profile_id: AgentProfileId,
+    objective: String,
+    prompt: String,
+    mode: AgentInvocationMode,
+    display_name_hint: Option<String>,
+    invocation_source: AgentInvocationSource,
+    resolved_profile: ResolvedAgentProfile,
+}
+
 impl SpawnAgentArgs {
     fn parse(args: &Value) -> Result<Self> {
         Ok(Self {
@@ -928,9 +1331,10 @@ fn profile_index_description(index: &crate::ModelVisibleAgentIndex) -> String {
         .iter()
         .map(|entry| {
             format!(
-                "- {}: {:?}; {}",
+                "- {}: {:?}; result_policy={}; {}",
                 entry.profile_id.as_str(),
                 entry.kind,
+                entry.result_policy.as_str(),
                 entry.description
             )
         })
@@ -944,6 +1348,24 @@ fn profile_index_description(index: &crate::ModelVisibleAgentIndex) -> String {
             index.hidden_count
         )
     }
+}
+
+fn agent_profile_system_prompt(profile: &ResolvedAgentProfile) -> Option<String> {
+    let mut parts = Vec::new();
+    if !profile.profile.description.trim().is_empty() {
+        parts.push(format!(
+            "Agent profile: {}\nDescription: {}",
+            profile.profile.id.as_str(),
+            profile.profile.description.trim()
+        ));
+    }
+    if !profile.profile.instructions.trim().is_empty() {
+        parts.push(format!(
+            "Instructions:\n{}",
+            profile.profile.instructions.trim()
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 fn simple_agent_preview(title: &str, summary: &str) -> ToolPreview {
@@ -982,19 +1404,45 @@ fn thread_id_arg(args: &Value) -> Result<AgentThreadId> {
     AgentThreadId::new(required_string(args, "thread_id")?)
 }
 
-fn max_summary_chars_arg(args: &Value) -> Result<usize> {
-    let Some(value) = args.get("max_summary_chars") else {
-        return Ok(DEFAULT_RESULT_SUMMARY_LIMIT);
-    };
-    let Some(limit) = value.as_u64().and_then(|value| usize::try_from(value).ok()) else {
-        return Err(anyhow!("max_summary_chars must be an integer"));
-    };
-    if !(MIN_RESULT_SUMMARY_LIMIT..=DEFAULT_RESULT_SUMMARY_LIMIT).contains(&limit) {
+#[derive(Debug, Clone, Copy)]
+struct ResultPageRequest {
+    offset_chars: usize,
+    max_chars: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ResultPage {
+    text: String,
+    offset_chars: usize,
+    returned_chars: usize,
+    total_chars: usize,
+    next_offset_chars: Option<usize>,
+    truncated: bool,
+}
+
+fn required_result_page_request_arg(args: &Value) -> Result<ResultPageRequest> {
+    let offset_chars = optional_usize_arg(args, "offset_chars")?.unwrap_or(0);
+    let max_chars = optional_usize_arg(args, "max_chars")?.unwrap_or(DEFAULT_RESULT_PAGE_LIMIT);
+    if !(MIN_RESULT_SUMMARY_LIMIT..=MAX_RESULT_PAGE_LIMIT).contains(&max_chars) {
         return Err(anyhow!(
-            "max_summary_chars must be between {MIN_RESULT_SUMMARY_LIMIT} and {DEFAULT_RESULT_SUMMARY_LIMIT}"
+            "max_chars must be between {MIN_RESULT_SUMMARY_LIMIT} and {MAX_RESULT_PAGE_LIMIT}"
         ));
     }
-    Ok(limit)
+    Ok(ResultPageRequest {
+        offset_chars,
+        max_chars,
+    })
+}
+
+fn optional_usize_arg(args: &Value, key: &str) -> Result<Option<usize>> {
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .and_then(|value| usize::try_from(value).ok())
+        .map(Some)
+        .ok_or_else(|| anyhow!("{key} must be an integer"))
 }
 
 fn parse_invocation_mode(value: &str) -> Result<AgentInvocationMode> {
@@ -1061,6 +1509,19 @@ fn chat_budget_scope_id(call_id: &str) -> Result<TaskId> {
     TaskId::new(format!("chat_{}", short_digest(&hash_text(call_id))))
 }
 
+fn manual_agent_call_id(session: &Session, profile_id: &AgentProfileId, prompt: &str) -> String {
+    format!(
+        "manual_agent_{}_{}",
+        profile_id.as_str(),
+        short_digest(&hash_text(&format!(
+            "{}:{}:{}",
+            session.entries().len(),
+            profile_id.as_str(),
+            prompt
+        )))
+    )
+}
+
 fn usage_summary_from_stats(stats: &sigil_kernel::SessionStats) -> AgentUsageSummary {
     AgentUsageSummary {
         input_tokens: stats.prompt_tokens,
@@ -1087,6 +1548,76 @@ fn child_status_from_outcome(
     }
 }
 
+fn read_agent_result_page(
+    parent_session: &Session,
+    result: &AgentThreadResult,
+    request: ResultPageRequest,
+) -> Result<ResultPage> {
+    let Some(parent_path) = parent_session.store_path() else {
+        return Err(anyhow!(
+            "agent result page unavailable because parent session has no durable store"
+        ));
+    };
+    let parent_dir = parent_path.parent().unwrap_or_else(|| Path::new("."));
+    let child_path = result.session_ref.resolve(parent_dir);
+    let entries = JsonlSessionStore::read_entries(&child_path).with_context(|| {
+        format!(
+            "failed to read child agent session {}",
+            child_path.display()
+        )
+    })?;
+    let final_text =
+        agent_final_text_from_entries(&entries, &result.output_hash).with_context(|| {
+            format!(
+                "failed to read final answer from child agent session {}",
+                child_path.display()
+            )
+        })?;
+    Ok(slice_result_page(&final_text, request))
+}
+
+fn agent_final_text_from_entries(entries: &[SessionLogEntry], output_hash: &str) -> Result<String> {
+    let mut latest_assistant_text = None;
+    for entry in entries {
+        let SessionLogEntry::Assistant(message) = entry else {
+            continue;
+        };
+        let Some(content) = message
+            .content
+            .as_ref()
+            .filter(|content| !content.is_empty())
+        else {
+            continue;
+        };
+        if hash_text(content) == output_hash {
+            return Ok(content.clone());
+        }
+        latest_assistant_text = Some(content.clone());
+    }
+    latest_assistant_text
+        .ok_or_else(|| anyhow!("child agent session has no assistant final answer"))
+}
+
+fn slice_result_page(full_text: &str, request: ResultPageRequest) -> ResultPage {
+    let total_chars = full_text.chars().count();
+    let text = full_text
+        .chars()
+        .skip(request.offset_chars)
+        .take(request.max_chars)
+        .collect::<String>();
+    let returned_chars = text.chars().count();
+    let end_offset = request.offset_chars.saturating_add(returned_chars);
+    let truncated = end_offset < total_chars;
+    ResultPage {
+        text,
+        offset_chars: request.offset_chars,
+        returned_chars,
+        total_chars,
+        next_offset_chars: truncated.then_some(end_offset),
+        truncated,
+    }
+}
+
 fn agent_result_tool_result(
     call: &ToolCall,
     thread_id: &AgentThreadId,
@@ -1110,24 +1641,35 @@ fn agent_result_tool_result(
     let summary = bounded_summary(&result.summary, max_summary_chars);
     let summary_truncated =
         result.summary_truncated || summary.chars().count() < result.summary.chars().count();
+    let result_fetch = json!({
+        "tool": READ_AGENT_RESULT_TOOL_NAME,
+        "thread_id": result.thread_id.as_str(),
+        "offset_chars": 0,
+        "max_chars": DEFAULT_RESULT_PAGE_LIMIT,
+        "max_page_chars": MAX_RESULT_PAGE_LIMIT
+    });
+    let payload = json!({
+        "thread_id": result.thread_id.as_str(),
+        "status": terminal_status_label(result.status),
+        "session_ref": result.session_ref.as_path().display().to_string(),
+        "summary": summary,
+        "summary_truncated": summary_truncated,
+        "original_summary_chars": result.original_summary_chars,
+        "changed_paths": result.changed_paths,
+        "artifacts": result.artifacts,
+        "risks": result.risks,
+        "followups": result.followups,
+        "usage": result.usage,
+        "output_hash": result.output_hash,
+        "truncated": summary_truncated,
+        "full_result_available": !result.artifacts.is_empty(),
+        "result_fetch": result_fetch
+    });
     ToolResult::ok(
         call.id.clone(),
         call.name.clone(),
-        serde_json::to_string(&json!({
-            "thread_id": result.thread_id.as_str(),
-            "status": terminal_status_label(result.status),
-            "summary": summary,
-            "summary_truncated": summary_truncated,
-            "original_summary_chars": result.original_summary_chars,
-            "changed_paths": result.changed_paths,
-            "artifacts": result.artifacts,
-            "risks": result.risks,
-            "followups": result.followups,
-            "usage": result.usage,
-            "output_hash": result.output_hash,
-            "truncated": summary_truncated
-        }))
-        .unwrap_or_else(|error| format!("failed to serialize agent result: {error}")),
+        serde_json::to_string(&payload)
+            .unwrap_or_else(|error| format!("failed to serialize agent result: {error}")),
         ToolResultMeta {
             truncated: summary_truncated,
             limit_bytes: Some(max_summary_chars as u64),
@@ -1141,6 +1683,110 @@ fn agent_result_tool_result(
             ..ToolResultMeta::default()
         },
     )
+}
+
+fn agent_status_tool_result(call: &ToolCall, thread: &AgentThreadProjection) -> ToolResult {
+    let result = thread.result.as_ref();
+    let payload = json!({
+        "thread_id": thread.thread_id.as_str(),
+        "status": thread_status_label(thread.status),
+        "terminal": thread.status.is_terminal(),
+        "reason": &thread.reason,
+        "result_available": result.is_some(),
+        "result_ref": result.map(|result| json!({
+            "thread_id": result.thread_id.as_str(),
+            "status": terminal_status_label(result.status),
+            "session_ref": result.session_ref.as_path().display().to_string(),
+            "summary_truncated": result.summary_truncated,
+            "original_summary_chars": result.original_summary_chars,
+            "changed_paths_count": result.changed_paths.len(),
+            "artifact_count": result.artifacts.len(),
+            "output_hash": result.output_hash,
+            "read_tool": READ_AGENT_RESULT_TOOL_NAME,
+            "read_args": {
+                "thread_id": result.thread_id.as_str(),
+                "offset_chars": 0,
+                "max_chars": DEFAULT_RESULT_PAGE_LIMIT,
+                "max_page_chars": MAX_RESULT_PAGE_LIMIT
+            }
+        })),
+    });
+    ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        serde_json::to_string(&payload)
+            .unwrap_or_else(|error| format!("failed to serialize agent status: {error}")),
+        ToolResultMeta {
+            details: json!({
+                "thread_id": thread.thread_id.as_str(),
+                "status": thread_status_label(thread.status),
+                "result_available": result.is_some(),
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
+}
+
+fn agent_result_page_tool_result(
+    call: &ToolCall,
+    result: &AgentThreadResult,
+    page: &ResultPage,
+) -> ToolResult {
+    let persistent_payload = json!({
+        "thread_id": result.thread_id.as_str(),
+        "status": terminal_status_label(result.status),
+        "session_ref": result.session_ref.as_path().display().to_string(),
+        "output_hash": result.output_hash,
+        "page": {
+            "offset_chars": page.offset_chars,
+            "returned_chars": page.returned_chars,
+            "total_chars": page.total_chars,
+            "next_offset_chars": page.next_offset_chars,
+            "truncated": page.truncated,
+            "text_omitted": true,
+            "text_delivery": "transient_context"
+        }
+    });
+    let transient_payload = json!({
+        "thread_id": result.thread_id.as_str(),
+        "status": terminal_status_label(result.status),
+        "session_ref": result.session_ref.as_path().display().to_string(),
+        "output_hash": result.output_hash,
+        "page": {
+            "text": page.text.as_str(),
+            "offset_chars": page.offset_chars,
+            "returned_chars": page.returned_chars,
+            "total_chars": page.total_chars,
+            "next_offset_chars": page.next_offset_chars,
+            "truncated": page.truncated
+        }
+    });
+    ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        serde_json::to_string(&persistent_payload)
+            .unwrap_or_else(|error| format!("failed to serialize agent result page: {error}")),
+        ToolResultMeta {
+            truncated: page.truncated,
+            limit_bytes: Some(page.returned_chars as u64),
+            details: json!({
+                "thread_id": result.thread_id.as_str(),
+                "status": terminal_status_label(result.status),
+                "output_hash": result.output_hash,
+                "offset_chars": page.offset_chars,
+                "returned_chars": page.returned_chars,
+                "total_chars": page.total_chars,
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
+    .with_transient_context(vec![ModelMessage::user(format!(
+        "Transient read_agent_result page for tool_call_id={}:\n{}",
+        call.id,
+        serde_json::to_string(&transient_payload).unwrap_or_else(|error| format!(
+            "failed to serialize transient agent result page: {error}"
+        ))
+    ))])
 }
 
 fn bounded_summary(summary: &str, max_chars: usize) -> String {
