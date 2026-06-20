@@ -556,6 +556,8 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                     session_ref: agent_session_ref(),
                     status: AgentThreadTerminalStatus::Completed,
                     summary: "done".to_owned(),
+                    summary_truncated: false,
+                    original_summary_chars: None,
                     artifacts: Vec::new(),
                     changed_paths: Vec::new(),
                     risks: Vec::new(),

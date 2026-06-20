@@ -654,6 +654,8 @@ async fn build_role_tool_registry_applies_default_and_configured_scopes() -> Res
 async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<()> {
     let mut registry = ToolRegistry::new();
     sigil_tools_builtin::register_builtin_tools(&mut registry);
+    let config = test_root_config("deepseek");
+    super::register_agent_tools(&mut registry, &config)?;
 
     let skill = SkillDescriptor {
         id: "readonly".to_owned(),
@@ -686,6 +688,15 @@ async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<
     assert!(direct.spec_for("read_file").is_some());
     assert!(direct.spec_for("write_file").is_none());
 
+    let mut allow_all_skill = skill.clone();
+    allow_all_skill.allowed_tools = ToolRegistryScope::default();
+    allow_all_skill.disallowed_tools = ToolRegistryScope::default();
+    let direct_allow_all = build_skill_tool_registry(&registry, &allow_all_skill);
+    assert!(direct_allow_all.spec_for("read_file").is_some());
+    assert!(direct_allow_all.spec_for("spawn_agent").is_none());
+    assert!(direct_allow_all.spec_for("wait_agent").is_none());
+    assert!(direct_allow_all.spec_for("close_agent").is_none());
+
     let mut write_allowed_skill = skill.clone();
     write_allowed_skill.disallowed_tools = ToolRegistryScope::default();
     let base_read_only = registry
@@ -711,7 +722,6 @@ async fn build_skill_tool_registry_never_expands_base_or_role_scope() -> Result<
     assert!(direct_on_denied_base.spec_for("read_file").is_some());
     assert!(direct_on_denied_base.spec_for("write_file").is_none());
 
-    let config = test_root_config("deepseek");
     let planner = build_role_skill_tool_registry(&registry, &config, AgentRole::Planner, &skill);
     assert!(planner.spec_for("read_file").is_some());
     assert!(planner.spec_for("write_file").is_none());

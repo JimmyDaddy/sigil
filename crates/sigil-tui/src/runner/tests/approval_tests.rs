@@ -2,9 +2,10 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use sigil_kernel::{
-    Agent, ApprovalHandler, ReasoningEffort, RunEvent, SessionLogEntry, ToolApproval, ToolCall,
-    ToolCategory, ToolPreviewCapability, ToolRegistry, ToolSpec,
+    Agent, ApprovalHandler, ProviderChunk, ReasoningEffort, RunEvent, SessionLogEntry,
+    ToolApproval, ToolCall, ToolCategory, ToolPreviewCapability, ToolRegistry, ToolSpec,
 };
+use sigil_runtime::register_agent_tools;
 use tempfile::tempdir;
 
 use super::{
@@ -13,7 +14,8 @@ use super::{
         approval_bridge::{ApprovalSignal, ChannelApprovalHandler},
     },
     common::{
-        ApprovalFlowProvider, PlannedProvider, WriteTool, spawn_test_worker, test_root_config,
+        ApprovalFlowProvider, PlannedProvider, StreamPlan, WriteTool, spawn_test_worker,
+        test_root_config,
     },
 };
 
@@ -81,6 +83,96 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
     let envelope: serde_json::Value = serde_json::from_str(tool_result_message)?;
     assert_eq!(envelope["status"], "ok");
     assert_eq!(envelope["content"], "wrote file");
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_tool_request_surfaces_approval_preview_in_worker() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-agent-approval.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &root_config)?;
+    let agent = Agent::new(
+        PlannedProvider::new(vec![
+            StreamPlan::Chunks(vec![
+                ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-spawn-agent".to_owned(),
+                    name: sigil_runtime::SPAWN_AGENT_TOOL_NAME.to_owned(),
+                    args_json: serde_json::json!({
+                        "profile_id": "explore",
+                        "objective": "inspect tui worker",
+                        "prompt": "inspect tui worker",
+                        "mode": "join_before_final"
+                    })
+                    .to_string(),
+                }),
+                ProviderChunk::Done,
+            ]),
+            StreamPlan::Chunks(vec![
+                ProviderChunk::TextDelta("spawn denied and handled".to_owned()),
+                ProviderChunk::Done,
+            ]),
+        ]),
+        registry,
+    );
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "use a sub agent".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let approval_request = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::Event(event)
+                if matches!(
+                    event.as_ref(),
+                    RunEvent::ToolApprovalRequested { call, preview, .. }
+                        if call.id == "call-spawn-agent"
+                            && call.name == sigil_runtime::SPAWN_AGENT_TOOL_NAME
+                            && preview.as_ref().is_some_and(|preview| preview.body.contains("budget:"))
+                )
+        )
+    })?;
+    assert!(matches!(
+        approval_request,
+        WorkerMessage::Event(event)
+            if matches!(
+                event.as_ref(),
+                RunEvent::ToolApprovalRequested { call, preview, .. }
+                    if call.id == "call-spawn-agent"
+                        && preview.as_ref().is_some_and(|preview| preview.body.contains("mode: join_before_final"))
+            )
+    ));
+
+    worker.send(WorkerCommand::ApprovalDecision {
+        call_id: "call-spawn-agent".to_owned(),
+        approved: false,
+    })?;
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
+    let WorkerMessage::RunFinished { result, entries } = finished else {
+        panic!("expected run finished");
+    };
+    assert_eq!(result.final_text, "spawn denied and handled");
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::ToolResult(message)
+                if message.tool_call_id.as_deref() == Some("call-spawn-agent")
+                    && message.content.as_deref().is_some_and(|content| {
+                        content.contains("approval_denied")
+                            || content.contains("tool execution denied by user")
+                    })
+        )
+    }));
 
     worker.shutdown()?;
     Ok(())

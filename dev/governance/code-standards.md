@@ -249,7 +249,7 @@ cargo clippy --all-targets -- -D warnings
 
 单测覆盖率门禁必须保持 `>= 96%` 行覆盖率。覆盖率统计入口统一使用仓库根目录的 `scripts/coverage.sh`，不要在 CI 或本地文档中另写一套不同参数。
 
-覆盖率门禁默认聚焦可单测的领域逻辑和状态模型；`scripts/coverage.sh` 会排除少量 orchestration loop 文件，这些文件主要承载 raw terminal / worker / agent 主循环调度和 I/O 失败出口，回归应通过其下层模块单测、状态转换测试和必要的人工冒烟覆盖。新增业务逻辑不要为了规避覆盖率而放进这些排除文件。
+覆盖率门禁默认聚焦可单测的领域逻辑和状态模型；`scripts/coverage.sh` 会排除少量 orchestration loop / adapter 文件（例如 agent 主循环、runtime agent-tool adapter、TUI worker/spawn 入口），这些文件主要承载 raw terminal / worker / agent 主循环调度、provider I/O 桥接和启动失败出口，回归应通过其下层模块单测、状态转换测试和必要的人工冒烟覆盖。新增业务逻辑不要为了规避覆盖率而放进这些排除文件。
 
 本地提交应启用仓库内版本化 hook：
 

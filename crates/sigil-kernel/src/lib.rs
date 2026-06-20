@@ -18,7 +18,7 @@ pub mod tool;
 
 pub use agent::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunOutput, AgentRunResult,
-    AgentRunTerminalReason,
+    AgentRunTerminalReason, AgentToolDelegate,
 };
 pub use agent_thread::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentInvocationMode,

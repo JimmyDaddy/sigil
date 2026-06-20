@@ -25,9 +25,10 @@ use sigil_kernel::{
 };
 
 use super::{
-    AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentSupervisorTaskChildRunner,
-    AgentTaskChildStart, EXPLORE_PROFILE_ID, agent_terminal_status_from_task_child,
-    task_child_status_from_outcome, tool_scope_is_write_capable,
+    AgentBudgetPolicy, AgentChatChildStart, AgentProfileRegistry, AgentSupervisor,
+    AgentSupervisorTaskChildRunner, AgentTaskChildStart, EXPLORE_PROFILE_ID,
+    agent_terminal_status_from_task_child, task_child_status_from_outcome,
+    tool_scope_is_write_capable,
 };
 
 #[derive(Default)]
@@ -383,6 +384,26 @@ fn child_start(step: TaskStepSpec, workspace_root: PathBuf) -> Result<AgentTaskC
     })
 }
 
+fn chat_child_start(profile_id: &str, workspace_root: PathBuf) -> Result<AgentChatChildStart> {
+    Ok(AgentChatChildStart {
+        call_id: format!("call_{profile_id}"),
+        budget_scope_id: TaskId::new("chat_1")?,
+        parent_thread_id: AgentThreadId::new("main")?,
+        parent_depth: 0,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        profile_id: sigil_kernel::AgentProfileId::new(profile_id)?,
+        role: AgentRole::SubagentRead,
+        child_session_ref: SessionRef::new_relative(format!("children/{profile_id}.jsonl"))?,
+        objective: "inspect code".to_owned(),
+        prompt: "inspect code".to_owned(),
+        workspace_root,
+        provider_capabilities: provider_capabilities(),
+        invocation_mode: AgentInvocationMode::JoinBeforeFinal,
+        invocation_source: AgentInvocationSource::Chat,
+        display_name_hint: Some("inspect".to_owned()),
+    })
+}
+
 #[test]
 fn supervisor_captures_profile_snapshot_before_spawn() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -418,6 +439,122 @@ fn supervisor_captures_profile_snapshot_before_spawn() -> Result<()> {
             RunEvent::Control(sigil_kernel::ControlEntry::AgentProfileCaptured(_))
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn chat_child_start_rejects_invalid_disabled_and_model_invisible_profiles() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let supervisor = supervisor_with_budget(AgentBudgetPolicy::from_root_config(&root_config()))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+
+    let error = supervisor
+        .begin_chat_child_thread(
+            &mut session,
+            &mut handler,
+            chat_child_start("missing", temp.path().to_path_buf())?,
+        )
+        .expect_err("missing profile rejected");
+    assert!(error.to_string().contains("not registered"));
+
+    let error = supervisor
+        .begin_chat_child_thread(
+            &mut session,
+            &mut handler,
+            chat_child_start("plan", temp.path().to_path_buf())?,
+        )
+        .expect_err("model-invisible profile rejected");
+    assert!(error.to_string().contains("not model-invocable"));
+
+    let mut disabled_config = root_config();
+    disabled_config.task.enabled = false;
+    let disabled_supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&disabled_config)?,
+        AgentBudgetPolicy::from_root_config(&disabled_config),
+        provider_capabilities(),
+    );
+    let error = disabled_supervisor
+        .begin_chat_child_thread(
+            &mut session,
+            &mut handler,
+            chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?,
+        )
+        .expect_err("disabled profile rejected");
+    assert!(error.to_string().contains("is disabled"));
+    Ok(())
+}
+
+#[test]
+fn chat_child_start_rejects_write_capable_profile_without_lease_support() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut config = root_config();
+    config.task.subagent_read.tools = sigil_kernel::ToolAllowlistConfig {
+        allow_all: false,
+        names: vec!["write_file".to_owned()],
+        prefixes: Vec::new(),
+    };
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        AgentBudgetPolicy::from_root_config(&config),
+        provider_capabilities(),
+    );
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    start.role = AgentRole::SubagentWrite;
+
+    let error = supervisor
+        .begin_chat_child_thread(&mut session, &mut handler, start)
+        .expect_err("write-capable chat profile rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("write-capable agent requires changeset")
+    );
+    let projection = session.agent_thread_state_projection();
+    assert!(projection.threads.values().any(|thread| {
+        thread.status == sigil_kernel::AgentThreadStatus::Failed
+            && thread
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("write-capable agents require"))
+    }));
+    Ok(())
+}
+
+#[test]
+fn record_chat_child_failure_appends_failed_status_and_releases_budget() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_parallel_readonly = 2;
+    budget.max_threads = 2;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let thread = supervisor.begin_chat_child_thread(
+        &mut session,
+        &mut handler,
+        chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?,
+    )?;
+    assert_eq!(supervisor.active_profile_ids().len(), 1);
+
+    supervisor.record_chat_child_failure(
+        &mut session,
+        &mut handler,
+        &thread,
+        "child failed".to_owned(),
+    )?;
+
+    assert!(supervisor.active_profile_ids().is_empty());
+    let projection = session.agent_thread_state_projection();
+    let projected = projection
+        .threads
+        .get(&thread.thread_id)
+        .expect("chat thread projected");
+    assert_eq!(projected.status, sigil_kernel::AgentThreadStatus::Failed);
+    assert_eq!(projected.reason.as_deref(), Some("child failed"));
     Ok(())
 }
 
@@ -529,6 +666,55 @@ fn reset_turn_budget_allows_next_spawn_window() -> Result<()> {
     )?;
 
     assert_eq!(supervisor.active_profile_ids().len(), 2);
+    Ok(())
+}
+
+#[test]
+fn cancel_foreground_run_releases_active_child_and_appends_audit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_parallel_readonly = 2;
+    budget.max_threads = 2;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+
+    let first = supervisor.begin_task_child_thread(
+        &mut session,
+        &mut handler,
+        child_start(step("one")?, temp.path().to_path_buf())?,
+    )?;
+    assert_eq!(supervisor.active_profile_ids().len(), 1);
+
+    let impact = supervisor.cancel_foreground_run();
+    assert_eq!(impact.foreground_children_interrupted.len(), 1);
+    assert_eq!(
+        impact.foreground_children_interrupted[0].thread_id,
+        first.thread_id
+    );
+    assert!(supervisor.active_profile_ids().is_empty());
+
+    AgentSupervisor::append_foreground_cancel_audit(
+        &mut session,
+        &mut handler,
+        impact,
+        "run cancelled from test",
+    )?;
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&first.thread_id)
+        .expect("cancelled thread projected");
+    assert_eq!(thread.status, sigil_kernel::AgentThreadStatus::Interrupted);
+    assert_eq!(thread.reason.as_deref(), Some("run cancelled from test"));
+
+    supervisor.reset_turn_budget();
+    supervisor.begin_task_child_thread(
+        &mut session,
+        &mut handler,
+        child_start(step("two")?, temp.path().to_path_buf())?,
+    )?;
+    assert_eq!(supervisor.active_profile_ids().len(), 1);
     Ok(())
 }
 

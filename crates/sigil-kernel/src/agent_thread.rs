@@ -417,6 +417,10 @@ pub struct AgentThreadResult {
     pub status: AgentThreadTerminalStatus,
     pub summary: String,
     #[serde(default)]
+    pub summary_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_summary_chars: Option<usize>,
+    #[serde(default)]
     pub artifacts: Vec<AgentArtifactRef>,
     #[serde(default)]
     pub changed_paths: Vec<String>,

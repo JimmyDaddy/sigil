@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, time::Instant};
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -24,7 +25,7 @@ use crate::{
     },
     terminal_task::TerminalTaskEntry,
     tool::{
-        ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
+        ToolCategory, ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
         ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus,
         ToolSubject, ToolSubjectScope,
     },
@@ -113,6 +114,32 @@ pub enum AgentRunTerminalReason {
     #[default]
     FinalAnswer,
     MaxTurns,
+}
+
+/// Runtime hook for model-visible agent-thread tools.
+///
+/// Kernel owns the provider-neutral tool-call loop and permission audit. Runtime adapters can
+/// implement this hook to connect approved `spawn_agent` / `wait_agent` style calls to an
+/// agent supervisor without making kernel depend on runtime.
+#[async_trait]
+pub trait AgentToolDelegate: Send {
+    /// Handles one agent tool call after normal permission approval has resolved.
+    ///
+    /// Return `Ok(None)` when the call is not an agent-thread tool and should continue through the
+    /// regular tool registry. Returned tool results may include durable control entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the delegated agent action fails before it can be represented as a
+    /// structured [`ToolResult`].
+    async fn handle_agent_tool_call(
+        &mut self,
+        session: &mut Session,
+        call: &ToolCall,
+        options: &AgentRunOptions,
+        handler: &mut (dyn EventHandler + Send),
+        approval_handler: &mut (dyn ApprovalHandler + Send),
+    ) -> Result<Option<ToolResult>>;
 }
 
 /// Provider-backed agent loop with a registered tool surface.
@@ -239,6 +266,37 @@ where
             &self.tools,
             handler,
             approval_handler,
+            None,
+        )
+        .await
+    }
+
+    /// Runs the agent from an explicit input contract with runtime-handled agent tools.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying run or delegation hook fails.
+    pub async fn run_with_approval_input_and_agent_delegate<H, A>(
+        &self,
+        session: &mut Session,
+        input: AgentRunInput,
+        options: AgentRunOptions,
+        handler: &mut H,
+        approval_handler: &mut A,
+        agent_delegate: &mut (dyn AgentToolDelegate + Send),
+    ) -> Result<AgentRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        self.run_with_approval_input_and_tools(
+            session,
+            input,
+            options,
+            &self.tools,
+            handler,
+            approval_handler,
+            Some(agent_delegate),
         )
         .await
     }
@@ -269,6 +327,39 @@ where
             &tools,
             handler,
             approval_handler,
+            None,
+        )
+        .await
+    }
+
+    /// Runs the agent with a temporary tool registry and runtime-handled agent tools.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying run or delegation hook fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_with_approval_input_tool_registry_and_agent_delegate<H, A>(
+        &self,
+        session: &mut Session,
+        input: AgentRunInput,
+        options: AgentRunOptions,
+        tools: ToolRegistry,
+        handler: &mut H,
+        approval_handler: &mut A,
+        agent_delegate: &mut (dyn AgentToolDelegate + Send),
+    ) -> Result<AgentRunOutput>
+    where
+        H: EventHandler + Send,
+        A: ApprovalHandler + Send,
+    {
+        self.run_with_approval_input_and_tools(
+            session,
+            input,
+            options,
+            &tools,
+            handler,
+            approval_handler,
+            Some(agent_delegate),
         )
         .await
     }
@@ -281,6 +372,7 @@ where
         tools: &ToolRegistry,
         handler: &mut H,
         approval_handler: &mut A,
+        mut agent_delegate: Option<&mut (dyn AgentToolDelegate + Send)>,
     ) -> Result<AgentRunOutput>
     where
         H: EventHandler + Send,
@@ -492,7 +584,11 @@ where
                         continue;
                     }
                     let mut execution_subjects = Vec::new();
+                    let mut tool_registered = false;
+                    let mut tool_is_agent_category = false;
                     if let Some(spec) = tools.spec_for(&call.name) {
+                        tool_registered = true;
+                        tool_is_agent_category = spec.category == ToolCategory::Agent;
                         let subjects = match tools.permission_subjects(&tool_ctx, &call) {
                             Ok(subjects) => subjects,
                             Err(error) => {
@@ -842,14 +938,46 @@ where
                         None,
                     )?;
                     let execution_started = Instant::now();
-                    let mut result = match tools.execute(tool_ctx.clone(), call.clone()).await {
-                        Ok(result) => result,
-                        Err(error) => ToolResult::error(
-                            call.id.clone(),
-                            call.name.clone(),
-                            ToolErrorKind::Internal,
-                            error.to_string(),
-                        ),
+                    let mut result = match agent_delegate
+                        .as_deref_mut()
+                        .filter(|_| tool_registered && tool_is_agent_category)
+                    {
+                        Some(delegate) => match delegate
+                            .handle_agent_tool_call(
+                                session,
+                                &call,
+                                &options,
+                                handler,
+                                approval_handler,
+                            )
+                            .await
+                        {
+                            Ok(Some(result)) => result,
+                            Ok(None) => match tools.execute(tool_ctx.clone(), call.clone()).await {
+                                Ok(result) => result,
+                                Err(error) => ToolResult::error(
+                                    call.id.clone(),
+                                    call.name.clone(),
+                                    ToolErrorKind::Internal,
+                                    error.to_string(),
+                                ),
+                            },
+                            Err(error) => ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Internal,
+                                error.to_string(),
+                            ),
+                        },
+                        None => match tools.execute(tool_ctx.clone(), call.clone()).await {
+                            Ok(result) => result,
+                            Err(error) => ToolResult::error(
+                                call.id.clone(),
+                                call.name.clone(),
+                                ToolErrorKind::Internal,
+                                error.to_string(),
+                            ),
+                        },
                     };
                     attach_tool_call_context(&mut result, &call, &execution_subjects);
                     let duration_ms = Some(duration_ms(execution_started));
@@ -919,7 +1047,7 @@ fn direct_task_tool_guidance_result(
     let content = if task_plan_update_available {
         "direct task/subagent tool calls are not supported in the planner; delegate work by calling task_plan_update with an accepted plan and step roles subagent_read or subagent_write"
     } else {
-        "direct task/subagent tool calls are not available in ordinary chat; ask the user to start planned orchestration with /plan <objective>, where delegation is expressed through task_plan_update step roles subagent_read or subagent_write"
+        "direct task/subagent tool calls are legacy aliases; use the model-visible agent tools spawn_agent, wait_agent, message_agent, and close_agent when the user explicitly asks for delegation"
     };
     Some(ToolResult::ok(
         call.id.clone(),

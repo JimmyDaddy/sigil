@@ -251,6 +251,12 @@ pub(super) fn run_worker_loop<P>(
                 let agent = Arc::clone(&agent);
                 let mut options = options.clone();
                 options.reasoning_effort = Some(reasoning_effort);
+                agent_supervisor.reset_turn_budget();
+                let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
+                    agent_supervisor.clone(),
+                    root_config.clone(),
+                    agent.tool_registry().clone(),
+                );
                 let task_result_tx = task_result_tx.clone();
                 let run_id = next_run_id;
                 next_run_id += 1;
@@ -260,14 +266,16 @@ pub(super) fn run_worker_loop<P>(
                     let result = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
                         agent
-                            .run_with_approval(
+                            .run_with_approval_input_and_agent_delegate(
                                 &mut run_session,
-                                prompt,
+                                AgentRunInput::user(prompt),
                                 options,
                                 &mut handler,
                                 &mut approval_handler,
+                                &mut agent_delegate,
                             )
                             .await
+                            .map(|output| output.result)
                             .map_err(|error| format!("{error:#}"))
                     };
                     let result = match append_mcp_elicitation_audits(
@@ -674,6 +682,7 @@ pub(super) fn run_worker_loop<P>(
                     elicitation_handler.set_audit_buffer(None);
                     discarded_run_ids.insert(active_run.run_id);
                     let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
+                    let agent_cancel_impact = agent_supervisor.cancel_foreground_run();
                     active_run.handle.abort();
                     match load_session(
                         &root_config.agent.provider,
@@ -687,6 +696,21 @@ pub(super) fn run_worker_loop<P>(
                                 &active_run.elicitation_audit_buffer,
                             ) {
                                 let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                current_session = Some(session);
+                                continue;
+                            }
+                            let mut cancel_handler = ChannelEventHandler::new(message_tx.clone());
+                            if let Err(error) =
+                                sigil_runtime::AgentSupervisor::append_foreground_cancel_audit(
+                                    &mut session,
+                                    &mut cancel_handler,
+                                    agent_cancel_impact,
+                                    "run cancelled from TUI",
+                                )
+                            {
+                                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                                    "failed to append cancelled agent state: {error:#}"
+                                )));
                                 current_session = Some(session);
                                 continue;
                             }

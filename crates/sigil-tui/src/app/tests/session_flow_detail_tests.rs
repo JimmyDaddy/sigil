@@ -611,6 +611,8 @@ fn render_agent_control_entries_and_status_labels() -> Result<()> {
         session_ref: session_ref.clone(),
         status: sigil_kernel::AgentThreadTerminalStatus::Completed,
         summary: "done".to_owned(),
+        summary_truncated: false,
+        original_summary_chars: None,
         artifacts: Vec::new(),
         changed_paths: Vec::new(),
         risks: Vec::new(),

@@ -32,6 +32,16 @@ class StagedCoverageHelpersTests(unittest.TestCase):
                 "crates/sigil-tui/src/runner/worker_loop.rs"
             )
         )
+        self.assertFalse(
+            check_staged_coverage.is_business_rust_file(
+                "crates/sigil-runtime/src/agent_tools.rs"
+            )
+        )
+        self.assertFalse(
+            check_staged_coverage.is_business_rust_file(
+                "crates/sigil-tui/src/runner/spawn.rs"
+            )
+        )
         self.assertFalse(check_staged_coverage.is_business_rust_file("README.md"))
 
     def test_non_executable_classifier_accepts_rust_type_shapes(self) -> None:

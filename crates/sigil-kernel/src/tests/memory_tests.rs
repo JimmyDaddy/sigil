@@ -113,7 +113,12 @@ fn memory_loader_enabled_without_documents_keeps_base_prompt_only() -> Result<()
         materialized.messages[0]
             .content
             .as_deref()
-            .is_some_and(|content| content.contains("Direct task/subagent tool calls"))
+            .is_some_and(|content| {
+                content.contains("model-visible agent tools")
+                    && content.contains("explicitly asks")
+                    && !content.contains("Direct task/subagent tool calls")
+                    && !content.contains("/plan flow")
+            })
     );
     Ok(())
 }

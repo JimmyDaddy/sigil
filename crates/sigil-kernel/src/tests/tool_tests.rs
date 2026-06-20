@@ -587,6 +587,7 @@ fn tool_labels_are_stable() {
     assert_eq!(ToolCategory::Search.as_str(), "search");
     assert_eq!(ToolCategory::Shell.as_str(), "shell");
     assert_eq!(ToolCategory::Mcp.as_str(), "mcp");
+    assert_eq!(ToolCategory::Agent.as_str(), "agent");
     assert_eq!(ToolCategory::Custom.as_str(), "custom");
 
     assert_eq!(ToolAccess::Read.as_str(), "read");

@@ -132,6 +132,7 @@ pub enum ToolCategory {
     Search,
     Shell,
     Mcp,
+    Agent,
     Custom,
 }
 
@@ -142,6 +143,7 @@ impl ToolCategory {
             Self::Search => "search",
             Self::Shell => "shell",
             Self::Mcp => "mcp",
+            Self::Agent => "agent",
             Self::Custom => "custom",
         }
     }
@@ -241,6 +243,17 @@ impl ToolSubject {
             scope: ToolSubjectScope::Unknown,
         }
     }
+
+    pub fn agent(profile_id: impl Into<String>) -> Self {
+        let profile_id = profile_id.into();
+        Self {
+            kind: ToolSubjectKind::Agent,
+            original: profile_id.clone(),
+            normalized: format!("agent:{profile_id}"),
+            canonical_path: None,
+            scope: ToolSubjectScope::Unknown,
+        }
+    }
 }
 
 /// Safe summary of data a tool is about to send outside the local agent boundary.
@@ -264,6 +277,7 @@ pub enum ToolSubjectKind {
     NetworkEndpoint,
     McpTool,
     McpTrustClass,
+    Agent,
     Other,
 }
 
@@ -275,6 +289,7 @@ impl ToolSubjectKind {
             Self::NetworkEndpoint => "network_endpoint",
             Self::McpTool => "mcp_tool",
             Self::McpTrustClass => "mcp_trust_class",
+            Self::Agent => "agent",
             Self::Other => "other",
         }
     }

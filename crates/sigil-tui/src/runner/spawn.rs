@@ -48,13 +48,17 @@ pub fn spawn_agent_worker(
                 Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
             let (mcp_event_tx, mcp_event_rx) = mpsc::channel();
             let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
-            let registry = sigil_runtime::build_tool_registry_without_eager_mcp(
+            let mut registry = sigil_runtime::build_tool_registry_without_eager_mcp(
                 &root_config,
                 &provider_capabilities,
                 workspace_root.clone(),
                 elicitation_handler.clone(),
                 mcp_event_handler.clone(),
             );
+            if let Err(error) = sigil_runtime::register_agent_tools(&mut registry, &root_config) {
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                return;
+            }
             spawn_eager_mcp_startup_tasks(
                 &runtime,
                 registry.clone(),

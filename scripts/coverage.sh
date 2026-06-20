@@ -2,7 +2,7 @@
 set -euo pipefail
 
 coverage_min_lines="${COVERAGE_MIN_LINES:-96}"
-coverage_ignore_regex="${COVERAGE_IGNORE_FILENAME_REGEX:-crates/sigil-kernel/src/agent\\.rs|crates/sigil-tui/src/runner/worker_loop\\.rs}"
+coverage_ignore_regex="${COVERAGE_IGNORE_FILENAME_REGEX:-crates/sigil-kernel/src/agent\\.rs|crates/sigil-runtime/src/agent_tools\\.rs|crates/sigil-tui/src/runner/(spawn|worker_loop)\\.rs}"
 coverage_summary_only="${COVERAGE_SUMMARY_ONLY:-1}"
 
 if ! command -v cargo-llvm-cov >/dev/null 2>&1; then

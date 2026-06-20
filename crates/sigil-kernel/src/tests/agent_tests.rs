@@ -3024,9 +3024,12 @@ async fn agent_guides_direct_task_tool_calls_without_hard_error() -> Result<()> 
         matches!(message.role, MessageRole::Tool)
             && message.tool_call_id.as_deref() == Some("call-task-1")
             && message.content.as_deref().is_some_and(|content| {
-                content.contains("/plan <objective>")
-                    && content.contains("task_plan_update")
-                    && content.contains("subagent_read")
+                content.contains("legacy aliases")
+                    && content.contains("spawn_agent")
+                    && content.contains("wait_agent")
+                    && content.contains("message_agent")
+                    && content.contains("close_agent")
+                    && !content.contains("/plan <objective>")
             })
     }));
     assert!(session.entries().iter().any(|entry| {

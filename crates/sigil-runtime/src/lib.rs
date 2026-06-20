@@ -36,6 +36,7 @@ use sigil_provider_openai_compat::{
 
 pub mod agent_profile_registry;
 pub mod agent_supervisor;
+pub mod agent_tools;
 pub mod doctor;
 pub mod plugins;
 pub mod skills;
@@ -45,8 +46,14 @@ pub use agent_profile_registry::{
     WORKER_PROFILE_ID,
 };
 pub use agent_supervisor::{
-    AgentBudgetPolicy, AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart,
-    AgentTaskChildThread, ForegroundCancelImpact,
+    AgentBudgetPolicy, AgentChatChildStart, AgentChatChildThread, AgentInterruptedThread,
+    AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart, AgentTaskChildThread,
+    ForegroundCancelImpact, chat_agent_thread_id_for_call,
+};
+pub use agent_tools::{
+    AgentToolProviderFactory, AgentToolRuntime, CLOSE_AGENT_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME,
+    SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, register_agent_tools,
+    register_agent_tools_with_registry,
 };
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
@@ -872,7 +879,10 @@ pub fn build_skill_tool_registry(
     } else {
         skill.allowed_tools.clone()
     };
-    registry.scoped_with_denies(effective_scope, skill.disallowed_tools.clone())
+    registry.scoped_with_denies(
+        effective_scope,
+        skill.disallowed_tools.union(&agent_tool_deny_scope()),
+    )
 }
 
 /// Builds a role-scoped registry further constrained by a loaded skill descriptor.
@@ -888,7 +898,22 @@ pub fn build_role_skill_tool_registry(
     } else {
         role_scope.intersection(&skill.allowed_tools)
     };
-    registry.scoped_with_denies(effective_scope, skill.disallowed_tools.clone())
+    registry.scoped_with_denies(
+        effective_scope,
+        skill.disallowed_tools.union(&agent_tool_deny_scope()),
+    )
+}
+
+fn agent_tool_deny_scope() -> ToolRegistryScope {
+    ToolRegistryScope::from_names_and_prefixes(
+        [
+            agent_tools::SPAWN_AGENT_TOOL_NAME,
+            agent_tools::WAIT_AGENT_TOOL_NAME,
+            agent_tools::MESSAGE_AGENT_TOOL_NAME,
+            agent_tools::CLOSE_AGENT_TOOL_NAME,
+        ],
+        std::iter::empty::<&str>(),
+    )
 }
 
 fn role_tool_scope(root_config: &RootConfig, role: AgentRole) -> ToolRegistryScope {
