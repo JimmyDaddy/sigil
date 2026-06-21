@@ -616,6 +616,21 @@ fn activity_controls_live_in_info_rail_not_footer() -> anyhow::Result<()> {
 }
 
 #[test]
+fn footer_hints_show_agent_background_shortcut_while_waiting() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::AgentRunStarted {
+        profile_id: "explore".to_owned(),
+        prompt: "inspect kernel".to_owned(),
+    })?;
+
+    let view_model = UiViewModel::from_app(&app);
+
+    assert!(view_model.footer.hints.contains("Ctrl-B background"));
+    assert!(view_model.footer.hints.contains("Esc interrupt"));
+    Ok(())
+}
+
+#[test]
 fn footer_hints_track_approval_state() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {

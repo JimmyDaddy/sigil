@@ -798,6 +798,7 @@ fn app_with_scrollback() -> AppState {
         prompt: "follow-up".to_owned(),
     })
     .expect("run started should render");
+    app.is_busy = false;
     app
 }
 

@@ -8,15 +8,16 @@ use std::{
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentDelegationRequirement, AgentProfileId, AgentRole, AgentRunInput, AgentRunOptions,
-    AgentRunResult, AgentThreadId, ControlEntry, ModelMessage, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, ProviderCapabilities, RootConfig,
-    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
-    SkillDescriptor, SkillRunMode, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry,
-    TaskStepId, TaskStepSpec, TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
-    TerminalTaskId, ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
-    ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
-    ToolSubjectAudit, default_user_config_dir, plan_text_hash, plan_workspace_paths,
+    AgentRunResult, AgentThreadId, AgentThreadStatus, ControlEntry, ModelMessage,
+    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry,
+    ProviderCapabilities, RootConfig, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection,
+    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
+    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
+    ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, default_user_config_dir,
+    plan_text_hash, plan_workspace_paths,
 };
 
 use crate::{
@@ -207,7 +208,24 @@ pub(super) fn run_worker_loop<P>(
                     };
                     let _ = message_tx.send(message);
                 }
+                RunTaskPayload::Agent {
+                    profile_id,
+                    result: Ok(run_result),
+                } => {
+                    let entries = current_session
+                        .as_ref()
+                        .map(|session| session.entries().to_vec())
+                        .unwrap_or_default();
+                    let _ = message_tx.send(WorkerMessage::AgentRunFinished {
+                        profile_id,
+                        result: run_result,
+                        entries,
+                    });
+                }
                 RunTaskPayload::Chat {
+                    result: Err(error), ..
+                }
+                | RunTaskPayload::Agent {
                     result: Err(error), ..
                 } => {
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
@@ -400,7 +418,7 @@ pub(super) fn run_worker_loop<P>(
                 elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
                 let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
                 agent_supervisor.reset_turn_budget();
-                let agent_delegate = sigil_runtime::AgentToolRuntime::new(
+                let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
                     agent_supervisor.clone(),
                     root_config.clone(),
                     agent.tool_registry().clone(),
@@ -440,10 +458,7 @@ pub(super) fn run_worker_loop<P>(
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
-                        payload: RunTaskPayload::Chat {
-                            result,
-                            plan_mode: false,
-                        },
+                        payload: RunTaskPayload::Agent { profile_id, result },
                     });
                 });
 
@@ -833,6 +848,39 @@ pub(super) fn run_worker_loop<P>(
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "received stray approval decision without pending approval".to_owned(),
                     ));
+                }
+            }
+            Ok(WorkerCommand::ApprovalDecisionWithArgs { call_id, args_json }) => {
+                if let Some(active_run) = &active_run {
+                    let _ = active_run.approval_tx.send(ApprovalSignal::Decision {
+                        call_id,
+                        approval: ToolApproval::ApproveWithArgs { args_json },
+                    });
+                } else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "received stray approval decision without pending approval".to_owned(),
+                    ));
+                }
+            }
+            Ok(WorkerCommand::BackgroundActiveAgent) => {
+                if active_run.is_none() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "no active agent run to background".to_owned(),
+                    ));
+                    continue;
+                }
+                match agent_supervisor.request_foreground_background() {
+                    Ok(thread_id) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "agent {} background requested",
+                            thread_id.as_str()
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "agent background unavailable: {error}"
+                        )));
+                    }
                 }
             }
             Ok(WorkerCommand::CancelRun) => {
@@ -2018,6 +2066,10 @@ enum RunTaskPayload {
         result: std::result::Result<AgentRunResult, String>,
         plan_mode: bool,
     },
+    Agent {
+        profile_id: String,
+        result: std::result::Result<AgentRunResult, String>,
+    },
     Task {
         task_id: String,
         result: std::result::Result<TaskRunStatus, String>,
@@ -2033,7 +2085,19 @@ fn manual_agent_invocation_result(
         .map(|result| result.summary.trim())
         .filter(|summary| !summary.is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("agent {} completed", invocation.thread_id.as_str()));
+        .unwrap_or_else(|| match invocation.status {
+            Some(AgentThreadStatus::Running) | Some(AgentThreadStatus::Started) => format!(
+                "agent {} is running in background",
+                invocation.thread_id.as_str()
+            ),
+            Some(AgentThreadStatus::Failed) => {
+                format!("agent {} failed", invocation.thread_id.as_str())
+            }
+            Some(AgentThreadStatus::Cancelled) | Some(AgentThreadStatus::Interrupted) => {
+                format!("agent {} was interrupted", invocation.thread_id.as_str())
+            }
+            _ => format!("agent {} completed", invocation.thread_id.as_str()),
+        });
     AgentRunResult {
         final_text,
         tool_calls: 0,

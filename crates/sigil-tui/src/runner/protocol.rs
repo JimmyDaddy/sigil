@@ -55,6 +55,11 @@ pub enum WorkerCommand {
         call_id: String,
         approved: bool,
     },
+    ApprovalDecisionWithArgs {
+        call_id: String,
+        args_json: String,
+    },
+    BackgroundActiveAgent,
     CancelRun,
     CancelTerminalTask {
         task_id: String,
@@ -101,6 +106,11 @@ pub enum WorkerMessage {
     AgentRunStarted {
         profile_id: String,
         prompt: String,
+    },
+    AgentRunFinished {
+        profile_id: String,
+        result: AgentRunResult,
+        entries: Vec<SessionLogEntry>,
     },
     TaskRunStarted {
         task_id: String,

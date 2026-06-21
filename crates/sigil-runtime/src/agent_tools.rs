@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -12,12 +13,12 @@ use sigil_kernel::{
     Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentProfileId,
     AgentRole, AgentRouteId, AgentRouteStatus, AgentRunOutcome, AgentThreadClosedEntry,
     AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
-    AgentThreadStatus, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
-    AgentUsageSummary, ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore,
-    ModelMessage, NoopEventHandler, Provider, RootConfig, RunEvent, Session, SessionLogEntry,
-    SessionRef, TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval, ToolCall,
-    ToolCategory, ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate,
+    AgentTrustState, AgentUsageSummary, ApprovalHandler, ControlEntry, EventHandler,
+    JsonlSessionStore, ModelMessage, NoopEventHandler, Provider, RootConfig, RunEvent, Session,
+    SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval,
+    ToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
 
 use crate::{
@@ -133,6 +134,7 @@ pub struct AgentToolRuntime {
 #[derive(Debug, Clone)]
 pub struct ManualAgentInvocationResult {
     pub thread_id: AgentThreadId,
+    pub status: Option<AgentThreadStatus>,
     pub result: Option<AgentThreadResult>,
 }
 
@@ -263,7 +265,7 @@ impl AgentToolRuntime {
     }
 
     pub async fn invoke_agent_profile(
-        &self,
+        &mut self,
         session: &mut Session,
         profile_id: AgentProfileId,
         prompt: String,
@@ -296,12 +298,15 @@ impl AgentToolRuntime {
         let thread_id = self
             .run_chat_agent(session, &call, request, options, handler, approval_handler)
             .await?;
-        let result = session
-            .agent_thread_state_projection()
-            .threads
-            .get(&thread_id)
-            .and_then(|thread| thread.result.clone());
-        Ok(ManualAgentInvocationResult { thread_id, result })
+        let projection = session.agent_thread_state_projection();
+        let thread = projection.threads.get(&thread_id);
+        let status = thread.map(|thread| thread.status);
+        let result = thread.and_then(|thread| thread.result.clone());
+        Ok(ManualAgentInvocationResult {
+            thread_id,
+            status,
+            result,
+        })
     }
 }
 
@@ -575,12 +580,30 @@ impl AgentToolRuntime {
             );
         }
 
+        if matches!(parsed.mode, AgentInvocationMode::JoinBeforeFinal)
+            && tool_scope_is_safe_readonly_for_auto_spawn(&resolved_profile.profile.tool_scope)
+        {
+            return self
+                .run_detachable_chat_child(
+                    session,
+                    call,
+                    child_thread,
+                    child_agent,
+                    child_session,
+                    child_input,
+                    child_options,
+                    budget_scope_id,
+                    handler,
+                )
+                .await;
+        }
+
         let _thread_guard = ChatChildThreadGuard {
             supervisor: self.supervisor.clone(),
             thread_id: child_thread.thread_id.clone(),
         };
         let output = {
-            let mut child_handler = ForwardEventHandler { inner: handler };
+            let mut child_handler = ChatChildEventHandler { inner: handler };
             let mut route_handler = ChatAgentApprovalRouteHandler {
                 inner: approval_handler,
                 parent_session: session,
@@ -656,8 +679,156 @@ impl AgentToolRuntime {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn run_detachable_chat_child(
+        &mut self,
+        session: &mut Session,
+        call: &ToolCall,
+        child_thread: crate::AgentChatChildThread,
+        child_agent: Agent<Box<dyn Provider>>,
+        child_session: Session,
+        child_input: sigil_kernel::AgentRunInput,
+        child_options: sigil_kernel::AgentRunOptions,
+        budget_scope_id: TaskId,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> ToolResult {
+        let thread_id = child_thread.thread_id.clone();
+        let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
+        let (_mailbox_tx, mailbox_rx) = mpsc::channel();
+        let handle = tokio::spawn(run_background_chat_agent(
+            child_agent,
+            child_session,
+            child_input,
+            child_options,
+            mailbox_rx,
+        ));
+
+        loop {
+            if self.supervisor.take_background_request(&thread_id) {
+                let control =
+                    ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+                        thread_id: thread_id.clone(),
+                        status: AgentThreadStatus::Running,
+                        reason: Some("agent moved to background".to_owned()),
+                        updated_at_ms: None,
+                    });
+                if let Err(error) = session
+                    .append_control(control.clone())
+                    .and_then(|()| handler.handle(RunEvent::Control(control)))
+                {
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        error.to_string(),
+                    );
+                }
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent @{} moved to background",
+                    child_thread.profile_id.as_str()
+                )));
+                self.background_runs.insert(
+                    thread_id.clone(),
+                    BackgroundChatAgentHandle {
+                        thread: thread_record,
+                        handle,
+                    },
+                );
+                let projection = session.agent_thread_state_projection();
+                if let Some(thread) = projection.threads.get(&thread_id) {
+                    return agent_status_tool_result(call, thread);
+                }
+                return ToolResult::ok(
+                    call.id.clone(),
+                    call.name.clone(),
+                    format!("agent thread {} is running", thread_id.as_str()),
+                    ToolResultMeta {
+                        details: json!({
+                            "thread_id": thread_id.as_str(),
+                            "status": "running"
+                        }),
+                        ..ToolResultMeta::default()
+                    },
+                );
+            }
+            if handle.is_finished() {
+                let output = match handle.await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(error)) => {
+                        let reason = format!("{error:#}");
+                        let _ = self.supervisor.record_chat_child_failure(
+                            session,
+                            handler,
+                            &child_thread,
+                            reason.clone(),
+                        );
+                        return ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::Internal,
+                            format!("child agent failed: {reason}"),
+                        );
+                    }
+                    Err(error) => {
+                        let reason = format!("child agent join failed: {error}");
+                        let _ = self.supervisor.record_chat_child_failure(
+                            session,
+                            handler,
+                            &child_thread,
+                            reason.clone(),
+                        );
+                        return ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::Internal,
+                            reason,
+                        );
+                    }
+                };
+                let budget_warning = self
+                    .supervisor
+                    .validate_usage_budget(&budget_scope_id, &output.usage)
+                    .err()
+                    .map(|error| format!("{error:#}"));
+                if let Err(error) = self.supervisor.record_chat_child_result(
+                    session,
+                    handler,
+                    &child_thread,
+                    output.status,
+                    &output.final_text,
+                    &output.outcome,
+                    Some(output.usage),
+                ) {
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        error.to_string(),
+                    );
+                }
+                if let Some(warning) = budget_warning {
+                    let _ = handler.handle(RunEvent::Notice(format!(
+                        "agent budget warning after child completion: {warning}"
+                    )));
+                }
+                let result = session
+                    .agent_thread_state_projection()
+                    .threads
+                    .get(&thread_id)
+                    .and_then(|thread| thread.result.clone());
+                return agent_result_tool_result(
+                    call,
+                    &thread_id,
+                    result.as_ref(),
+                    DEFAULT_RESULT_SUMMARY_LIMIT,
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     async fn run_chat_agent(
-        &self,
+        &mut self,
         session: &mut Session,
         call: &ToolCall,
         request: ChatAgentRunRequest,
@@ -709,11 +880,6 @@ impl AgentToolRuntime {
                 display_name_hint: request.display_name_hint.clone(),
             },
         )?;
-        let _thread_guard = ChatChildThreadGuard {
-            supervisor: self.supervisor.clone(),
-            thread_id: child_thread.thread_id.clone(),
-        };
-
         let mut child_session = match build_agent_child_session(session, &child_session_ref) {
             Ok(session) => session,
             Err(error) => {
@@ -744,8 +910,35 @@ impl AgentToolRuntime {
             options.interaction_mode,
             role,
         );
+        if matches!(request.mode, AgentInvocationMode::JoinBeforeFinal)
+            && tool_scope_is_safe_readonly_for_auto_spawn(
+                &request.resolved_profile.profile.tool_scope,
+            )
+        {
+            let result = self
+                .run_detachable_chat_child(
+                    session,
+                    call,
+                    child_thread,
+                    child_agent,
+                    child_session,
+                    child_input,
+                    child_options,
+                    budget_scope_id,
+                    handler,
+                )
+                .await;
+            if result.is_error() {
+                return Err(anyhow!(result.content));
+            }
+            return Ok(thread_id);
+        }
+        let _thread_guard = ChatChildThreadGuard {
+            supervisor: self.supervisor.clone(),
+            thread_id: child_thread.thread_id.clone(),
+        };
         let output = {
-            let mut child_handler = ForwardEventHandler { inner: handler };
+            let mut child_handler = ChatChildEventHandler { inner: handler };
             let mut route_handler = ChatAgentApprovalRouteHandler {
                 inner: approval_handler,
                 parent_session: session,
@@ -1229,9 +1422,12 @@ impl Tool for AgentTool {
     fn permission_default_mode(
         &self,
         _ctx: &ToolContext,
-        _args: &Value,
+        args: &Value,
     ) -> Result<Option<sigil_kernel::ApprovalMode>> {
         Ok(match self.kind {
+            AgentToolKind::Spawn if self.safe_model_spawn(args)? => {
+                Some(sigil_kernel::ApprovalMode::Allow)
+            }
             AgentToolKind::Spawn | AgentToolKind::Message | AgentToolKind::Close => {
                 Some(sigil_kernel::ApprovalMode::Ask)
             }
@@ -1279,10 +1475,21 @@ impl Tool for AgentTool {
 }
 
 impl AgentTool {
+    fn safe_model_spawn(&self, args: &Value) -> Result<bool> {
+        let profile_id = AgentProfileId::new(required_string(args, "profile_id")?)?;
+        let Some(resolved) = self.surface.profile_registry.get(&profile_id) else {
+            return Ok(false);
+        };
+        Ok(resolved.effective_enabled()
+            && resolved.trust_state == AgentTrustState::Trusted
+            && resolved.effective_model_invocation_allowed()
+            && tool_scope_is_safe_readonly_for_auto_spawn(&resolved.profile.tool_scope))
+    }
+
     fn description(&self) -> String {
         match self.kind {
             AgentToolKind::Spawn => format!(
-                "Spawn a child agent when the user explicitly asks for delegated, parallel, sub-agent, or child-agent work. You must delegate the requested non-overlapping scope instead of completing that same scope yourself, and use join_before_final when the child result is needed before your final answer. Use stable profile_id values, not display names.\n{}",
+                "Spawn a child agent when the user explicitly asks for delegated, parallel, sub-agent, or child-agent work. You must delegate the requested non-overlapping scope instead of completing that same scope yourself. Default to mode=background when the parent can continue independent work while the child runs; then continue the parent work and call wait_agent before the final answer. Use mode=join_before_final only when the parent cannot make useful progress until the child result is available; foreground users may move that run to background before execution. Use stable profile_id values, not display names.\n{}",
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
@@ -1317,7 +1524,7 @@ impl AgentTool {
                     "mode": {
                         "type": "string",
                         "enum": ["foreground", "join_before_final", "background"],
-                        "default": "join_before_final"
+                        "default": "background"
                     },
                     "display_name_hint": { "type": "string" }
                 },
@@ -1482,7 +1689,7 @@ impl SpawnAgentArgs {
                 .as_deref()
                 .map(parse_invocation_mode)
                 .transpose()?
-                .unwrap_or(AgentInvocationMode::JoinBeforeFinal),
+                .unwrap_or(AgentInvocationMode::Background),
             display_name_hint: optional_string(args, "display_name_hint"),
         })
     }
@@ -1496,7 +1703,7 @@ struct ChatAgentApprovalRouteHandler<'a> {
 
 struct BackgroundApprovalHandler;
 
-struct ForwardEventHandler<'a> {
+struct ChatChildEventHandler<'a> {
     inner: &'a mut (dyn EventHandler + Send),
 }
 
@@ -1511,9 +1718,31 @@ impl Drop for ChatChildThreadGuard {
     }
 }
 
-impl EventHandler for ForwardEventHandler<'_> {
+impl EventHandler for ChatChildEventHandler<'_> {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
-        self.inner.handle(event)
+        match event {
+            RunEvent::ToolApprovalRequested {
+                call,
+                spec,
+                subjects,
+                preview,
+            } => self.inner.handle(RunEvent::ToolApprovalRequested {
+                call,
+                spec,
+                subjects,
+                preview,
+            }),
+            RunEvent::ToolApprovalResolved {
+                call_id,
+                approved,
+                reason,
+            } => self.inner.handle(RunEvent::ToolApprovalResolved {
+                call_id,
+                approved,
+                reason,
+            }),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1542,7 +1771,9 @@ impl ApprovalHandler for ChatAgentApprovalRouteHandler<'_> {
             }))?;
         let approval = self.inner.approve_tool_call(call, spec)?;
         let status = match approval {
-            ToolApproval::Approve => AgentRouteStatus::Resolved,
+            ToolApproval::Approve | ToolApproval::ApproveWithArgs { .. } => {
+                AgentRouteStatus::Resolved
+            }
             ToolApproval::Deny { .. } => AgentRouteStatus::Rejected,
         };
         self.parent_session
@@ -2127,6 +2358,27 @@ fn tool_scope_summary(scope: &sigil_kernel::ToolRegistryScope) -> String {
     } else {
         format!("names={names}; prefixes={prefixes}")
     }
+}
+
+fn tool_scope_is_safe_readonly_for_auto_spawn(scope: &sigil_kernel::ToolRegistryScope) -> bool {
+    const SAFE_READONLY_TOOLS: &[&str] = &[
+        "read_file",
+        "ls",
+        "glob",
+        "grep",
+        "code_symbols",
+        "code_workspace_symbols",
+        "code_definition",
+        "code_references",
+        "code_diagnostics",
+        crate::LOAD_SKILL_TOOL_NAME,
+    ];
+    !scope.allow_all
+        && scope.prefixes.is_empty()
+        && scope
+            .names
+            .iter()
+            .all(|name| SAFE_READONLY_TOOLS.contains(&name.as_str()))
 }
 
 fn agent_route_id_for_call(thread_id: &AgentThreadId, call_id: &str) -> Result<AgentRouteId> {

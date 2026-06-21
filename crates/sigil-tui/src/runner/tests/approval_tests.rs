@@ -1,11 +1,11 @@
-use std::{sync::Arc, time::Duration};
+use std::{fs, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use sigil_kernel::{
     Agent, ApprovalHandler, ProviderChunk, ReasoningEffort, RunEvent, SessionLogEntry,
     ToolApproval, ToolCall, ToolCategory, ToolPreviewCapability, ToolRegistry, ToolSpec,
 };
-use sigil_runtime::register_agent_tools;
+use sigil_runtime::register_agent_tools_with_workspace;
 use tempfile::tempdir;
 
 use super::{
@@ -92,12 +92,26 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
 fn spawn_agent_tool_request_surfaces_approval_preview_in_worker() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
+    let agent_dir = workspace_root
+        .join(".sigil")
+        .join("agents")
+        .join("review-required");
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(
+        agent_dir.join("agent.toml"),
+        r#"
+description = "Review-required test agent."
+instructions = "Inspect the workspace."
+invocation_policy = "model_allowed"
+allowed_tools = ["grep"]
+"#,
+    )?;
     let session_log_path = temp
         .path()
         .join(".sigil/sessions/session-agent-approval.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let mut registry = ToolRegistry::new();
-    register_agent_tools(&mut registry, &root_config)?;
+    register_agent_tools_with_workspace(&mut registry, &root_config, &workspace_root)?;
     let agent = Agent::new(
         PlannedProvider::new(vec![
             StreamPlan::Chunks(vec![
@@ -105,7 +119,7 @@ fn spawn_agent_tool_request_surfaces_approval_preview_in_worker() -> Result<()> 
                     id: "call-spawn-agent".to_owned(),
                     name: sigil_runtime::SPAWN_AGENT_TOOL_NAME.to_owned(),
                     args_json: serde_json::json!({
-                        "profile_id": "explore",
+                        "profile_id": "review-required",
                         "objective": "inspect tui worker",
                         "prompt": "inspect tui worker",
                         "mode": "join_before_final"
@@ -264,6 +278,40 @@ fn approval_handler_ignores_other_call_ids_until_matching_decision_arrives() -> 
     )?;
 
     assert!(matches!(approval, ToolApproval::Approve));
+    Ok(())
+}
+
+#[test]
+fn approval_handler_forwards_approved_argument_overrides() -> Result<()> {
+    let (tx, rx) = std::sync::mpsc::channel::<ApprovalSignal>();
+    let mut handler = ChannelApprovalHandler::with_timeout(rx, Duration::from_secs(1));
+    tx.send(ApprovalSignal::Decision {
+        call_id: "call-spawn".to_owned(),
+        approval: ToolApproval::ApproveWithArgs {
+            args_json: r#"{"mode":"background"}"#.to_owned(),
+        },
+    })?;
+
+    let approval = handler.approve_tool_call(
+        &ToolCall {
+            id: "call-spawn".to_owned(),
+            name: sigil_runtime::SPAWN_AGENT_TOOL_NAME.to_owned(),
+            args_json: "{}".to_owned(),
+        },
+        &ToolSpec {
+            name: sigil_runtime::SPAWN_AGENT_TOOL_NAME.to_owned(),
+            description: "spawn".to_owned(),
+            input_schema: serde_json::json!({"type":"object"}),
+            category: ToolCategory::Agent,
+            access: sigil_kernel::ToolAccess::Execute,
+            preview: ToolPreviewCapability::Required,
+        },
+    )?;
+
+    assert!(matches!(
+        approval,
+        ToolApproval::ApproveWithArgs { args_json } if args_json.contains("background")
+    ));
     Ok(())
 }
 

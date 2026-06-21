@@ -7,3 +7,4 @@ sigil.toml
 .repo-local-dev
 __pycache__/
 *.pyc
+.sigil

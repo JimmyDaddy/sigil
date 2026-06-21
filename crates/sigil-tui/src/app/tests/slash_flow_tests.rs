@@ -508,7 +508,7 @@ aliases = ["rr"]
             if profile_id == "repo-review" && prompt == "audit crates/sigil-tui"
     ));
     assert!(app.is_busy);
-    assert_eq!(app.last_notice(), Some("invoking agent repo-review"));
+    assert_eq!(app.last_notice(), Some("waiting for agent @repo-review"));
     assert_eq!(app.input, "");
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "@repo-review audit crates/sigil-tui"
@@ -574,7 +574,7 @@ slash_names = ["review-agent"]
         Some(AppAction::InvokeAgentProfile { profile_id, prompt })
             if profile_id == "repo-review" && prompt == "audit crates/sigil-tui"
     ));
-    assert_eq!(app.last_notice(), Some("invoking agent repo-review"));
+    assert_eq!(app.last_notice(), Some("waiting for agent @repo-review"));
     Ok(())
 }
 

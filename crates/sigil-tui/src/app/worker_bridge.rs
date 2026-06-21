@@ -6,6 +6,7 @@ use super::{
     AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary, McpServerRuntimeStatus,
     ModelPickerRefresh, PaneFocus, PendingApproval, RunPhase, TimelineRole,
     formatting::{
+        format_agent_thread_started_block, format_agent_thread_status_block,
         format_terminal_task_block_redacted, format_tool_result_block_redacted, summarize_error,
     },
 };
@@ -16,10 +17,16 @@ use crate::provider_status::BalanceSnapshot;
 use crate::provider_status::resolve_provider_api_key;
 use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 use sigil_kernel::{
-    ControlEntry, EventHandler, RunEvent, ToolDiffBudget, ToolPreviewSnapshot, ToolResult,
+    ControlEntry, EventHandler, RunEvent, ToolCall, ToolDiffBudget, ToolPreviewSnapshot, ToolResult,
 };
 
 impl AppState {
+    fn set_agent_wait_phase(&mut self, profile_id: &str) {
+        self.run_phase = RunPhase::Agent(profile_id.to_owned());
+        self.last_notice = Some(format!("waiting for agent @{profile_id}"));
+        self.push_phase_marker(format!("agent|{profile_id}"));
+    }
+
     pub fn poll_background_tasks(&mut self) -> bool {
         false
     }
@@ -132,6 +139,7 @@ impl AppState {
         match message {
             WorkerMessage::Event(event) => self.handle(*event)?,
             WorkerMessage::RunStarted { prompt } => {
+                self.is_busy = true;
                 self.run_phase = RunPhase::Thinking;
                 self.mcp_progress = None;
                 self.last_notice = Some("thinking".to_owned());
@@ -139,6 +147,7 @@ impl AppState {
                 self.push_event("run:start", prompt);
             }
             WorkerMessage::PlanRunStarted { prompt } => {
+                self.is_busy = true;
                 self.run_phase = RunPhase::Thinking;
                 self.mcp_progress = None;
                 self.last_notice = Some("planning".to_owned());
@@ -146,13 +155,56 @@ impl AppState {
                 self.push_event("plan:start", prompt);
             }
             WorkerMessage::AgentRunStarted { profile_id, prompt } => {
-                self.run_phase = RunPhase::Thinking;
+                self.is_busy = true;
+                self.run_phase = RunPhase::Agent(profile_id.clone());
                 self.mcp_progress = None;
-                self.last_notice = Some(format!("invoking agent {profile_id}"));
+                self.last_notice = Some(format!("waiting for agent @{profile_id}"));
                 self.push_phase_marker(format!("agent|{profile_id}"));
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    format!("agent @{profile_id} started; waiting for result"),
+                );
                 self.push_event("agent:start", prompt);
             }
+            WorkerMessage::AgentRunFinished {
+                profile_id,
+                result,
+                entries,
+            } => {
+                self.is_busy = false;
+                self.run_phase = RunPhase::Idle;
+                self.mcp_progress = None;
+                self.pending_approval = None;
+                self.modal_state = None;
+                self.last_phase_marker = None;
+                self.finish_streaming_assistant_entry();
+                self.finish_streaming_reasoning_entry();
+                self.sync_current_session_state(entries);
+                self.refresh_session_history();
+                self.recompute_compaction_status(false);
+                self.schedule_balance_refresh();
+                let notice = format!("agent @{profile_id} finished");
+                self.last_notice = Some(notice.clone());
+                self.push_timeline(TimelineRole::Notice, notice);
+                let final_text = result.final_text.trim();
+                if !final_text.is_empty()
+                    && !self.timeline.last().is_some_and(|entry| {
+                        entry.role == TimelineRole::Assistant && entry.text == final_text
+                    })
+                {
+                    self.push_timeline(TimelineRole::Assistant, final_text.to_owned());
+                }
+                self.push_event(
+                    "agent:finish",
+                    format!(
+                        "{profile_id} tool_calls={} final_text_bytes={}",
+                        result.tool_calls,
+                        result.final_text.len()
+                    ),
+                );
+            }
             WorkerMessage::TaskRunStarted { task_id, objective } => {
+                self.is_busy = true;
                 self.run_phase = RunPhase::Thinking;
                 self.mcp_progress = None;
                 self.last_notice = Some(format!("planning task {task_id}"));
@@ -549,6 +601,10 @@ impl AppState {
             AppAction::ApprovalDecision { call_id, approved } => {
                 WorkerCommand::ApprovalDecision { call_id, approved }
             }
+            AppAction::ApprovalDecisionWithArgs { call_id, args_json } => {
+                WorkerCommand::ApprovalDecisionWithArgs { call_id, args_json }
+            }
+            AppAction::BackgroundActiveAgent => WorkerCommand::BackgroundActiveAgent,
             AppAction::CancelRun => WorkerCommand::CancelRun,
             AppAction::CancelTerminalTask { task_id } => {
                 WorkerCommand::CancelTerminalTask { task_id }
@@ -899,13 +955,17 @@ impl EventHandler for AppState {
                 }
             }
             RunEvent::ToolCallCompleted(call) => {
-                self.run_phase = RunPhase::Tool(call.name.clone());
                 if agent_tool_name(&call.name) {
                     self.downgrade_streaming_assistant_entry_to_thinking();
                 }
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
-                self.push_phase_marker(format!("tool|{}", call.name));
+                if let Some(profile_id) = spawn_agent_profile_id(&call) {
+                    self.set_agent_wait_phase(&profile_id);
+                } else {
+                    self.run_phase = RunPhase::Tool(call.name.clone());
+                    self.push_phase_marker(format!("tool|{}", call.name));
+                }
                 self.push_event("tool:complete", format!("{} {}", call.name, call.id));
             }
             RunEvent::ToolApprovalRequested {
@@ -954,9 +1014,19 @@ impl EventHandler for AppState {
                 approved,
                 reason,
             } => {
-                self.run_phase = RunPhase::Thinking;
+                let approved_agent_profile = approved.then(|| {
+                    self.pending_approval
+                        .as_ref()
+                        .and_then(|pending| spawn_agent_profile_id(&pending.call))
+                });
                 self.pending_approval = None;
                 self.active_pane = PaneFocus::Composer;
+                if let Some(Some(profile_id)) = approved_agent_profile {
+                    self.set_agent_wait_phase(&profile_id);
+                } else {
+                    self.run_phase = RunPhase::Thinking;
+                    self.push_phase_marker(format!("thinking|{}", self.model_name));
+                }
                 self.push_event(
                     "approval:resolved",
                     format!(
@@ -978,9 +1048,17 @@ impl EventHandler for AppState {
                 }
             }
             RunEvent::ToolResult(result) => {
-                self.run_phase = RunPhase::Tool(result.tool_name.clone());
+                let is_agent_tool = agent_tool_name(&result.tool_name);
+                if !is_agent_tool {
+                    self.run_phase = RunPhase::Tool(result.tool_name.clone());
+                }
                 self.finish_streaming_reasoning_entry();
-                self.push_phase_marker(format!("tool|{}", result.tool_name));
+                if is_agent_tool {
+                    self.run_phase = RunPhase::Thinking;
+                    self.push_phase_marker(format!("thinking|{}", self.model_name));
+                } else {
+                    self.push_phase_marker(format!("tool|{}", result.tool_name));
+                }
                 let status = if result.is_error() { "error" } else { "ok" };
                 self.apply_code_intelligence_tool_status(&result);
                 self.apply_mcp_activation_tool_status(&result);
@@ -1040,6 +1118,38 @@ impl EventHandler for AppState {
                     );
                     self.append_current_session_control(ControlEntry::TerminalTask(task));
                 }
+                ControlEntry::AgentThreadStarted(entry) => {
+                    let control = ControlEntry::AgentThreadStarted(entry.clone());
+                    if matches!(
+                        entry.invocation_source,
+                        sigil_kernel::AgentInvocationSource::Chat
+                            | sigil_kernel::AgentInvocationSource::Mention
+                    ) {
+                        let profile_id = entry.profile_id.as_str();
+                        self.set_agent_wait_phase(profile_id);
+                        self.push_timeline(
+                            TimelineRole::Tool,
+                            format_agent_thread_started_block(&entry),
+                        );
+                        self.push_event("agent:start", entry.objective.clone());
+                    } else {
+                        self.push_event("control", format!("{control:?}"));
+                    }
+                    self.append_current_session_control(control);
+                }
+                ControlEntry::AgentThreadStatusChanged(entry) => {
+                    self.push_event(
+                        "agent:status",
+                        format!("{} {:?}", entry.thread_id.as_str(), entry.status),
+                    );
+                    self.push_timeline(
+                        TimelineRole::Tool,
+                        format_agent_thread_status_block(&entry),
+                    );
+                    self.append_current_session_control(ControlEntry::AgentThreadStatusChanged(
+                        entry,
+                    ));
+                }
                 other => {
                     self.push_event("control", format!("{other:?}"));
                     self.append_current_session_control(other);
@@ -1090,6 +1200,18 @@ fn agent_tool_name(name: &str) -> bool {
         name,
         "spawn_agent" | "wait_agent" | "read_agent_result" | "message_agent" | "close_agent"
     )
+}
+
+fn spawn_agent_profile_id(call: &ToolCall) -> Option<String> {
+    if call.name != "spawn_agent" {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&call.args_json)
+        .ok()?
+        .get("profile_id")?
+        .as_str()
+        .filter(|profile_id| !profile_id.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

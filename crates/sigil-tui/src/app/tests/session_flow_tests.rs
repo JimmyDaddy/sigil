@@ -138,6 +138,96 @@ fn restored_terminal_task_control_renders_user_facing_card() -> Result<()> {
 }
 
 #[test]
+fn restored_agent_thread_controls_render_user_facing_cards() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_restore_1")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_restore_1")?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/agents/agent_restore_1.jsonl",
+                )?,
+                profile_id: sigil_kernel::AgentProfileId::new("explore")?,
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: snapshot_id,
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
+                    effective_tool_scope_hash: "tools".to_owned(),
+                    effective_permission_policy_hash: "permissions".to_owned(),
+                    effective_mcp_scope_hash: "mcp".to_owned(),
+                    provider_capability_hash: "provider".to_owned(),
+                    model_visible_agent_index_hash: Some("agent-index".to_owned()),
+                    budget_policy_hash: "budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: "inspect kernel".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+                invocation_source: sigil_kernel::AgentInvocationSource::Mention,
+                display_name: Some("kernel-explorer".to_owned()),
+                created_at_ms: Some(42),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id,
+                status: sigil_kernel::AgentThreadStatus::Running,
+                reason: Some("waiting for result".to_owned()),
+                updated_at_ms: Some(43),
+            },
+        )),
+        SessionLogEntry::Assistant(ModelMessage::assistant(
+            Some("parent summary".to_owned()),
+            Vec::new(),
+        )),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let tool_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool)
+        .map(|entry| entry.text.as_str())
+        .collect::<Vec<_>>();
+    assert!(tool_cards.iter().any(|text| {
+        text.contains("\"tool_name\":\"spawn_agent\"")
+            && text.contains("\"thread_id\":\"agent_restore_1\"")
+            && text.contains("\"source\":\"mention\"")
+    }));
+    assert!(tool_cards.iter().any(|text| {
+        text.contains("\"tool_name\":\"wait_agent\"")
+            && text.contains("\"thread_id\":\"agent_restore_1\"")
+            && text.contains("\"reason\":\"waiting for result\"")
+    }));
+    assert!(app.events.iter().any(|event| {
+        event.label == "control:restore"
+            && event.detail.contains("agent_restore_1")
+            && event.detail.contains("started")
+    }));
+    assert!(app.events.iter().any(|event| {
+        event.label == "control:restore"
+            && event.detail.contains("agent_restore_1")
+            && event.detail.contains("Running")
+    }));
+    assert!(plain_transcript(&app, 20).contains("parent summary"));
+    Ok(())
+}
+
+#[test]
 fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let session_log_path = app.session_log_path.clone();

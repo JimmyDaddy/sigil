@@ -69,6 +69,22 @@ fn approval_helper_functions_format_subjects_and_diff_lines() {
         approval_changeset_file_metadata("apply_changeset", r#"{"id":"change-1"}"#).is_empty(),
         "change set args without files should be ignored"
     );
+    assert!(spawn_agent_background_args_json("read_file", "{}").is_none());
+    assert!(
+        spawn_agent_background_args_json(
+            sigil_runtime::SPAWN_AGENT_TOOL_NAME,
+            r#"{"mode":"background"}"#
+        )
+        .is_none()
+    );
+    assert_eq!(
+        spawn_agent_background_args_json(
+            sigil_runtime::SPAWN_AGENT_TOOL_NAME,
+            r#"{"mode":"join_before_final","profile_id":"explore"}"#
+        )
+        .as_deref(),
+        Some(r#"{"mode":"background","profile_id":"explore"}"#)
+    );
     assert!(approval_format_hint(&["package.json".to_owned()]).contains("JSON"));
     assert!(approval_format_hint(&["ci.yaml".to_owned()]).contains("YAML"));
     assert_eq!(

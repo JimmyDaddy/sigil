@@ -78,6 +78,15 @@ def is_business_rust_file(path: str) -> bool:
     )
 
 
+def package_names_for_staged_files(staged_files: list[str]) -> list[str]:
+    packages: set[str] = set()
+    for path in staged_files:
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] == "crates":
+            packages.add(parts[1])
+    return sorted(packages)
+
+
 def is_trivially_non_executable_added_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
@@ -393,12 +402,21 @@ def main() -> int:
         print("staged coverage: no added Rust business-code lines")
         return 0
     staged_sources = {path: git_output("show", f":{path}") for path in staged_files}
+    staged_packages = package_names_for_staged_files(staged_files)
 
     with tempfile.TemporaryDirectory(prefix="sigil-staged-coverage-") as temp_dir:
         lcov_path = Path(temp_dir) / "coverage.lcov"
         env = os.environ.copy()
         env["COVERAGE_SUMMARY_ONLY"] = "0"
-        print("staged coverage: running ./scripts/coverage.sh for line data")
+        env["COVERAGE_MIN_LINES"] = "0"
+        if staged_packages:
+            env["COVERAGE_PACKAGES"] = " ".join(staged_packages)
+        package_scope = (
+            f" for packages: {', '.join(staged_packages)}"
+            if staged_packages
+            else ""
+        )
+        print(f"staged coverage: running ./scripts/coverage.sh for line data{package_scope}")
         run(
             ["./scripts/coverage.sh", "--lcov", "--output-path", str(lcov_path)],
             env=env,

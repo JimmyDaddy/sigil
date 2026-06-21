@@ -44,6 +44,18 @@ class StagedCoverageHelpersTests(unittest.TestCase):
         )
         self.assertFalse(check_staged_coverage.is_business_rust_file("README.md"))
 
+    def test_package_names_for_staged_files_uses_crate_directories(self) -> None:
+        packages = check_staged_coverage.package_names_for_staged_files(
+            [
+                "crates/sigil-tui/src/app.rs",
+                "crates/sigil-kernel/src/session.rs",
+                "crates/sigil-tui/src/ui/theme.rs",
+                "README.md",
+            ]
+        )
+
+        self.assertEqual(packages, ["sigil-kernel", "sigil-tui"])
+
     def test_non_executable_classifier_accepts_rust_type_shapes(self) -> None:
         non_executable = [
             "Stale { capability: String },",

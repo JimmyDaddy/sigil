@@ -17,6 +17,7 @@ use super::{
     AppState, PaneFocus, RunPhase, SESSION_HISTORY_TITLE_SCAN_LIMIT, SessionHistoryEntry,
     SessionHistoryRow, SessionViewMode, TimelineRole,
     formatting::{
+        format_agent_thread_started_block, format_agent_thread_status_block,
         format_terminal_task_block_redacted, format_tool_content_block_redacted_for_restore,
         human_file_size, relative_age_label, truncate_session_view_text,
     },
@@ -513,6 +514,34 @@ impl AppState {
                             ),
                         );
                     }
+                    ControlEntry::AgentThreadStarted(entry) => {
+                        self.push_timeline(
+                            TimelineRole::Tool,
+                            format_agent_thread_started_block(&entry),
+                        );
+                        self.push_event(
+                            "control:restore",
+                            format!(
+                                "agent {} started profile={}",
+                                entry.thread_id.as_str(),
+                                entry.profile_id.as_str()
+                            ),
+                        );
+                    }
+                    ControlEntry::AgentThreadStatusChanged(entry) => {
+                        self.push_timeline(
+                            TimelineRole::Tool,
+                            format_agent_thread_status_block(&entry),
+                        );
+                        self.push_event(
+                            "control:restore",
+                            format!(
+                                "agent {} status={:?}",
+                                entry.thread_id.as_str(),
+                                entry.status
+                            ),
+                        );
+                    }
                     other => {
                         self.push_event("control:restore", format!("{other:?}"));
                     }
@@ -643,6 +672,18 @@ fn restored_timeline_entries_from_session_entries(
                 timeline.push(crate::timeline::TimelineEntry {
                     role: TimelineRole::Tool,
                     text: format_terminal_task_block_redacted(task, redactor),
+                });
+            }
+            SessionLogEntry::Control(ControlEntry::AgentThreadStarted(entry)) => {
+                timeline.push(crate::timeline::TimelineEntry {
+                    role: TimelineRole::Tool,
+                    text: format_agent_thread_started_block(entry),
+                });
+            }
+            SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(entry)) => {
+                timeline.push(crate::timeline::TimelineEntry {
+                    role: TimelineRole::Tool,
+                    text: format_agent_thread_status_block(entry),
                 });
             }
             SessionLogEntry::Control(_) => {}

@@ -189,6 +189,9 @@ fn footer_hints(app: &AppState) -> String {
     if app.pending_approval.is_some() {
         return format!("{agent} · Y allow · N deny · V diff");
     }
+    if app.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
+        return format!("{agent} · Ctrl-B background · Esc interrupt · Ctrl-T details");
+    }
     if app.is_busy {
         return format!("{agent} · Esc interrupt · Ctrl-T details");
     }

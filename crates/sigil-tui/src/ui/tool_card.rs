@@ -1007,6 +1007,23 @@ fn render_agent_status_preview(summary: &ToolCardRender, accent: Color) -> Vec<L
             )],
         ));
     }
+    if let Some(action_hint) =
+        agent_payload_string(summary, "action_hint").filter(|hint| !hint.is_empty())
+    {
+        lines.push(timeline_content_line(
+            accent,
+            vec![
+                Span::styled("action", Style::default().fg(dim())),
+                Span::raw(" "),
+                Span::styled(
+                    action_hint,
+                    Style::default()
+                        .fg(accent_gold())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ],
+        ));
+    }
     if agent_result_read_tool(summary).is_some() {
         lines.push(timeline_content_line(
             accent,

@@ -779,7 +779,9 @@ where
         )?;
         let approval = self.inner.approve_tool_call(call, spec)?;
         let status = match approval {
-            ToolApproval::Approve => TaskRouteStatus::Resolved,
+            ToolApproval::Approve | ToolApproval::ApproveWithArgs { .. } => {
+                TaskRouteStatus::Resolved
+            }
             ToolApproval::Deny { .. } => TaskRouteStatus::Rejected,
         };
         append_approval_route(

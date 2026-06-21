@@ -5,9 +5,10 @@ use std::{
 
 use ratatui::text::Line;
 use sigil_kernel::{
-    ReasoningEffort, RootConfig, SecretRedactor, TerminalTaskEntry, TerminalTaskStatus,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
-    ToolResultStatus,
+    AgentInvocationMode, AgentInvocationSource, AgentThreadStartedEntry, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, ReasoningEffort, RootConfig, SecretRedactor, TerminalTaskEntry,
+    TerminalTaskStatus, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot, ToolResult,
+    ToolResultMeta, ToolResultStatus,
 };
 
 use crate::slash::KNOWN_MODEL_IDS;
@@ -122,6 +123,111 @@ pub(super) fn format_token_count(tokens: u64) -> String {
         out.push(character);
     }
     out
+}
+
+pub(super) fn format_agent_thread_started_block(entry: &AgentThreadStartedEntry) -> String {
+    let mode = agent_invocation_mode_label(entry.invocation_mode);
+    let mut preview_value = serde_json::json!({
+        "thread_id": entry.thread_id.as_str(),
+        "profile_id": entry.profile_id.as_str(),
+        "display_name": entry
+            .display_name
+            .as_deref()
+            .unwrap_or_else(|| entry.profile_id.as_str()),
+        "status": "running",
+        "mode": mode,
+        "source": agent_invocation_source_label(entry.invocation_source),
+        "reason": "waiting for result",
+    });
+    if entry.invocation_mode == AgentInvocationMode::JoinBeforeFinal
+        && let Some(object) = preview_value.as_object_mut()
+    {
+        object.insert(
+            "action_hint".to_owned(),
+            serde_json::Value::String("Ctrl-B background".to_owned()),
+        );
+    }
+    serde_json::json!({
+        "call_id": format!("agent-started-{}", entry.thread_id.as_str()),
+        "tool_name": "spawn_agent",
+        "status": "ok",
+        "summary": if entry.invocation_mode == AgentInvocationMode::JoinBeforeFinal {
+            "join before final · Ctrl-B background"
+        } else {
+            mode
+        },
+        "preview_kind": "json",
+        "preview_value": preview_value,
+        "preview_lines": [],
+        "hidden_lines": 0,
+    })
+    .to_string()
+}
+
+pub(super) fn format_agent_thread_status_block(entry: &AgentThreadStatusChangedEntry) -> String {
+    let status = agent_thread_status_label(entry.status);
+    let mut preview_value = serde_json::json!({
+        "thread_id": entry.thread_id.as_str(),
+        "status": status,
+    });
+    if let Some(reason) = entry.reason.as_deref()
+        && let Some(object) = preview_value.as_object_mut()
+    {
+        object.insert(
+            "reason".to_owned(),
+            serde_json::Value::String(reason.to_owned()),
+        );
+    }
+    serde_json::json!({
+        "call_id": format!("agent-status-{}-{}", entry.thread_id.as_str(), status),
+        "tool_name": "wait_agent",
+        "status": "ok",
+        "summary": entry
+            .reason
+            .as_deref()
+            .unwrap_or(status),
+        "preview_kind": "json",
+        "preview_value": preview_value,
+        "preview_lines": [],
+        "hidden_lines": 0,
+    })
+    .to_string()
+}
+
+fn agent_invocation_mode_label(mode: AgentInvocationMode) -> &'static str {
+    match mode {
+        AgentInvocationMode::Foreground => "foreground",
+        AgentInvocationMode::Background => "background",
+        AgentInvocationMode::JoinBeforeFinal => "join_before_final",
+        AgentInvocationMode::Unknown => "unknown",
+    }
+}
+
+fn agent_invocation_source_label(source: AgentInvocationSource) -> &'static str {
+    match source {
+        AgentInvocationSource::Chat => "chat",
+        AgentInvocationSource::Mention => "mention",
+        AgentInvocationSource::Skill => "skill",
+        AgentInvocationSource::Task => "task",
+        AgentInvocationSource::Plugin => "plugin",
+        AgentInvocationSource::System => "system",
+        AgentInvocationSource::Unknown => "unknown",
+    }
+}
+
+fn agent_thread_status_label(status: AgentThreadStatus) -> &'static str {
+    match status {
+        AgentThreadStatus::Started => "started",
+        AgentThreadStatus::Running => "running",
+        AgentThreadStatus::Blocked => "blocked",
+        AgentThreadStatus::Completed => "completed",
+        AgentThreadStatus::Failed => "failed",
+        AgentThreadStatus::Cancelled => "cancelled",
+        AgentThreadStatus::Interrupted => "interrupted",
+        AgentThreadStatus::Closed => "closed",
+        AgentThreadStatus::Unavailable => "unavailable",
+        AgentThreadStatus::Unknown => "unknown",
+    }
 }
 
 pub(super) fn format_token_compact(tokens: u64) -> String {

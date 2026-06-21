@@ -636,13 +636,47 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
         profile_id: "review".to_owned(),
         prompt: "inspect kernel".to_owned(),
     })?;
-    assert_eq!(app.run_phase(), RunPhase::Thinking);
-    assert_eq!(app.last_notice(), Some("invoking agent review"));
+    assert_eq!(app.run_phase(), RunPhase::Agent("review".to_owned()));
+    assert_eq!(app.last_notice(), Some("waiting for agent @review"));
+    assert_eq!(
+        app.live_activity_summary()
+            .expect("agent run should expose live activity")
+            .detail,
+        "waiting for @review result"
+    );
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry.text == "agent @review started; waiting for result"
+    }));
     assert!(
         app.events
             .iter()
             .any(|event| event.label == "agent:start" && event.detail == "inspect kernel")
     );
+
+    app.handle_worker_message(WorkerMessage::AgentRunFinished {
+        profile_id: "review".to_owned(),
+        result: sigil_kernel::AgentRunResult {
+            final_text: "kernel review complete".to_owned(),
+            tool_calls: 0,
+        },
+        entries: restored_entries("restored-provider", "restored-model"),
+    })?;
+    assert!(!app.is_busy);
+    assert_eq!(app.run_phase(), RunPhase::Idle);
+    assert_eq!(app.last_notice(), Some("agent @review finished"));
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text == "agent @review finished"
+    }));
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Assistant && entry.text == "kernel review complete"
+    }));
+    assert!(app.events.iter().any(|event| {
+        event.label == "agent:finish"
+            && event
+                .detail
+                .contains("review tool_calls=0 final_text_bytes=22")
+    }));
 
     app.handle_worker_message(WorkerMessage::McpActivationStatus {
         server_name: None,
@@ -962,6 +996,188 @@ fn worker_events_cover_completion_continuation_and_duplicate_assistant_messages(
 }
 
 #[test]
+fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let spawn_call = ToolCall {
+        id: "call-spawn".to_owned(),
+        name: "spawn_agent".to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect kernel",
+            "prompt": "inspect crates/sigil-kernel"
+        })
+        .to_string(),
+    };
+
+    app.handle(RunEvent::ToolCallCompleted(spawn_call.clone()))?;
+    assert_eq!(app.run_phase(), RunPhase::Agent("explore".to_owned()));
+    assert_eq!(app.last_notice(), Some("waiting for agent @explore"));
+
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: spawn_call.clone(),
+        spec: ToolSpec {
+            name: "spawn_agent".to_owned(),
+            description: "Spawn an agent".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Agent,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        preview: None,
+    })?;
+    assert_eq!(app.run_phase(), RunPhase::Tool("spawn_agent".to_owned()));
+
+    app.handle(RunEvent::ToolApprovalResolved {
+        call_id: "call-spawn".to_owned(),
+        approved: true,
+        reason: None,
+    })?;
+    assert_eq!(app.run_phase(), RunPhase::Agent("explore".to_owned()));
+    assert_eq!(app.last_notice(), Some("waiting for agent @explore"));
+
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        "call-spawn".to_owned(),
+        "spawn_agent".to_owned(),
+        "{}".to_owned(),
+        sigil_kernel::ToolResultMeta::default(),
+    )))?;
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    Ok(())
+}
+
+#[test]
+fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore_1")?;
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_chat_1")?;
+
+    app.handle(RunEvent::Control(ControlEntry::AgentThreadStarted(
+        sigil_kernel::AgentThreadStartedEntry {
+            thread_id: thread_id.clone(),
+            parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            thread_session_ref: sigil_kernel::SessionRef::new_relative(
+                "children/agents/agent_chat_1.jsonl",
+            )?,
+            profile_id: profile_id.clone(),
+            profile_snapshot_id: snapshot_id.clone(),
+            run_context: sigil_kernel::AgentRunContextSnapshot {
+                profile_snapshot_id: snapshot_id,
+                provider: "deepseek".to_owned(),
+                model: "deepseek-v4-pro".to_owned(),
+                reasoning_effort: None,
+                workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
+                effective_tool_scope_hash: "tools".to_owned(),
+                effective_permission_policy_hash: "permissions".to_owned(),
+                effective_mcp_scope_hash: "mcp".to_owned(),
+                provider_capability_hash: "provider".to_owned(),
+                model_visible_agent_index_hash: Some("agent-index".to_owned()),
+                budget_policy_hash: "budget".to_owned(),
+                provider_background_handle_ref: None,
+            },
+            objective: "inspect kernel".to_owned(),
+            prompt_hash: "sha256:prompt".to_owned(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+            invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+            display_name: Some("kernel-explorer".to_owned()),
+            created_at_ms: Some(42),
+        },
+    )))?;
+
+    assert_eq!(app.run_phase(), RunPhase::Agent("explore".to_owned()));
+    assert_eq!(app.last_notice(), Some("waiting for agent @explore"));
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Tool
+            && entry.text.contains("\"tool_name\":\"spawn_agent\"")
+            && entry.text.contains("\"thread_id\":\"agent_chat_1\"")
+            && entry.text.contains("\"action_hint\":\"Ctrl-B background\"")
+    }));
+
+    app.handle(RunEvent::Control(ControlEntry::AgentThreadStatusChanged(
+        sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: sigil_kernel::AgentThreadStatus::Running,
+            reason: Some("agent moved to background".to_owned()),
+            updated_at_ms: Some(43),
+        },
+    )))?;
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Tool
+            && entry.text.contains("\"tool_name\":\"wait_agent\"")
+            && entry.text.contains("\"thread_id\":\"agent_chat_1\"")
+            && entry
+                .text
+                .contains("\"reason\":\"agent moved to background\"")
+    }));
+    assert!(app.events.iter().any(|event| {
+        event.label == "agent:status"
+            && event.detail.contains(thread_id.as_str())
+            && event.detail.contains("Running")
+    }));
+
+    app.handle(RunEvent::Control(ControlEntry::AgentThreadStarted(
+        sigil_kernel::AgentThreadStartedEntry {
+            thread_id: sigil_kernel::AgentThreadId::new("agent_task_1")?,
+            parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            thread_session_ref: sigil_kernel::SessionRef::new_relative(
+                "children/agents/agent_task_1.jsonl",
+            )?,
+            profile_id,
+            profile_snapshot_id: sigil_kernel::AgentProfileSnapshotId::new("snapshot_task_1")?,
+            run_context: sigil_kernel::AgentRunContextSnapshot {
+                profile_snapshot_id: sigil_kernel::AgentProfileSnapshotId::new("snapshot_task_1")?,
+                provider: "deepseek".to_owned(),
+                model: "deepseek-v4-pro".to_owned(),
+                reasoning_effort: None,
+                workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
+                effective_tool_scope_hash: "tools".to_owned(),
+                effective_permission_policy_hash: "permissions".to_owned(),
+                effective_mcp_scope_hash: "mcp".to_owned(),
+                provider_capability_hash: "provider".to_owned(),
+                model_visible_agent_index_hash: Some("agent-index".to_owned()),
+                budget_policy_hash: "budget".to_owned(),
+                provider_background_handle_ref: None,
+            },
+            objective: "task child".to_owned(),
+            prompt_hash: "sha256:task-prompt".to_owned(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: sigil_kernel::AgentInvocationSource::Task,
+            display_name: None,
+            created_at_ms: Some(44),
+        },
+    )))?;
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "control" && event.detail.contains("agent_task_1"))
+    );
+    Ok(())
+}
+
+#[test]
+fn ctrl_b_during_agent_wait_requests_background() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle_worker_message(WorkerMessage::AgentRunStarted {
+        profile_id: "explore".to_owned(),
+        prompt: "inspect kernel".to_owned(),
+    })?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))?;
+
+    assert!(matches!(action, Some(AppAction::BackgroundActiveAgent)));
+    assert_eq!(app.last_notice(), Some("agent background requested"));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "agent" && event.detail == "background requested")
+    );
+    Ok(())
+}
+
+#[test]
 fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_updates() {
     let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -1005,6 +1221,18 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         }),
         WorkerCommand::ApprovalDecision { call_id, approved }
             if call_id == "call-1" && approved
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::ApprovalDecisionWithArgs {
+            call_id: "call-spawn".to_owned(),
+            args_json: r#"{"mode":"background"}"#.to_owned(),
+        }),
+        WorkerCommand::ApprovalDecisionWithArgs { call_id, args_json }
+            if call_id == "call-spawn" && args_json.contains("background")
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::BackgroundActiveAgent),
+        WorkerCommand::BackgroundActiveAgent
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::CancelRun),

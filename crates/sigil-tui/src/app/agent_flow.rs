@@ -62,10 +62,12 @@ impl AppState {
     }
 
     pub(crate) fn composer_agent_rows(&self) -> Vec<SidebarAgentRow> {
-        self.agent_sidebar_rows()
-            .into_iter()
-            .filter(|row| !row.muted)
-            .collect()
+        bounded_composer_agent_rows(
+            self.agent_sidebar_rows()
+                .into_iter()
+                .filter(|row| !row.muted)
+                .collect(),
+        )
     }
 
     pub(crate) fn composer_agent_panel_rows(&self) -> u16 {
@@ -869,6 +871,31 @@ fn selectable_agent_indexes(items: &[AgentSidebarItem]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(index, item)| item.target.is_some().then_some(index))
+        .collect()
+}
+
+fn bounded_composer_agent_rows(rows: Vec<SidebarAgentRow>) -> Vec<SidebarAgentRow> {
+    if rows.len() <= COMPOSER_AGENT_VISIBLE_ROWS {
+        return rows;
+    }
+
+    let mut selected_indexes = std::collections::BTreeSet::new();
+    selected_indexes.insert(0usize);
+    for (index, row) in rows.iter().enumerate() {
+        if row.active || row.selected {
+            selected_indexes.insert(index);
+        }
+    }
+    for index in (0..rows.len()).rev() {
+        if selected_indexes.len() >= COMPOSER_AGENT_VISIBLE_ROWS {
+            break;
+        }
+        selected_indexes.insert(index);
+    }
+
+    rows.into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| selected_indexes.contains(&index).then_some(row))
         .collect()
 }
 

@@ -7,6 +7,11 @@ use crate::{ToolCall, ToolSpec};
 pub enum ToolApproval {
     /// Allow the tool call to execute.
     Approve,
+    /// Allow the tool call to execute with approved argument overrides.
+    ///
+    /// This is intended for UI-mediated safety transforms that preserve the requested tool but
+    /// change execution mode, such as moving an agent invocation to the background before it runs.
+    ApproveWithArgs { args_json: String },
     /// Deny the tool call and persist a user-facing reason.
     Deny { reason: String },
 }

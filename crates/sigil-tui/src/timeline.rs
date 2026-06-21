@@ -157,6 +157,7 @@ fn agent_status_label(detail: &str) -> Option<&str> {
 pub(crate) enum RunPhase {
     Idle,
     Thinking,
+    Agent(String),
     Tool(String),
     Streaming,
 }

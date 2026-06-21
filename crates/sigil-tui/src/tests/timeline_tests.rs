@@ -165,6 +165,10 @@ fn run_phase_variants_hold_user_facing_state() {
     assert!(matches!(RunPhase::Thinking, RunPhase::Thinking));
     assert!(matches!(RunPhase::Streaming, RunPhase::Streaming));
     assert!(matches!(
+        RunPhase::Agent("explore".to_owned()),
+        RunPhase::Agent(ref profile_id) if profile_id == "explore"
+    ));
+    assert!(matches!(
         RunPhase::Tool("read_file".to_owned()),
         RunPhase::Tool(ref name) if name == "read_file"
     ));

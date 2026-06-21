@@ -576,7 +576,7 @@ where
                     workspace_root: options.workspace_root.clone(),
                     timeout_secs: options.tool_timeout_secs,
                 };
-                for call in completed_calls {
+                for mut call in completed_calls {
                     if call.name == TASK_PLAN_UPDATE_TOOL_NAME {
                         let Some(context) = task_plan_update.as_ref() else {
                             let mut result = ToolResult::error(
@@ -844,8 +844,26 @@ where
                                     subjects: decision.subjects.clone(),
                                     preview,
                                 })?;
-                                match approval_handler.approve_tool_call(&call, &spec)? {
+                                let approval = approval_handler.approve_tool_call(&call, &spec)?;
+                                match approval {
                                     ToolApproval::Approve => {
+                                        append_tool_approval_audit(
+                                            session,
+                                            &call,
+                                            &decision,
+                                            ToolApprovalAuditAction::Resolved,
+                                            Some(ToolApprovalUserDecision::Approved),
+                                            None,
+                                            preview_hash,
+                                        )?;
+                                        handler.handle(RunEvent::ToolApprovalResolved {
+                                            call_id: call.id.clone(),
+                                            approved: true,
+                                            reason: None,
+                                        })?;
+                                    }
+                                    ToolApproval::ApproveWithArgs { args_json } => {
+                                        call.args_json = args_json;
                                         append_tool_approval_audit(
                                             session,
                                             &call,

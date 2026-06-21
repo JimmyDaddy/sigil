@@ -291,6 +291,7 @@ pub(crate) fn keyboard_help_lines(include_tool_cards: bool) -> Vec<String> {
         "Shift-Enter, Alt-Enter, or Ctrl-J: Insert a newline in the composer.".to_owned(),
         "Paste: Insert pasted text without submitting; large pastes are folded in the composer display.".to_owned(),
         "@agent or trusted /agent-name: Invoke an enabled trusted agent profile with a prompt.".to_owned(),
+        "Ctrl-B while waiting for a foreground agent: Move that agent to the background.".to_owned(),
         "Ctrl-A/E: Move to the start/end of the current composer line.".to_owned(),
         "Ctrl-B/F or Left/Right: Move the composer cursor by character.".to_owned(),
         "Alt-B/F or Ctrl-Left/Right: Move the composer cursor by word.".to_owned(),

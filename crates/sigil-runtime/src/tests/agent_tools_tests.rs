@@ -40,6 +40,48 @@ impl EventHandler for RecordingEventHandler {
     }
 }
 
+fn assert_child_transcript_events_not_forwarded(handler: &RecordingEventHandler) {
+    assert!(
+        handler.events.iter().all(|event| {
+            !matches!(
+                event,
+                RunEvent::TextDelta(_)
+                    | RunEvent::ReasoningDelta(_)
+                    | RunEvent::Usage(_)
+                    | RunEvent::AssistantMessage(_)
+                    | RunEvent::ToolCallStarted(_)
+                    | RunEvent::ToolCallArgsDelta { .. }
+                    | RunEvent::ToolCallCompleted(_)
+                    | RunEvent::ToolResult(_)
+                    | RunEvent::Notice(_)
+                    | RunEvent::ContinuationState(_)
+            )
+        }),
+        "child agent transcript/progress events must not be forwarded to the parent handler"
+    );
+}
+
+fn assert_parent_agent_thread_controls_forwarded(handler: &RecordingEventHandler) {
+    assert!(
+        handler.events.iter().any(|event| {
+            matches!(
+                event,
+                RunEvent::Control(ControlEntry::AgentThreadStarted(_))
+            )
+        }),
+        "parent agent thread start control should still be forwarded"
+    );
+    assert!(
+        handler.events.iter().any(|event| {
+            matches!(
+                event,
+                RunEvent::Control(ControlEntry::AgentThreadResultRecorded(_))
+            )
+        }),
+        "parent agent thread result control should still be forwarded"
+    );
+}
+
 struct ChildTextProvider {
     text: String,
 }
@@ -471,6 +513,8 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
             .contains("result_policy=summary_with_page_ref")
     );
     assert!(spec.description.contains("must delegate"));
+    assert!(spec.description.contains("mode=background"));
+    assert!(spec.description.contains("mode=join_before_final only"));
     assert!(!spec.description.contains("worker:"));
     assert!(spec.input_schema["properties"].get("profile_id").is_some());
     assert!(
@@ -513,7 +557,48 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
         .as_array()
         .expect("mode enum");
     assert!(modes.iter().any(|mode| mode == "background"));
+    assert_eq!(
+        spec.input_schema["properties"]["mode"]["default"],
+        "background"
+    );
     assert!(registry.spec_for(MESSAGE_AGENT_TOOL_NAME).is_some());
+    Ok(())
+}
+
+#[test]
+fn spawn_agent_permission_defaults_allow_safe_trusted_readonly_profiles() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let ctx = sigil_kernel::ToolContext {
+        workspace_root: std::env::temp_dir(),
+        timeout_secs: 30,
+    };
+    let safe_spawn = ToolCall {
+        id: "call-safe-spawn".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect",
+            "prompt": "inspect",
+        })
+        .to_string(),
+    };
+
+    assert_eq!(
+        registry.permission_default_mode(&ctx, &safe_spawn)?,
+        Some(sigil_kernel::ApprovalMode::Allow)
+    );
+
+    let close = ToolCall {
+        id: "call-close-agent".to_owned(),
+        name: CLOSE_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({ "thread_id": "agent_chat_example" }).to_string(),
+    };
+    assert_eq!(
+        registry.permission_default_mode(&ctx, &close)?,
+        Some(sigil_kernel::ApprovalMode::Ask)
+    );
     Ok(())
 }
 
@@ -701,6 +786,8 @@ async fn spawn_agent_injects_profile_prompt_into_child_request() -> Result<()> {
             .as_deref()
             .is_none_or(|content| !content.contains("Agent profile: explore"))
     }));
+    assert_child_transcript_events_not_forwarded(&handler);
+    assert_parent_agent_thread_controls_forwarded(&handler);
     Ok(())
 }
 
@@ -1139,6 +1226,110 @@ async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
 }
 
 #[tokio::test]
+async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let request_supervisor = supervisor.clone();
+    let observed_followup = Arc::new(Mutex::new(false));
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(DelayedFollowupProviderFactory { observed_followup }),
+    );
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let thread_id =
+        chat_agent_thread_id_for_call("call-join-background", &AgentProfileId::new("explore")?)?;
+    let spawn_call = ToolCall {
+        id: "call-join-background".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect",
+            "prompt": "inspect",
+            "mode": "join_before_final"
+        })
+        .to_string(),
+    };
+
+    let request_background = async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        request_supervisor.request_foreground_background()
+    };
+    let options = run_options(std::env::temp_dir());
+    let (spawn, requested_thread_id) = tokio::join!(
+        runtime.handle_agent_tool_call(
+            &mut session,
+            &spawn_call,
+            &options,
+            &mut handler,
+            &mut approval,
+        ),
+        request_background,
+    );
+    let requested_thread_id = requested_thread_id.map_err(|error| anyhow::anyhow!(error))?;
+    assert_eq!(requested_thread_id, thread_id);
+    let spawn = spawn?.expect("spawn handled");
+
+    assert!(!spawn.is_error());
+    assert_eq!(spawn.metadata.details["status"], "running");
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("detached thread should be projected");
+    assert_eq!(thread.status, AgentThreadStatus::Running);
+    assert_eq!(thread.reason.as_deref(), Some("agent moved to background"));
+
+    let mut collected = None;
+    for _ in 0..20 {
+        let wait = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: "call-wait-detached".to_owned(),
+                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+                },
+                &run_options(std::env::temp_dir()),
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("wait handled");
+        if session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.result.as_ref())
+            .is_some()
+        {
+            collected = Some(wait);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let collected = collected.expect("detached agent result should be collected");
+    assert!(!collected.is_error());
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("detached thread should stay projected");
+    assert_eq!(thread.status, AgentThreadStatus::Completed);
+    assert_eq!(
+        thread.result.as_ref().map(|result| result.summary.as_str()),
+        Some("initial background done")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn wait_agent_collects_completed_background_result() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
@@ -1271,7 +1462,7 @@ async fn manual_agent_invocation_allows_user_invocable_model_hidden_profile() ->
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
     let supervisor = supervisor(&config)?;
-    let runtime = AgentToolRuntime::with_provider_factory(
+    let mut runtime = AgentToolRuntime::with_provider_factory(
         supervisor,
         config,
         registry,
@@ -1311,6 +1502,8 @@ async fn manual_agent_invocation_allows_user_invocable_model_hidden_profile() ->
         thread.profile_id.as_ref().map(AgentProfileId::as_str),
         Some("plan")
     );
+    assert_child_transcript_events_not_forwarded(&handler);
+    assert_parent_agent_thread_controls_forwarded(&handler);
     Ok(())
 }
 

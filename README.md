@@ -72,6 +72,7 @@ Run `sigil` with no subcommand for normal work. Common TUI entry points:
 | Run a durable multi-step task | `/task <task>`; use `/task continue` for unfinished tasks |
 | Require a child agent from chat | Say so explicitly, for example "use a sub-agent for ..." |
 | Invoke a trusted agent profile directly | `@profile <prompt>` or a trusted profile slash name such as `/review-agent <prompt>` |
+| Move a foreground child agent to background | Press `Ctrl-B` while Sigil is waiting for that agent |
 | Switch or rename visible parent/child agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A`, `Shift-Alt-A`, `/agent`, or `/agent rename <child-id|current> <name>` |
 | Inspect long child-agent results | Switch to the child transcript, or let `read_agent_result` explicitly page through the child final answer when extra detail is needed |
 | Start or switch sessions | `/new`, `/resume` |

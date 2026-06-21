@@ -228,6 +228,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
             "status": "running",
             "terminal": false,
             "reason": null,
+            "action_hint": "Ctrl-B background",
             "result_available": false,
             "result_ref": null
         }
@@ -341,6 +342,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
     assert_eq!(wait_display.status.label, "RUNNING");
     assert_eq!(wait_display.summary.as_deref(), Some("result pending"));
     assert!(wait_text.contains("running · thread_1"));
+    assert!(wait_text.contains("action Ctrl-B background"));
 
     assert_eq!(spawn_display.title.plain(), "Started agent thread_2");
     assert_eq!(spawn_display.status.label, "DONE");

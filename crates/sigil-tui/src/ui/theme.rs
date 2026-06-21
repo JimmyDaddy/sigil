@@ -122,6 +122,7 @@ pub(crate) fn phase_accent(phase: &RunPhase) -> Color {
     match phase {
         RunPhase::Idle => accent_teal(),
         RunPhase::Thinking => accent_gold(),
+        RunPhase::Agent(_) => accent_blue(),
         RunPhase::Tool(_) => accent_rose(),
         RunPhase::Streaming => accent_blue(),
     }

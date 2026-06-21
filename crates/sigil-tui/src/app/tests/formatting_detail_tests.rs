@@ -138,6 +138,126 @@ fn preview_helpers_cover_json_markdown_and_limits() {
 }
 
 #[test]
+fn agent_thread_tool_blocks_include_mode_source_status_and_background_hint() -> anyhow::Result<()> {
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore")?;
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_thread_1")?;
+    let run_context = sigil_kernel::AgentRunContextSnapshot {
+        profile_snapshot_id: snapshot_id.clone(),
+        provider: "deepseek".to_owned(),
+        model: "deepseek-v4-pro".to_owned(),
+        reasoning_effort: None,
+        workspace_root: sigil_kernel::WorkspaceRootSnapshot::new("/workspace")?,
+        effective_tool_scope_hash: "tools".to_owned(),
+        effective_permission_policy_hash: "permissions".to_owned(),
+        effective_mcp_scope_hash: "mcp".to_owned(),
+        provider_capability_hash: "provider".to_owned(),
+        model_visible_agent_index_hash: None,
+        budget_policy_hash: "budget".to_owned(),
+        provider_background_handle_ref: None,
+    };
+    let started_entry = AgentThreadStartedEntry {
+        thread_id: thread_id.clone(),
+        parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+        parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+        thread_session_ref: sigil_kernel::SessionRef::new_relative("children/thread.jsonl")?,
+        profile_id,
+        profile_snapshot_id: snapshot_id,
+        run_context,
+        objective: "inspect runtime".to_owned(),
+        prompt_hash: "sha256:prompt".to_owned(),
+        invocation_mode: AgentInvocationMode::JoinBeforeFinal,
+        invocation_source: AgentInvocationSource::Mention,
+        display_name: Some("runtime scan".to_owned()),
+        created_at_ms: Some(42),
+    };
+
+    let started: serde_json::Value =
+        serde_json::from_str(&format_agent_thread_started_block(&started_entry))?;
+    assert_eq!(started["tool_name"], "spawn_agent");
+    assert_eq!(started["summary"], "join before final · Ctrl-B background");
+    assert_eq!(started["preview_value"]["mode"], "join_before_final");
+    assert_eq!(started["preview_value"]["source"], "mention");
+    assert_eq!(started["preview_value"]["action_hint"], "Ctrl-B background");
+
+    let mut foreground_entry = started_entry.clone();
+    foreground_entry.invocation_mode = AgentInvocationMode::Foreground;
+    foreground_entry.invocation_source = AgentInvocationSource::Skill;
+    let foreground: serde_json::Value =
+        serde_json::from_str(&format_agent_thread_started_block(&foreground_entry))?;
+    assert_eq!(foreground["summary"], "foreground");
+    assert_eq!(foreground["preview_value"]["source"], "skill");
+
+    let mut background_entry = started_entry.clone();
+    background_entry.invocation_mode = AgentInvocationMode::Background;
+    background_entry.invocation_source = AgentInvocationSource::Plugin;
+    let background: serde_json::Value =
+        serde_json::from_str(&format_agent_thread_started_block(&background_entry))?;
+    assert_eq!(background["summary"], "background");
+    assert_eq!(background["preview_value"]["source"], "plugin");
+    assert!(background["preview_value"].get("action_hint").is_none());
+
+    let mut system_entry = started_entry.clone();
+    system_entry.invocation_mode = AgentInvocationMode::Unknown;
+    system_entry.invocation_source = AgentInvocationSource::System;
+    let system: serde_json::Value =
+        serde_json::from_str(&format_agent_thread_started_block(&system_entry))?;
+    assert_eq!(system["summary"], "unknown");
+    assert_eq!(system["preview_value"]["source"], "system");
+
+    let mut task_entry = started_entry.clone();
+    task_entry.invocation_source = AgentInvocationSource::Task;
+    let task: serde_json::Value =
+        serde_json::from_str(&format_agent_thread_started_block(&task_entry))?;
+    assert_eq!(task["preview_value"]["source"], "task");
+
+    let mut unknown_source_entry = started_entry.clone();
+    unknown_source_entry.invocation_source = AgentInvocationSource::Unknown;
+    let unknown_source: serde_json::Value =
+        serde_json::from_str(&format_agent_thread_started_block(&unknown_source_entry))?;
+    assert_eq!(unknown_source["preview_value"]["source"], "unknown");
+
+    let status_entry = AgentThreadStatusChangedEntry {
+        thread_id: thread_id.clone(),
+        status: AgentThreadStatus::Running,
+        reason: Some("agent moved to background".to_owned()),
+        updated_at_ms: Some(43),
+    };
+    let status: serde_json::Value =
+        serde_json::from_str(&format_agent_thread_status_block(&status_entry))?;
+    assert_eq!(status["tool_name"], "wait_agent");
+    assert_eq!(status["summary"], "agent moved to background");
+    assert_eq!(status["preview_value"]["status"], "running");
+    assert_eq!(
+        status["preview_value"]["reason"],
+        "agent moved to background"
+    );
+    for (agent_status, expected) in [
+        (AgentThreadStatus::Started, "started"),
+        (AgentThreadStatus::Blocked, "blocked"),
+        (AgentThreadStatus::Completed, "completed"),
+        (AgentThreadStatus::Failed, "failed"),
+        (AgentThreadStatus::Cancelled, "cancelled"),
+        (AgentThreadStatus::Interrupted, "interrupted"),
+        (AgentThreadStatus::Closed, "closed"),
+        (AgentThreadStatus::Unavailable, "unavailable"),
+        (AgentThreadStatus::Unknown, "unknown"),
+    ] {
+        let status_entry = AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: agent_status,
+            reason: None,
+            updated_at_ms: None,
+        };
+        let status: serde_json::Value =
+            serde_json::from_str(&format_agent_thread_status_block(&status_entry))?;
+        assert_eq!(status["summary"], expected);
+        assert_eq!(status["preview_value"]["status"], expected);
+    }
+    Ok(())
+}
+
+#[test]
 fn agent_result_tools_use_agent_preview_sources() -> anyhow::Result<()> {
     let read_payload = serde_json::json!({
         "thread_id": "thread_1",

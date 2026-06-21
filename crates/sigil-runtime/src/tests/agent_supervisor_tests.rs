@@ -664,6 +664,37 @@ fn send_agent_message_reports_inactive_thread_and_missing_mailbox() -> Result<()
 }
 
 #[test]
+fn foreground_background_request_reports_budget_and_missing_foreground() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_threads = 2;
+    budget.max_parallel_readonly = 2;
+    budget.max_background_threads = 1;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+
+    let no_foreground = supervisor
+        .request_foreground_background()
+        .expect_err("missing foreground child should reject background request");
+    assert_eq!(
+        no_foreground,
+        "no foreground child agent is currently running"
+    );
+
+    let mut background_start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    background_start.call_id = "call_background_budget".to_owned();
+    background_start.invocation_mode = AgentInvocationMode::Background;
+    supervisor.begin_chat_child_thread(&mut session, &mut handler, background_start)?;
+
+    let budget_error = supervisor
+        .request_foreground_background()
+        .expect_err("background budget should be enforced before searching foreground children");
+    assert!(budget_error.contains("max_background_threads=1"));
+    Ok(())
+}
+
+#[test]
 fn supervisor_enforces_max_depth() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());

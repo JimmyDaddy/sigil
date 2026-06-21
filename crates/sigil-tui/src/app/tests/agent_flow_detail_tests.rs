@@ -159,3 +159,34 @@ fn child_transcript_readers_cover_invalid_paths_blank_lines_and_tail_truncation(
     assert!(recent.truncated);
     Ok(())
 }
+
+#[test]
+fn bounded_composer_agent_rows_keeps_main_active_selected_and_recent() {
+    let rows = (0..6)
+        .map(|index| SidebarAgentRow {
+            label: if index == 0 {
+                "main".to_owned()
+            } else {
+                format!("agent {index}")
+            },
+            detail: if index == 0 {
+                "idle in current session".to_owned()
+            } else {
+                "completed · explore · mention".to_owned()
+            },
+            selected: index == 3,
+            active: index == 2,
+            muted: false,
+        })
+        .collect::<Vec<_>>();
+
+    let bounded = bounded_composer_agent_rows(rows);
+
+    assert_eq!(
+        bounded
+            .iter()
+            .map(|row| row.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["main", "agent 2", "agent 3", "agent 5"]
+    );
+}

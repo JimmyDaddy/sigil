@@ -980,6 +980,7 @@ impl AppState {
         let (label, detail) = match &self.run_phase {
             RunPhase::Idle => ("working", "waiting for next event".to_owned()),
             RunPhase::Thinking => ("thinking", format!("reasoning with {}", self.model_name)),
+            RunPhase::Agent(profile_id) => ("agent", format!("waiting for @{profile_id} result")),
             RunPhase::Tool(name) => ("tool", format!("running {name}")),
             RunPhase::Streaming => ("streaming", "writing the reply".to_owned()),
         };

@@ -292,6 +292,46 @@ fn approval_keys_emit_allow_and_deny_actions() -> Result<()> {
 }
 
 #[test]
+fn spawn_agent_approval_key_can_switch_call_to_background() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-spawn-agent".to_owned(),
+            name: sigil_runtime::SPAWN_AGENT_TOOL_NAME.to_owned(),
+            args_json: json!({
+                "profile_id": "explore",
+                "objective": "inspect kernel",
+                "prompt": "inspect kernel",
+                "mode": "join_before_final"
+            })
+            .to_string(),
+        },
+        spec: ToolSpec {
+            name: sigil_runtime::SPAWN_AGENT_TOOL_NAME.to_owned(),
+            description: "Spawn agent".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Agent,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        preview: None,
+    })?;
+
+    let lines = app.approval_preview_lines().join("\n");
+    assert!(lines.contains("B background"));
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))?;
+    let Some(AppAction::ApprovalDecisionWithArgs { call_id, args_json }) = action else {
+        panic!("expected approval decision with rewritten args");
+    };
+    assert_eq!(call_id, "call-spawn-agent");
+    let args: serde_json::Value = serde_json::from_str(&args_json)?;
+    assert_eq!(args["mode"], "background");
+    assert_eq!(args["profile_id"], "explore");
+    Ok(())
+}
+
+#[test]
 fn approval_enter_chooses_selected_action() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     inject_write_file_approval(&mut app, sample_approval_preview())?;

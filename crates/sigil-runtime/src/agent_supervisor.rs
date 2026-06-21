@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     sync::{Arc, Mutex, mpsc},
 };
@@ -99,6 +99,7 @@ pub struct AgentSupervisor {
 #[derive(Debug, Default)]
 struct AgentSupervisorState {
     active_threads: BTreeMap<AgentThreadId, ActiveAgentThread>,
+    background_requests: BTreeSet<AgentThreadId>,
     spawn_fanout_this_turn: usize,
     task_token_usage: BTreeMap<TaskId, u64>,
 }
@@ -218,6 +219,44 @@ impl AgentSupervisor {
             foreground_children_interrupted,
             background_children_cancelled: 0,
         }
+    }
+
+    pub fn request_foreground_background(&self) -> std::result::Result<AgentThreadId, String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "agent supervisor state lock poisoned".to_owned())?;
+        let background_count = state
+            .active_threads
+            .values()
+            .filter(|thread| thread.background)
+            .count();
+        if background_count >= self.budget.max_background_threads {
+            return Err(format!(
+                "background agent budget exceeded: max_background_threads={}",
+                self.budget.max_background_threads
+            ));
+        }
+        let Some(thread_id) = state
+            .active_threads
+            .iter()
+            .find(|(_, thread)| !thread.background)
+            .map(|(thread_id, _)| thread_id.clone())
+        else {
+            return Err("no foreground child agent is currently running".to_owned());
+        };
+        if let Some(thread) = state.active_threads.get_mut(&thread_id) {
+            thread.background = true;
+        }
+        state.background_requests.insert(thread_id.clone());
+        Ok(thread_id)
+    }
+
+    pub(crate) fn take_background_request(&self, thread_id: &AgentThreadId) -> bool {
+        self.state
+            .lock()
+            .map(|mut state| state.background_requests.remove(thread_id))
+            .unwrap_or(false)
     }
 
     pub fn reset_turn_budget(&self) {
@@ -1147,7 +1186,9 @@ where
             }))?;
         let approval = self.inner.approve_tool_call(call, spec)?;
         let (task_status, agent_status) = match approval {
-            ToolApproval::Approve => (TaskRouteStatus::Resolved, AgentRouteStatus::Resolved),
+            ToolApproval::Approve | ToolApproval::ApproveWithArgs { .. } => {
+                (TaskRouteStatus::Resolved, AgentRouteStatus::Resolved)
+            }
             ToolApproval::Deny { .. } => (TaskRouteStatus::Rejected, AgentRouteStatus::Rejected),
         };
         append_task_approval_route(

@@ -649,6 +649,58 @@ fn composer_up_down_navigates_input_history() -> Result<()> {
 }
 
 #[test]
+fn composer_history_navigation_continues_past_slash_entries() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input_history = vec![
+        "earlier prompt".to_owned(),
+        "/quit".to_owned(),
+        "latest prompt".to_owned(),
+    ];
+    app.active_pane = PaneFocus::Composer;
+    app.set_input_and_cursor(String::new());
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.input, "latest prompt");
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.input, "/quit");
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(app.input, "earlier prompt");
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.input, "/quit");
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.input, "latest prompt");
+    Ok(())
+}
+
+#[test]
+fn input_history_does_not_record_session_control_commands() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.input = "/quit".to_owned();
+    assert!(app.submit_input()?.is_none());
+    app.should_quit = false;
+
+    app.input = "/new".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::StartNewSession { .. })
+    ));
+
+    app.input = "normal prompt".to_owned();
+    assert!(matches!(
+        app.submit_input()?,
+        Some(AppAction::SubmitPrompt(prompt)) if prompt == "normal prompt"
+    ));
+
+    assert_eq!(app.input_history, vec!["normal prompt".to_owned()]);
+    Ok(())
+}
+
+#[test]
 fn composer_up_inside_wrapped_input_moves_cursor_before_history() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "first".to_owned();

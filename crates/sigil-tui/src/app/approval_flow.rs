@@ -107,7 +107,11 @@ impl AppState {
         }
 
         lines.push(String::new());
-        lines.push("Y allow  N deny".to_owned());
+        if spawn_agent_background_args_json(&pending.call.name, &pending.call.args_json).is_some() {
+            lines.push("Y allow  B background  N deny".to_owned());
+        } else {
+            lines.push("Y allow  N deny".to_owned());
+        }
         lines
     }
 
@@ -128,6 +132,17 @@ impl AppState {
                         call_id: pending.call.id.clone(),
                         approved: false,
                     }));
+                }
+                KeyCode::Char('b') | KeyCode::Char('B') => {
+                    if let Some(args_json) = spawn_agent_background_args_json(
+                        &pending.call.name,
+                        &pending.call.args_json,
+                    ) {
+                        return Some(Some(AppAction::ApprovalDecisionWithArgs {
+                            call_id: pending.call.id.clone(),
+                            args_json,
+                        }));
+                    }
                 }
                 KeyCode::Enter if key.modifiers.is_empty() => {
                     return Some(Some(AppAction::ApprovalDecision {
@@ -686,6 +701,23 @@ fn approval_diff_line_kind(line: &str) -> ApprovalDiffLineKind {
 
 fn normalize_approval_diagnostic_path(path: &str) -> String {
     path.replace('\\', "/").trim_start_matches("./").to_owned()
+}
+
+fn spawn_agent_background_args_json(tool_name: &str, args_json: &str) -> Option<String> {
+    if tool_name != sigil_runtime::SPAWN_AGENT_TOOL_NAME {
+        return None;
+    }
+    let mut args: Value = serde_json::from_str(args_json).ok()?;
+    let object = args.as_object_mut()?;
+    if object
+        .get("mode")
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode == "background")
+    {
+        return None;
+    }
+    object.insert("mode".to_owned(), Value::String("background".to_owned()));
+    serde_json::to_string(&args).ok()
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

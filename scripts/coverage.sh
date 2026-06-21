@@ -4,6 +4,7 @@ set -euo pipefail
 coverage_min_lines="${COVERAGE_MIN_LINES:-96}"
 coverage_ignore_regex="${COVERAGE_IGNORE_FILENAME_REGEX:-crates/sigil-kernel/src/agent\\.rs|crates/sigil-runtime/src/agent_tools\\.rs|crates/sigil-tui/src/runner/(spawn|worker_loop)\\.rs}"
 coverage_summary_only="${COVERAGE_SUMMARY_ONLY:-1}"
+coverage_packages="${COVERAGE_PACKAGES:-}"
 
 if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
   cat >&2 <<'EOF'
@@ -16,11 +17,19 @@ EOF
 fi
 
 coverage_args=(
-  --workspace
   --all-targets
   --locked
   --fail-under-lines "${coverage_min_lines}"
 )
+
+if [[ -n "${coverage_packages}" ]]; then
+  read -r -a coverage_package_list <<<"${coverage_packages}"
+  for package in "${coverage_package_list[@]}"; do
+    coverage_args+=(-p "${package}")
+  done
+else
+  coverage_args+=(--workspace)
+fi
 
 if [[ "${coverage_summary_only}" != "0" ]]; then
   coverage_args+=(--summary-only)

@@ -297,6 +297,11 @@ pub enum AppAction {
         call_id: String,
         approved: bool,
     },
+    ApprovalDecisionWithArgs {
+        call_id: String,
+        args_json: String,
+    },
+    BackgroundActiveAgent,
     CancelRun,
     CancelTerminalTask {
         task_id: String,
@@ -799,6 +804,18 @@ impl AppState {
             return Ok(Some(outcome));
         }
 
+        if self.is_busy
+            && self.pending_approval.is_none()
+            && matches!(self.run_phase, RunPhase::Agent(_))
+            && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'))
+            && has_control_without_alt(key)
+        {
+            self.last_notice = Some("agent background requested".to_owned());
+            self.push_timeline(TimelineRole::Notice, "agent background requested");
+            self.push_event("agent", "background requested");
+            return Ok(Some(AppAction::BackgroundActiveAgent));
+        }
+
         if self.active_pane == PaneFocus::Activity
             && self.pending_approval.is_none()
             && !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1014,6 +1031,20 @@ impl AppState {
             KeyCode::Enter if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
                 self.activate_selected_agent_view();
                 self.blur_composer_agent_panel();
+            }
+            KeyCode::Up
+                if self.active_pane == PaneFocus::Composer
+                    && self.input_history_index.is_some()
+                    && key.modifiers.is_empty() =>
+            {
+                self.navigate_input_history(true);
+            }
+            KeyCode::Down
+                if self.active_pane == PaneFocus::Composer
+                    && self.input_history_index.is_some()
+                    && key.modifiers.is_empty() =>
+            {
+                self.navigate_input_history(false);
             }
             KeyCode::Up if self.active_pane == PaneFocus::Composer && self.has_slash_selector() => {
                 self.move_slash_selector(false)
@@ -1557,8 +1588,8 @@ impl AppState {
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
         self.is_busy = true;
-        self.run_phase = RunPhase::Thinking;
-        self.last_notice = Some(format!("invoking agent {profile_id}"));
+        self.run_phase = RunPhase::Agent(profile_id.clone());
+        self.last_notice = Some(format!("waiting for agent @{profile_id}"));
         self.last_phase_marker = None;
         self.push_phase_marker(format!("agent|{profile_id}"));
         self.streaming_assistant_index = None;
@@ -1657,6 +1688,7 @@ impl AppState {
         match &self.run_phase {
             RunPhase::Idle => "ready".to_owned(),
             RunPhase::Thinking => "thinking".to_owned(),
+            RunPhase::Agent(profile_id) => format!("agent @{profile_id}"),
             RunPhase::Tool(name) => format!("tool {name}"),
             RunPhase::Streaming => "streaming".to_owned(),
         }

@@ -1035,6 +1035,50 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
                 updated_at_ms: 2,
             },
         )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: sigil_kernel::AgentThreadId::new("agent_restore_1")?,
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/agents/agent_restore_1.jsonl",
+                )?,
+                profile_id: sigil_kernel::AgentProfileId::new("explore")?,
+                profile_snapshot_id: sigil_kernel::AgentProfileSnapshotId::new(
+                    "snapshot_restore_1",
+                )?,
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: sigil_kernel::AgentProfileSnapshotId::new(
+                        "snapshot_restore_1",
+                    )?,
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
+                    effective_tool_scope_hash: "tools".to_owned(),
+                    effective_permission_policy_hash: "permissions".to_owned(),
+                    effective_mcp_scope_hash: "mcp".to_owned(),
+                    provider_capability_hash: "provider".to_owned(),
+                    model_visible_agent_index_hash: Some("agent-index".to_owned()),
+                    budget_policy_hash: "budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: "inspect kernel".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::JoinBeforeFinal,
+                invocation_source: sigil_kernel::AgentInvocationSource::Mention,
+                display_name: Some("kernel-explorer".to_owned()),
+                created_at_ms: Some(42),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id: sigil_kernel::AgentThreadId::new("agent_restore_1")?,
+                status: sigil_kernel::AgentThreadStatus::Running,
+                reason: Some("waiting for result".to_owned()),
+                updated_at_ms: Some(43),
+            },
+        )),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "other".to_owned(),
             data: json!({}),
@@ -1061,6 +1105,9 @@ fn restored_timeline_entries_project_all_visible_session_entry_kinds() -> Result
     assert!(rendered.contains("think 2"));
     assert!(rendered.contains("command failed"));
     assert!(rendered.contains("terminal_task"));
+    assert!(rendered.contains("\"tool_name\":\"spawn_agent\""));
+    assert!(rendered.contains("\"tool_name\":\"wait_agent\""));
+    assert!(rendered.contains("\"thread_id\":\"agent_restore_1\""));
     assert!(!rendered.contains("other"));
     Ok(())
 }

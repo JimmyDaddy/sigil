@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::*;
-use crate::ui::theme::phase_accent;
+use crate::ui::theme::{accent_blue, phase_accent};
 
 fn test_config() -> RootConfig {
     RootConfig {
@@ -70,6 +70,14 @@ fn render_live_progress_lines_shows_current_phase() -> anyhow::Result<()> {
     assert!(!plain.contains("(Thinking)"));
     assert!(plain.contains("reasoning with"));
     Ok(())
+}
+
+#[test]
+fn phase_accent_uses_blue_for_agent_phase() {
+    assert_eq!(
+        phase_accent(&crate::timeline::RunPhase::Agent("explore".to_owned())),
+        accent_blue()
+    );
 }
 
 #[test]
