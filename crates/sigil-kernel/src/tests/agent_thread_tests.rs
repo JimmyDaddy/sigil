@@ -306,6 +306,7 @@ fn agent_control_entries_roundtrip() -> Result<()> {
             source_thread_id: thread_id("main")?,
             target_thread_id: thread_id("thread_1")?,
             prompt_hash: "sha256:steer".to_owned(),
+            prompt: None,
             status: AgentRouteStatus::Resolved,
         }),
         ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry { result }),
@@ -1128,6 +1129,7 @@ fn load_from_store_closes_orphan_agent_routes() -> Result<()> {
             source_thread_id: thread_id("main")?,
             target_thread_id: thread_id("thread_1")?,
             prompt_hash: "sha256:message".to_owned(),
+            prompt: Some("continue".to_owned()),
             status: AgentRouteStatus::Requested,
         }),
     ))?;
@@ -1193,6 +1195,7 @@ fn closed_agent_routes_skip_terminal_and_already_closed_routes() -> Result<()> {
                 source_thread_id: thread_id("main")?,
                 target_thread_id: thread_id("thread_1")?,
                 prompt_hash: "sha256:message".to_owned(),
+                prompt: None,
                 status: AgentRouteStatus::Registered,
             },
         )),

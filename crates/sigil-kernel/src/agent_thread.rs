@@ -801,6 +801,8 @@ pub struct AgentThreadMessageRoutedEntry {
     pub source_thread_id: AgentThreadId,
     pub target_thread_id: AgentThreadId,
     pub prompt_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     pub status: AgentRouteStatus,
 }
 

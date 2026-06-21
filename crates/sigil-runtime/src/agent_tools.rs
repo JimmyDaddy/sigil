@@ -1,6 +1,7 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -9,20 +10,20 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentProfileId,
-    AgentRole, AgentRouteId, AgentRouteStatus, AgentThreadClosedEntry, AgentThreadId,
-    AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult, AgentThreadStatus,
-    AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState, AgentUsageSummary,
-    ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, ModelMessage, Provider,
-    RootConfig, RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId,
-    Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
-    ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject,
+    AgentRole, AgentRouteId, AgentRouteStatus, AgentRunOutcome, AgentThreadClosedEntry,
+    AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
+    AgentThreadStatus, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
+    AgentUsageSummary, ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore,
+    ModelMessage, NoopEventHandler, Provider, RootConfig, RunEvent, Session, SessionLogEntry,
+    SessionRef, TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval, ToolCall,
+    ToolCategory, ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
 
 use crate::{
-    AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, ResolvedAgentProfile,
-    WORKER_PROFILE_ID, build_role_provider, build_role_run_options, build_role_tool_registry,
-    chat_agent_thread_id_for_call,
+    AgentBudgetPolicy, AgentMailboxMessage, AgentProfileRegistry, AgentSupervisor,
+    ResolvedAgentProfile, WORKER_PROFILE_ID, build_role_provider, build_role_run_options,
+    build_role_tool_registry, chat_agent_thread_id_for_call,
 };
 
 pub const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
@@ -125,6 +126,7 @@ pub struct AgentToolRuntime {
     root_config: RootConfig,
     base_registry: ToolRegistry,
     provider_factory: Arc<dyn AgentToolProviderFactory>,
+    background_runs: BTreeMap<AgentThreadId, BackgroundChatAgentHandle>,
 }
 
 /// Result of a user-directed foreground agent invocation.
@@ -132,6 +134,52 @@ pub struct AgentToolRuntime {
 pub struct ManualAgentInvocationResult {
     pub thread_id: AgentThreadId,
     pub result: Option<AgentThreadResult>,
+}
+
+struct BackgroundChatAgentHandle {
+    thread: BackgroundChatAgentThreadRecord,
+    handle: tokio::task::JoinHandle<Result<BackgroundChatAgentResult>>,
+}
+
+struct BackgroundChatAgentThreadRecord {
+    thread_id: AgentThreadId,
+    attempt_id: sigil_kernel::AgentRunAttemptId,
+    profile_id: AgentProfileId,
+    parent_thread_id: AgentThreadId,
+    child_session_ref: SessionRef,
+    budget_scope_id: TaskId,
+}
+
+impl BackgroundChatAgentThreadRecord {
+    fn from_thread(thread: &crate::AgentChatChildThread) -> Self {
+        Self {
+            thread_id: thread.thread_id.clone(),
+            attempt_id: thread.attempt_id.clone(),
+            profile_id: thread.profile_id.clone(),
+            parent_thread_id: thread.parent_thread_id.clone(),
+            child_session_ref: thread.child_session_ref.clone(),
+            budget_scope_id: thread.budget_scope_id.clone(),
+        }
+    }
+
+    fn to_runtime_thread(&self) -> crate::AgentChatChildThread {
+        crate::AgentChatChildThread {
+            thread_id: self.thread_id.clone(),
+            attempt_id: self.attempt_id.clone(),
+            profile_id: self.profile_id.clone(),
+            parent_thread_id: self.parent_thread_id.clone(),
+            child_session_ref: self.child_session_ref.clone(),
+            budget_scope_id: self.budget_scope_id.clone(),
+            mailbox_rx: None,
+        }
+    }
+}
+
+struct BackgroundChatAgentResult {
+    final_text: String,
+    outcome: AgentRunOutcome,
+    usage: AgentUsageSummary,
+    status: TaskChildSessionStatus,
 }
 
 impl AgentToolRuntime {
@@ -146,6 +194,7 @@ impl AgentToolRuntime {
             root_config,
             base_registry,
             provider_factory: Arc::new(DefaultAgentToolProviderFactory),
+            background_runs: BTreeMap::new(),
         }
     }
 
@@ -161,6 +210,7 @@ impl AgentToolRuntime {
             root_config,
             base_registry,
             provider_factory,
+            background_runs: BTreeMap::new(),
         }
     }
 
@@ -296,7 +346,7 @@ impl AgentToolDelegate for AgentToolRuntime {
                 self.spawn_agent(session, call, &args, options, handler, approval_handler)
                     .await
             }
-            AgentToolKind::Wait => self.wait_agent(session, call, &args),
+            AgentToolKind::Wait => self.wait_agent(session, call, &args, handler).await,
             AgentToolKind::ReadResult => self.read_agent_result(session, call, &args),
             AgentToolKind::Message => self.message_agent(session, call, &args),
             AgentToolKind::Close => self.close_agent(session, call, &args),
@@ -307,7 +357,7 @@ impl AgentToolDelegate for AgentToolRuntime {
 
 impl AgentToolRuntime {
     async fn spawn_agent(
-        &self,
+        &mut self,
         session: &mut Session,
         call: &ToolCall,
         args: &Value,
@@ -327,14 +377,6 @@ impl AgentToolRuntime {
             }
         };
         let role = role_for_profile_id(&parsed.profile_id);
-        if matches!(parsed.mode, AgentInvocationMode::Background) {
-            return ToolResult::error(
-                call.id.clone(),
-                call.name.clone(),
-                ToolErrorKind::Unsupported,
-                "background agent mode requires provider-backed agent mailbox support",
-            );
-        }
         let resolved_profile = match self.resolve_spawn_profile(&parsed.profile_id) {
             Ok(profile) => profile,
             Err(error) => {
@@ -407,7 +449,7 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let child_thread = match self.supervisor.begin_chat_child_thread(
+        let mut child_thread = match self.supervisor.begin_chat_child_thread(
             session,
             handler,
             crate::AgentChatChildStart {
@@ -448,10 +490,6 @@ impl AgentToolRuntime {
                 );
             }
         };
-        let _thread_guard = ChatChildThreadGuard {
-            supervisor: self.supervisor.clone(),
-            thread_id: child_thread.thread_id.clone(),
-        };
 
         let mut child_session = match build_agent_child_session(session, &child_session_ref) {
             Ok(session) => session,
@@ -488,6 +526,59 @@ impl AgentToolRuntime {
             options.interaction_mode,
             role,
         );
+
+        if matches!(parsed.mode, AgentInvocationMode::Background) {
+            let Some(mailbox_rx) = child_thread.mailbox_rx.take() else {
+                let _ = self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &child_thread,
+                    "background agent mailbox was not created".to_owned(),
+                );
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    "background agent mailbox was not created",
+                );
+            };
+            let thread_id = child_thread.thread_id.clone();
+            let handle = tokio::spawn(run_background_chat_agent(
+                child_agent,
+                child_session,
+                child_input,
+                child_options,
+                mailbox_rx,
+            ));
+            self.background_runs.insert(
+                thread_id.clone(),
+                BackgroundChatAgentHandle {
+                    thread: BackgroundChatAgentThreadRecord::from_thread(&child_thread),
+                    handle,
+                },
+            );
+            let projection = session.agent_thread_state_projection();
+            if let Some(thread) = projection.threads.get(&thread_id) {
+                return agent_status_tool_result(call, thread);
+            }
+            return ToolResult::ok(
+                call.id.clone(),
+                call.name.clone(),
+                format!("agent thread {} is running", thread_id.as_str()),
+                ToolResultMeta {
+                    details: json!({
+                        "thread_id": thread_id.as_str(),
+                        "status": "running"
+                    }),
+                    ..ToolResultMeta::default()
+                },
+            );
+        }
+
+        let _thread_guard = ChatChildThreadGuard {
+            supervisor: self.supervisor.clone(),
+            thread_id: child_thread.thread_id.clone(),
+        };
         let output = {
             let mut child_handler = ForwardEventHandler { inner: handler };
             let mut route_handler = ChatAgentApprovalRouteHandler {
@@ -708,7 +799,13 @@ impl AgentToolRuntime {
         Ok(child_thread.thread_id)
     }
 
-    fn wait_agent(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
+    async fn wait_agent(
+        &mut self,
+        session: &mut Session,
+        call: &ToolCall,
+        args: &Value,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> ToolResult {
         let thread_id = match thread_id_arg(args) {
             Ok(thread_id) => thread_id,
             Err(error) => {
@@ -720,6 +817,82 @@ impl AgentToolRuntime {
                 );
             }
         };
+        if let Some(background) = self.background_runs.get(&thread_id)
+            && !background.handle.is_finished()
+        {
+            let projection = session.agent_thread_state_projection();
+            if let Some(thread) = projection.threads.get(&thread_id) {
+                return agent_status_tool_result(call, thread);
+            }
+        }
+        if self
+            .background_runs
+            .get(&thread_id)
+            .is_some_and(|background| background.handle.is_finished())
+            && let Some(background) = self.background_runs.remove(&thread_id)
+        {
+            let thread = background.thread.to_runtime_thread();
+            match background.handle.await {
+                Ok(Ok(output)) => {
+                    let budget_warning = self
+                        .supervisor
+                        .validate_usage_budget(&thread.budget_scope_id, &output.usage)
+                        .err()
+                        .map(|error| format!("{error:#}"));
+                    if let Err(error) = self.supervisor.record_chat_child_result(
+                        session,
+                        handler,
+                        &thread,
+                        output.status,
+                        &output.final_text,
+                        &output.outcome,
+                        Some(output.usage),
+                    ) {
+                        return ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::Internal,
+                            error.to_string(),
+                        );
+                    }
+                    if let Some(warning) = budget_warning {
+                        let _ = handler.handle(RunEvent::Notice(format!(
+                            "agent budget warning after child completion: {warning}"
+                        )));
+                    }
+                }
+                Ok(Err(error)) => {
+                    let reason = format!("{error:#}");
+                    let _ = self.supervisor.record_chat_child_failure(
+                        session,
+                        handler,
+                        &thread,
+                        reason.clone(),
+                    );
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        format!("background child agent failed: {reason}"),
+                    );
+                }
+                Err(error) => {
+                    let reason = format!("background child agent join failed: {error}");
+                    let _ = self.supervisor.record_chat_child_failure(
+                        session,
+                        handler,
+                        &thread,
+                        reason.clone(),
+                    );
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        reason,
+                    );
+                }
+            }
+        }
         let projection = session.agent_thread_state_projection();
         let Some(thread) = projection.threads.get(&thread_id) else {
             return ToolResult::error(
@@ -844,33 +1017,76 @@ impl AgentToolRuntime {
             }
         };
         let prompt_hash = hash_text(&prompt);
-        let rejected = AgentThreadMessageRoutedEntry {
+        let requested = AgentThreadMessageRoutedEntry {
             route_id: route_id.clone(),
             source_thread_id: source_thread_id.clone(),
             target_thread_id: thread_id.clone(),
             prompt_hash: prompt_hash.clone(),
-            status: AgentRouteStatus::Rejected,
+            prompt: Some(prompt.clone()),
+            status: AgentRouteStatus::Requested,
         };
-        ToolResult::error(
-            call.id.clone(),
-            call.name.clone(),
-            ToolErrorKind::Unsupported,
-            format!(
-                "agent thread {} is {}; live agent messages require background mailbox support",
+        let delivery = if thread.status.is_terminal() {
+            Err(format!(
+                "agent thread {} is {}",
                 thread_id.as_str(),
                 thread_status_label(thread.status)
-            ),
-        )
-        .with_control_entry(ControlEntry::AgentThreadMessageRouted(
-            AgentThreadMessageRoutedEntry {
-                route_id,
-                source_thread_id,
-                target_thread_id: thread_id,
-                prompt_hash,
-                status: AgentRouteStatus::Requested,
-            },
-        ))
-        .with_control_entry(ControlEntry::AgentThreadMessageRouted(rejected))
+            ))
+        } else {
+            self.supervisor.send_agent_message(
+                &thread_id,
+                AgentMailboxMessage {
+                    route_id: route_id.clone(),
+                    prompt: prompt.clone(),
+                },
+            )
+        };
+        match delivery {
+            Ok(()) => ToolResult::ok(
+                call.id.clone(),
+                call.name.clone(),
+                format!("message queued for agent thread {}", thread_id.as_str()),
+                ToolResultMeta {
+                    details: json!({
+                        "thread_id": thread_id.as_str(),
+                        "route_id": route_id.as_str(),
+                        "status": "resolved"
+                    }),
+                    ..ToolResultMeta::default()
+                },
+            )
+            .with_control_entry(ControlEntry::AgentThreadMessageRouted(requested))
+            .with_control_entry(ControlEntry::AgentThreadMessageRouted(
+                AgentThreadMessageRoutedEntry {
+                    route_id,
+                    source_thread_id,
+                    target_thread_id: thread_id,
+                    prompt_hash,
+                    prompt: None,
+                    status: AgentRouteStatus::Resolved,
+                },
+            )),
+            Err(reason) => ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Unsupported,
+                format!(
+                    "agent thread {} cannot accept live messages: {}",
+                    thread_id.as_str(),
+                    reason
+                ),
+            )
+            .with_control_entry(ControlEntry::AgentThreadMessageRouted(requested))
+            .with_control_entry(ControlEntry::AgentThreadMessageRouted(
+                AgentThreadMessageRoutedEntry {
+                    route_id,
+                    source_thread_id,
+                    target_thread_id: thread_id,
+                    prompt_hash,
+                    prompt: None,
+                    status: AgentRouteStatus::Rejected,
+                },
+            )),
+        }
     }
 
     fn close_agent(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
@@ -940,7 +1156,13 @@ enum AgentToolKind {
 }
 
 impl AgentToolKind {
-    const ALL: [Self; 4] = [Self::Spawn, Self::Wait, Self::ReadResult, Self::Close];
+    const ALL: [Self; 5] = [
+        Self::Spawn,
+        Self::Wait,
+        Self::ReadResult,
+        Self::Message,
+        Self::Close,
+    ];
 
     fn from_name(name: &str) -> Option<Self> {
         match name {
@@ -1072,7 +1294,8 @@ impl AgentTool {
                     .to_owned()
             }
             AgentToolKind::Message => {
-                "Reserved for future active child-agent mailbox support.".to_owned()
+                "Send follow-up instructions to an active background child agent mailbox. Use only for steering an already spawned agent thread; wait_agent is still required to collect terminal results."
+                    .to_owned()
             }
             AgentToolKind::Close => {
                 "Close a completed, failed, cancelled, or interrupted agent thread.".to_owned()
@@ -1093,7 +1316,7 @@ impl AgentTool {
                     "prompt": { "type": "string" },
                     "mode": {
                         "type": "string",
-                        "enum": ["foreground", "join_before_final"],
+                        "enum": ["foreground", "join_before_final", "background"],
                         "default": "join_before_final"
                     },
                     "display_name_hint": { "type": "string" }
@@ -1271,6 +1494,8 @@ struct ChatAgentApprovalRouteHandler<'a> {
     source_thread_id: AgentThreadId,
 }
 
+struct BackgroundApprovalHandler;
+
 struct ForwardEventHandler<'a> {
     inner: &'a mut (dyn EventHandler + Send),
 }
@@ -1289,6 +1514,17 @@ impl Drop for ChatChildThreadGuard {
 impl EventHandler for ForwardEventHandler<'_> {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         self.inner.handle(event)
+    }
+}
+
+impl ApprovalHandler for BackgroundApprovalHandler {
+    fn approve_tool_call(&mut self, call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
+        Ok(ToolApproval::Deny {
+            reason: format!(
+                "background agent cannot request interactive approval for {}",
+                call.name
+            ),
+        })
     }
 }
 
@@ -1320,6 +1556,64 @@ impl ApprovalHandler for ChatAgentApprovalRouteHandler<'_> {
             }))?;
         Ok(approval)
     }
+}
+
+async fn run_background_chat_agent(
+    child_agent: Agent<Box<dyn Provider>>,
+    mut child_session: Session,
+    initial_input: sigil_kernel::AgentRunInput,
+    child_options: sigil_kernel::AgentRunOptions,
+    mailbox_rx: mpsc::Receiver<AgentMailboxMessage>,
+) -> Result<BackgroundChatAgentResult> {
+    let mut handler = NoopEventHandler;
+    let mut approval_handler = BackgroundApprovalHandler;
+    let mut latest_output = child_agent
+        .run_with_approval_input(
+            &mut child_session,
+            initial_input,
+            child_options.clone(),
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    loop {
+        let mut prompts = Vec::new();
+        while let Ok(message) = mailbox_rx.try_recv() {
+            prompts.push(format!(
+                "route {}:\n{}",
+                message.route_id.as_str(),
+                message.prompt.trim()
+            ));
+        }
+        if prompts.is_empty() {
+            break;
+        }
+        let followup_prompt = format!(
+            "Parent agent sent follow-up instructions while this child agent was active.\n\n{}",
+            prompts.join("\n\n")
+        );
+        latest_output = child_agent
+            .run_with_approval_input(
+                &mut child_session,
+                sigil_kernel::AgentRunInput::user(followup_prompt),
+                child_options.clone(),
+                &mut handler,
+                &mut approval_handler,
+            )
+            .await?;
+    }
+
+    let final_text = latest_output.result.final_text;
+    let outcome = latest_output.outcome;
+    let usage = usage_summary_from_stats(child_session.stats());
+    let status = child_status_from_outcome(&final_text, &outcome);
+    Ok(BackgroundChatAgentResult {
+        final_text,
+        outcome,
+        usage,
+        status,
+    })
 }
 
 fn profile_index_description(index: &crate::ModelVisibleAgentIndex) -> String {

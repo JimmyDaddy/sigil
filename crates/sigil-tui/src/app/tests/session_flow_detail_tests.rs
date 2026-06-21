@@ -767,6 +767,7 @@ fn render_agent_control_entries_and_status_labels() -> Result<()> {
                 source_thread_id: parent_thread_id.clone(),
                 target_thread_id: thread_id.clone(),
                 prompt_hash: "sha256:steer".to_owned(),
+                prompt: None,
                 status: sigil_kernel::AgentRouteStatus::Resolved,
             }),
         )),

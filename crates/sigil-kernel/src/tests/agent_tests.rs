@@ -2690,9 +2690,9 @@ async fn approved_plan_workspace_edits_allows_required_preview_write_without_pro
     }));
     let agent = Agent::new(WriteMockProvider, registry);
     let mut session = Session::new("mock-write", "mock-model");
-    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(
-        Vec::new(),
-    )))?;
+    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(vec![
+        "file.txt",
+    ])))?;
     let mut handler = RecordingEventHandler::default();
     let mut approval_handler = PanicApprovalHandler;
 
@@ -2740,6 +2740,54 @@ async fn approved_plan_workspace_edits_allows_required_preview_write_without_pro
             entry,
             SessionLogEntry::Control(ControlEntry::ToolPreviewCaptured(snapshot))
                 if snapshot.call_id == "call-write-1"
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn approved_plan_workspace_edits_requires_reapproval_for_empty_scope() -> Result<()> {
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool {
+        executed: Arc::clone(&executed),
+    }));
+    let agent = Agent::new(WriteMockProvider, registry);
+    let mut session = Session::new("mock-write", "mock-model");
+    session.append_control(ControlEntry::PlanApproved(approved_workspace_plan(
+        Vec::new(),
+    )))?;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = DenyWritesHandler;
+
+    let result = agent
+        .run_with_approval(
+            &mut session,
+            "execute the approved plan",
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(!executed.load(Ordering::SeqCst));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ToolApproval(approval))
+                if approval.call_id == "call-write-1"
+                    && approval.action == ToolApprovalAuditAction::Requested
         )
     }));
     Ok(())

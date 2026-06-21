@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -55,7 +55,7 @@ impl AgentBudgetPolicy {
                 1
             },
             max_parallel_write: 1,
-            max_background_threads: 0,
+            max_background_threads: 1,
             max_spawn_fanout_per_turn: max_threads,
             max_agent_tokens_per_task: 200_000,
         }
@@ -109,6 +109,13 @@ struct ActiveAgentThread {
     attempt_id: AgentRunAttemptId,
     role: AgentRole,
     background: bool,
+    mailbox_tx: Option<mpsc::Sender<AgentMailboxMessage>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentMailboxMessage {
+    pub route_id: AgentRouteId,
+    pub prompt: String,
 }
 
 /// Runtime child runner that connects kernel task orchestration to the supervisor.
@@ -160,6 +167,26 @@ impl AgentSupervisor {
     #[must_use]
     pub fn supports_background_resume(&self) -> bool {
         self.provider_capabilities.supports_agent_background_resume
+    }
+
+    pub fn send_agent_message(
+        &self,
+        target_thread_id: &AgentThreadId,
+        message: AgentMailboxMessage,
+    ) -> std::result::Result<(), String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "agent supervisor state lock poisoned".to_owned())?;
+        let Some(thread) = state.active_threads.get(target_thread_id) else {
+            return Err("agent thread is not active".to_owned());
+        };
+        let Some(sender) = thread.mailbox_tx.as_ref() else {
+            return Err("agent thread has no active mailbox".to_owned());
+        };
+        sender
+            .send(message)
+            .map_err(|_| "agent mailbox is closed".to_owned())
     }
 
     #[must_use]
@@ -295,9 +322,11 @@ impl AgentSupervisor {
         )?;
 
         if start.role == AgentRole::SubagentWrite
-            && tool_scope_is_write_capable(&resolved_profile.profile.tool_scope)
+            && tool_scope_has_unguarded_write_capability(&resolved_profile.profile.tool_scope)
         {
-            let reason = "write-capable agents require changeset or path lease support".to_owned();
+            let reason =
+                "write-capable agents require guarded changeset-only scope or path lease support"
+                    .to_owned();
             append_control(
                 session,
                 handler,
@@ -308,7 +337,9 @@ impl AgentSupervisor {
                     updated_at_ms: None,
                 }),
             )?;
-            bail!("write-capable agent requires changeset or path lease support");
+            bail!(
+                "write-capable agent requires guarded changeset-only scope or path lease support"
+            );
         }
 
         if let Err(reason) = self.reserve_thread(
@@ -319,6 +350,7 @@ impl AgentSupervisor {
             start.role,
             start.invocation_mode,
             start.parent_depth,
+            None,
         ) {
             append_control(
                 session,
@@ -463,9 +495,11 @@ impl AgentSupervisor {
         )?;
 
         if start.role == AgentRole::SubagentWrite
-            && tool_scope_is_write_capable(&resolved_profile.profile.tool_scope)
+            && tool_scope_has_unguarded_write_capability(&resolved_profile.profile.tool_scope)
         {
-            let reason = "write-capable agents require changeset or path lease support".to_owned();
+            let reason =
+                "write-capable agents require guarded changeset-only scope or path lease support"
+                    .to_owned();
             append_control(
                 session,
                 handler,
@@ -476,8 +510,18 @@ impl AgentSupervisor {
                     updated_at_ms: None,
                 }),
             )?;
-            bail!("write-capable agent requires changeset or path lease support");
+            bail!(
+                "write-capable agent requires guarded changeset-only scope or path lease support"
+            );
         }
+
+        let (mailbox_tx, mailbox_rx) =
+            if matches!(start.invocation_mode, AgentInvocationMode::Background) {
+                let (tx, rx) = mpsc::channel();
+                (Some(tx), Some(rx))
+            } else {
+                (None, None)
+            };
 
         if let Err(reason) = self.reserve_thread(
             &thread_id,
@@ -487,6 +531,7 @@ impl AgentSupervisor {
             start.role,
             start.invocation_mode,
             start.parent_depth,
+            mailbox_tx,
         ) {
             append_control(
                 session,
@@ -530,6 +575,7 @@ impl AgentSupervisor {
             parent_thread_id: start.parent_thread_id,
             child_session_ref: start.child_session_ref,
             budget_scope_id: start.budget_scope_id,
+            mailbox_rx,
         })
     }
 
@@ -706,6 +752,7 @@ impl AgentSupervisor {
         role: AgentRole,
         invocation_mode: AgentInvocationMode,
         parent_depth: usize,
+        mailbox_tx: Option<mpsc::Sender<AgentMailboxMessage>>,
     ) -> std::result::Result<(), String> {
         let mut state = self
             .state
@@ -773,11 +820,6 @@ impl AgentSupervisor {
                 self.budget.max_parallel_write
             ));
         }
-        if role == AgentRole::SubagentWrite
-            && matches!(invocation_mode, AgentInvocationMode::Background)
-        {
-            return Err("background write agents are disabled".to_owned());
-        }
         state.spawn_fanout_this_turn += 1;
         state.active_threads.insert(
             thread_id.clone(),
@@ -786,6 +828,7 @@ impl AgentSupervisor {
                 attempt_id: attempt_id.clone(),
                 role,
                 background: matches!(invocation_mode, AgentInvocationMode::Background),
+                mailbox_tx,
             },
         );
         Ok(())
@@ -914,7 +957,7 @@ pub struct AgentChatChildStart {
     pub display_name_hint: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AgentChatChildThread {
     pub thread_id: AgentThreadId,
     pub attempt_id: AgentRunAttemptId,
@@ -922,6 +965,7 @@ pub struct AgentChatChildThread {
     pub parent_thread_id: AgentThreadId,
     pub child_session_ref: SessionRef,
     pub budget_scope_id: TaskId,
+    pub mailbox_rx: Option<mpsc::Receiver<AgentMailboxMessage>>,
 }
 
 #[async_trait]
@@ -1316,6 +1360,7 @@ fn usage_summary_from_stats(stats: &SessionStats) -> AgentUsageSummary {
     }
 }
 
+#[cfg(test)]
 fn tool_scope_is_write_capable(scope: &ToolRegistryScope) -> bool {
     scope.allow_all
         || WRITE_CAPABLE_TOOL_NAMES
@@ -1328,7 +1373,21 @@ fn tool_scope_is_write_capable(scope: &ToolRegistryScope) -> bool {
         })
 }
 
+fn tool_scope_has_unguarded_write_capability(scope: &ToolRegistryScope) -> bool {
+    scope.allow_all
+        || UNGUARDED_WRITE_TOOL_NAMES
+            .iter()
+            .any(|tool_name| scope.allows(tool_name))
+        || scope.prefixes.iter().any(|prefix| {
+            WRITE_CAPABLE_TOOL_PREFIXES
+                .iter()
+                .any(|write_prefix| prefix.starts_with(write_prefix))
+        })
+}
+
+#[cfg(test)]
 const WRITE_CAPABLE_TOOL_NAMES: &[&str] = &["write_file", "edit_file", "apply_changeset", "bash"];
+const UNGUARDED_WRITE_TOOL_NAMES: &[&str] = &["write_file", "edit_file", "bash"];
 const WRITE_CAPABLE_TOOL_PREFIXES: &[&str] = &["mcp__"];
 
 fn main_thread_id() -> Result<AgentThreadId> {

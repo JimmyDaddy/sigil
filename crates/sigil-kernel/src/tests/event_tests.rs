@@ -586,6 +586,7 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 source_thread_id: AgentThreadId::new("main").expect("valid thread id"),
                 target_thread_id: agent_thread_id(),
                 prompt_hash: "sha256:steer".to_owned(),
+                prompt: None,
                 status: AgentRouteStatus::Resolved,
             }),
             "agent_thread_message_routed",

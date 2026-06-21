@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -92,6 +93,50 @@ impl Provider for ChildUsageProvider {
                 ..UsageStats::default()
             })),
             Ok(ProviderChunk::TextDelta("expensive child done".to_owned())),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+struct DelayedFollowupProvider {
+    delay: Duration,
+    observed_followup: Arc<Mutex<bool>>,
+}
+
+#[async_trait]
+impl Provider for DelayedFollowupProvider {
+    fn name(&self) -> &str {
+        "delayed-followup"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        provider_capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        tokio::time::sleep(self.delay).await;
+        let followup_seen = request
+            .messages
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::User))
+            .filter_map(|message| message.content.as_deref())
+            .any(|content| content.contains("continue with more detail"));
+        if followup_seen {
+            *self
+                .observed_followup
+                .lock()
+                .expect("followup observation lock should not be poisoned") = true;
+        }
+        let text = if followup_seen {
+            "followup observed"
+        } else {
+            "initial background done"
+        };
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::TextDelta(text.to_owned())),
             Ok(ProviderChunk::Done),
         ])))
     }
@@ -376,6 +421,24 @@ impl AgentToolProviderFactory for UsageProviderFactory {
     }
 }
 
+struct DelayedFollowupProviderFactory {
+    observed_followup: Arc<Mutex<bool>>,
+}
+
+impl AgentToolProviderFactory for DelayedFollowupProviderFactory {
+    fn build_provider(
+        &self,
+        _root_config: &RootConfig,
+        _role: sigil_kernel::AgentRole,
+        _profile_id: &sigil_kernel::AgentProfileId,
+    ) -> Result<Box<dyn Provider>> {
+        Ok(Box::new(DelayedFollowupProvider {
+            delay: Duration::from_millis(20),
+            observed_followup: self.observed_followup.clone(),
+        }))
+    }
+}
+
 struct RecordingProviderFactory {
     observed_request: Arc<Mutex<Option<ChildRequestObservation>>>,
 }
@@ -449,8 +512,8 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     let modes = spec.input_schema["properties"]["mode"]["enum"]
         .as_array()
         .expect("mode enum");
-    assert!(!modes.iter().any(|mode| mode == "background"));
-    assert!(registry.spec_for(MESSAGE_AGENT_TOOL_NAME).is_none());
+    assert!(modes.iter().any(|mode| mode == "background"));
+    assert!(registry.spec_for(MESSAGE_AGENT_TOOL_NAME).is_some());
     Ok(())
 }
 
@@ -844,7 +907,7 @@ async fn wait_and_close_agent_use_bounded_thread_projection() -> Result<()> {
 }
 
 #[tokio::test]
-async fn message_agent_records_rejected_message_route_without_mailbox() -> Result<()> {
+async fn message_agent_records_rejected_message_route_for_terminal_thread() -> Result<()> {
     let (mut runtime, mut session, thread_id) = spawned_runtime_session().await?;
     let mut handler = RecordingEventHandler::default();
     let mut approval = AutoApproveHandler;
@@ -869,7 +932,7 @@ async fn message_agent_records_rejected_message_route_without_mailbox() -> Resul
         .expect("message_agent handled by runtime delegate");
 
     assert!(result.is_error());
-    assert!(result.content.contains("background mailbox support"));
+    assert!(result.content.contains("cannot accept live messages"));
     let routed = result
         .control_entries
         .iter()
@@ -884,17 +947,147 @@ async fn message_agent_records_rejected_message_route_without_mailbox() -> Resul
     assert_eq!(routed[0].source_thread_id.as_str(), "main");
     assert_eq!(routed[0].target_thread_id, thread_id);
     assert_eq!(routed[0].status, sigil_kernel::AgentRouteStatus::Requested);
+    assert_eq!(
+        routed[0].prompt.as_deref(),
+        Some("continue with more detail")
+    );
     assert_eq!(routed[1].route_id, routed[0].route_id);
     assert_eq!(routed[1].source_thread_id, routed[0].source_thread_id);
     assert_eq!(routed[1].target_thread_id, routed[0].target_thread_id);
     assert_eq!(routed[1].prompt_hash, routed[0].prompt_hash);
+    assert_eq!(routed[1].prompt, None);
     assert_eq!(routed[1].status, sigil_kernel::AgentRouteStatus::Rejected);
     assert!(!routed[0].prompt_hash.contains("continue with more detail"));
     Ok(())
 }
 
 #[tokio::test]
-async fn spawn_agent_rejects_background_mode_without_starting_thread() -> Result<()> {
+async fn message_agent_queues_followup_for_background_mailbox() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let observed_followup = Arc::new(Mutex::new(false));
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(DelayedFollowupProviderFactory {
+            observed_followup: observed_followup.clone(),
+        }),
+    );
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let thread_id =
+        chat_agent_thread_id_for_call("call-background-message", &AgentProfileId::new("explore")?)?;
+
+    let spawn = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-background-message".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "explore",
+                    "objective": "inspect",
+                    "prompt": "inspect",
+                    "mode": "background"
+                })
+                .to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("spawn handled");
+    assert!(!spawn.is_error());
+
+    let message = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-message-background".to_owned(),
+                name: MESSAGE_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "thread_id": thread_id.as_str(),
+                    "prompt": "continue with more detail"
+                })
+                .to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("message handled");
+    assert!(!message.is_error());
+    let routed = message
+        .control_entries
+        .iter()
+        .filter_map(|entry| {
+            let ControlEntry::AgentThreadMessageRouted(route) = entry else {
+                return None;
+            };
+            Some(route)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(routed.len(), 2);
+    assert_eq!(routed[0].status, sigil_kernel::AgentRouteStatus::Requested);
+    assert_eq!(
+        routed[0].prompt.as_deref(),
+        Some("continue with more detail")
+    );
+    assert_eq!(routed[1].status, sigil_kernel::AgentRouteStatus::Resolved);
+    assert_eq!(routed[1].prompt, None);
+
+    for _ in 0..20 {
+        let _ = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: "call-wait-background-message".to_owned(),
+                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+                },
+                &run_options(std::env::temp_dir()),
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("wait handled");
+        if session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.result.as_ref())
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        *observed_followup
+            .lock()
+            .expect("followup observation lock should not be poisoned")
+    );
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("background thread should be projected");
+    assert_eq!(
+        thread.result.as_ref().map(|result| result.summary.as_str()),
+        Some("followup observed")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -930,9 +1123,102 @@ async fn spawn_agent_rejects_background_mode_without_starting_thread() -> Result
         .await?
         .expect("spawn handled");
 
-    assert!(result.is_error());
-    assert!(result.content.contains("background agent mode requires"));
-    assert!(session.agent_thread_state_projection().threads.is_empty());
+    assert!(!result.is_error());
+    assert!(result.content.contains("running"));
+    let projection = session.agent_thread_state_projection();
+    let thread_id = chat_agent_thread_id_for_call(
+        "call-background",
+        &sigil_kernel::AgentProfileId::new("explore")?,
+    )?;
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("background thread should be started");
+    assert_eq!(thread.status, AgentThreadStatus::Running);
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_agent_collects_completed_background_result() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(StaticProviderFactory),
+    );
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let thread_id =
+        chat_agent_thread_id_for_call("call-background-wait", &AgentProfileId::new("explore")?)?;
+
+    let spawn = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-background-wait".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "explore",
+                    "objective": "inspect",
+                    "prompt": "inspect",
+                    "mode": "background"
+                })
+                .to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("spawn handled");
+    assert!(!spawn.is_error());
+
+    let mut waited = None;
+    for _ in 0..10 {
+        let result = runtime
+            .handle_agent_tool_call(
+                &mut session,
+                &ToolCall {
+                    id: "call-wait-background".to_owned(),
+                    name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                    args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+                },
+                &run_options(std::env::temp_dir()),
+                &mut handler,
+                &mut approval,
+            )
+            .await?
+            .expect("wait handled");
+        if session
+            .agent_thread_state_projection()
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.result.as_ref())
+            .is_some()
+        {
+            waited = Some(result);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let waited = waited.expect("background result should be collected");
+    assert!(!waited.is_error());
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("background thread should be projected");
+    assert_eq!(thread.status, AgentThreadStatus::Completed);
+    assert_eq!(
+        thread.result.as_ref().map(|result| result.summary.as_str()),
+        Some("child summary only")
+    );
     Ok(())
 }
 

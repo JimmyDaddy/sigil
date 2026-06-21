@@ -1239,8 +1239,10 @@ fn plan_approval_covers_subjects(workspace_paths: &[String], subjects: &[ToolSub
 }
 
 fn plan_approval_covers_subject(workspace_paths: &[String], subject: &ToolSubject) -> bool {
+    // Empty scope means the accepted plan did not name a concrete workspace target. Keep the
+    // write behind normal approval instead of widening an ambiguous plan to the full workspace.
     if workspace_paths.is_empty() {
-        return true;
+        return false;
     }
     workspace_paths
         .iter()

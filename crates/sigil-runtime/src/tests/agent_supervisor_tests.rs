@@ -12,8 +12,8 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentConfig, AgentInvocationMode, AgentInvocationSource, AgentRole, AgentRunInput,
-    AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason, AgentThreadId,
+    Agent, AgentConfig, AgentInvocationMode, AgentInvocationSource, AgentRole, AgentRouteId,
+    AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason, AgentThreadId,
     AgentThreadTerminalStatus, AgentUsageSummary, ApprovalMode, AutoApproveHandler,
     CompactionConfig, CompletionRequest, EventHandler, InteractionMode, JsonlSessionStore,
     MemoryConfig, ModelMessage, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
@@ -26,8 +26,8 @@ use sigil_kernel::{
 };
 
 use super::{
-    AgentBudgetPolicy, AgentChatChildStart, AgentProfileRegistry, AgentSupervisor,
-    AgentSupervisorTaskChildRunner, AgentTaskChildStart, EXPLORE_PROFILE_ID,
+    AgentBudgetPolicy, AgentChatChildStart, AgentMailboxMessage, AgentProfileRegistry,
+    AgentSupervisor, AgentSupervisorTaskChildRunner, AgentTaskChildStart, EXPLORE_PROFILE_ID,
     agent_terminal_status_from_task_child, task_child_status_from_outcome,
     tool_scope_is_write_capable,
 };
@@ -550,7 +550,7 @@ fn chat_child_start_rejects_write_capable_profile_without_lease_support() -> Res
     assert!(
         error
             .to_string()
-            .contains("write-capable agent requires changeset")
+            .contains("write-capable agent requires guarded changeset-only scope")
     );
     let projection = session.agent_thread_state_projection();
     assert!(projection.threads.values().any(|thread| {
@@ -594,6 +594,72 @@ fn record_chat_child_failure_appends_failed_status_and_releases_budget() -> Resu
         .expect("chat thread projected");
     assert_eq!(projected.status, sigil_kernel::AgentThreadStatus::Failed);
     assert_eq!(projected.reason.as_deref(), Some("child failed"));
+    Ok(())
+}
+
+#[test]
+fn send_agent_message_reports_inactive_thread_and_missing_mailbox() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_threads = 2;
+    budget.max_parallel_readonly = 2;
+    budget.max_background_threads = 1;
+    let supervisor = supervisor_with_budget(budget)?;
+
+    let inactive_error = supervisor
+        .send_agent_message(
+            &AgentThreadId::new("missing")?,
+            AgentMailboxMessage {
+                route_id: AgentRouteId::new("route_missing")?,
+                prompt: "follow up".to_owned(),
+            },
+        )
+        .expect_err("inactive thread rejects mailbox message");
+    assert_eq!(inactive_error, "agent thread is not active");
+
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let foreground = supervisor.begin_chat_child_thread(
+        &mut session,
+        &mut handler,
+        chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?,
+    )?;
+
+    let missing_mailbox_error = supervisor
+        .send_agent_message(
+            &foreground.thread_id,
+            AgentMailboxMessage {
+                route_id: AgentRouteId::new("route_foreground")?,
+                prompt: "follow up".to_owned(),
+            },
+        )
+        .expect_err("foreground child has no active mailbox");
+    assert_eq!(missing_mailbox_error, "agent thread has no active mailbox");
+
+    let mut background_start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    background_start.call_id = "call_background_mailbox".to_owned();
+    background_start.invocation_mode = AgentInvocationMode::Background;
+    let mut background =
+        supervisor.begin_chat_child_thread(&mut session, &mut handler, background_start)?;
+    let route_id = AgentRouteId::new("route_background")?;
+    supervisor
+        .send_agent_message(
+            &background.thread_id,
+            AgentMailboxMessage {
+                route_id: route_id.clone(),
+                prompt: "continue".to_owned(),
+            },
+        )
+        .map_err(|error| anyhow!(error))?;
+
+    let received = background
+        .mailbox_rx
+        .as_mut()
+        .expect("background child should have mailbox")
+        .try_recv()
+        .expect("message should be queued");
+    assert_eq!(received.route_id, route_id);
+    assert_eq!(received.prompt, "continue");
     Ok(())
 }
 
@@ -892,7 +958,7 @@ fn supervisor_enforces_parallel_write_budget_for_readonly_scoped_writer() -> Res
 }
 
 #[test]
-fn supervisor_denies_background_write_after_budget_checks() -> Result<()> {
+fn supervisor_allows_background_write_role_when_scope_is_readonly() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
     config.task.allow_write_subagents = false;
@@ -910,17 +976,15 @@ fn supervisor_denies_background_write_after_budget_checks() -> Result<()> {
     start.role = AgentRole::SubagentWrite;
     start.invocation_mode = AgentInvocationMode::Background;
 
-    let error = supervisor
+    let thread = supervisor
         .begin_task_child_thread(&mut session, &mut handler, start)
-        .expect_err("background write is denied after budget checks");
+        .expect("read-only scoped write role should be allowed");
 
-    assert!(error.to_string().contains("agent budget denied"));
+    assert!(thread.thread_id.as_str().starts_with("agent_v1_"));
     let projection = session.agent_thread_state_projection();
     assert!(projection.threads.values().any(|thread| {
-        thread
-            .reason
-            .as_deref()
-            .is_some_and(|reason| reason.contains("background write agents are disabled"))
+        thread.status == sigil_kernel::AgentThreadStatus::Running
+            && thread.reason.as_deref() == Some("child session started")
     }));
     Ok(())
 }
@@ -1008,9 +1072,15 @@ fn task_child_status_and_terminal_status_cover_edges() {
 #[test]
 fn supervisor_denies_background_write_agents() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    let mut config = root_config();
+    config.task.allow_write_subagents = true;
+    let mut budget = AgentBudgetPolicy::from_root_config(&config);
     budget.max_background_threads = 2;
-    let supervisor = supervisor_with_budget(budget)?;
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        budget,
+        provider_capabilities(),
+    );
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let mut handler = RecordingEventHandler::default();
     let mut start = child_start(write_step("edit")?, temp.path().to_path_buf())?;
@@ -1024,10 +1094,41 @@ fn supervisor_denies_background_write_agents() -> Result<()> {
     let projection = session.agent_thread_state_projection();
     assert!(projection.threads.values().any(|thread| {
         thread.reason.as_deref().is_some_and(|reason| {
-            reason.contains("background write agents are disabled")
-                || reason.contains("write-capable agents require changeset")
+            reason.contains("write-capable agents require guarded changeset-only scope")
         })
     }));
+    Ok(())
+}
+
+#[test]
+fn supervisor_denies_unguarded_mcp_write_prefix_agents() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut config = root_config();
+    config.task.allow_write_subagents = true;
+    config.task.subagent_write.tools = sigil_kernel::ToolAllowlistConfig {
+        allow_all: false,
+        names: Vec::new(),
+        prefixes: vec!["mcp__filesystem__".to_owned()],
+    };
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        AgentBudgetPolicy::from_root_config(&config),
+        provider_capabilities(),
+    );
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut start = child_start(write_step("mcp_write")?, temp.path().to_path_buf())?;
+    start.role = AgentRole::SubagentWrite;
+
+    let error = supervisor
+        .begin_task_child_thread(&mut session, &mut handler, start)
+        .expect_err("unguarded mcp write prefix is denied");
+
+    assert!(
+        error
+            .to_string()
+            .contains("write-capable agent requires guarded changeset-only scope")
+    );
     Ok(())
 }
 
@@ -1053,8 +1154,39 @@ fn supervisor_denies_foreground_write_capable_agents_without_changeset_guard() -
     assert!(
         error
             .to_string()
-            .contains("write-capable agent requires changeset")
+            .contains("write-capable agent requires guarded changeset-only scope")
     );
+    Ok(())
+}
+
+#[test]
+fn supervisor_allows_changeset_only_write_capable_agents() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut config = root_config();
+    config.task.subagent_write.tools = sigil_kernel::ToolAllowlistConfig {
+        allow_all: false,
+        names: vec!["apply_changeset".to_owned()],
+        prefixes: Vec::new(),
+    };
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        AgentBudgetPolicy::from_root_config(&config),
+        provider_capabilities(),
+    );
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut start = child_start(write_step("changeset")?, temp.path().to_path_buf())?;
+    start.role = AgentRole::SubagentWrite;
+
+    let thread = supervisor.begin_task_child_thread(&mut session, &mut handler, start)?;
+
+    let projection = session.agent_thread_state_projection();
+    let projected = projection
+        .threads
+        .get(&thread.thread_id)
+        .expect("thread should be projected");
+    assert_eq!(projected.status, sigil_kernel::AgentThreadStatus::Running);
+    assert_eq!(projected.reason.as_deref(), Some("child session started"));
     Ok(())
 }
 
