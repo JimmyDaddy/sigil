@@ -1,7 +1,7 @@
 use ratatui::style::{Modifier, Style};
 
 use super::*;
-use crate::ui::theme::{accent_blue, accent_gold, accent_lime, accent_rose, dim, muted};
+use crate::ui::theme::{Theme, accent_blue, accent_gold, accent_lime, accent_rose, dim, muted};
 
 #[test]
 fn status_indicator_maps_semantic_symbols_and_styles() {
@@ -87,6 +87,39 @@ fn indicator_styles_cover_focus_and_status_markers() {
             .add_modifier(Modifier::BOLD)
     );
     assert!(indicator_styles(">").is_none());
+}
+
+#[test]
+fn indicators_can_render_with_explicit_theme_palette() {
+    let theme = Theme::builtin(sigil_kernel::ThemeId::SolarizedLight);
+    let palette = &theme.palette;
+
+    assert_eq!(
+        StatusIndicator::static_kind(StatusKind::Success)
+            .span_with_palette(palette)
+            .style
+            .fg,
+        Some(palette.status_success)
+    );
+    assert_eq!(
+        StatusIndicator::static_kind(StatusKind::Error)
+            .badge_style_with_palette(palette)
+            .bg,
+        Some(palette.surface_badge)
+    );
+    assert_eq!(
+        status_rest_style_with_palette(StatusKind::Unknown, palette),
+        Style::default().fg(palette.text_secondary)
+    );
+
+    let (focus, rest) = indicator_styles_with_palette("▸", palette).expect("focus style");
+    assert_eq!(
+        focus,
+        Style::default()
+            .fg(palette.accent_info)
+            .add_modifier(Modifier::BOLD)
+    );
+    assert_eq!(rest, Style::default().fg(palette.text_primary));
 }
 
 #[test]

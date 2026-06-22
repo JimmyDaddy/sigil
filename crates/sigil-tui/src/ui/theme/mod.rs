@@ -123,6 +123,7 @@ pub(crate) fn ink() -> Color {
     default_palette().text_primary
 }
 
+#[cfg(test)]
 pub(crate) fn muted() -> Color {
     default_palette().text_secondary
 }
@@ -160,34 +161,42 @@ pub(crate) fn config_panel_bg() -> Color {
     default_palette().config_bg
 }
 
+#[cfg(test)]
 pub(crate) fn config_border() -> Color {
     default_palette().config_border
 }
 
+#[cfg(test)]
 pub(crate) fn config_primary() -> Color {
     default_palette().config_primary
 }
 
+#[cfg(test)]
 pub(crate) fn config_detail() -> Color {
     default_palette().config_detail
 }
 
+#[cfg(test)]
 pub(crate) fn config_warning() -> Color {
     default_palette().config_warning
 }
 
+#[cfg(test)]
 pub(crate) fn config_danger() -> Color {
     default_palette().config_danger
 }
 
+#[cfg(test)]
 pub(crate) fn config_tab_bg() -> Color {
     default_palette().config_tab_bg
 }
 
+#[cfg(test)]
 pub(crate) fn config_section_bg() -> Color {
     default_palette().config_section_bg
 }
 
+#[cfg(test)]
 pub(crate) fn config_selected_bg() -> Color {
     default_palette().config_selected_bg
 }

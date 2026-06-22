@@ -328,9 +328,8 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
 
     terminal.draw(|frame| render(frame, &app))?;
 
-    let expected = Theme::builtin(sigil_kernel::ThemeId::SigilDark.next())
-        .palette
-        .config_bg;
+    let expected_theme = Theme::builtin(sigil_kernel::ThemeId::SigilDark.next());
+    let expected = expected_theme.palette.config_bg;
     let actual = terminal
         .backend()
         .buffer()
@@ -339,11 +338,58 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
         .bg;
     assert_eq!(actual, expected);
     assert_eq!(
+        cell_fg_at_text(&terminal, "Appearance 7/11", "Appearance"),
+        expected_theme.palette.text_primary
+    );
+    assert_eq!(
+        cell_fg_at_text(&terminal, "Built-ins", "Built-ins"),
+        expected_theme.palette.text_secondary
+    );
+    assert_ne!(
+        cell_fg_at_text(&terminal, "Appearance 7/11", "Appearance"),
+        Theme::builtin(sigil_kernel::ThemeId::SigilDark)
+            .palette
+            .text_primary
+    );
+    assert_eq!(
         app.root_config_snapshot()
             .expect("config snapshot should exist")
             .appearance
             .theme,
         sigil_kernel::ThemeId::SigilDark
+    );
+    Ok(())
+}
+
+#[test]
+fn render_config_saved_theme_uses_theme_text_palette() -> anyhow::Result<()> {
+    let mut config = test_config();
+    config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let expected = Theme::builtin(sigil_kernel::ThemeId::SolarizedLight);
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((0, 0))
+            .expect("top-left cell should exist")
+            .bg,
+        expected.palette.config_bg
+    );
+    assert_eq!(
+        cell_fg_at_text(&terminal, "Provider 1/11", "Provider"),
+        expected.palette.text_primary
+    );
+    assert_eq!(
+        cell_fg_at_text(&terminal, "file sigil.toml", "sigil.toml"),
+        expected.palette.text_secondary
     );
     Ok(())
 }
@@ -1281,6 +1327,21 @@ fn rendered_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
 fn char_index_of(row: &str, needle: &str) -> Option<usize> {
     row.find(needle)
         .map(|byte_index| row[..byte_index].chars().count())
+}
+
+fn cell_fg_at_text(terminal: &Terminal<TestBackend>, row_needle: &str, text: &str) -> Color {
+    let rows = rendered_rows(terminal);
+    let row_index = rows
+        .iter()
+        .position(|row| row.contains(row_needle))
+        .expect("row should render");
+    let column_index = char_index_of(&rows[row_index], text).expect("text should render in row");
+    terminal
+        .backend()
+        .buffer()
+        .cell((column_index as u16, row_index as u16))
+        .expect("cell in bounds")
+        .fg
 }
 
 #[test]

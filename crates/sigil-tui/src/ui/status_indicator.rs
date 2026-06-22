@@ -5,7 +5,7 @@ use ratatui::{
     text::Span,
 };
 
-use super::theme::{accent_blue, accent_gold, accent_lime, accent_rose, badge_bg, dim, ink, muted};
+use super::theme::{self, ThemePalette};
 
 const RUNNING_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 const SPINNER_FRAME_MILLIS: u128 = 120;
@@ -64,12 +64,26 @@ impl StatusIndicator {
         status_style(self.kind)
     }
 
+    pub(crate) fn style_with_palette(self, palette: &ThemePalette) -> Style {
+        status_style_with_palette(self.kind, palette)
+    }
+
     pub(crate) fn badge_style(self) -> Style {
-        self.style().bg(badge_bg()).add_modifier(Modifier::BOLD)
+        self.badge_style_with_palette(&theme::default_palette())
+    }
+
+    pub(crate) fn badge_style_with_palette(self, palette: &ThemePalette) -> Style {
+        self.style_with_palette(palette)
+            .bg(palette.surface_badge)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub(crate) fn span(self) -> Span<'static> {
         Span::styled(self.symbol(), self.style())
+    }
+
+    pub(crate) fn span_with_palette(self, palette: &ThemePalette) -> Span<'static> {
+        Span::styled(self.symbol(), self.style_with_palette(palette))
     }
 }
 
@@ -85,35 +99,46 @@ pub(crate) fn status_symbol(kind: StatusKind) -> &'static str {
 }
 
 pub(crate) fn status_style(kind: StatusKind) -> Style {
+    status_style_with_palette(kind, &theme::default_palette())
+}
+
+pub(crate) fn status_style_with_palette(kind: StatusKind, palette: &ThemePalette) -> Style {
     match kind {
-        StatusKind::Idle | StatusKind::Pending | StatusKind::Unknown => Style::default().fg(dim()),
+        StatusKind::Idle | StatusKind::Pending | StatusKind::Unknown => {
+            Style::default().fg(palette.status_pending)
+        }
         StatusKind::Running => Style::default()
-            .fg(accent_gold())
+            .fg(palette.status_thinking)
             .add_modifier(Modifier::BOLD),
-        StatusKind::Success => Style::default().fg(accent_lime()),
+        StatusKind::Success => Style::default().fg(palette.status_success),
         StatusKind::Error => Style::default()
-            .fg(accent_rose())
+            .fg(palette.status_error)
             .add_modifier(Modifier::BOLD),
         StatusKind::Warning => Style::default()
-            .fg(accent_gold())
+            .fg(palette.status_warning)
             .add_modifier(Modifier::BOLD),
     }
 }
 
+#[cfg(test)]
 pub(crate) fn status_rest_style(kind: StatusKind) -> Style {
+    status_rest_style_with_palette(kind, &theme::default_palette())
+}
+
+pub(crate) fn status_rest_style_with_palette(kind: StatusKind, palette: &ThemePalette) -> Style {
     match kind {
         StatusKind::Idle | StatusKind::Pending | StatusKind::Unknown => {
-            Style::default().fg(muted())
+            Style::default().fg(palette.text_secondary)
         }
         StatusKind::Running => Style::default()
-            .fg(accent_gold())
+            .fg(palette.status_thinking)
             .add_modifier(Modifier::BOLD),
-        StatusKind::Success => Style::default().fg(accent_lime()),
+        StatusKind::Success => Style::default().fg(palette.status_success),
         StatusKind::Error => Style::default()
-            .fg(accent_rose())
+            .fg(palette.status_error)
             .add_modifier(Modifier::BOLD),
         StatusKind::Warning => Style::default()
-            .fg(accent_gold())
+            .fg(palette.status_warning)
             .add_modifier(Modifier::BOLD),
     }
 }
@@ -127,24 +152,41 @@ pub(crate) fn focus_symbol(kind: FocusKind) -> &'static str {
 }
 
 pub(crate) fn focus_style(kind: FocusKind) -> Style {
+    focus_style_with_palette(kind, &theme::default_palette())
+}
+
+pub(crate) fn focus_style_with_palette(kind: FocusKind, palette: &ThemePalette) -> Style {
     match kind {
         FocusKind::Current | FocusKind::Selected => Style::default()
-            .fg(accent_blue())
+            .fg(palette.accent_info)
             .add_modifier(Modifier::BOLD),
-        FocusKind::None => Style::default().fg(ink()),
+        FocusKind::None => Style::default().fg(palette.text_primary),
     }
 }
 
 pub(crate) fn indicator_styles(marker: &str) -> Option<(Style, Style)> {
+    indicator_styles_with_palette(marker, &theme::default_palette())
+}
+
+pub(crate) fn indicator_styles_with_palette(
+    marker: &str,
+    palette: &ThemePalette,
+) -> Option<(Style, Style)> {
     if let Some(kind) = status_kind_from_symbol(marker) {
-        return Some((status_style(kind), status_rest_style(kind)));
+        return Some((
+            status_style_with_palette(kind, palette),
+            status_rest_style_with_palette(kind, palette),
+        ));
     }
     let focus_kind = match marker {
         "◉" => Some(FocusKind::Current),
         "▸" => Some(FocusKind::Selected),
         _ => None,
     }?;
-    Some((focus_style(focus_kind), Style::default().fg(ink())))
+    Some((
+        focus_style_with_palette(focus_kind, palette),
+        Style::default().fg(palette.text_primary),
+    ))
 }
 
 pub(crate) fn render_marker_symbol(marker: &str) -> &str {
