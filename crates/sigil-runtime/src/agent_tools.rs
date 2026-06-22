@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
@@ -127,7 +127,13 @@ pub struct AgentToolRuntime {
     root_config: RootConfig,
     base_registry: ToolRegistry,
     provider_factory: Arc<dyn AgentToolProviderFactory>,
-    background_runs: BTreeMap<AgentThreadId, BackgroundChatAgentHandle>,
+    background_runs: AgentToolBackgroundRuns,
+}
+
+/// Shared owner for detached chat-agent runs that can outlive one parent model turn.
+#[derive(Clone, Default)]
+pub struct AgentToolBackgroundRuns {
+    handles: Arc<Mutex<BTreeMap<AgentThreadId, BackgroundChatAgentHandle>>>,
 }
 
 /// Result of a user-directed foreground agent invocation.
@@ -184,6 +190,67 @@ struct BackgroundChatAgentResult {
     status: TaskChildSessionStatus,
 }
 
+impl AgentToolBackgroundRuns {
+    #[must_use]
+    pub fn has_finished(&self) -> bool {
+        self.handles
+            .lock()
+            .map(|handles| {
+                handles
+                    .values()
+                    .any(|background| background.handle.is_finished())
+            })
+            .unwrap_or(false)
+    }
+
+    fn insert(&self, thread_id: AgentThreadId, handle: BackgroundChatAgentHandle) -> Result<()> {
+        let mut handles = self
+            .handles
+            .lock()
+            .map_err(|_| anyhow!("agent background run lock poisoned"))?;
+        handles.insert(thread_id, handle);
+        Ok(())
+    }
+
+    fn is_running(&self, thread_id: &AgentThreadId) -> bool {
+        self.handles
+            .lock()
+            .map(|handles| {
+                handles
+                    .get(thread_id)
+                    .is_some_and(|background| !background.handle.is_finished())
+            })
+            .unwrap_or(false)
+    }
+
+    fn remove_if_finished(&self, thread_id: &AgentThreadId) -> Option<BackgroundChatAgentHandle> {
+        let mut handles = self.handles.lock().ok()?;
+        if handles
+            .get(thread_id)
+            .is_some_and(|background| background.handle.is_finished())
+        {
+            return handles.remove(thread_id);
+        }
+        None
+    }
+
+    fn take_finished(&self) -> Vec<BackgroundChatAgentHandle> {
+        let Ok(mut handles) = self.handles.lock() else {
+            return Vec::new();
+        };
+        let finished = handles
+            .iter()
+            .filter_map(|(thread_id, background)| {
+                background.handle.is_finished().then_some(thread_id.clone())
+            })
+            .collect::<Vec<_>>();
+        finished
+            .into_iter()
+            .filter_map(|thread_id| handles.remove(&thread_id))
+            .collect()
+    }
+}
+
 impl AgentToolRuntime {
     #[must_use]
     pub fn new(
@@ -196,7 +263,7 @@ impl AgentToolRuntime {
             root_config,
             base_registry,
             provider_factory: Arc::new(DefaultAgentToolProviderFactory),
-            background_runs: BTreeMap::new(),
+            background_runs: AgentToolBackgroundRuns::default(),
         }
     }
 
@@ -212,8 +279,30 @@ impl AgentToolRuntime {
             root_config,
             base_registry,
             provider_factory,
-            background_runs: BTreeMap::new(),
+            background_runs: AgentToolBackgroundRuns::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_background_runs(mut self, background_runs: AgentToolBackgroundRuns) -> Self {
+        self.background_runs = background_runs;
+        self
+    }
+
+    pub async fn collect_finished_background_runs(
+        &mut self,
+        session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+    ) -> Result<Vec<AgentThreadId>> {
+        let finished = self.background_runs.take_finished();
+        let mut thread_ids = Vec::new();
+        for background in finished {
+            thread_ids.push(
+                self.record_finished_background_run(session, handler, background)
+                    .await?,
+            );
+        }
+        Ok(thread_ids)
     }
 
     fn resolve_spawn_profile(&self, profile_id: &AgentProfileId) -> Result<ResolvedAgentProfile> {
@@ -345,6 +434,8 @@ impl AgentToolDelegate for AgentToolRuntime {
         let Some(kind) = AgentToolKind::from_name(&call.name) else {
             return Ok(None);
         };
+        self.collect_finished_background_runs(session, handler)
+            .await?;
         let args = parse_tool_args(call)?;
         let result = match kind {
             AgentToolKind::Spawn => {
@@ -555,13 +646,26 @@ impl AgentToolRuntime {
                 child_options,
                 mailbox_rx,
             ));
-            self.background_runs.insert(
+            if let Err(error) = self.background_runs.insert(
                 thread_id.clone(),
                 BackgroundChatAgentHandle {
                     thread: BackgroundChatAgentThreadRecord::from_thread(&child_thread),
                     handle,
                 },
-            );
+            ) {
+                let _ = self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &child_thread,
+                    format!("{error:#}"),
+                );
+                return ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    ToolErrorKind::Internal,
+                    error.to_string(),
+                );
+            }
             let projection = session.agent_thread_state_projection();
             if let Some(thread) = projection.threads.get(&thread_id) {
                 return agent_status_tool_result(call, thread);
@@ -727,13 +831,26 @@ impl AgentToolRuntime {
                     "agent @{} moved to background",
                     child_thread.profile_id.as_str()
                 )));
-                self.background_runs.insert(
+                if let Err(error) = self.background_runs.insert(
                     thread_id.clone(),
                     BackgroundChatAgentHandle {
                         thread: thread_record,
                         handle,
                     },
-                );
+                ) {
+                    let _ = self.supervisor.record_chat_child_failure(
+                        session,
+                        handler,
+                        &child_thread,
+                        format!("{error:#}"),
+                    );
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::Internal,
+                        error.to_string(),
+                    );
+                }
                 let projection = session.agent_thread_state_projection();
                 if let Some(thread) = projection.threads.get(&thread_id) {
                     return agent_status_tool_result(call, thread);
@@ -1010,81 +1127,23 @@ impl AgentToolRuntime {
                 );
             }
         };
-        if let Some(background) = self.background_runs.get(&thread_id)
-            && !background.handle.is_finished()
-        {
+        if self.background_runs.is_running(&thread_id) {
             let projection = session.agent_thread_state_projection();
             if let Some(thread) = projection.threads.get(&thread_id) {
                 return agent_status_tool_result(call, thread);
             }
         }
-        if self
-            .background_runs
-            .get(&thread_id)
-            .is_some_and(|background| background.handle.is_finished())
-            && let Some(background) = self.background_runs.remove(&thread_id)
+        if let Some(background) = self.background_runs.remove_if_finished(&thread_id)
+            && let Err(error) = self
+                .record_finished_background_run(session, handler, background)
+                .await
         {
-            let thread = background.thread.to_runtime_thread();
-            match background.handle.await {
-                Ok(Ok(output)) => {
-                    let budget_warning = self
-                        .supervisor
-                        .validate_usage_budget(&thread.budget_scope_id, &output.usage)
-                        .err()
-                        .map(|error| format!("{error:#}"));
-                    if let Err(error) = self.supervisor.record_chat_child_result(
-                        session,
-                        handler,
-                        &thread,
-                        output.status,
-                        &output.final_text,
-                        &output.outcome,
-                        Some(output.usage),
-                    ) {
-                        return ToolResult::error(
-                            call.id.clone(),
-                            call.name.clone(),
-                            ToolErrorKind::Internal,
-                            error.to_string(),
-                        );
-                    }
-                    if let Some(warning) = budget_warning {
-                        let _ = handler.handle(RunEvent::Notice(format!(
-                            "agent budget warning after child completion: {warning}"
-                        )));
-                    }
-                }
-                Ok(Err(error)) => {
-                    let reason = format!("{error:#}");
-                    let _ = self.supervisor.record_chat_child_failure(
-                        session,
-                        handler,
-                        &thread,
-                        reason.clone(),
-                    );
-                    return ToolResult::error(
-                        call.id.clone(),
-                        call.name.clone(),
-                        ToolErrorKind::Internal,
-                        format!("background child agent failed: {reason}"),
-                    );
-                }
-                Err(error) => {
-                    let reason = format!("background child agent join failed: {error}");
-                    let _ = self.supervisor.record_chat_child_failure(
-                        session,
-                        handler,
-                        &thread,
-                        reason.clone(),
-                    );
-                    return ToolResult::error(
-                        call.id.clone(),
-                        call.name.clone(),
-                        ToolErrorKind::Internal,
-                        reason,
-                    );
-                }
-            }
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
         }
         let projection = session.agent_thread_state_projection();
         let Some(thread) = projection.threads.get(&thread_id) else {
@@ -1096,6 +1155,70 @@ impl AgentToolRuntime {
             );
         };
         agent_status_tool_result(call, thread)
+    }
+
+    async fn record_finished_background_run(
+        &self,
+        session: &mut Session,
+        handler: &mut (dyn EventHandler + Send),
+        background: BackgroundChatAgentHandle,
+    ) -> Result<AgentThreadId> {
+        let thread = background.thread.to_runtime_thread();
+        let thread_id = thread.thread_id.clone();
+        match background.handle.await {
+            Ok(Ok(output)) => {
+                let budget_warning = self
+                    .supervisor
+                    .validate_usage_budget(&thread.budget_scope_id, &output.usage)
+                    .err()
+                    .map(|error| format!("{error:#}"));
+                self.supervisor.record_chat_child_result(
+                    session,
+                    handler,
+                    &thread,
+                    output.status,
+                    &output.final_text,
+                    &output.outcome,
+                    Some(output.usage),
+                )?;
+                if let Some(warning) = budget_warning {
+                    let _ = handler.handle(RunEvent::Notice(format!(
+                        "agent budget warning after child completion: {warning}"
+                    )));
+                }
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent {} finished",
+                    thread_id.as_str()
+                )));
+            }
+            Ok(Err(error)) => {
+                let reason = format!("{error:#}");
+                self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &thread,
+                    reason.clone(),
+                )?;
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent {} failed: {reason}",
+                    thread_id.as_str()
+                )));
+            }
+            Err(error) => {
+                let reason = format!("background child agent join failed: {error}");
+                self.supervisor.record_chat_child_failure(
+                    session,
+                    handler,
+                    &thread,
+                    reason.clone(),
+                )?;
+                let _ = handler.handle(RunEvent::Notice(format!(
+                    "agent {} failed: {reason}",
+                    thread_id.as_str()
+                )));
+            }
+        }
+        Ok(thread_id)
     }
 
     fn read_agent_result(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {

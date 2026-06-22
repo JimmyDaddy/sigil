@@ -95,6 +95,7 @@ pub(super) fn run_worker_loop<P>(
                 return;
             }
         };
+    let background_agent_runs = sigil_runtime::AgentToolBackgroundRuns::default();
 
     loop {
         while let Ok(event) = mcp_event_rx.try_recv() {
@@ -261,6 +262,18 @@ pub(super) fn run_worker_loop<P>(
             }
         }
 
+        if active_run.is_none() {
+            collect_finished_background_agent_runs(
+                &runtime,
+                &background_agent_runs,
+                &agent_supervisor,
+                &root_config,
+                agent.tool_registry(),
+                &mut current_session,
+                &message_tx,
+            );
+        }
+
         match command_rx.recv_timeout(Duration::from_millis(50)) {
             Ok(
                 command @ (WorkerCommand::SubmitPrompt { .. }
@@ -316,7 +329,8 @@ pub(super) fn run_worker_loop<P>(
                     agent_supervisor.clone(),
                     root_config.clone(),
                     agent.tool_registry().clone(),
-                );
+                )
+                .with_background_runs(background_agent_runs.clone());
                 let plan_tools = plan_mode.then(|| {
                     sigil_runtime::build_plan_prompt_tool_registry(
                         agent.tool_registry(),
@@ -422,7 +436,8 @@ pub(super) fn run_worker_loop<P>(
                     agent_supervisor.clone(),
                     root_config.clone(),
                     agent.tool_registry().clone(),
-                );
+                )
+                .with_background_runs(background_agent_runs.clone());
                 let options = options.clone();
                 let task_result_tx = task_result_tx.clone();
                 let run_id = next_run_id;
@@ -2101,6 +2116,37 @@ fn manual_agent_invocation_result(
     AgentRunResult {
         final_text,
         tool_calls: 0,
+    }
+}
+
+fn collect_finished_background_agent_runs(
+    runtime: &tokio::runtime::Runtime,
+    background_runs: &sigil_runtime::AgentToolBackgroundRuns,
+    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    root_config: &RootConfig,
+    base_registry: &ToolRegistry,
+    current_session: &mut Option<Session>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+) {
+    if !background_runs.has_finished() {
+        return;
+    }
+    let Some(session) = current_session.as_mut() else {
+        return;
+    };
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
+    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
+        agent_supervisor.clone(),
+        root_config.clone(),
+        base_registry.clone(),
+    )
+    .with_background_runs(background_runs.clone());
+    if let Err(error) =
+        runtime.block_on(agent_delegate.collect_finished_background_runs(session, &mut handler))
+    {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "agent background collection failed: {error:#}"
+        )));
     }
 }
 

@@ -22,10 +22,11 @@ use sigil_kernel::{
 };
 
 use super::{
-    AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolProviderFactory,
-    AgentToolRuntime, CLOSE_AGENT_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, READ_AGENT_RESULT_TOOL_NAME,
-    SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, chat_agent_thread_id_for_call,
-    register_agent_tools, register_agent_tools_with_workspace_and_entries,
+    AgentBudgetPolicy, AgentProfileRegistry, AgentSupervisor, AgentToolBackgroundRuns,
+    AgentToolProviderFactory, AgentToolRuntime, CLOSE_AGENT_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME,
+    READ_AGENT_RESULT_TOOL_NAME, SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME,
+    chat_agent_thread_id_for_call, register_agent_tools,
+    register_agent_tools_with_workspace_and_entries,
 };
 
 #[derive(Default)]
@@ -1326,6 +1327,112 @@ async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
         thread.result.as_ref().map(|result| result.summary.as_str()),
         Some("initial background done")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn moved_to_background_agent_can_be_collected_by_later_runtime() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let request_supervisor = supervisor.clone();
+    let background_runs = AgentToolBackgroundRuns::default();
+    let observed_followup = Arc::new(Mutex::new(false));
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor.clone(),
+        config.clone(),
+        registry.clone(),
+        Arc::new(DelayedFollowupProviderFactory { observed_followup }),
+    )
+    .with_background_runs(background_runs.clone());
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let thread_id =
+        chat_agent_thread_id_for_call("call-shared-background", &AgentProfileId::new("explore")?)?;
+    let spawn_call = ToolCall {
+        id: "call-shared-background".to_owned(),
+        name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({
+            "profile_id": "explore",
+            "objective": "inspect",
+            "prompt": "inspect",
+            "mode": "join_before_final"
+        })
+        .to_string(),
+    };
+
+    let request_background = async {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        request_supervisor.request_foreground_background()
+    };
+    let options = run_options(std::env::temp_dir());
+    let (spawn, requested_thread_id) = tokio::join!(
+        runtime.handle_agent_tool_call(
+            &mut session,
+            &spawn_call,
+            &options,
+            &mut handler,
+            &mut approval,
+        ),
+        request_background,
+    );
+    let requested_thread_id = requested_thread_id.map_err(anyhow::Error::msg)?;
+    assert_eq!(requested_thread_id, thread_id);
+    let spawn = spawn?.expect("spawn handled");
+    assert!(!spawn.is_error());
+    assert_eq!(spawn.metadata.details["status"], "running");
+    drop(runtime);
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(background_runs.has_finished());
+    let mut collector = AgentToolRuntime::with_provider_factory(
+        supervisor.clone(),
+        config.clone(),
+        registry.clone(),
+        Arc::new(StaticProviderFactory),
+    )
+    .with_background_runs(background_runs);
+    let collected = collector
+        .collect_finished_background_runs(&mut session, &mut handler)
+        .await?;
+    assert_eq!(collected, vec![thread_id.clone()]);
+
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("background thread should be projected");
+    assert_eq!(thread.status, AgentThreadStatus::Completed);
+    assert_eq!(
+        thread.result.as_ref().map(|result| result.summary.as_str()),
+        Some("initial background done")
+    );
+    assert!(supervisor.active_profile_ids().is_empty());
+
+    let second = collector
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-after-collect".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "explore",
+                    "objective": "inspect again",
+                    "prompt": "inspect again",
+                    "mode": "join_before_final"
+                })
+                .to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("second spawn handled");
+    assert!(!second.is_error());
+    assert!(!second.content.contains("max_parallel_readonly"));
     Ok(())
 }
 

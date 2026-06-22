@@ -1030,7 +1030,6 @@ impl AppState {
             }
             KeyCode::Enter if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
                 self.activate_selected_agent_view();
-                self.blur_composer_agent_panel();
             }
             KeyCode::Up
                 if self.active_pane == PaneFocus::Composer

@@ -798,7 +798,7 @@ fn composer_down_focuses_agent_panel_and_enter_switches_agent() -> Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
     assert_eq!(app.active_agent_label(), "仓库审查");
-    assert!(!app.is_composer_agent_panel_focused());
+    assert!(app.is_composer_agent_panel_focused());
     Ok(())
 }
 
