@@ -157,7 +157,7 @@ accent_primary = "#91B6AA"
 markdown_code_bg = "#1C2129"
 ```
 
-`theme` 控制 TUI 配色。内置值包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。`/config` 面板提供 `Appearance` 区块；在 `Theme` 行按 `Enter` 会循环切换内置主题并立即预览草稿效果，`Ctrl-S` 会把选中主题保存到 `sigil.toml`。
+`theme` 控制 TUI 配色。内置值包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。`/config` 面板提供 `Appearance` 区块；在 `Theme` 行按 `Enter` 会循环切换内置主题并立即预览草稿 palette，包括 config 背景、边框、文字、选中行、状态和提示颜色。`Ctrl-S` 会把选中主题保存到 `sigil.toml`。
 
 `[appearance.colors]` 可以用 `#RRGGBB` 覆盖稳定语义 color token。未知 token 或非十六进制值会让配置加载失败。覆盖只影响 TUI 渲染，不写入 session history、approval record、tool payload 或 provider 可见上下文。
 

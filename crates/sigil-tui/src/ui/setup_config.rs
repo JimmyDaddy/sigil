@@ -13,7 +13,10 @@ use super::{
     StatusKind,
     modal::render_modal,
     shell::render_status,
-    status_indicator::{FocusKind, StatusIndicator, focus_style, focus_symbol, status_rest_style},
+    status_indicator::{
+        FocusKind, StatusIndicator, focus_style_with_palette, focus_symbol,
+        status_rest_style_with_palette,
+    },
     theme,
 };
 
@@ -76,7 +79,8 @@ pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
 
 pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
     let current_theme = theme::resolve_for_app(app);
-    let panel_bg = current_theme.palette.config_bg;
+    let palette = &current_theme.palette;
+    let panel_bg = palette.config_bg;
     frame.render_widget(
         Block::default().style(Style::default().bg(panel_bg)),
         frame.area(),
@@ -87,7 +91,7 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
         .split(frame.area());
     let header_area = centered_config_area(outer[0]);
     let content_area = centered_config_area(outer[1]);
-    render_config_header(frame, header_area, app, panel_bg);
+    render_config_header(frame, header_area, app, palette);
 
     let (mut main_lines, context_lines) = split_config_context_lines(app.config_detail_lines());
     let show_context_panel = content_area.width >= CONFIG_DETAIL_SPLIT_MIN_WIDTH;
@@ -118,10 +122,10 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
                 Constraint::Length(CONFIG_DETAIL_PANEL_WIDTH),
             ])
             .split(panel_area);
-        render_config_panel(frame, content[0], main_lines, panel_bg);
-        render_config_context_panel(frame, content[2], app, context_lines, panel_bg);
+        render_config_panel(frame, content[0], main_lines, palette);
+        render_config_context_panel(frame, content[2], app, context_lines, palette);
     } else {
-        render_config_panel(frame, panel_area, main_lines, panel_bg);
+        render_config_panel(frame, panel_area, main_lines, palette);
     }
     if footer_height > 0 {
         let footer_area = Rect {
@@ -129,7 +133,7 @@ pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
             height: footer_height,
             ..content_area
         };
-        render_config_footer(frame, footer_area, app, panel_bg);
+        render_config_footer(frame, footer_area, app, palette);
     }
     render_modal(frame, app);
 }
@@ -144,8 +148,14 @@ pub(super) fn centered_config_area(area: Rect) -> Rect {
     Rect { x, width, ..area }
 }
 
-fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg: Color) {
+fn render_config_header(
+    frame: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    palette: &theme::ThemePalette,
+) {
     let content_width = area.width as usize;
+    let panel_bg = palette.config_bg;
     let section = app.config_section_title().unwrap_or("Config");
     let (state, state_kind) = if app.config_is_dirty() {
         ("unsaved", StatusKind::Warning)
@@ -154,13 +164,13 @@ fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
     };
     let state_style = if app.config_is_dirty() {
         Style::default()
-            .fg(Color::Black)
-            .bg(theme::config_warning())
+            .fg(palette.text_inverse)
+            .bg(palette.config_warning)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-            .fg(Color::Black)
-            .bg(theme::config_primary())
+            .fg(palette.text_inverse)
+            .bg(palette.config_primary)
             .add_modifier(Modifier::BOLD)
     };
     let field = app.config_selected_field_label().unwrap_or("summary");
@@ -174,8 +184,8 @@ fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
         &mut remaining,
         title,
         Style::default()
-            .fg(Color::Black)
-            .bg(theme::config_primary())
+            .fg(palette.text_inverse)
+            .bg(palette.config_primary)
             .add_modifier(Modifier::BOLD),
     );
     push_config_header_gap(&mut summary_spans, &mut remaining);
@@ -184,7 +194,7 @@ fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
         &mut remaining,
         section,
         Style::default()
-            .fg(theme::config_detail())
+            .fg(palette.config_detail)
             .add_modifier(Modifier::BOLD),
     );
     push_config_header_gap(&mut summary_spans, &mut remaining);
@@ -197,7 +207,13 @@ fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
         ),
         state_style,
     );
-    push_config_header_pair(&mut summary_spans, &mut remaining, "field", field);
+    push_config_header_pair_with_palette(
+        &mut summary_spans,
+        &mut remaining,
+        "field",
+        field,
+        palette,
+    );
 
     let notice_min_width = "hint ".chars().count() + 12;
     let file_value_width = content_width
@@ -208,11 +224,15 @@ fn render_config_header(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
         "file ".chars().count() + file_value.chars().count() + "  ".chars().count(),
     );
     let mut file_spans = vec![
-        Span::styled("file ", Style::default().fg(theme::dim())),
-        Span::styled(file_value, Style::default().fg(theme::muted())),
+        Span::styled("file ", Style::default().fg(palette.text_muted)),
+        Span::styled(file_value, Style::default().fg(palette.text_secondary)),
         Span::raw("  "),
     ];
-    file_spans.extend(render_config_header_notice(notice, notice_width));
+    file_spans.extend(render_config_header_notice_with_palette(
+        notice,
+        notice_width,
+        palette,
+    ));
     let lines = vec![Line::from(summary_spans), Line::from(file_spans)];
     let header = Paragraph::new(Text::from(lines))
         .style(Style::default().bg(panel_bg))
@@ -228,24 +248,33 @@ fn config_file_label(app: &AppState) -> String {
         .to_owned()
 }
 
+#[cfg(test)]
 fn render_config_header_notice(notice: &str, width: usize) -> Vec<Span<'static>> {
+    render_config_header_notice_with_palette(notice, width, &theme::default_palette())
+}
+
+fn render_config_header_notice_with_palette(
+    notice: &str,
+    width: usize,
+    palette: &theme::ThemePalette,
+) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
     }
     let (marker, value_style) = if notice == CONFIG_HEADER_NOTICE {
-        ("hint ", Style::default().fg(theme::muted()))
+        ("hint ", Style::default().fg(palette.text_secondary))
     } else {
         (
             "note ",
             Style::default()
-                .fg(theme::config_warning())
+                .fg(palette.config_warning)
                 .add_modifier(Modifier::BOLD),
         )
     };
     let marker_width = marker.chars().count();
     let marker_style = Style::default()
-        .fg(theme::dim())
-        .bg(theme::config_tab_bg())
+        .fg(palette.text_muted)
+        .bg(palette.config_tab_bg)
         .add_modifier(Modifier::BOLD);
     if width <= marker_width {
         return vec![Span::styled(fit_config_value(marker, width), marker_style)];
@@ -263,22 +292,48 @@ fn push_config_header_gap(spans: &mut Vec<Span<'static>>, remaining: &mut usize)
     push_config_header_span(spans, remaining, "  ", Style::default())
 }
 
+#[cfg(test)]
 fn push_config_header_pair(
     spans: &mut Vec<Span<'static>>,
     remaining: &mut usize,
     label: &str,
     value: &str,
 ) {
+    push_config_header_pair_with_palette(spans, remaining, label, value, &theme::default_palette());
+}
+
+fn push_config_header_pair_with_palette(
+    spans: &mut Vec<Span<'static>>,
+    remaining: &mut usize,
+    label: &str,
+    value: &str,
+    palette: &theme::ThemePalette,
+) {
     if !push_config_header_gap(spans, remaining) {
         return;
     }
     let label = format!("{label}: ");
     if *remaining <= label.chars().count() {
-        push_config_header_span(spans, remaining, &label, Style::default().fg(theme::dim()));
+        push_config_header_span(
+            spans,
+            remaining,
+            &label,
+            Style::default().fg(palette.text_muted),
+        );
         return;
     }
-    push_config_header_span(spans, remaining, &label, Style::default().fg(theme::dim()));
-    push_config_header_span(spans, remaining, value, Style::default().fg(theme::ink()));
+    push_config_header_span(
+        spans,
+        remaining,
+        &label,
+        Style::default().fg(palette.text_muted),
+    );
+    push_config_header_span(
+        spans,
+        remaining,
+        value,
+        Style::default().fg(palette.text_primary),
+    );
 }
 
 fn push_config_header_span(
@@ -317,7 +372,12 @@ pub(super) fn top_aligned_config_area(area: Rect, height: u16) -> Rect {
     }
 }
 
-fn render_config_panel(frame: &mut Frame, area: Rect, lines: Vec<String>, panel_bg: Color) {
+fn render_config_panel(
+    frame: &mut Frame,
+    area: Rect,
+    lines: Vec<String>,
+    palette: &theme::ThemePalette,
+) {
     let details_index = lines.iter().position(|line| line == "[details]");
     let selected_line_indexes = lines
         .iter()
@@ -326,7 +386,7 @@ fn render_config_panel(frame: &mut Frame, area: Rect, lines: Vec<String>, panel_
             (line.starts_with("> ") || line.starts_with("selected:")).then_some(index)
         })
         .collect::<Vec<_>>();
-    let block = config_block("Config", theme::config_primary(), panel_bg);
+    let block = config_block("Config", palette.config_primary, palette);
     let content_area = block.inner(area);
     let content_width = content_area.width as usize;
     let detail = lines
@@ -334,11 +394,16 @@ fn render_config_panel(frame: &mut Frame, area: Rect, lines: Vec<String>, panel_
         .enumerate()
         .map(|(index, line)| {
             if details_index == Some(index) {
-                render_config_subsection_line(&line, theme::config_detail(), content_width)
+                render_config_subsection_line_with_palette(
+                    &line,
+                    palette.config_detail,
+                    content_width,
+                    palette,
+                )
             } else if details_index.is_some_and(|details_index| index > details_index) {
-                render_config_context_line(&line, content_width)
+                render_config_context_line_with_palette(&line, content_width, palette)
             } else {
-                render_config_line(index, &line, content_width)
+                render_config_line_with_palette(index, &line, content_width, palette)
             }
         })
         .collect::<Vec<_>>();
@@ -351,8 +416,15 @@ fn render_config_panel(frame: &mut Frame, area: Rect, lines: Vec<String>, panel_
         detail.len(),
         content_area.height,
         scroll_offset,
+        palette,
     );
-    render_config_selected_row_bgs(frame, content_area, &selected_line_indexes, scroll_offset);
+    render_config_selected_row_bgs(
+        frame,
+        content_area,
+        &selected_line_indexes,
+        scroll_offset,
+        palette,
+    );
 
     let widget =
         Paragraph::new(Text::from(detail)).scroll((scroll_offset.min(u16::MAX as usize) as u16, 0));
@@ -365,6 +437,7 @@ fn render_config_selected_row_bgs(
     content_area: Rect,
     selected_line_indexes: &[usize],
     scroll_offset: usize,
+    palette: &theme::ThemePalette,
 ) {
     for selected_line_index in selected_line_indexes.iter().copied() {
         let Some(visible_index) = selected_line_index.checked_sub(scroll_offset) else {
@@ -380,7 +453,7 @@ fn render_config_selected_row_bgs(
             ..content_area
         };
         frame.render_widget(
-            Block::default().style(Style::default().bg(theme::config_selected_bg())),
+            Block::default().style(Style::default().bg(palette.config_selected_bg)),
             row_area,
         );
     }
@@ -391,7 +464,7 @@ fn render_config_context_panel(
     area: Rect,
     app: &AppState,
     context_lines: Vec<String>,
-    panel_bg: Color,
+    palette: &theme::ThemePalette,
 ) {
     let lines = if context_lines.is_empty() {
         vec![
@@ -408,12 +481,12 @@ fn render_config_context_panel(
         .enumerate()
         .filter_map(|(index, line)| line.starts_with("selected:").then_some(index))
         .collect::<Vec<_>>();
-    let block = config_block("Details", theme::config_detail(), panel_bg);
+    let block = config_block("Details", palette.config_detail, palette);
     let content_area = block.inner(area);
     let content_width = content_area.width as usize;
     let detail = lines
         .into_iter()
-        .map(|line| render_config_context_line(&line, content_width))
+        .map(|line| render_config_context_line_with_palette(&line, content_width, palette))
         .collect::<Vec<_>>();
     let scroll_offset =
         config_scroll_offset(detail.len(), content_area.height, &selected_line_indexes);
@@ -424,8 +497,15 @@ fn render_config_context_panel(
         detail.len(),
         content_area.height,
         scroll_offset,
+        palette,
     );
-    render_config_selected_row_bgs(frame, content_area, &selected_line_indexes, scroll_offset);
+    render_config_selected_row_bgs(
+        frame,
+        content_area,
+        &selected_line_indexes,
+        scroll_offset,
+        palette,
+    );
 
     let widget =
         Paragraph::new(Text::from(detail)).scroll((scroll_offset.min(u16::MAX as usize) as u16, 0));
@@ -459,6 +539,7 @@ fn render_config_scroll_markers(
     line_count: usize,
     viewport_height: u16,
     scroll_offset: usize,
+    palette: &theme::ThemePalette,
 ) {
     let viewport_height = viewport_height as usize;
     if area.width <= CONFIG_SCROLL_MARKER_WIDTH + 2 || line_count <= viewport_height {
@@ -472,7 +553,7 @@ fn render_config_scroll_markers(
 
     let marker_x = area.x + area.width.saturating_sub(CONFIG_SCROLL_MARKER_WIDTH + 1);
     if top_hidden {
-        render_config_scroll_marker(frame, marker_x, area.y, " more ^ ");
+        render_config_scroll_marker(frame, marker_x, area.y, " more ^ ", palette);
     }
     if bottom_hidden {
         render_config_scroll_marker(
@@ -480,16 +561,23 @@ fn render_config_scroll_markers(
             marker_x,
             area.y + area.height.saturating_sub(1),
             " more v ",
+            palette,
         );
     }
 }
 
-fn render_config_scroll_marker(frame: &mut Frame, x: u16, y: u16, text: &'static str) {
+fn render_config_scroll_marker(
+    frame: &mut Frame,
+    x: u16,
+    y: u16,
+    text: &'static str,
+    palette: &theme::ThemePalette,
+) {
     let marker = Paragraph::new(Line::from(vec![Span::styled(
         text,
         Style::default()
-            .fg(Color::Black)
-            .bg(theme::config_warning())
+            .fg(palette.text_inverse)
+            .bg(palette.config_warning)
             .add_modifier(Modifier::BOLD),
     )]));
     frame.render_widget(
@@ -503,19 +591,23 @@ fn render_config_scroll_marker(frame: &mut Frame, x: u16, y: u16, text: &'static
     );
 }
 
-fn config_block(title: &'static str, accent: Color, panel_bg: Color) -> Block<'static> {
+fn config_block(
+    title: &'static str,
+    accent: Color,
+    palette: &theme::ThemePalette,
+) -> Block<'static> {
     Block::default()
         .title(title)
         .title_style(
             Style::default()
-                .fg(Color::Black)
+                .fg(palette.text_inverse)
                 .bg(accent)
                 .add_modifier(Modifier::BOLD),
         )
         .border_type(BorderType::Rounded)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::config_border()))
-        .style(Style::default().bg(panel_bg))
+        .border_style(Style::default().fg(palette.config_border))
+        .style(Style::default().bg(palette.config_bg))
 }
 
 pub(super) fn split_config_context_lines(lines: Vec<String>) -> (Vec<String>, Vec<String>) {
@@ -531,7 +623,12 @@ pub(super) fn split_config_context_lines(lines: Vec<String>) -> (Vec<String>, Ve
     (main_lines, context_lines)
 }
 
-fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg: Color) {
+fn render_config_footer(
+    frame: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    palette: &theme::ThemePalette,
+) {
     let selected = app.config_selected_footer_action_label();
     let compact = area.width < CONFIG_FOOTER_COMPACT_WIDTH;
     let action_labels = app.config_footer_action_labels();
@@ -546,8 +643,9 @@ fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
         action_spans.push(footer_action_span(
             label,
             is_selected,
-            footer_action_accent(label),
+            footer_action_accent_with_palette(label, palette),
             compact,
+            palette,
         ));
         actions_width += footer_action_width(label, is_selected, compact);
     }
@@ -565,14 +663,14 @@ fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
         .saturating_sub(gap_width);
     let status_style = if app.config_close_guard_armed() {
         Style::default()
-            .fg(theme::config_danger())
+            .fg(palette.config_danger)
             .add_modifier(Modifier::BOLD)
     } else if app.config_is_dirty() {
         Style::default()
-            .fg(theme::config_warning())
+            .fg(palette.config_warning)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::muted())
+        Style::default().fg(palette.text_secondary)
     };
     let gap = if compact {
         " | ".to_owned()
@@ -581,25 +679,31 @@ fn render_config_footer(frame: &mut Frame, area: Rect, app: &AppState, panel_bg:
     };
     let mut spans = action_spans;
     spans.push(Span::raw(gap));
-    spans.extend(footer_status_spans(
+    spans.extend(footer_status_spans_with_palette(
         &app.config_footer_hint(),
         status_width,
         status_style,
+        palette,
     ));
     let line = Line::from(spans);
     let footer = Paragraph::new(Text::from(vec![line]))
-        .style(Style::default().bg(panel_bg))
+        .style(Style::default().bg(palette.config_bg))
         .wrap(Wrap { trim: false });
     frame.render_widget(footer, area);
 }
 
+#[cfg(test)]
 fn footer_action_accent(label: &str) -> Color {
+    footer_action_accent_with_palette(label, &theme::default_palette())
+}
+
+fn footer_action_accent_with_palette(label: &str, palette: &theme::ThemePalette) -> Color {
     match label {
-        "save" => theme::config_primary(),
-        "save+close" => theme::config_warning(),
-        "activate" => theme::config_detail(),
-        "close" => theme::config_danger(),
-        _ => theme::config_primary(),
+        "save" => palette.config_primary,
+        "save+close" => palette.config_warning,
+        "activate" => palette.config_detail,
+        "close" => palette.config_danger,
+        _ => palette.config_primary,
     }
 }
 
@@ -608,17 +712,18 @@ fn footer_action_span(
     selected: bool,
     accent: Color,
     compact: bool,
+    palette: &theme::ThemePalette,
 ) -> Span<'static> {
     let text = footer_action_text(label, selected, compact);
     let style = if selected {
         Style::default()
-            .fg(Color::Black)
+            .fg(palette.text_inverse)
             .bg(accent)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
             .fg(accent)
-            .bg(theme::config_tab_bg())
+            .bg(palette.config_tab_bg)
             .add_modifier(Modifier::BOLD)
     };
     Span::styled(text, style)
@@ -645,7 +750,17 @@ fn footer_status_width(value: &str) -> usize {
     CONFIG_STATUS_MARKER_WIDTH + footer_status_value(value).chars().count()
 }
 
+#[cfg(test)]
 fn footer_status_spans(value: &str, width: usize, value_style: Style) -> Vec<Span<'static>> {
+    footer_status_spans_with_palette(value, width, value_style, &theme::default_palette())
+}
+
+fn footer_status_spans_with_palette(
+    value: &str,
+    width: usize,
+    value_style: Style,
+    palette: &theme::ThemePalette,
+) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
     }
@@ -653,16 +768,19 @@ fn footer_status_spans(value: &str, width: usize, value_style: Style) -> Vec<Spa
     let kind = config_status_kind_for_value("status", status_value).unwrap_or(StatusKind::Unknown);
     let indicator = StatusIndicator::static_kind(kind);
     if width == 1 {
-        return vec![indicator.span()];
+        return vec![indicator.span_with_palette(palette)];
     }
     let value = fit_config_value(
         status_value,
         width.saturating_sub(CONFIG_STATUS_MARKER_WIDTH),
     );
     vec![
-        indicator.span(),
+        indicator.span_with_palette(palette),
         Span::raw(" "),
-        Span::styled(value, config_status_value_style(kind, value_style)),
+        Span::styled(
+            value,
+            config_status_value_style_with_palette(kind, value_style, palette),
+        ),
     ]
 }
 
@@ -719,18 +837,39 @@ fn config_status_key(value: &str) -> Option<String> {
     Some(first.to_ascii_lowercase().replace('-', "_"))
 }
 
-fn config_status_value_style(kind: StatusKind, fallback: Style) -> Style {
+fn config_status_value_style_with_palette(
+    kind: StatusKind,
+    fallback: Style,
+    palette: &theme::ThemePalette,
+) -> Style {
     match kind {
         StatusKind::Unknown | StatusKind::Pending => fallback,
-        _ => status_rest_style(kind),
+        _ => status_rest_style_with_palette(kind, palette),
     }
 }
 
+#[cfg(test)]
 fn config_status_value_spans(
     label: &str,
     value: &str,
     width: usize,
     fallback_style: Style,
+) -> Vec<Span<'static>> {
+    config_status_value_spans_with_palette(
+        label,
+        value,
+        width,
+        fallback_style,
+        &theme::default_palette(),
+    )
+}
+
+fn config_status_value_spans_with_palette(
+    label: &str,
+    value: &str,
+    width: usize,
+    fallback_style: Style,
+    palette: &theme::ThemePalette,
 ) -> Vec<Span<'static>> {
     if width == 0 {
         return Vec::new();
@@ -740,36 +879,61 @@ fn config_status_value_spans(
     };
     let indicator = StatusIndicator::animated(kind);
     if width == 1 {
-        return vec![indicator.span()];
+        return vec![indicator.span_with_palette(palette)];
     }
     let value = fit_config_value(value, width.saturating_sub(CONFIG_STATUS_MARKER_WIDTH));
     vec![
-        indicator.span(),
+        indicator.span_with_palette(palette),
         Span::raw(" "),
-        Span::styled(value, config_status_value_style(kind, fallback_style)),
+        Span::styled(
+            value,
+            config_status_value_style_with_palette(kind, fallback_style, palette),
+        ),
     ]
 }
 
+#[cfg(test)]
 fn render_config_line(index: usize, line: &str, content_width: usize) -> Line<'static> {
+    render_config_line_with_palette(index, line, content_width, &theme::default_palette())
+}
+
+fn render_config_line_with_palette(
+    index: usize,
+    line: &str,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     if line.is_empty() {
         return Line::raw(String::new());
     }
     if index == 0 {
-        return render_config_title_line(line);
+        return render_config_title_line_with_palette(line, palette);
     }
     if index == 1 {
-        return render_config_step_line(line, theme::config_primary(), content_width);
+        return render_config_step_line_with_palette(
+            line,
+            palette.config_primary,
+            content_width,
+            palette,
+        );
     }
     if line.starts_with('[') && line.ends_with(']') {
-        return render_config_subsection_line(line, theme::config_primary(), content_width);
+        return render_config_subsection_line_with_palette(
+            line,
+            palette.config_primary,
+            content_width,
+            palette,
+        );
     }
-    if let Some(line) = render_readonly_line(line, content_width) {
+    if let Some(line) = render_readonly_line_with_palette(line, content_width, palette) {
         return line;
     }
-    if let Some(line) = render_hint_line(line) {
+    if let Some(line) = render_hint_line_with_palette(line, palette) {
         return line;
     }
-    if let Some(line) = render_form_line(line, theme::config_primary(), content_width) {
+    if let Some(line) =
+        render_form_line_with_palette(line, palette.config_primary, content_width, palette)
+    {
         return line;
     }
     if line.starts_with("Type value")
@@ -777,33 +941,54 @@ fn render_config_line(index: usize, line: &str, content_width: usize) -> Line<'s
         || line.starts_with("Enter ")
         || line.starts_with("Ctrl-")
     {
-        return Line::styled(
-            line.to_owned(),
-            Style::default().fg(theme::config_warning()),
-        );
+        return Line::styled(line.to_owned(), Style::default().fg(palette.config_warning));
     }
     if config_line_is_meta(line) {
-        return Line::styled(line.to_owned(), Style::default().fg(theme::dim()));
+        return Line::styled(line.to_owned(), Style::default().fg(palette.text_muted));
     }
     if config_line_looks_like_field(line) {
-        return Line::styled(line.to_owned(), Style::default().fg(theme::ink()));
+        return Line::styled(line.to_owned(), Style::default().fg(palette.text_primary));
     }
 
-    Line::styled(line.to_owned(), Style::default().fg(theme::muted()))
+    Line::styled(line.to_owned(), Style::default().fg(palette.text_secondary))
 }
 
+#[cfg(test)]
 fn render_config_context_line(line: &str, content_width: usize) -> Line<'static> {
+    render_config_context_line_with_palette(line, content_width, &theme::default_palette())
+}
+
+fn render_config_context_line_with_palette(
+    line: &str,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     if line.is_empty() {
         return Line::raw(String::new());
     }
     if let Some((label, value)) = line.split_once(':') {
-        return render_config_context_pair(label, value.trim_start(), content_width);
+        return render_config_context_pair_with_palette(
+            label,
+            value.trim_start(),
+            content_width,
+            palette,
+        );
     }
 
-    render_config_context_info_line(line, content_width)
+    render_config_context_info_line_with_palette(line, content_width, palette)
 }
 
+#[cfg(test)]
 fn render_config_context_pair(label: &str, value: &str, content_width: usize) -> Line<'static> {
+    render_config_context_pair_with_palette(label, value, content_width, &theme::default_palette())
+}
+
+fn render_config_context_pair_with_palette(
+    label: &str,
+    value: &str,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     match label {
         "selected" => {
             let marker = format!("{} ", focus_symbol(FocusKind::Selected));
@@ -814,23 +999,26 @@ fn render_config_context_pair(label: &str, value: &str, content_width: usize) ->
             Line::from(vec![
                 Span::styled(
                     marker,
-                    focus_style(FocusKind::Selected).add_modifier(Modifier::BOLD),
+                    focus_style_with_palette(FocusKind::Selected, palette)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     value,
                     Style::default()
-                        .fg(theme::ink())
-                        .bg(theme::config_selected_bg())
+                        .fg(palette.text_primary)
+                        .bg(palette.config_selected_bg)
                         .add_modifier(Modifier::BOLD),
                 ),
             ])
-            .style(Style::default().bg(theme::config_selected_bg()))
+            .style(Style::default().bg(palette.config_selected_bg))
         }
         "controls" | "actions" | "mcp" => {
-            render_config_context_commands(label, value, content_width)
+            render_config_context_commands_with_palette(label, value, content_width, palette)
         }
-        "status" => render_config_status_line(value, content_width),
-        "key" | "advanced" | "override" => render_config_metadata_line(label, value, content_width),
+        "status" => render_config_status_line_with_palette(value, content_width, palette),
+        "key" | "advanced" | "override" => {
+            render_config_metadata_line_with_palette(label, value, content_width, palette)
+        }
         _ => {
             let label_text = format!("{label}: ");
             let value_width =
@@ -838,26 +1026,32 @@ fn render_config_context_pair(label: &str, value: &str, content_width: usize) ->
             let mut spans = vec![Span::styled(
                 label_text,
                 Style::default()
-                    .fg(theme::config_detail())
+                    .fg(palette.config_detail)
                     .add_modifier(Modifier::BOLD),
             )];
-            spans.extend(config_status_value_spans(
+            spans.extend(config_status_value_spans_with_palette(
                 label,
                 value,
                 value_width,
-                Style::default().fg(theme::ink()),
+                Style::default().fg(palette.text_primary),
+                palette,
             ));
             Line::from(spans)
         }
     }
 }
 
-fn render_config_context_commands(label: &str, value: &str, content_width: usize) -> Line<'static> {
+fn render_config_context_commands_with_palette(
+    label: &str,
+    value: &str,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     let marker = config_context_command_marker(label);
     let marker_width = marker.chars().count();
     let marker_style = Style::default()
-        .fg(theme::dim())
-        .bg(theme::config_tab_bg())
+        .fg(palette.text_muted)
+        .bg(palette.config_tab_bg)
         .add_modifier(Modifier::BOLD);
     if content_width <= marker_width {
         return Line::from(vec![Span::styled(
@@ -876,16 +1070,19 @@ fn render_config_context_commands(label: &str, value: &str, content_width: usize
         if separator_width >= remaining {
             spans.push(Span::styled(
                 fit_config_value("...", remaining),
-                Style::default().fg(theme::dim()),
+                Style::default().fg(palette.text_muted),
             ));
             break;
         }
         let token_capacity = remaining.saturating_sub(separator_width);
         if index > 0 {
-            spans.push(Span::styled(separator, Style::default().fg(theme::dim())));
+            spans.push(Span::styled(
+                separator,
+                Style::default().fg(palette.text_muted),
+            ));
         }
         let (rendered_width, truncated) =
-            push_config_command_token(&mut spans, token, token_capacity);
+            push_config_command_token_with_palette(&mut spans, token, token_capacity, palette);
         if truncated {
             break;
         }
@@ -903,10 +1100,20 @@ fn config_context_command_marker(label: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn push_config_command_token(
     spans: &mut Vec<Span<'static>>,
     token: &str,
     capacity: usize,
+) -> (usize, bool) {
+    push_config_command_token_with_palette(spans, token, capacity, &theme::default_palette())
+}
+
+fn push_config_command_token_with_palette(
+    spans: &mut Vec<Span<'static>>,
+    token: &str,
+    capacity: usize,
+    palette: &theme::ThemePalette,
 ) -> (usize, bool) {
     if capacity == 0 {
         return (0, !token.is_empty());
@@ -919,8 +1126,8 @@ fn push_config_command_token(
     spans.push(Span::styled(
         key,
         Style::default()
-            .fg(theme::config_warning())
-            .bg(theme::config_tab_bg())
+            .fg(palette.config_warning)
+            .bg(palette.config_tab_bg)
             .add_modifier(Modifier::BOLD),
     ));
     if key_width < original_key_width || key_width >= capacity || suffix.is_empty() {
@@ -933,7 +1140,7 @@ fn push_config_command_token(
     let suffix_width = rendered_suffix.chars().count();
     spans.push(Span::styled(
         rendered_suffix,
-        Style::default().fg(theme::muted()),
+        Style::default().fg(palette.text_secondary),
     ));
     (
         key_width + suffix_width,
@@ -941,7 +1148,16 @@ fn push_config_command_token(
     )
 }
 
+#[cfg(test)]
 fn render_config_context_info_line(line: &str, content_width: usize) -> Line<'static> {
+    render_config_context_info_line_with_palette(line, content_width, &theme::default_palette())
+}
+
+fn render_config_context_info_line_with_palette(
+    line: &str,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     let text = fit_config_value(
         line,
         available_config_value_width(content_width, "i ".chars().count(), 0),
@@ -950,19 +1166,29 @@ fn render_config_context_info_line(line: &str, content_width: usize) -> Line<'st
         Span::styled(
             "i ",
             Style::default()
-                .fg(theme::config_warning())
+                .fg(palette.config_warning)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             text,
             Style::default()
-                .fg(theme::muted())
+                .fg(palette.text_secondary)
                 .add_modifier(Modifier::ITALIC),
         ),
     ])
 }
 
+#[cfg(test)]
 fn render_config_metadata_line(label: &str, value: &str, content_width: usize) -> Line<'static> {
+    render_config_metadata_line_with_palette(label, value, content_width, &theme::default_palette())
+}
+
+fn render_config_metadata_line_with_palette(
+    label: &str,
+    value: &str,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     let marker = config_metadata_marker(label);
     let value = fit_config_value(
         value,
@@ -972,11 +1198,11 @@ fn render_config_metadata_line(label: &str, value: &str, content_width: usize) -
         Span::styled(
             marker,
             Style::default()
-                .fg(theme::dim())
-                .bg(theme::config_tab_bg())
+                .fg(palette.text_muted)
+                .bg(palette.config_tab_bg)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(value, Style::default().fg(theme::muted())),
+        Span::styled(value, Style::default().fg(palette.text_secondary)),
     ])
 }
 
@@ -989,7 +1215,16 @@ fn config_metadata_marker(label: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn render_config_status_line(value: &str, content_width: usize) -> Line<'static> {
+    render_config_status_line_with_palette(value, content_width, &theme::default_palette())
+}
+
+fn render_config_status_line_with_palette(
+    value: &str,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     if content_width == 0 {
         return Line::raw(String::new());
     }
@@ -1000,14 +1235,14 @@ fn render_config_status_line(value: &str, content_width: usize) -> Line<'static>
     };
     let value_style = if value.contains("confirm close") {
         Style::default()
-            .fg(theme::config_danger())
+            .fg(palette.config_danger)
             .add_modifier(Modifier::BOLD)
     } else if value.contains("unsaved") {
         Style::default()
-            .fg(theme::config_warning())
+            .fg(palette.config_warning)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::config_primary())
+        Style::default().fg(palette.config_primary)
     };
     let indicator = StatusIndicator::static_kind(kind);
     let value = fit_config_value(
@@ -1015,13 +1250,22 @@ fn render_config_status_line(value: &str, content_width: usize) -> Line<'static>
         content_width.saturating_sub(CONFIG_STATUS_MARKER_WIDTH),
     );
     Line::from(vec![
-        indicator.span(),
+        indicator.span_with_palette(palette),
         Span::raw(" "),
         Span::styled(value, value_style),
     ])
 }
 
+#[cfg(test)]
 fn render_readonly_line(line: &str, content_width: usize) -> Option<Line<'static>> {
+    render_readonly_line_with_palette(line, content_width, &theme::default_palette())
+}
+
+fn render_readonly_line_with_palette(
+    line: &str,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Option<Line<'static>> {
     let rest = line.strip_prefix("- ")?;
     let (label, value) = rest.split_once(':')?;
     let label_width = config_form_label_width(content_width, label);
@@ -1034,35 +1278,44 @@ fn render_readonly_line(line: &str, content_width: usize) -> Option<Line<'static
     let indicator = StatusIndicator::animated(marker_kind);
 
     let mut spans = vec![
-        indicator.span(),
+        indicator.span_with_palette(palette),
         Span::raw(" "),
-        Span::styled(padded_label, Style::default().fg(theme::muted())),
-        Span::styled(": ", Style::default().fg(theme::dim())),
+        Span::styled(padded_label, Style::default().fg(palette.text_secondary)),
+        Span::styled(": ", Style::default().fg(palette.text_muted)),
     ];
-    spans.extend(config_status_value_spans(
+    spans.extend(config_status_value_spans_with_palette(
         label,
         value,
         value_width,
-        Style::default().fg(theme::muted()),
+        Style::default().fg(palette.text_secondary),
+        palette,
     ));
 
     Some(Line::from(spans))
 }
 
+#[cfg(test)]
 fn render_hint_line(line: &str) -> Option<Line<'static>> {
+    render_hint_line_with_palette(line, &theme::default_palette())
+}
+
+fn render_hint_line_with_palette(
+    line: &str,
+    palette: &theme::ThemePalette,
+) -> Option<Line<'static>> {
     let text = line.strip_prefix("i ")?;
 
     Some(Line::from(vec![
         Span::styled(
             "i ",
             Style::default()
-                .fg(theme::config_warning())
+                .fg(palette.config_warning)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             text.to_owned(),
             Style::default()
-                .fg(theme::muted())
+                .fg(palette.text_secondary)
                 .add_modifier(Modifier::ITALIC),
         ),
     ]))
@@ -1100,8 +1353,17 @@ fn render_setup_line(line: &str) -> Line<'static> {
 }
 
 fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<Line<'static>> {
+    render_form_line_with_palette(line, accent, content_width, &theme::default_palette())
+}
+
+fn render_form_line_with_palette(
+    line: &str,
+    accent: Color,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Option<Line<'static>> {
     let content_width = content_width.min(CONFIG_CONTENT_MAX_WIDTH as usize);
-    let row_bg = selected_row_bg(accent);
+    let row_bg = selected_row_bg_with_palette(accent, palette);
     let (selected, rest) = if let Some(rest) = line.strip_prefix("> ") {
         (true, rest)
     } else if let Some(rest) = line.strip_prefix("  ") {
@@ -1116,19 +1378,19 @@ fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<L
     {
         let marker_style = if selected {
             Style::default()
-                .fg(Color::Black)
+                .fg(palette.text_inverse)
                 .bg(accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::dim())
+            Style::default().fg(palette.text_muted)
         };
         let value_style = if selected {
             Style::default()
-                .fg(Color::Black)
+                .fg(palette.text_inverse)
                 .bg(accent)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::ink())
+            Style::default().fg(palette.text_primary)
         };
         let spans = vec![
             Span::styled(if selected { "> " } else { "  " }, marker_style),
@@ -1155,11 +1417,11 @@ fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<L
 
     let marker_style = if selected {
         Style::default()
-            .fg(Color::Black)
+            .fg(palette.text_inverse)
             .bg(accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::dim())
+        Style::default().fg(palette.text_muted)
     };
     let label_style = if selected {
         Style::default()
@@ -1167,26 +1429,27 @@ fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<L
             .bg(row_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::config_detail())
+        Style::default().fg(palette.config_detail)
     };
     let value_style = if selected {
         Style::default()
-            .fg(theme::ink())
+            .fg(palette.text_primary)
             .bg(row_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme::ink())
+        Style::default().fg(palette.text_primary)
     };
     let colon_style = if selected {
-        Style::default().fg(theme::dim()).bg(row_bg)
+        Style::default().fg(palette.text_muted).bg(row_bg)
     } else {
-        Style::default().fg(theme::dim())
+        Style::default().fg(palette.text_muted)
     };
     let action_display = action.as_deref().map(config_action_display_label);
     let action_width = action_display.map_or(0, |action| 2 + config_action_chip_width(action));
     let value_width =
         available_config_value_width(content_width, 2 + label_width + 2, action_width);
-    let mut value_spans = config_status_value_spans(label, value, value_width, value_style);
+    let mut value_spans =
+        config_status_value_spans_with_palette(label, value, value_width, value_style, palette);
     if selected {
         apply_span_background(&mut value_spans, row_bg);
     }
@@ -1209,11 +1472,11 @@ fn render_form_line(line: &str, accent: Color, content_width: usize) -> Option<L
             format!("[{action}]"),
             if selected {
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(palette.text_inverse)
                     .bg(accent)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme::config_warning())
+                Style::default().fg(palette.config_warning)
             },
         ));
     }
@@ -1293,12 +1556,20 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| span.content.chars().count()).sum()
 }
 
+#[cfg(test)]
 fn render_config_title_line(line: &str) -> Line<'static> {
+    render_config_title_line_with_palette(line, &theme::default_palette())
+}
+
+fn render_config_title_line_with_palette(
+    line: &str,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     let Some((title, rest)) = line.split_once(' ') else {
         return Line::styled(
             line.to_owned(),
             Style::default()
-                .fg(theme::ink())
+                .fg(palette.text_primary)
                 .add_modifier(Modifier::BOLD),
         );
     };
@@ -1307,38 +1578,48 @@ fn render_config_title_line(line: &str) -> Line<'static> {
         Span::styled(
             title.to_owned(),
             Style::default()
-                .fg(theme::ink())
+                .fg(palette.text_primary)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
             position.to_owned(),
-            Style::default().fg(theme::config_warning()),
+            Style::default().fg(palette.config_warning),
         ),
     ];
     if !summary.is_empty() {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             summary.to_owned(),
-            Style::default().fg(theme::muted()),
+            Style::default().fg(palette.text_secondary),
         ));
     }
     Line::from(spans)
 }
 
+#[cfg(test)]
 fn render_config_step_line(line: &str, accent: Color, content_width: usize) -> Line<'static> {
+    render_config_step_line_with_palette(line, accent, content_width, &theme::default_palette())
+}
+
+fn render_config_step_line_with_palette(
+    line: &str,
+    accent: Color,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     let Some(selected_section) = selected_config_step_section(line) else {
-        return render_config_step_words(line, accent);
+        return render_config_step_words_with_palette(line, accent, palette);
     };
     let Some(selected_index) = selected_section.flow_index() else {
-        return render_config_step_words(line, accent);
+        return render_config_step_words_with_palette(line, accent, palette);
     };
     let (start, end) = config_step_window(selected_index, content_width);
     let mut spans = Vec::new();
     if start > 0 {
         push_config_step_item(
             &mut spans,
-            Span::styled("...", Style::default().fg(theme::dim())),
+            Span::styled("...", Style::default().fg(palette.text_muted)),
         );
     }
     for index in start..end {
@@ -1349,19 +1630,19 @@ fn render_config_step_line(line: &str, accent: Color, content_width: usize) -> L
             Span::styled(
                 format!(" {label} "),
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(palette.text_inverse)
                     .bg(accent)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(label, Style::default().fg(theme::muted()))
+            Span::styled(label, Style::default().fg(palette.text_secondary))
         };
         push_config_step_item(&mut spans, span);
     }
     if end < ConfigSection::FLOW.len() {
         push_config_step_item(
             &mut spans,
-            Span::styled("...", Style::default().fg(theme::dim())),
+            Span::styled("...", Style::default().fg(palette.text_muted)),
         );
     }
     Line::from(spans)
@@ -1449,7 +1730,11 @@ fn push_config_step_item(spans: &mut Vec<Span<'static>>, span: Span<'static>) {
     spans.push(span);
 }
 
-fn render_config_step_words(line: &str, accent: Color) -> Line<'static> {
+fn render_config_step_words_with_palette(
+    line: &str,
+    accent: Color,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, token) in line.split_whitespace().enumerate() {
         if index > 0 {
@@ -1459,12 +1744,15 @@ fn render_config_step_words(line: &str, accent: Color) -> Line<'static> {
             (
                 format!(" {} ", token.trim_start_matches('[').trim_end_matches(']')),
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(palette.text_inverse)
                     .bg(accent)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            (token.to_owned(), Style::default().fg(theme::muted()))
+            (
+                token.to_owned(),
+                Style::default().fg(palette.text_secondary),
+            )
         };
         spans.push(Span::styled(text, style));
     }
@@ -1472,20 +1760,43 @@ fn render_config_step_words(line: &str, accent: Color) -> Line<'static> {
 }
 
 fn render_subsection_line(line: &str, accent: Color) -> Line<'static> {
+    render_subsection_line_with_palette(line, accent, &theme::default_palette())
+}
+
+fn render_subsection_line_with_palette(
+    line: &str,
+    accent: Color,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     let text = line.trim_start_matches('[').trim_end_matches(']');
     Line::from(vec![
         Span::styled(
             format!(" {text} "),
             Style::default()
                 .fg(accent)
-                .bg(theme::config_section_bg())
+                .bg(palette.config_section_bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
     ])
 }
 
+#[cfg(test)]
 fn render_config_subsection_line(line: &str, accent: Color, content_width: usize) -> Line<'static> {
+    render_config_subsection_line_with_palette(
+        line,
+        accent,
+        content_width,
+        &theme::default_palette(),
+    )
+}
+
+fn render_config_subsection_line_with_palette(
+    line: &str,
+    accent: Color,
+    content_width: usize,
+    palette: &theme::ThemePalette,
+) -> Line<'static> {
     let text = line.trim_start_matches('[').trim_end_matches(']');
     let leading = "  ";
     let chip = format!(" {text} ");
@@ -1503,22 +1814,27 @@ fn render_config_subsection_line(line: &str, accent: Color, content_width: usize
             chip,
             Style::default()
                 .fg(accent)
-                .bg(theme::config_section_bg())
+                .bg(palette.config_section_bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             separator.unwrap_or_default(),
-            Style::default().fg(theme::dim()),
+            Style::default().fg(palette.text_muted),
         ),
     ])
 }
 
+#[cfg(test)]
 fn selected_row_bg(accent: Color) -> Color {
+    selected_row_bg_with_palette(accent, &theme::default_palette())
+}
+
+fn selected_row_bg_with_palette(accent: Color, palette: &theme::ThemePalette) -> Color {
     match accent {
         Color::Yellow => Color::Rgb(51, 43, 14),
         Color::Green => Color::Rgb(14, 36, 22),
         Color::Cyan => Color::Rgb(14, 32, 36),
-        _ if accent == theme::config_primary() => theme::config_selected_bg(),
+        _ if accent == palette.config_primary => palette.config_selected_bg,
         _ => Color::Rgb(28, 32, 30),
     }
 }
