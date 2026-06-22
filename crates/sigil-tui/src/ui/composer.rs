@@ -288,17 +288,30 @@ fn render_composer_gutter(frame: &mut Frame, area: Rect, accent: Color, bg: Colo
 }
 
 fn render_panel_separator(frame: &mut Frame, area: Rect, bg: Color, edge: Color) {
-    if area.width == 0 {
+    let Some(separator) = panel_separator_area(area) else {
         return;
-    }
+    };
     let line = Line::from(vec![Span::styled(
-        "─".repeat(area.width as usize),
+        "─".repeat(separator.width as usize),
         Style::default().fg(edge).bg(bg),
     )]);
     frame.render_widget(
         Paragraph::new(Text::from(vec![line])).style(Style::default().bg(bg)),
-        Rect::new(area.x, area.y, area.width, 1),
+        separator,
     );
+}
+
+fn panel_separator_area(area: Rect) -> Option<Rect> {
+    if area.width <= COMPOSER_HORIZONTAL_INSET {
+        return None;
+    }
+    let separator_width = area.width - COMPOSER_HORIZONTAL_INSET;
+    Some(Rect::new(
+        area.x.saturating_add(COMPOSER_HORIZONTAL_INSET),
+        area.y,
+        separator_width,
+        1,
+    ))
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
