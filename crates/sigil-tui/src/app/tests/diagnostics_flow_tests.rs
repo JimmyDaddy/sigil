@@ -41,7 +41,7 @@ fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Resul
         .expect("doctor report should be rendered")
         .text
         .clone();
-    assert!(rendered.contains("[ok] config:load - config parsed"));
+    assert!(rendered.contains("[ok] config:load\n  config parsed"));
     assert!(rendered.contains("summary:"));
     assert!(rendered.contains("needs attention:"));
     assert!(rendered.contains("provider:auth"));
@@ -100,11 +100,10 @@ fn render_doctor_report_includes_summary_and_check_lines() {
     let rendered = render_doctor_report(&report);
 
     assert!(rendered.starts_with("doctor: warn\nsummary: 0 error · 1 warn · 1 ok"));
-    assert!(rendered.contains("needs attention:\n- [warn] terminal - TERM is not set"));
+    assert!(rendered.contains("needs attention:\n- [warn] terminal\n  TERM is not set"));
     assert!(rendered.contains("  fix: set TERM in the shell before launching the TUI"));
-    assert!(rendered.contains("checks:\n[ok] config:load - config parsed"));
-    assert!(rendered.contains("[warn] terminal - TERM is not set"));
-    assert!(rendered.contains("    fix: set TERM in the shell before launching the TUI"));
+    assert!(rendered.contains("checks:\n[ok] config:load\n  config parsed"));
+    assert!(rendered.contains("[warn] terminal\n  TERM is not set"));
 }
 
 #[test]

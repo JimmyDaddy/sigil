@@ -534,6 +534,9 @@ fn render_timeline_content_spans_with_palette(
 }
 
 fn notice_tone(text: &str) -> NoticeTone {
+    if let Some(tone) = doctor_notice_tone(text) {
+        return tone;
+    }
     let lower = text.to_ascii_lowercase();
     if lower.contains("failed")
         || lower.contains("error")
@@ -549,6 +552,20 @@ fn notice_tone(text: &str) -> NoticeTone {
         NoticeTone::Ok
     } else {
         NoticeTone::Info
+    }
+}
+
+fn doctor_notice_tone(text: &str) -> Option<NoticeTone> {
+    let first_line = text.lines().find(|line| !line.trim().is_empty())?;
+    let (label, status) = first_line.trim().split_once(':')?;
+    if !label.trim().eq_ignore_ascii_case("doctor") {
+        return None;
+    }
+    let normalized_status = status.trim().to_ascii_lowercase();
+    match normalized_status.as_str() {
+        "error" => Some(NoticeTone::Error),
+        "ok" => Some(NoticeTone::Ok),
+        _ => Some(NoticeTone::Info),
     }
 }
 

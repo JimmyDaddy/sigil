@@ -1,5 +1,5 @@
 use sigil_runtime::doctor::{
-    DoctorReport, DoctorReportOptions, DoctorStatus, build_doctor_report_with_options,
+    DoctorCheck, DoctorReport, DoctorReportOptions, DoctorStatus, build_doctor_report_with_options,
 };
 
 use super::{AppState, TimelineRole};
@@ -33,15 +33,7 @@ fn render_doctor_report(report: &DoctorReport) -> String {
     push_doctor_attention_section(report, &mut lines);
     lines.push("checks:".to_owned());
     for check in &report.checks {
-        lines.push(format!(
-            "[{}] {} - {}",
-            check.status.as_str(),
-            check.name,
-            check.message
-        ));
-        if let Some(remediation) = check.remediation.as_deref() {
-            lines.push(format!("    fix: {remediation}"));
-        }
+        push_doctor_check_lines(check, "", "  ", &mut lines);
     }
     lines.join("\n")
 }
@@ -78,15 +70,24 @@ fn push_doctor_attention_section(report: &DoctorReport, lines: &mut Vec<String>)
 
     lines.push("needs attention:".to_owned());
     for check in actionable {
-        lines.push(format!(
-            "- [{}] {} - {}",
-            check.status.as_str(),
-            check.name,
-            check.message
-        ));
-        if let Some(remediation) = check.remediation.as_deref() {
-            lines.push(format!("  fix: {remediation}"));
-        }
+        push_doctor_check_lines(check, "- ", "  ", lines);
+    }
+}
+
+fn push_doctor_check_lines(
+    check: &DoctorCheck,
+    header_prefix: &str,
+    body_prefix: &str,
+    lines: &mut Vec<String>,
+) {
+    lines.push(format!(
+        "{header_prefix}[{}] {}",
+        check.status.as_str(),
+        check.name
+    ));
+    lines.push(format!("{body_prefix}{}", check.message));
+    if let Some(remediation) = check.remediation.as_deref() {
+        lines.push(format!("{body_prefix}fix: {remediation}"));
     }
 }
 

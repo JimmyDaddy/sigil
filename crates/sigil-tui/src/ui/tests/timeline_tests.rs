@@ -1961,6 +1961,32 @@ fn render_timeline_entry_lines_label_notice_tones() {
 }
 
 #[test]
+fn render_timeline_entry_lines_uses_doctor_status_for_notice_tone() {
+    let ok_doctor = TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "doctor: ok\nsummary: 0 error · 0 warn · 8 ok".to_owned(),
+    };
+    let warn_doctor = TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "doctor: warn\nsummary: 0 error · 1 warn · 7 ok".to_owned(),
+    };
+    let error_doctor = TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "doctor: error\nsummary: 1 error · 0 warn · 7 ok".to_owned(),
+    };
+
+    let ok_plain = rendered_plain_lines(&render_timeline_entry_lines(&ok_doctor)).join("\n");
+    let warn_plain = rendered_plain_lines(&render_timeline_entry_lines(&warn_doctor)).join("\n");
+    let error_plain = rendered_plain_lines(&render_timeline_entry_lines(&error_doctor)).join("\n");
+
+    assert!(ok_plain.contains("done"));
+    assert!(!ok_plain.contains("error\n"));
+    assert!(warn_plain.contains("notice"));
+    assert!(!warn_plain.contains("error\n"));
+    assert!(error_plain.contains("error"));
+}
+
+#[test]
 fn render_timeline_entry_lines_keeps_notice_visible_without_info_subtitle() {
     let notice = TimelineEntry {
         role: TimelineRole::Notice,
