@@ -193,6 +193,14 @@ fn background_width(line: &Line<'_>, background: Color) -> usize {
         .sum()
 }
 
+fn span_style(line: &Line<'_>, text: &str) -> Style {
+    line.spans
+        .iter()
+        .find(|span| span.content.as_ref() == text)
+        .unwrap_or_else(|| panic!("expected span {text:?} in {:?}", line_text(line)))
+        .style
+}
+
 #[test]
 fn centered_config_area_respects_narrow_and_wide_bounds() {
     let wide = centered_config_area(Rect::new(0, 0, 220, 10));
@@ -371,6 +379,9 @@ fn render_config_context_pair_handles_special_and_default_labels() {
     assert!(line_text(&status).contains("△ unsaved"));
     assert!(!line_text(&status).contains("status:"));
     assert!(line_text(&other).contains("owner: workspace"));
+
+    let commands = render_config_context_commands("controls", "Enter edit · Esc close", 28);
+    assert!(line_text(&commands).contains("keys Enter"));
 }
 
 #[test]
@@ -442,17 +453,18 @@ fn readonly_and_hint_helpers_return_none_for_unmatched_lines() {
 
 #[test]
 fn render_setup_line_covers_title_defaults_warning_form_and_plain_text() {
+    let palette = theme::default_palette();
     let title = render_setup_line("Quick setup");
     let defaults = render_setup_line("defaults: ask");
     let warning = render_setup_line("Enter save");
     let form = render_setup_line("> Model: deepseek-v4-flash  [Enter choose]");
     let plain = render_setup_line("workspace ready");
 
-    assert_eq!(title.style.fg, Some(Color::White));
-    assert_eq!(defaults.style.fg, Some(Color::DarkGray));
-    assert_eq!(warning.style.fg, Some(Color::Yellow));
+    assert_eq!(title.style.fg, Some(palette.text_primary));
+    assert_eq!(defaults.style.fg, Some(palette.text_muted));
+    assert_eq!(warning.style.fg, Some(palette.config_warning));
     assert!(line_text(&form).contains("[choose]"));
-    assert_eq!(plain.style.fg, Some(Color::Gray));
+    assert_eq!(plain.style.fg, Some(palette.text_secondary));
 }
 
 #[test]
@@ -490,6 +502,78 @@ fn render_config_line_routes_warning_meta_field_and_muted_variants() {
     assert_eq!(meta.style.fg, Some(theme::dim()));
     assert_eq!(field.style.fg, Some(theme::ink()));
     assert_eq!(muted.style.fg, Some(theme::muted()));
+}
+
+#[test]
+fn render_config_line_styles_theme_preview_with_current_palette() {
+    let palette = theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight).palette;
+    let text =
+        render_config_line_with_palette(2, "preview text: primary secondary muted", 80, &palette);
+    let selection =
+        render_config_line_with_palette(2, "preview selection: selected row", 80, &palette);
+    let status = render_config_line_with_palette(
+        2,
+        "preview status: success warning error pending",
+        80,
+        &palette,
+    );
+    let diff =
+        render_config_line_with_palette(2, "preview diff: +added -removed @@ hunk", 80, &palette);
+    let markdown =
+        render_config_line_with_palette(2, "preview markdown: heading link code", 80, &palette);
+    let narrow =
+        render_config_line_with_palette(2, "preview approval: allow deny selected", 24, &palette);
+    let marker_only = render_theme_preview_line_with_palette("preview text: primary", 0, &palette)
+        .expect("preview marker should render");
+    let kind_missing_space =
+        render_theme_preview_line_with_palette("preview text: primary", 10, &palette)
+            .expect("preview kind should truncate");
+    let samples_missing_space =
+        render_theme_preview_line_with_palette("preview text: primary", 13, &palette)
+            .expect("preview separator should truncate");
+    let unknown = render_theme_preview_line_with_palette("preview custom: fallback", 80, &palette)
+        .expect("unknown preview should render as text");
+
+    assert_eq!(span_style(&text, "primary").fg, Some(palette.text_primary));
+    assert_eq!(
+        span_style(&text, "secondary").fg,
+        Some(palette.text_secondary)
+    );
+    assert_eq!(
+        span_style(&selection, "selected row").fg,
+        Some(palette.selection_fg)
+    );
+    assert_eq!(
+        span_style(&selection, "selected row").bg,
+        Some(palette.selection_bg)
+    );
+    assert_eq!(
+        span_style(&status, "✓ success").fg,
+        Some(palette.status_success)
+    );
+    assert_eq!(
+        span_style(&status, "△ warning").fg,
+        Some(palette.status_warning)
+    );
+    assert_eq!(span_style(&diff, "+added").bg, Some(palette.diff_added_bg));
+    assert_eq!(
+        span_style(&diff, "-removed").bg,
+        Some(palette.diff_removed_bg)
+    );
+    assert_eq!(
+        span_style(&markdown, "code").fg,
+        Some(palette.markdown_code_fg)
+    );
+    assert_eq!(
+        span_style(&markdown, "code").bg,
+        Some(palette.markdown_code_bg)
+    );
+    assert!(line_text(&narrow).chars().count() <= 24);
+    assert!(line_text(&marker_only).is_empty());
+    assert_eq!(line_text(&kind_missing_space), "preview te");
+    assert_eq!(line_text(&samples_missing_space), "preview text:");
+    assert!(line_text(&unknown).contains("custom"));
+    assert!(line_text(&unknown).contains("fallback"));
 }
 
 #[test]
@@ -536,6 +620,7 @@ fn finish_form_line_title_and_subsection_helpers_preserve_visual_structure() {
     let subsection = render_subsection_line("[provider]", Color::Yellow);
     let config_subsection =
         render_config_subsection_line("[provider]", theme::config_primary(), 12);
+    let block = config_block("Config", theme::config_primary(), theme::config_panel_bg());
 
     assert_eq!(selected.style.bg, Some(theme::config_selected_bg()));
     assert_eq!(plain.style.bg, None);
@@ -543,18 +628,21 @@ fn finish_form_line_title_and_subsection_helpers_preserve_visual_structure() {
     assert!(line_text(&title_summary).contains("1/6"));
     assert!(line_text(&subsection).contains(" provider "));
     assert!(line_text(&config_subsection).contains(" provider "));
+    assert_eq!(block.inner(Rect::new(0, 0, 12, 5)), Rect::new(1, 1, 10, 3));
 }
 
 #[test]
 fn selected_row_and_line_classifier_helpers_cover_known_variants() {
-    assert_eq!(selected_row_bg(Color::Yellow), Color::Rgb(51, 43, 14));
-    assert_eq!(selected_row_bg(Color::Green), Color::Rgb(14, 36, 22));
-    assert_eq!(selected_row_bg(Color::Cyan), Color::Rgb(14, 32, 36));
+    let palette = theme::default_palette();
+
+    assert_eq!(selected_row_bg(Color::Yellow), palette.surface_selection);
+    assert_eq!(selected_row_bg(Color::Green), palette.surface_selection);
+    assert_eq!(selected_row_bg(Color::Cyan), palette.surface_selection);
     assert_eq!(
         selected_row_bg(theme::config_primary()),
         theme::config_selected_bg()
     );
-    assert_eq!(selected_row_bg(Color::Blue), Color::Rgb(28, 32, 30));
+    assert_eq!(selected_row_bg(Color::Blue), palette.surface_selection);
 
     assert!(config_line_is_meta("cfg: sigil.toml"));
     assert!(config_line_is_meta("Ctrl-N add server"));

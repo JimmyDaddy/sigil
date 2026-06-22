@@ -133,6 +133,7 @@ pub(crate) fn diff_line_number_text(line: Option<usize>, width: usize) -> String
         .unwrap_or_else(|| " ".repeat(width))
 }
 
+#[allow(dead_code)]
 pub(crate) fn diff_line_style(kind: DiffLineKind) -> (Color, Style) {
     let palette = theme::default_palette();
     diff_line_style_for_palette(kind, &palette)

@@ -72,7 +72,7 @@ pub(super) fn render_modal(frame: &mut Frame, app: &AppState) {
         .title(title)
         .title_style(
             Style::default()
-                .fg(Color::Black)
+                .fg(visual.title_fg)
                 .bg(visual.accent)
                 .add_modifier(Modifier::BOLD),
         )
@@ -275,6 +275,7 @@ fn render_modal_input_line(label: &str, value: &str, visual: &ModalVisual) -> Li
 
 struct ModalVisual {
     accent: Color,
+    title_fg: Color,
     border: Color,
     label: Color,
     hint: Color,
@@ -294,6 +295,7 @@ fn modal_visual(app: &AppState) -> ModalVisual {
     if app.is_config_mode() {
         return ModalVisual {
             accent: palette.config_primary,
+            title_fg: palette.button_selected_fg,
             border: palette.config_border,
             label: palette.config_detail,
             hint: palette.config_warning,
@@ -311,6 +313,7 @@ fn modal_visual(app: &AppState) -> ModalVisual {
     match app.modal_title() {
         Some("API Key") => ModalVisual {
             accent: palette.accent_warning,
+            title_fg: palette.button_selected_fg,
             border: palette.accent_warning,
             label: palette.accent_warning,
             hint: palette.accent_warning,
@@ -325,6 +328,7 @@ fn modal_visual(app: &AppState) -> ModalVisual {
         },
         Some("Model") | Some("FIM Model") | Some("Model ID") => ModalVisual {
             accent: palette.accent_info,
+            title_fg: palette.button_selected_fg,
             border: palette.accent_info,
             label: palette.accent_info,
             hint: palette.accent_info,
@@ -339,6 +343,7 @@ fn modal_visual(app: &AppState) -> ModalVisual {
         },
         _ => ModalVisual {
             accent: palette.accent_success,
+            title_fg: palette.button_selected_fg,
             border: palette.accent_success,
             label: palette.accent_success,
             hint: palette.accent_success,

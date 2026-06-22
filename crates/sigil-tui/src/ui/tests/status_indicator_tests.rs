@@ -90,36 +90,30 @@ fn indicator_styles_cover_focus_and_status_markers() {
 }
 
 #[test]
-fn indicators_can_render_with_explicit_theme_palette() {
-    let theme = Theme::builtin(sigil_kernel::ThemeId::SolarizedLight);
-    let palette = &theme.palette;
+fn status_indicator_palette_variants_use_current_theme() {
+    let palette = Theme::builtin(sigil_kernel::ThemeId::SolarizedLight).palette;
+    let indicator = StatusIndicator::static_kind(StatusKind::Success);
 
     assert_eq!(
-        StatusIndicator::static_kind(StatusKind::Success)
-            .span_with_palette(palette)
-            .style
-            .fg,
+        indicator.span_with_palette(&palette).style.fg,
         Some(palette.status_success)
     );
     assert_eq!(
-        StatusIndicator::static_kind(StatusKind::Error)
-            .badge_style_with_palette(palette)
-            .bg,
+        indicator.badge_style_with_palette(&palette).bg,
         Some(palette.surface_badge)
     );
     assert_eq!(
-        status_rest_style_with_palette(StatusKind::Unknown, palette),
-        Style::default().fg(palette.text_secondary)
+        status_rest_style_with_palette(StatusKind::Error, &palette).fg,
+        Some(palette.status_error)
     );
-
-    let (focus, rest) = indicator_styles_with_palette("▸", palette).expect("focus style");
     assert_eq!(
-        focus,
-        Style::default()
-            .fg(palette.accent_info)
-            .add_modifier(Modifier::BOLD)
+        focus_style_with_palette(FocusKind::Selected, &palette).fg,
+        Some(palette.accent_info)
     );
-    assert_eq!(rest, Style::default().fg(palette.text_primary));
+    let (marker_style, rest_style) =
+        indicator_styles_with_palette("✕", &palette).expect("error style");
+    assert_eq!(marker_style.fg, Some(palette.status_error));
+    assert_eq!(rest_style.fg, Some(palette.status_error));
 }
 
 #[test]

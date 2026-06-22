@@ -391,6 +391,14 @@ impl AppState {
                     ),
                 ));
                 lines.push(String::new());
+                lines.push("[preview]".to_owned());
+                lines.push("preview text: primary secondary muted".to_owned());
+                lines.push("preview selection: selected row".to_owned());
+                lines.push("preview status: success warning error pending".to_owned());
+                lines.push("preview diff: +added -removed @@ hunk".to_owned());
+                lines.push("preview approval: allow deny selected".to_owned());
+                lines.push("preview markdown: heading link code".to_owned());
+                lines.push(String::new());
                 lines.push("[scope]".to_owned());
                 lines.push(render_config_hint_row(
                     "Theme choices affect only the TUI and are not written to session history",

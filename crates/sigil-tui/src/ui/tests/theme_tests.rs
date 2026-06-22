@@ -84,6 +84,83 @@ fn contrast_ratio_orders_light_and_dark_colors() {
 }
 
 #[test]
+fn builtin_themes_keep_core_text_and_ui_contrast_readable() {
+    for theme_id in ThemeId::all() {
+        let theme = Theme::builtin(*theme_id);
+        let palette = &theme.palette;
+        for (label, foreground, background, minimum) in [
+            (
+                "text_primary/surface_base",
+                palette.text_primary,
+                palette.surface_base,
+                4.5,
+            ),
+            (
+                "text_primary/surface_panel",
+                palette.text_primary,
+                palette.surface_panel,
+                4.5,
+            ),
+            (
+                "text_secondary/surface_base",
+                palette.text_secondary,
+                palette.surface_base,
+                3.0,
+            ),
+            (
+                "text_muted/surface_base",
+                palette.text_muted,
+                palette.surface_base,
+                3.0,
+            ),
+            (
+                "selection_fg/selection_bg",
+                palette.selection_fg,
+                palette.selection_bg,
+                3.0,
+            ),
+            (
+                "button_selected_fg/button_selected_bg",
+                palette.button_selected_fg,
+                palette.button_selected_bg,
+                3.0,
+            ),
+            (
+                "diff_added_fg/diff_added_bg",
+                palette.diff_added_fg,
+                palette.diff_added_bg,
+                3.0,
+            ),
+            (
+                "diff_removed_fg/diff_removed_bg",
+                palette.diff_removed_fg,
+                palette.diff_removed_bg,
+                3.0,
+            ),
+            (
+                "markdown_code_fg/markdown_code_bg",
+                palette.markdown_code_fg,
+                palette.markdown_code_bg,
+                4.5,
+            ),
+            (
+                "text_primary/approval_bg",
+                palette.text_primary,
+                palette.approval_bg,
+                4.5,
+            ),
+        ] {
+            let ratio = contrast::contrast_ratio(foreground, background)
+                .unwrap_or_else(|| panic!("{theme_id:?} {label} should use contrastable colors"));
+            assert!(
+                ratio >= minimum,
+                "{theme_id:?} {label} contrast {ratio:.2} is below {minimum:.1}"
+            );
+        }
+    }
+}
+
+#[test]
 fn color_token_allowlist_contains_documented_core_tokens() {
     for token in [
         "surface_base",

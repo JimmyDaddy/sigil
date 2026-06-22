@@ -4,7 +4,7 @@ use sigil_kernel::ThemeColorOverrides;
 
 use super::palette::ThemePalette;
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) const COLOR_TOKEN_NAMES: &[&str] = &[
     "surface_base",
     "surface_rail",

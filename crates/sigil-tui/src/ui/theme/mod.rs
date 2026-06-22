@@ -1,5 +1,5 @@
 mod builtin;
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod contrast;
 mod overrides;
 mod palette;
@@ -13,7 +13,7 @@ use crate::app::AppState;
 #[cfg(test)]
 use crate::app::RunPhase;
 
-#[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use overrides::COLOR_TOKEN_NAMES;
 pub(crate) use palette::ThemePalette;
 
@@ -119,11 +119,12 @@ pub(crate) fn user_message_bg() -> Color {
     default_palette().surface_user_message
 }
 
+#[allow(dead_code)]
 pub(crate) fn ink() -> Color {
     default_palette().text_primary
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn muted() -> Color {
     default_palette().text_secondary
 }
@@ -132,22 +133,27 @@ pub(crate) fn dim() -> Color {
     default_palette().text_muted
 }
 
+#[allow(dead_code)]
 pub(crate) fn accent_teal() -> Color {
     default_palette().accent_secondary
 }
 
+#[allow(dead_code)]
 pub(crate) fn accent_blue() -> Color {
     default_palette().accent_info
 }
 
+#[allow(dead_code)]
 pub(crate) fn accent_gold() -> Color {
     default_palette().accent_warning
 }
 
+#[allow(dead_code)]
 pub(crate) fn accent_lime() -> Color {
     default_palette().accent_primary
 }
 
+#[allow(dead_code)]
 pub(crate) fn accent_rose() -> Color {
     default_palette().accent_danger
 }
@@ -161,42 +167,42 @@ pub(crate) fn config_panel_bg() -> Color {
     default_palette().config_bg
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn config_border() -> Color {
     default_palette().config_border
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn config_primary() -> Color {
     default_palette().config_primary
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn config_detail() -> Color {
     default_palette().config_detail
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn config_warning() -> Color {
     default_palette().config_warning
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn config_danger() -> Color {
     default_palette().config_danger
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn config_tab_bg() -> Color {
     default_palette().config_tab_bg
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn config_section_bg() -> Color {
     default_palette().config_section_bg
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn config_selected_bg() -> Color {
     default_palette().config_selected_bg
 }

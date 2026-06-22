@@ -60,6 +60,7 @@ impl StatusIndicator {
         status_symbol(self.kind)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn style(self) -> Style {
         status_style(self.kind)
     }
@@ -68,6 +69,7 @@ impl StatusIndicator {
         status_style_with_palette(self.kind, palette)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn badge_style(self) -> Style {
         self.badge_style_with_palette(&theme::default_palette())
     }
@@ -78,6 +80,7 @@ impl StatusIndicator {
             .add_modifier(Modifier::BOLD)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn span(self) -> Span<'static> {
         Span::styled(self.symbol(), self.style())
     }
@@ -98,6 +101,7 @@ pub(crate) fn status_symbol(kind: StatusKind) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn status_style(kind: StatusKind) -> Style {
     status_style_with_palette(kind, &theme::default_palette())
 }
@@ -151,6 +155,7 @@ pub(crate) fn focus_symbol(kind: FocusKind) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn focus_style(kind: FocusKind) -> Style {
     focus_style_with_palette(kind, &theme::default_palette())
 }

@@ -1,15 +1,50 @@
 use ratatui::{
-    style::{Modifier, Style},
-    text::Line,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
 };
 use serde_json::{Value, json};
 
 use crate::{
     app::{TimelineEntry, TimelineRole},
-    ui::TimelineRenderOptions,
+    ui::{
+        TimelineRenderOptions,
+        theme::{Theme, ThemePalette, accent_gold, accent_rose, accent_teal, dim},
+    },
 };
 
 use super::*;
+
+fn test_palette() -> ThemePalette {
+    crate::ui::theme::default_palette()
+}
+
+fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<Span<'static>>> {
+    super::code_intelligence_row_with_palette(summary, entry, &test_palette())
+}
+
+fn code_intelligence_servers_line(value: &Value) -> Option<Vec<Span<'static>>> {
+    super::code_intelligence_servers_line_with_palette(value, &test_palette())
+}
+
+fn render_tool_diff_line(
+    accent: Color,
+    line: NumberedDiffLine<'_>,
+    line_number_width: usize,
+) -> Line<'static> {
+    super::render_tool_diff_line_with_palette(accent, line, line_number_width, &test_palette())
+}
+
+fn tool_diff_old_line_number_style(line: NumberedDiffLine<'_>) -> Style {
+    super::tool_diff_old_line_number_style_with_palette(line, &test_palette())
+}
+
+fn tool_diff_new_line_number_style(line: NumberedDiffLine<'_>) -> Style {
+    super::tool_diff_new_line_number_style_with_palette(line, &test_palette())
+}
+
+fn tool_title_spans(title: &ToolCardTitle, max_chars: usize) -> Vec<Span<'static>> {
+    super::tool_title_spans_with_palette(title, max_chars, &test_palette())
+}
 
 fn line_plain_text(line: &Line<'static>) -> String {
     line.spans
@@ -569,6 +604,48 @@ fn tool_card_render_entry_lines_styles_hovered_header() {
 
     assert_eq!(lines[0].spans[0].style.fg, Some(accent_gold()));
     assert!(!plain_text(&lines).contains("●"));
+}
+
+#[test]
+fn tool_card_render_entry_lines_use_configured_theme_palette() {
+    let theme = Theme::builtin(sigil_kernel::ThemeId::SolarizedLight);
+    let palette = theme.palette.clone();
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: json!({
+            "call_id": "call-themed",
+            "tool_name": "read_file",
+            "status": "ok",
+            "preview_kind": "markdown",
+            "summary": "first 2/4 lines · 42 B",
+            "preview_lines": ["# Title", "`code`"],
+            "hidden_lines": 2
+        })
+        .to_string(),
+    };
+    let options = TimelineRenderOptions {
+        hovered_tool_activity_key: Some("call:call-themed".to_owned()),
+        max_content_width: 72,
+        theme,
+        ..TimelineRenderOptions::default()
+    };
+
+    let lines = render_tool_entry_lines(&entry, &options, 0);
+    let code_span = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "code")
+        .expect("inline code preview should render");
+    let hidden_tail = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref().contains("2 more lines hidden"))
+        .expect("hidden tail should render");
+
+    assert_eq!(lines[0].spans[0].style.fg, Some(palette.accent_warning));
+    assert_eq!(code_span.style.fg, Some(palette.markdown_code_fg));
+    assert_eq!(code_span.style.bg, Some(palette.markdown_code_bg));
+    assert_eq!(hidden_tail.style.fg, Some(palette.text_muted));
 }
 
 #[test]

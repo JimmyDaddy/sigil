@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, ops::Range};
 
 use ratatui::{
-    style::{Color, Style},
+    style::Style,
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -598,18 +598,26 @@ impl AppState {
             ];
         }
         let selection = self.selected_timeline_line_range();
+        let selection_style = {
+            let options = self.timeline_render_options();
+            timeline_selection_style(&options.theme.palette)
+        };
         self.timeline_render_cache[visible_range.clone()]
             .iter()
             .enumerate()
             .map(|(offset, line)| {
                 let line_index = visible_range.start.saturating_add(offset);
                 if let Some(columns) = self.selected_timeline_column_range(line_index) {
-                    selected_timeline_line_columns(line.clone(), columns)
+                    selected_timeline_line_columns_with_style(
+                        line.clone(),
+                        columns,
+                        selection_style,
+                    )
                 } else if selection
                     .as_ref()
                     .is_some_and(|range| range.contains(&line_index))
                 {
-                    selected_timeline_line(line.clone())
+                    selected_timeline_line(line.clone(), selection_style)
                 } else {
                     line.clone()
                 }
@@ -658,8 +666,9 @@ impl AppState {
         let child = self.active_agent_child_entry();
         let agent_thread = self.active_agent_thread_projection();
         let active_label = self.active_agent_label();
+        let theme = self.timeline_render_options().theme;
         let mut header = vec![Line::from(vec![
-            Span::styled("agent view", Style::default().fg(Color::Cyan)),
+            Span::styled("agent view", Style::default().fg(theme.palette.accent_info)),
             Span::raw(format!(": {active_label}")),
             Span::raw(" · child session"),
         ])];
@@ -1073,13 +1082,27 @@ fn agent_thread_source_label(source: Option<sigil_kernel::AgentInvocationSource>
     }
 }
 
-fn selected_timeline_line(line: Line<'static>) -> Line<'static> {
-    line.patch_style(timeline_selection_style())
+fn selected_timeline_line(line: Line<'static>, selection_style: Style) -> Line<'static> {
+    line.patch_style(selection_style)
 }
 
+#[allow(dead_code)]
 pub(super) fn selected_timeline_line_columns(
     line: Line<'static>,
     columns: Range<usize>,
+) -> Line<'static> {
+    let theme = crate::ui::theme::Theme::default();
+    selected_timeline_line_columns_with_style(
+        line,
+        columns,
+        timeline_selection_style(&theme.palette),
+    )
+}
+
+fn selected_timeline_line_columns_with_style(
+    line: Line<'static>,
+    columns: Range<usize>,
+    selection_style: Style,
 ) -> Line<'static> {
     if columns.start >= columns.end {
         return line;
@@ -1089,7 +1112,9 @@ pub(super) fn selected_timeline_line_columns(
     let spans = std::mem::take(&mut selected_line.spans);
     selected_line.spans = spans
         .into_iter()
-        .flat_map(|span| split_span_for_column_selection(span, &mut display_column, &columns))
+        .flat_map(|span| {
+            split_span_for_column_selection(span, &mut display_column, &columns, selection_style)
+        })
         .collect();
     selected_line
 }
@@ -1098,6 +1123,7 @@ fn split_span_for_column_selection(
     span: Span<'static>,
     display_column: &mut usize,
     columns: &Range<usize>,
+    selection_style: Style,
 ) -> Vec<Span<'static>> {
     let mut pieces = Vec::new();
     let mut current_text = String::new();
@@ -1115,6 +1141,7 @@ fn split_span_for_column_selection(
                 &span,
                 &current_text,
                 current_selected == Some(true),
+                selection_style,
             ));
             current_text.clear();
         }
@@ -1127,24 +1154,30 @@ fn split_span_for_column_selection(
             &span,
             &current_text,
             current_selected == Some(true),
+            selection_style,
         ));
     }
     pieces
 }
 
-fn selection_span_piece(source: &Span<'static>, text: &str, selected: bool) -> Span<'static> {
+fn selection_span_piece(
+    source: &Span<'static>,
+    text: &str,
+    selected: bool,
+    selection_style: Style,
+) -> Span<'static> {
     let style = if selected {
-        source.style.patch(timeline_selection_style())
+        source.style.patch(selection_style)
     } else {
         source.style
     };
     Span::styled(text.to_owned(), style)
 }
 
-fn timeline_selection_style() -> Style {
+fn timeline_selection_style(palette: &crate::ui::theme::ThemePalette) -> Style {
     Style::default()
-        .fg(Color::Black)
-        .bg(Color::Rgb(242, 171, 122))
+        .fg(palette.selection_fg)
+        .bg(palette.selection_bg)
 }
 
 pub(super) fn text_by_display_columns(text: &str, start: usize, end: usize) -> String {

@@ -3,7 +3,7 @@ use std::path::Path;
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
@@ -138,13 +138,15 @@ fn footer_context_width(footer: &FooterViewModel, available_width: u16) -> u16 {
 }
 
 pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
+    let current_theme = theme::resolve_for_app(app);
+    let palette = &current_theme.palette;
     if app.is_setup_mode() {
         let title = Line::from(vec![
             Span::styled(
                 " Sigil setup ",
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(palette.button_selected_fg)
+                    .bg(palette.button_selected_bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" quick setup "),
@@ -156,7 +158,7 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
         ))]);
         let tertiary = Line::from(vec![Span::styled(
             app.last_notice().unwrap_or("trust folder, set auth, save"),
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(palette.config_warning),
         )]);
         let paragraph = Paragraph::new(Text::from(vec![title, secondary, tertiary]))
             .block(Block::default().title("Status").borders(Borders::ALL))
@@ -168,8 +170,8 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
         Span::styled(
             " Sigil TUI ",
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
+                .fg(palette.button_selected_fg)
+                .bg(palette.button_selected_bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
@@ -193,7 +195,7 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let tertiary = Line::from(vec![Span::styled(
         app.last_notice().unwrap_or("ready"),
-        Style::default().fg(Color::Yellow),
+        Style::default().fg(palette.config_warning),
     )]);
 
     let paragraph = Paragraph::new(Text::from(vec![title, secondary, tertiary]))
