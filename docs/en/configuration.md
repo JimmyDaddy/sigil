@@ -157,7 +157,7 @@ accent_primary = "#91B6AA"
 markdown_code_bg = "#1C2129"
 ```
 
-`theme` controls the TUI color palette. Built-in values are `sigil_dark`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `nord`, and `high_contrast_dark`. The `/config` panel includes an `Appearance` section; pressing `Enter` on `Theme` cycles through the built-ins, and `Ctrl-S` saves and applies the running TUI theme. Unsaved theme changes are not previewed.
+`theme` controls the TUI color palette. Built-in values are `sigil_dark`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `nord`, and `high_contrast_dark`. The `/config` panel includes an `Appearance` section; pressing `Enter` on `Theme` cycles through the built-ins and previews the draft immediately, while `Ctrl-S` saves the selection to `sigil.toml`.
 
 `[appearance.colors]` can override stable semantic color tokens with `#RRGGBB` values. Unknown tokens or non-hex values make the config invalid. Overrides affect TUI rendering only; they are not written to session history, approval records, tool payloads, or provider-visible context.
 

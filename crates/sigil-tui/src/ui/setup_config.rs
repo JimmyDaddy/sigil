@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::app::AppState;
-use crate::config_panel::CONFIG_HEADER_NOTICE;
+use crate::config_panel::{CONFIG_HEADER_NOTICE, ConfigSection};
 
 use super::{
     StatusKind,
@@ -758,7 +758,7 @@ fn render_config_line(index: usize, line: &str, content_width: usize) -> Line<'s
         return render_config_title_line(line);
     }
     if index == 1 {
-        return render_config_step_line(line, theme::config_primary());
+        return render_config_step_line(line, theme::config_primary(), content_width);
     }
     if line.starts_with('[') && line.ends_with(']') {
         return render_config_subsection_line(line, theme::config_primary(), content_width);
@@ -1326,7 +1326,130 @@ fn render_config_title_line(line: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-fn render_config_step_line(line: &str, accent: Color) -> Line<'static> {
+fn render_config_step_line(line: &str, accent: Color, content_width: usize) -> Line<'static> {
+    let Some(selected_section) = selected_config_step_section(line) else {
+        return render_config_step_words(line, accent);
+    };
+    let Some(selected_index) = selected_section.flow_index() else {
+        return render_config_step_words(line, accent);
+    };
+    let (start, end) = config_step_window(selected_index, content_width);
+    let mut spans = Vec::new();
+    if start > 0 {
+        push_config_step_item(
+            &mut spans,
+            Span::styled("...", Style::default().fg(theme::dim())),
+        );
+    }
+    for index in start..end {
+        let section = ConfigSection::FLOW[index];
+        let label = section.title().to_ascii_lowercase();
+        let selected = index == selected_index;
+        let span = if selected {
+            Span::styled(
+                format!(" {label} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(label, Style::default().fg(theme::muted()))
+        };
+        push_config_step_item(&mut spans, span);
+    }
+    if end < ConfigSection::FLOW.len() {
+        push_config_step_item(
+            &mut spans,
+            Span::styled("...", Style::default().fg(theme::dim())),
+        );
+    }
+    Line::from(spans)
+}
+
+fn selected_config_step_section(line: &str) -> Option<ConfigSection> {
+    let (_, rest) = line.split_once('[')?;
+    let (selected, _) = rest.split_once(']')?;
+    ConfigSection::FLOW
+        .iter()
+        .copied()
+        .find(|section| section.title().eq_ignore_ascii_case(selected))
+}
+
+fn config_step_window(selected_index: usize, max_width: usize) -> (usize, usize) {
+    let mut start = selected_index;
+    let mut end = selected_index
+        .saturating_add(1)
+        .min(ConfigSection::FLOW.len());
+    let mut prefer_left = selected_index >= ConfigSection::FLOW.len() / 2;
+    loop {
+        let mut changed = false;
+        for try_left in [prefer_left, !prefer_left] {
+            if try_left {
+                if start == 0 {
+                    continue;
+                }
+                let candidate_start = start - 1;
+                if config_step_window_width(candidate_start, end, selected_index) <= max_width {
+                    start = candidate_start;
+                    changed = true;
+                    break;
+                }
+            } else {
+                if end >= ConfigSection::FLOW.len() {
+                    continue;
+                }
+                let candidate_end = end + 1;
+                if config_step_window_width(start, candidate_end, selected_index) <= max_width {
+                    end = candidate_end;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+        prefer_left = !prefer_left;
+    }
+    (start, end)
+}
+
+fn config_step_window_width(start: usize, end: usize, selected_index: usize) -> usize {
+    let mut item_count = 0usize;
+    let mut width = 0usize;
+    if start > 0 {
+        width += "...".chars().count();
+        item_count += 1;
+    }
+    for index in start..end {
+        width += config_step_section_width(index, selected_index);
+        item_count += 1;
+    }
+    if end < ConfigSection::FLOW.len() {
+        width += "...".chars().count();
+        item_count += 1;
+    }
+    width + item_count.saturating_sub(1) * 2
+}
+
+fn config_step_section_width(index: usize, selected_index: usize) -> usize {
+    let label_width = ConfigSection::FLOW[index].title().chars().count();
+    if index == selected_index {
+        label_width + 2
+    } else {
+        label_width
+    }
+}
+
+fn push_config_step_item(spans: &mut Vec<Span<'static>>, span: Span<'static>) {
+    if !spans.is_empty() {
+        spans.push(Span::raw("  "));
+    }
+    spans.push(span);
+}
+
+fn render_config_step_words(line: &str, accent: Color) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, token) in line.split_whitespace().enumerate() {
         if index > 0 {
