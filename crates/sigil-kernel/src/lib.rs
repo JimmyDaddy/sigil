@@ -43,12 +43,13 @@ pub use changeset::{
     ChangeSetState, ChangeSetValidation, ChangeSetValidationKind, ChangeSetValidationStatus,
 };
 pub use config::{
-    AgentConfig, CodeIntelStartup, CodeIntelligenceConfig, CodeIntelligenceDiscoveryConfig,
-    CompactionConfig, CompactionThresholdStatus, LanguageServerConfig, McpServerConfig,
-    McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy, McpTrustClass, MemoryConfig,
-    RoleModelConfig, RootConfig, SessionConfig, SkillConfig, TaskConfig, TaskMode,
-    ToolAllowlistConfig, WorkspaceConfig, default_user_config_dir, default_user_config_path,
-    preferred_config_path, resolve_workspace_root,
+    AgentConfig, AppearanceConfig, CodeIntelStartup, CodeIntelligenceConfig,
+    CodeIntelligenceDiscoveryConfig, CompactionConfig, CompactionThresholdStatus,
+    LanguageServerConfig, McpServerConfig, McpServerPinnedIdentity, McpServerStartup,
+    McpServerTrustPolicy, McpTrustClass, MemoryConfig, RoleModelConfig, RootConfig, SessionConfig,
+    SkillConfig, TaskConfig, TaskMode, ThemeColorOverrides, ThemeId, ToolAllowlistConfig,
+    WorkspaceConfig, default_user_config_dir, default_user_config_path, preferred_config_path,
+    resolve_workspace_root,
 };
 pub use event::{
     EventHandler, NoopEventHandler, PUBLIC_RUN_EVENT_SCHEMA_VERSION, PublicAssistantMessage,

@@ -59,6 +59,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         compaction: sigil_kernel::CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: TaskConfig::default(),
         providers: BTreeMap::from([
             (

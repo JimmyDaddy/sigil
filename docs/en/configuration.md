@@ -87,6 +87,9 @@ mouse_capture = true
 osc52_clipboard = true
 scroll_sensitivity = 3
 
+[appearance]
+theme = "sigil_dark"
+
 [providers.deepseek]
 model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
@@ -141,6 +144,51 @@ tool_timeout_secs = 30
 - `model`: the default model.
 - `tool_timeout_secs`: tool execution timeout.
 - `max_turns`: optional guard. It is disabled by default; when set, a run stops recoverably if the model keeps requesting tools without producing a final answer.
+
+## Appearance
+
+```toml
+[appearance]
+theme = "sigil_dark"
+
+[appearance.colors]
+surface_base = "#07080A"
+accent_primary = "#91B6AA"
+markdown_code_bg = "#1C2129"
+```
+
+`theme` controls the TUI color palette. Built-in values are `sigil_dark`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `nord`, and `high_contrast_dark`. The `/config` panel includes an `Appearance` section; pressing `Enter` on `Theme` cycles through the built-ins, and `Ctrl-S` saves and applies the running TUI theme. Unsaved theme changes are not previewed.
+
+`[appearance.colors]` can override stable semantic color tokens with `#RRGGBB` values. Unknown tokens or non-hex values make the config invalid. Overrides affect TUI rendering only; they are not written to session history, approval records, tool payloads, or provider-visible context.
+
+Supported color tokens:
+
+```text
+surface_base, surface_rail, surface_panel, surface_panel_alt, surface_input,
+surface_agent_panel, surface_overlay, surface_overlay_shadow, surface_badge,
+surface_selection, surface_user_message, surface_code,
+border_subtle, border_strong, border_focus, border_danger,
+text_primary, text_secondary, text_muted, text_inverse, text_disabled,
+accent_primary, accent_secondary, accent_info, accent_success, accent_warning,
+accent_danger, accent_streaming, accent_idle,
+selection_fg, selection_bg, button_selected_fg, button_selected_bg,
+button_inactive_fg,
+diff_header_fg, diff_hunk_fg, diff_added_fg, diff_added_bg,
+diff_removed_fg, diff_removed_bg, diff_context_fg, diff_gutter_fg,
+diff_current_hunk_bg,
+approval_bg, approval_backdrop_bg, approval_border, approval_shadow,
+risk_low, risk_medium, risk_high, approval_allow_bg, approval_deny_bg,
+approval_selected_bg,
+markdown_heading, markdown_quote_bar, markdown_quote_text, markdown_rule,
+markdown_code_fg, markdown_code_bg, markdown_link,
+modal_bg, modal_border, modal_shadow, modal_command_bg, modal_selected_bg,
+overlay_bg, overlay_shadow,
+config_bg, config_border, config_primary, config_detail, config_warning,
+config_danger, config_tab_bg, config_section_bg, config_selected_bg,
+setup_bg,
+status_idle, status_thinking, status_tool, status_streaming, status_success,
+status_warning, status_error, status_pending
+```
 
 ## Task Planning
 

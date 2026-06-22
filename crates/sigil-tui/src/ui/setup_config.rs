@@ -75,7 +75,8 @@ pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
 }
 
 pub(super) fn render_config(frame: &mut Frame, app: &AppState) {
-    let panel_bg = theme::config_panel_bg();
+    let current_theme = theme::resolve_for_app(app);
+    let panel_bg = current_theme.palette.config_bg;
     frame.render_widget(
         Block::default().style(Style::default().bg(panel_bg)),
         frame.area(),

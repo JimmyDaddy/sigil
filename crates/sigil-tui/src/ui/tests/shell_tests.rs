@@ -13,7 +13,7 @@ use crate::app::AppState;
 use crate::timeline::RunPhase;
 
 use super::super::theme::{
-    config_border, config_primary, config_section_bg, config_selected_bg, config_tab_bg,
+    Theme, config_border, config_primary, config_section_bg, config_selected_bg, config_tab_bg,
 };
 use super::*;
 
@@ -37,6 +37,7 @@ fn test_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
@@ -276,7 +277,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Provider 1/10"));
+    assert!(rendered.contains("Provider 1/11"));
     assert!(rendered.contains("▸ Model"));
     assert!(rendered.contains("key model"));
     assert!(rendered.contains("keys Tab section"));
@@ -290,12 +291,36 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 }
 
 #[test]
+fn render_main_screen_uses_configured_theme_surface() -> anyhow::Result<()> {
+    let mut config = test_config();
+    config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let expected = Theme::builtin(sigil_kernel::ThemeId::SolarizedLight)
+        .palette
+        .surface_base;
+    let actual = terminal
+        .backend()
+        .buffer()
+        .cell((0, 0))
+        .expect("top-left cell should exist")
+        .bg;
+    assert_eq!(actual, expected);
+    assert_ne!(actual, Color::Rgb(7, 8, 10));
+    Ok(())
+}
+
+#[test]
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/10", "▸ Model"),
-            (2, "Memory 3/10", "▸ Memory"),
-            (3, "Compaction 4/10", "▸ Auto compact"),
+            (0, "Provider 1/11", "▸ Model"),
+            (2, "Memory 3/11", "▸ Memory"),
+            (3, "Compaction 4/11", "▸ Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.input = "/config".to_owned();
@@ -1045,7 +1070,7 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    for _ in 0..8 {
+    for _ in 0..9 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     }
     let backend = TestBackend::new(96, 80);
@@ -1054,7 +1079,7 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Plugins 9/10"));
+    assert!(rendered.contains("Plugins 10/11"));
     assert!(rendered.contains("Hook 4"));
     assert!(rendered.contains("session_stop"));
     assert!(rendered.contains("scripts/hook-4.sh --flag-4"));
@@ -1168,7 +1193,7 @@ fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Memory 3/10"));
+    assert!(rendered.contains("Memory 3/11"));
     assert!(rendered.contains("◇ Documents"));
     assert!(rendered.contains("Last scan"));
     assert!(rendered.contains("Root files"));
@@ -1320,10 +1345,11 @@ fn render_footer_status_returns_early_for_zero_and_tiny_areas() -> anyhow::Resul
     };
     let backend = TestBackend::new(8, 2);
     let mut terminal = Terminal::new(backend)?;
+    let theme = theme::Theme::default();
 
     terminal.draw(|frame| {
-        render_footer_status(frame, Rect::new(0, 0, 0, 1), &footer);
-        render_footer_status(frame, Rect::new(0, 1, 3, 1), &footer);
+        render_footer_status(frame, Rect::new(0, 0, 0, 1), &footer, &theme);
+        render_footer_status(frame, Rect::new(0, 1, 3, 1), &footer, &theme);
     })?;
 
     Ok(())
@@ -1341,8 +1367,9 @@ fn render_footer_status_omits_context_when_width_is_small_or_label_is_empty() ->
     };
     let backend = TestBackend::new(24, 2);
     let mut terminal = Terminal::new(backend)?;
+    let theme = theme::Theme::default();
 
-    terminal.draw(|frame| render_footer_status(frame, Rect::new(0, 0, 24, 1), &footer))?;
+    terminal.draw(|frame| render_footer_status(frame, Rect::new(0, 0, 24, 1), &footer, &theme))?;
 
     let rendered = rendered_content(&terminal);
     assert!(!rendered.contains("ready"));
