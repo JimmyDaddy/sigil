@@ -394,7 +394,10 @@ fn render_task_strip_row(
     };
     Line::from(vec![
         Span::styled("  ", Style::default().bg(row_bg)),
-        Span::styled(status.symbol(), status.style().bg(row_bg)),
+        Span::styled(
+            status.symbol(),
+            status.style_with_palette(palette).bg(row_bg),
+        ),
         Span::styled(" ", Style::default().bg(row_bg)),
         Span::styled(label, label_style),
     ])
@@ -486,7 +489,7 @@ fn render_live_progress_lines_with_theme(
     let indicator = StatusIndicator::animated(StatusKind::Running);
     vec![
         Line::from(vec![
-            indicator.span(),
+            indicator.span_with_palette(palette),
             Span::raw(" "),
             Span::styled(
                 format!("{}...", progress.title),

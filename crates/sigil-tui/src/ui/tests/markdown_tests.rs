@@ -3,6 +3,8 @@ use ratatui::{
     text::Span,
 };
 
+use crate::ui::theme::{accent_gold, accent_lime, accent_teal, ink, muted};
+
 use super::*;
 
 fn plain_text(lines: &[Line<'static>]) -> String {
@@ -31,6 +33,29 @@ fn markdown_timeline_lines_render_code_blocks() {
     let plain = plain_text(&lines);
     assert!(plain.contains("rust"));
     assert!(plain.contains("fn main() {}"));
+}
+
+#[test]
+fn markdown_default_wrappers_use_default_theme_palette() {
+    let palette = crate::ui::theme::default_palette();
+    let code = render_code_line_spans("let x = 1;", Color::Cyan, Style::default());
+    assert_eq!(code[1].style.bg, Some(palette.markdown_code_bg));
+
+    let table = render_table_spans(
+        "| name | value |",
+        Style::default(),
+        MarkdownRenderOptions::timeline(80),
+    );
+    let text = table
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(text.contains("name"));
+    assert!(
+        table
+            .iter()
+            .any(|span| span.style.fg == Some(palette.markdown_rule))
+    );
 }
 
 #[test]
@@ -411,7 +436,10 @@ fn markdown_inline_and_plain_text_helpers_cover_emphasis_code_and_fallbacks() {
         .expect("expected inline code span");
 
     assert!(italic.style.add_modifier.contains(Modifier::ITALIC));
-    assert_eq!(code.style.bg, Some(Color::Rgb(35, 40, 48)));
+    assert_eq!(
+        code.style.bg,
+        Some(crate::ui::theme::default_palette().markdown_code_bg)
+    );
     assert!(code.style.add_modifier.contains(Modifier::BOLD));
     assert_eq!(markdown_plain_text("`code` _em_"), "code em");
     assert_eq!(markdown_plain_text("`unterminated"), "`unterminated");

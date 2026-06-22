@@ -643,6 +643,13 @@ fn config_appearance_step_shows_theme_and_scope() {
     assert!(detail.contains("- Name: Gruvbox Dark"));
     assert!(detail.contains("sigil_dark, solarized_dark, solarized_light"));
     assert!(detail.contains("- Overrides: 1 colors"));
+    assert!(detail.contains("[preview]"));
+    assert!(detail.contains("preview text: primary secondary muted"));
+    assert!(detail.contains("preview selection: selected row"));
+    assert!(detail.contains("preview status: success warning error pending"));
+    assert!(detail.contains("preview diff: +added -removed @@ hunk"));
+    assert!(detail.contains("preview approval: allow deny selected"));
+    assert!(detail.contains("preview markdown: heading link code"));
     assert!(detail.contains("[scope]"));
     assert!(detail.contains("not written to session history"));
     assert!(detail.contains("Theme draft previews immediately"));

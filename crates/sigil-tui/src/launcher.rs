@@ -22,7 +22,7 @@ use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use sigil_kernel::RootConfig;
@@ -35,7 +35,7 @@ use crate::{
     app::{AppAction, AppState},
     mouse::AppMouseOutcome,
     runner::{self, WorkerCommand, WorkerMessage},
-    ui::LayoutSnapshot,
+    ui::{LayoutSnapshot, theme},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -792,17 +792,18 @@ fn render_scrollback_rows(buf: &mut Buffer, rows: &[(String, Style)]) {
 }
 
 fn scrollback_separator(app: &AppState) -> Line<'static> {
+    let palette = theme::default_palette();
     Line::from(vec![
-        Span::styled("---- session ", Style::default().fg(Color::DarkGray)),
+        Span::styled("---- session ", Style::default().fg(palette.text_muted)),
         Span::styled(
             app.session_id.chars().take(8).collect::<String>(),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette.accent_info)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!(" {} / {} ----", app.provider_name, app.model_name),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(palette.text_muted),
         ),
     ])
 }

@@ -165,9 +165,9 @@ fn sigil_dark() -> ThemePalette {
         button_inactive_fg: c(149, 158, 173),
         diff_header_fg: Color::Cyan,
         diff_hunk_fg: Color::Yellow,
-        diff_added_fg: Color::Green,
+        diff_added_fg: c(126, 211, 139),
         diff_added_bg: c(16, 34, 22),
-        diff_removed_fg: Color::Red,
+        diff_removed_fg: c(255, 146, 146),
         diff_removed_bg: c(40, 18, 18),
         diff_context_fg: Color::Gray,
         diff_gutter_fg: Color::DarkGray,
@@ -218,7 +218,7 @@ fn sigil_dark() -> ThemePalette {
 }
 
 fn solarized_dark() -> ThemePalette {
-    seeded_palette(
+    let mut palette = seeded_palette(
         c(0, 43, 54),
         c(7, 54, 66),
         c(7, 54, 66),
@@ -236,11 +236,13 @@ fn solarized_dark() -> ThemePalette {
         c(181, 137, 0),
         c(220, 50, 47),
         c(181, 137, 0),
-    )
+    );
+    palette.diff_removed_fg = c(255, 104, 100);
+    palette
 }
 
 fn solarized_light() -> ThemePalette {
-    seeded_palette(
+    let mut palette = seeded_palette(
         c(253, 246, 227),
         c(238, 232, 213),
         c(245, 239, 220),
@@ -250,7 +252,7 @@ fn solarized_light() -> ThemePalette {
         c(217, 234, 223),
         c(7, 54, 66),
         c(88, 110, 117),
-        c(131, 148, 150),
+        c(101, 123, 131),
         c(253, 246, 227),
         c(42, 161, 152),
         c(38, 139, 210),
@@ -258,7 +260,9 @@ fn solarized_light() -> ThemePalette {
         c(181, 137, 0),
         c(220, 50, 47),
         c(38, 139, 210),
-    )
+    );
+    palette.diff_added_fg = c(0, 109, 100);
+    palette
 }
 
 fn gruvbox_dark() -> ThemePalette {
@@ -284,7 +288,7 @@ fn gruvbox_dark() -> ThemePalette {
 }
 
 fn nord() -> ThemePalette {
-    seeded_palette(
+    let mut palette = seeded_palette(
         c(46, 52, 64),
         c(59, 66, 82),
         c(53, 60, 74),
@@ -302,7 +306,9 @@ fn nord() -> ThemePalette {
         c(235, 203, 139),
         c(191, 97, 106),
         c(136, 192, 208),
-    )
+    );
+    palette.diff_removed_fg = c(222, 110, 120);
+    palette
 }
 
 fn high_contrast_dark() -> ThemePalette {

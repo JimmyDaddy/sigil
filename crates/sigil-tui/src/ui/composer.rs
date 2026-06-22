@@ -10,7 +10,7 @@ use crate::view_model::ComposerViewModel;
 
 use super::{
     geometry::inset_rect,
-    status_indicator::{FocusKind, StatusIndicator, focus_style},
+    status_indicator::{FocusKind, StatusIndicator, focus_style_with_palette},
     text::{pad_display_width, truncate_display_width, wrap_composer_input},
     theme::Theme,
 };
@@ -244,18 +244,19 @@ fn render_agent_row(
     Line::from(vec![
         Span::styled(
             focus.to_owned(),
-            focus_style(if row.active {
-                FocusKind::Current
-            } else if panel_focused && row.selected {
-                FocusKind::Selected
-            } else {
-                FocusKind::None
-            }),
+            focus_style_with_palette(
+                if row.active {
+                    FocusKind::Current
+                } else {
+                    FocusKind::None
+                },
+                palette,
+            ),
         ),
         Span::raw(" "),
         Span::styled(label_text, style),
         Span::raw(" "),
-        status.span(),
+        status.span_with_palette(palette),
         Span::raw(" "),
         Span::styled(
             detail_text,

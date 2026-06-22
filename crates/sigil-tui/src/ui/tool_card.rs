@@ -10,18 +10,16 @@ use super::{
     TimelineRenderOptions,
     diff::{
         DiffLineKind, NumberedDiffLine, diff_line_kind, diff_line_number_text,
-        diff_line_number_width, diff_line_style, number_unified_diff_lines,
+        diff_line_number_width, diff_line_style_for_palette, number_unified_diff_lines,
     },
     markdown::{
-        MarkdownRenderOptions, render_code_line_spans_with_bg, render_markdown_timeline_lines,
+        MarkdownRenderOptions, render_code_line_spans_with_bg,
         render_markdown_timeline_lines_with_palette,
     },
     primitives::{section_badge, timeline_badge, timeline_content_line, timeline_section_line},
     status_indicator::{StatusIndicator, StatusKind, status_kind_from_label},
     text::truncate_inline_text,
-    theme::{
-        ThemePalette, accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink,
-    },
+    theme::ThemePalette,
 };
 
 const COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS: usize = 4;
@@ -70,6 +68,7 @@ pub(crate) fn render_tool_entry_lines(
         hovered,
         expanded,
         options.max_content_width,
+        palette,
     )];
     if let Some(summary_line) = display.summary.clone() {
         lines.push(timeline_content_line(
@@ -133,7 +132,7 @@ fn render_tool_collapsed_preview_body_with_palette(
     let visible_rows = COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS;
     let hidden_rows = collapsed_tool_hidden_rows(summary, body.len(), visible_rows);
     let mut lines = body.into_iter().take(visible_rows).collect::<Vec<_>>();
-    lines.extend(render_tool_hidden_tail(accent, hidden_rows));
+    lines.extend(render_tool_hidden_tail(accent, hidden_rows, palette));
     lines
 }
 
@@ -157,11 +156,12 @@ fn tool_card_header_line(
     hovered: bool,
     expanded: bool,
     max_content_width: usize,
+    palette: &ThemePalette,
 ) -> Line<'static> {
     let accent = if hovered {
-        accent_gold()
+        palette.accent_warning
     } else {
-        accent_rose()
+        palette.accent_danger
     };
     let mut spans = vec![
         Span::styled(
@@ -170,15 +170,16 @@ fn tool_card_header_line(
         ),
         Span::raw(" "),
     ];
-    spans.extend(tool_title_spans(
+    spans.extend(tool_title_spans_with_palette(
         &display.title,
         tool_title_width(display, max_content_width),
+        palette,
     ));
     spans.push(Span::raw("  "));
     let status_indicator = StatusIndicator::animated(display.status.kind);
     spans.push(Span::styled(
         format!(" {} {} ", status_indicator.symbol(), display.status.label),
-        tool_status_style(display.status.kind),
+        tool_status_style(display.status.kind, palette),
     ));
     if let Some(detail) = &display.status.detail {
         spans.push(Span::raw(" "));
@@ -186,10 +187,10 @@ fn tool_card_header_line(
             detail.clone(),
             if display.status.is_error {
                 Style::default()
-                    .fg(accent_rose())
+                    .fg(palette.accent_danger)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(dim())
+                Style::default().fg(palette.text_muted)
             },
         ));
     }
@@ -198,13 +199,16 @@ fn tool_card_header_line(
         spans.push(Span::styled(
             "●",
             Style::default()
-                .fg(accent_blue())
+                .fg(palette.accent_info)
                 .add_modifier(Modifier::BOLD),
         ));
     }
     if expanded {
         spans.push(Span::raw(" "));
-        spans.push(Span::styled("▾", Style::default().fg(accent_lime())));
+        spans.push(Span::styled(
+            "▾",
+            Style::default().fg(palette.accent_success),
+        ));
     }
     Line::from(spans)
 }
@@ -236,26 +240,26 @@ fn render_tool_preview_body_with_palette(
 ) -> Vec<Line<'static>> {
     if (tool_name_matches(&summary.tool_name, "ls")
         || tool_name_matches(&summary.tool_name, "glob"))
-        && let Some(lines) = render_path_list_preview(summary, accent)
+        && let Some(lines) = render_path_list_preview_with_palette(summary, accent, palette)
     {
         return lines;
     }
     if tool_name_matches(&summary.tool_name, "grep")
-        && let Some(lines) = render_grep_preview(summary, accent)
+        && let Some(lines) = render_grep_preview_with_palette(summary, accent, palette)
     {
         return lines;
     }
     if tool_name_matches(&summary.tool_name, "bash") {
-        return render_bash_preview(summary, accent);
+        return render_bash_preview_with_palette(summary, accent, palette);
     }
     if terminal_task_tool(summary) {
-        return render_terminal_task_preview(summary, accent);
+        return render_terminal_task_preview_with_palette(summary, accent, palette);
     }
     if agent_tool(summary) {
-        return render_agent_tool_preview(summary, accent, max_content_width);
+        return render_agent_tool_preview(summary, accent, max_content_width, palette);
     }
     if file_change_tool(summary)
-        && let Some(lines) = render_file_change_preview(summary, accent)
+        && let Some(lines) = render_file_change_preview_with_palette(summary, accent, palette)
     {
         return lines;
     }
@@ -263,9 +267,14 @@ fn render_tool_preview_body_with_palette(
         return render_read_file_preview_with_palette(summary, accent, max_content_width, palette);
     }
     if code_intelligence_tool(summary) {
-        return render_code_intelligence_preview(summary, accent, max_content_width);
+        return render_code_intelligence_preview_with_palette(
+            summary,
+            accent,
+            max_content_width,
+            palette,
+        );
     }
-    render_generic_tool_preview(summary, accent, max_content_width)
+    render_generic_tool_preview_with_palette(summary, accent, max_content_width, palette)
 }
 
 #[cfg(test)]
@@ -291,14 +300,14 @@ fn render_read_file_preview_with_palette(
         } else {
             "file"
         },
-        accent_blue(),
+        palette.accent_info,
         vec![Span::styled(
             if summary.preview_kind == ToolPreviewKind::Markdown {
                 "document excerpt"
             } else {
                 "file excerpt"
             },
-            Style::default().fg(dim()),
+            Style::default().fg(palette.text_muted),
         )],
     )];
     match summary.preview_kind {
@@ -320,11 +329,25 @@ fn render_read_file_preview_with_palette(
             ));
         }
     }
-    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    lines.extend(render_tool_hidden_tail(
+        accent,
+        summary.hidden_lines,
+        palette,
+    ));
     lines
 }
 
+#[cfg(test)]
 fn render_path_list_preview(summary: &ToolCardRender, accent: Color) -> Option<Vec<Line<'static>>> {
+    let palette = crate::ui::theme::default_palette();
+    render_path_list_preview_with_palette(summary, accent, &palette)
+}
+
+fn render_path_list_preview_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    palette: &ThemePalette,
+) -> Option<Vec<Line<'static>>> {
     let entries = summary
         .preview_value
         .as_ref()
@@ -339,10 +362,10 @@ fn render_path_list_preview(summary: &ToolCardRender, accent: Color) -> Option<V
         } else {
             "files"
         },
-        accent_blue(),
+        palette.accent_info,
         vec![Span::styled(
             format!("{} paths", entries.len() + summary.hidden_lines),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.text_muted),
         )],
     )];
     for path in entries {
@@ -352,18 +375,32 @@ fn render_path_list_preview(summary: &ToolCardRender, accent: Color) -> Option<V
                 Span::styled(
                     "• ",
                     Style::default()
-                        .fg(accent_gold())
+                        .fg(palette.accent_warning)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(path, Style::default().fg(ink())),
+                Span::styled(path, Style::default().fg(palette.text_primary)),
             ],
         ));
     }
-    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    lines.extend(render_tool_hidden_tail(
+        accent,
+        summary.hidden_lines,
+        palette,
+    ));
     Some(lines)
 }
 
+#[cfg(test)]
 fn render_grep_preview(summary: &ToolCardRender, accent: Color) -> Option<Vec<Line<'static>>> {
+    let palette = crate::ui::theme::default_palette();
+    render_grep_preview_with_palette(summary, accent, &palette)
+}
+
+fn render_grep_preview_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    palette: &ThemePalette,
+) -> Option<Vec<Line<'static>>> {
     let matches = summary.preview_value.as_ref().and_then(json_grep_matches)?;
     if matches.is_empty() {
         return None;
@@ -381,24 +418,29 @@ fn render_grep_preview(summary: &ToolCardRender, accent: Color) -> Option<Vec<Li
     let mut lines = vec![timeline_section_line(
         accent,
         "matches",
-        accent_blue(),
+        palette.accent_info,
         vec![Span::styled(
             format!("{} files", grouped.len()),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.text_muted),
         )],
     )];
     for (path, rows) in grouped {
         lines.push(timeline_content_line(
             accent,
             vec![
-                section_badge("file", accent_teal()),
+                section_badge("file", palette.accent_secondary),
                 Span::raw(" "),
                 Span::styled(
                     path,
-                    Style::default().fg(ink()).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(palette.text_primary)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),
-                Span::styled(format!("{} hits", rows.len()), Style::default().fg(dim())),
+                Span::styled(
+                    format!("{} hits", rows.len()),
+                    Style::default().fg(palette.text_muted),
+                ),
             ],
         ));
         for (line_number, text) in rows {
@@ -408,20 +450,37 @@ fn render_grep_preview(summary: &ToolCardRender, accent: Color) -> Option<Vec<Li
                     Span::styled(
                         format!("L{line_number:<4}"),
                         Style::default()
-                            .fg(accent_gold())
+                            .fg(palette.accent_warning)
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(" "),
-                    Span::styled(truncate_inline_text(&text, 140), Style::default().fg(ink())),
+                    Span::styled(
+                        truncate_inline_text(&text, 140),
+                        Style::default().fg(palette.text_primary),
+                    ),
                 ],
             ));
         }
     }
-    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    lines.extend(render_tool_hidden_tail(
+        accent,
+        summary.hidden_lines,
+        palette,
+    ));
     Some(lines)
 }
 
+#[cfg(test)]
 fn render_bash_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'static>> {
+    let palette = crate::ui::theme::default_palette();
+    render_bash_preview_with_palette(summary, accent, &palette)
+}
+
+fn render_bash_preview_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let section = bash_preview_section_label(summary);
     let subtitle = match (&summary.summary, summary.metadata.exit_code) {
         (Some(summary), Some(code)) => format!("exit {code} · {summary}"),
@@ -432,29 +491,41 @@ fn render_bash_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'sta
     let mut lines = vec![timeline_section_line(
         accent,
         section,
-        accent_gold(),
-        vec![Span::styled(subtitle, Style::default().fg(dim()))],
+        palette.accent_warning,
+        vec![Span::styled(
+            subtitle,
+            Style::default().fg(palette.text_muted),
+        )],
     )];
     if summary.preview_lines.is_empty() {
         lines.push(timeline_content_line(
             accent,
             vec![Span::styled(
                 "(no output)".to_owned(),
-                Style::default().fg(dim()),
+                Style::default().fg(palette.text_muted),
             )],
         ));
     } else {
-        lines.extend(render_code_preview_lines(
+        lines.extend(render_code_preview_lines_with_palette(
             accent,
             &summary.preview_lines,
-            Color::Rgb(33, 24, 28),
+            palette.markdown_code_bg,
+            palette,
         ));
     }
-    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    lines.extend(render_tool_hidden_tail(
+        accent,
+        summary.hidden_lines,
+        palette,
+    ));
     lines
 }
 
-fn render_terminal_task_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'static>> {
+fn render_terminal_task_preview_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let subtitle = summary
         .metadata
         .terminal_command
@@ -465,16 +536,19 @@ fn render_terminal_task_preview(summary: &ToolCardRender, accent: Color) -> Vec<
     let mut lines = vec![timeline_section_line(
         accent,
         "terminal",
-        accent_gold(),
-        vec![Span::styled(subtitle, Style::default().fg(dim()))],
+        palette.accent_warning,
+        vec![Span::styled(
+            subtitle,
+            Style::default().fg(palette.text_muted),
+        )],
     )];
     if let Some(log_path) = &summary.metadata.terminal_log_path {
         lines.push(timeline_content_line(
             accent,
             vec![
-                section_badge("log", accent_teal()),
+                section_badge("log", palette.accent_secondary),
                 Span::raw(" "),
-                Span::styled(log_path.clone(), Style::default().fg(dim())),
+                Span::styled(log_path.clone(), Style::default().fg(palette.text_muted)),
             ],
         ));
     }
@@ -483,17 +557,22 @@ fn render_terminal_task_preview(summary: &ToolCardRender, accent: Color) -> Vec<
             accent,
             vec![Span::styled(
                 "(no output preview)".to_owned(),
-                Style::default().fg(dim()),
+                Style::default().fg(palette.text_muted),
             )],
         ));
     } else {
-        lines.extend(render_code_preview_lines(
+        lines.extend(render_code_preview_lines_with_palette(
             accent,
             &summary.preview_lines,
-            Color::Rgb(33, 24, 28),
+            palette.markdown_code_bg,
+            palette,
         ));
     }
-    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    lines.extend(render_tool_hidden_tail(
+        accent,
+        summary.hidden_lines,
+        palette,
+    ));
     lines
 }
 
@@ -563,9 +642,19 @@ fn terminal_task_status_kind(summary: &ToolCardRender) -> StatusKind {
     }
 }
 
+#[cfg(test)]
 fn render_file_change_preview(
     summary: &ToolCardRender,
     accent: Color,
+) -> Option<Vec<Line<'static>>> {
+    let palette = crate::ui::theme::default_palette();
+    render_file_change_preview_with_palette(summary, accent, &palette)
+}
+
+fn render_file_change_preview_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    palette: &ThemePalette,
 ) -> Option<Vec<Line<'static>>> {
     if summary.metadata.changed_files.is_empty() && summary.diff.is_none() {
         return None;
@@ -575,14 +664,14 @@ fn render_file_change_preview(
         lines.push(timeline_section_line(
             accent,
             "files",
-            accent_blue(),
+            palette.accent_info,
             vec![Span::styled(
                 format!(
                     "{} {}",
                     summary.metadata.changed_files.len(),
                     file_change_count_label(summary)
                 ),
-                Style::default().fg(dim()),
+                Style::default().fg(palette.text_muted),
             )],
         ));
         for path in &summary.metadata.changed_files {
@@ -592,43 +681,62 @@ fn render_file_change_preview(
                     Span::styled(
                         "• ",
                         Style::default()
-                            .fg(accent_lime())
+                            .fg(palette.accent_success)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(path.clone(), Style::default().fg(ink())),
+                    Span::styled(path.clone(), Style::default().fg(palette.text_primary)),
                 ],
             ));
         }
     }
     if let Some(diff) = &summary.diff {
-        lines.extend(render_tool_diff_preview(summary, diff, accent));
+        lines.extend(render_tool_diff_preview_with_palette(
+            summary, diff, accent, palette,
+        ));
     }
     if !summary.preview_lines.is_empty() {
         lines.push(timeline_section_line(
             accent,
             "result",
-            accent_gold(),
+            palette.accent_warning,
             vec![Span::styled(
                 file_change_result_label(summary),
-                Style::default().fg(dim()),
+                Style::default().fg(palette.text_muted),
             )],
         ));
-        lines.extend(render_code_preview_lines(
+        lines.extend(render_code_preview_lines_with_palette(
             accent,
             &summary.preview_lines,
-            Color::Rgb(28, 33, 41),
+            palette.markdown_code_bg,
+            palette,
         ));
     }
     Some(lines)
 }
 
+#[cfg(test)]
 fn render_code_intelligence_preview(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
 ) -> Vec<Line<'static>> {
+    let palette = crate::ui::theme::default_palette();
+    render_code_intelligence_preview_with_palette(summary, accent, max_content_width, &palette)
+}
+
+fn render_code_intelligence_preview_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let Some(value) = &summary.preview_value else {
-        return render_generic_tool_preview(summary, accent, max_content_width);
+        return render_generic_tool_preview_with_palette(
+            summary,
+            accent,
+            max_content_width,
+            palette,
+        );
     };
     let server = value
         .get("server")
@@ -655,7 +763,7 @@ fn render_code_intelligence_preview(
     let mut lines = vec![timeline_section_line(
         accent,
         code_intelligence_section(summary),
-        accent_blue(),
+        palette.accent_info,
         vec![Span::styled(
             format!(
                 "{} · {} · {} · {returned}/{total}",
@@ -663,25 +771,26 @@ fn render_code_intelligence_preview(
                 server,
                 code_intelligence_capability_label(capability)
             ),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.text_muted),
         )],
     )];
-    if let Some(server_line) = code_intelligence_servers_line(value) {
+    if let Some(server_line) = code_intelligence_servers_line_with_palette(value, palette) {
         lines.push(timeline_content_line(accent, server_line));
     }
-    if let Some(items) = code_intelligence_items(summary, value) {
+    if let Some(items) = code_intelligence_items(summary, value, palette) {
         for item in items.into_iter().take(16) {
             lines.push(timeline_content_line(accent, item));
         }
         let hidden = total
             .saturating_sub(returned)
             .saturating_add(returned.saturating_sub(16));
-        lines.extend(render_tool_hidden_tail(accent, hidden as usize));
+        lines.extend(render_tool_hidden_tail(accent, hidden as usize, palette));
     } else {
-        lines.extend(render_generic_tool_preview(
+        lines.extend(render_generic_tool_preview_with_palette(
             summary,
             accent,
             max_content_width,
+            palette,
         ));
     }
     lines
@@ -704,6 +813,7 @@ fn code_intelligence_section(summary: &ToolCardRender) -> &'static str {
 fn code_intelligence_items(
     summary: &ToolCardRender,
     value: &Value,
+    palette: &ThemePalette,
 ) -> Option<Vec<Vec<Span<'static>>>> {
     let key = if tool_name_matches(&summary.tool_name, "code_diagnostics") {
         "diagnostics"
@@ -724,12 +834,16 @@ fn code_intelligence_items(
         .and_then(Value::as_array)?;
     let rows = array
         .iter()
-        .filter_map(|entry| code_intelligence_row(summary, entry))
+        .filter_map(|entry| code_intelligence_row_with_palette(summary, entry, palette))
         .collect::<Vec<_>>();
     Some(rows)
 }
 
-fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<Span<'static>>> {
+fn code_intelligence_row_with_palette(
+    summary: &ToolCardRender,
+    entry: &Value,
+    palette: &ThemePalette,
+) -> Option<Vec<Span<'static>>> {
     if tool_name_matches(&summary.tool_name, "code_diagnostics") {
         let severity = entry.get("severity")?.as_str()?.to_owned();
         let path = entry.get("path")?.as_str()?.to_owned();
@@ -739,23 +853,26 @@ fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<
             .and_then(Value::as_str)
             .map(str::to_owned);
         let mut spans = vec![
-            section_badge(&severity, diagnostic_severity_color(&severity)),
+            section_badge(
+                &severity,
+                diagnostic_severity_color_with_palette(&severity, palette),
+            ),
             Span::raw(" "),
             Span::styled(
                 code_location_label(&path, entry),
-                Style::default().fg(accent_blue()),
+                Style::default().fg(palette.accent_info),
             ),
             Span::raw(" "),
         ];
         if let Some(source) = source {
             spans.push(Span::styled(
                 format!("{source}: "),
-                Style::default().fg(dim()),
+                Style::default().fg(palette.text_muted),
             ));
         }
         spans.push(Span::styled(
             truncate_inline_text(&message, 120),
-            Style::default().fg(ink()),
+            Style::default().fg(palette.text_primary),
         ));
         return Some(spans);
     }
@@ -774,13 +891,13 @@ fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<
             "inspect"
         };
         return Some(vec![
-            section_badge(&label, accent_teal()),
+            section_badge(&label, palette.accent_secondary),
             Span::raw(" "),
-            Span::styled(capability, Style::default().fg(accent_blue())),
+            Span::styled(capability, Style::default().fg(palette.accent_info)),
             Span::raw(" "),
             Span::styled(
                 truncate_inline_text(&title, 120),
-                Style::default().fg(ink()),
+                Style::default().fg(palette.text_primary),
             ),
         ]);
     }
@@ -806,20 +923,23 @@ fn code_intelligence_row(summary: &ToolCardRender, entry: &Value) -> Option<Vec<
         .unwrap_or("")
         .to_owned();
     let mut spans = vec![
-        section_badge(&label, accent_teal()),
+        section_badge(&label, palette.accent_secondary),
         Span::raw(" "),
         Span::styled(
             code_location_label(&path, entry),
-            Style::default().fg(accent_blue()),
+            Style::default().fg(palette.accent_info),
         ),
         Span::raw(" "),
-        Span::styled(truncate_inline_text(&name, 120), Style::default().fg(ink())),
+        Span::styled(
+            truncate_inline_text(&name, 120),
+            Style::default().fg(palette.text_primary),
+        ),
     ];
     if let Some(container) = entry.get("container_name").and_then(Value::as_str) {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
             format!("in {container}"),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.text_muted),
         ));
     }
     Some(spans)
@@ -873,7 +993,10 @@ fn code_intelligence_capability_label(capability: &str) -> String {
     }
 }
 
-fn code_intelligence_servers_line(value: &Value) -> Option<Vec<Span<'static>>> {
+fn code_intelligence_servers_line_with_palette(
+    value: &Value,
+    palette: &ThemePalette,
+) -> Option<Vec<Span<'static>>> {
     let servers = value.get("servers").and_then(Value::as_array)?;
     if servers.len() <= 1 {
         return None;
@@ -891,9 +1014,9 @@ fn code_intelligence_servers_line(value: &Value) -> Option<Vec<Span<'static>>> {
         return None;
     }
     Some(vec![
-        section_badge("servers", accent_blue()),
+        section_badge("servers", palette.accent_info),
         Span::raw(" "),
-        Span::styled(labels.join(" · "), Style::default().fg(dim())),
+        Span::styled(labels.join(" · "), Style::default().fg(palette.text_muted)),
     ])
 }
 
@@ -921,11 +1044,17 @@ fn code_intelligence_server_label(value: &Value) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn diagnostic_severity_color(severity: &str) -> Color {
+    let palette = crate::ui::theme::default_palette();
+    diagnostic_severity_color_with_palette(severity, &palette)
+}
+
+fn diagnostic_severity_color_with_palette(severity: &str, palette: &ThemePalette) -> Color {
     match severity {
-        "error" => accent_rose(),
-        "warning" => accent_gold(),
-        _ => accent_teal(),
+        "error" => palette.status_error,
+        "warning" => palette.status_warning,
+        _ => palette.accent_secondary,
     }
 }
 
@@ -958,31 +1087,33 @@ fn render_agent_tool_preview(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     if tool_name_matches(&summary.tool_name, "read_agent_result") {
-        return render_agent_result_page_preview(summary, accent, max_content_width);
+        return render_agent_result_page_preview(summary, accent, max_content_width, palette);
     }
     if tool_name_matches(&summary.tool_name, "spawn_agent") && !summary.preview_lines.is_empty() {
-        return render_agent_summary_preview(summary, accent, max_content_width);
+        return render_agent_summary_preview(summary, accent, max_content_width, palette);
     }
-    render_agent_status_preview(summary, accent)
+    render_agent_status_preview(summary, accent, palette)
 }
 
 fn render_agent_result_page_preview(
     summary: &ToolCardRender,
     accent: Color,
     _max_content_width: usize,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![timeline_section_line(
         accent,
         "result",
-        accent_blue(),
+        palette.accent_info,
         vec![Span::styled(
             agent_result_page_summary(summary).unwrap_or_else(|| "agent result page".to_owned()),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.text_muted),
         )],
     )];
-    lines.extend(render_agent_status_preview(summary, accent));
+    lines.extend(render_agent_status_preview(summary, accent, palette));
     lines
 }
 
@@ -990,53 +1121,65 @@ fn render_agent_summary_preview(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![timeline_section_line(
         accent,
         "summary",
-        accent_blue(),
+        palette.accent_info,
         vec![Span::styled(
             agent_status_detail(summary),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.text_muted),
         )],
     )];
-    lines.extend(render_markdown_timeline_lines(
+    lines.extend(render_markdown_timeline_lines_with_palette(
         accent,
-        Style::default().fg(ink()),
+        Style::default().fg(palette.text_primary),
         &summary.preview_lines.join("\n"),
         MarkdownRenderOptions::tool_preview(max_content_width),
+        palette,
     ));
-    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    lines.extend(render_tool_hidden_tail(
+        accent,
+        summary.hidden_lines,
+        palette,
+    ));
     if agent_payload_bool(summary, "summary_truncated").unwrap_or(false) {
         lines.push(timeline_content_line(
             accent,
             vec![Span::styled(
                 "Use read_agent_result for the complete result.",
-                Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(palette.text_muted)
+                    .add_modifier(Modifier::ITALIC),
             )],
         ));
     }
     lines
 }
 
-fn render_agent_status_preview(summary: &ToolCardRender, accent: Color) -> Vec<Line<'static>> {
+fn render_agent_status_preview(
+    summary: &ToolCardRender,
+    accent: Color,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let mut details = vec![Span::styled(
         agent_status_detail(summary),
-        Style::default().fg(dim()),
+        Style::default().fg(palette.text_muted),
     )];
     if agent_payload_bool(summary, "result_available").unwrap_or(false) {
         details.push(Span::raw(" · "));
         details.push(Span::styled(
             "result ready",
             Style::default()
-                .fg(accent_lime())
+                .fg(palette.accent_success)
                 .add_modifier(Modifier::BOLD),
         ));
     }
     let mut lines = vec![timeline_section_line(
         accent,
         "agent",
-        accent_blue(),
+        palette.accent_info,
         details,
     )];
     if let Some(reason) =
@@ -1046,7 +1189,9 @@ fn render_agent_status_preview(summary: &ToolCardRender, accent: Color) -> Vec<L
             accent,
             vec![Span::styled(
                 reason,
-                Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(palette.text_muted)
+                    .add_modifier(Modifier::ITALIC),
             )],
         ));
     }
@@ -1056,12 +1201,12 @@ fn render_agent_status_preview(summary: &ToolCardRender, accent: Color) -> Vec<L
         lines.push(timeline_content_line(
             accent,
             vec![
-                Span::styled("action", Style::default().fg(dim())),
+                Span::styled("action", Style::default().fg(palette.text_muted)),
                 Span::raw(" "),
                 Span::styled(
                     action_hint,
                     Style::default()
-                        .fg(accent_gold())
+                        .fg(palette.accent_warning)
                         .add_modifier(Modifier::BOLD),
                 ),
             ],
@@ -1071,9 +1216,12 @@ fn render_agent_status_preview(summary: &ToolCardRender, accent: Color) -> Vec<L
         lines.push(timeline_content_line(
             accent,
             vec![
-                Span::styled("read", Style::default().fg(dim())),
+                Span::styled("read", Style::default().fg(palette.text_muted)),
                 Span::raw(" "),
-                Span::styled("read_agent_result", Style::default().fg(accent_blue())),
+                Span::styled(
+                    "read_agent_result",
+                    Style::default().fg(palette.accent_info),
+                ),
             ],
         ));
     }
@@ -1231,29 +1379,43 @@ fn file_change_result_label(summary: &ToolCardRender) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn render_tool_diff_preview(
     summary: &ToolCardRender,
     diff: &ToolCardDiff,
     accent: Color,
 ) -> Vec<Line<'static>> {
+    let palette = crate::ui::theme::default_palette();
+    render_tool_diff_preview_with_palette(summary, diff, accent, &palette)
+}
+
+fn render_tool_diff_preview_with_palette(
+    summary: &ToolCardRender,
+    diff: &ToolCardDiff,
+    accent: Color,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let mut lines = vec![timeline_section_line(
         accent,
         "diff",
-        accent_gold(),
+        palette.accent_warning,
         vec![Span::styled(
             diff.summary.clone(),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.text_muted),
         )],
     )];
     for file in &diff.files {
         lines.push(timeline_content_line(
             accent,
             vec![
-                timeline_badge(tool_diff_file_label(summary, file), accent_blue()),
+                timeline_badge(tool_diff_file_label(summary, file), palette.accent_info),
                 Span::raw(" "),
-                Span::styled(file.path.clone(), Style::default().fg(ink())),
+                Span::styled(file.path.clone(), Style::default().fg(palette.text_primary)),
                 Span::raw(" "),
-                Span::styled(diff_hunk_summary(file), Style::default().fg(dim())),
+                Span::styled(
+                    diff_hunk_summary(file),
+                    Style::default().fg(palette.text_muted),
+                ),
             ],
         ));
         let numbered_lines = number_unified_diff_lines(file.lines.iter().map(String::as_str));
@@ -1262,7 +1424,12 @@ fn render_tool_diff_preview(
             if matches!(line.kind, DiffLineKind::Hunk) {
                 continue;
             }
-            lines.push(render_tool_diff_line(accent, line, line_number_width));
+            lines.push(render_tool_diff_line_with_palette(
+                accent,
+                line,
+                line_number_width,
+                palette,
+            ));
         }
         if file.truncated {
             let hidden = file
@@ -1273,7 +1440,7 @@ fn render_tool_diff_preview(
                 vec![Span::styled(
                     format!("diff truncated · {hidden} lines hidden"),
                     Style::default()
-                        .fg(accent_gold())
+                        .fg(palette.accent_warning)
                         .add_modifier(Modifier::BOLD),
                 )],
             ));
@@ -1288,7 +1455,7 @@ fn render_tool_diff_preview(
             vec![Span::styled(
                 format!("diff truncated · {hidden} lines hidden"),
                 Style::default()
-                    .fg(accent_gold())
+                    .fg(palette.accent_warning)
                     .add_modifier(Modifier::BOLD),
             )],
         ));
@@ -1334,26 +1501,27 @@ fn file_diff_line_stats(file: &ToolCardDiffFile) -> (usize, usize) {
     })
 }
 
-fn render_tool_diff_line(
+fn render_tool_diff_line_with_palette(
     accent: Color,
     line: NumberedDiffLine<'_>,
     line_number_width: usize,
+    palette: &ThemePalette,
 ) -> Line<'static> {
-    let (marker_color, body_style) = diff_line_style(line.kind);
+    let (marker_color, body_style) = diff_line_style_for_palette(line.kind, palette);
     timeline_content_line(
         accent,
         vec![
             Span::styled("│", Style::default().fg(marker_color)),
             Span::styled(
                 diff_line_number_text(line.old_line, line_number_width),
-                tool_diff_old_line_number_style(line),
+                tool_diff_old_line_number_style_with_palette(line, palette),
             ),
-            Span::styled(" ", Style::default().fg(dim())),
+            Span::styled(" ", Style::default().fg(palette.text_muted)),
             Span::styled(
                 diff_line_number_text(line.new_line, line_number_width),
-                tool_diff_new_line_number_style(line),
+                tool_diff_new_line_number_style_with_palette(line, palette),
             ),
-            Span::styled("│ ", Style::default().fg(dim())),
+            Span::styled("│ ", Style::default().fg(palette.text_muted)),
             Span::styled(
                 if line.text.is_empty() {
                     " ".to_owned()
@@ -1366,11 +1534,14 @@ fn render_tool_diff_line(
     )
 }
 
-fn tool_diff_old_line_number_style(line: NumberedDiffLine<'_>) -> Style {
+fn tool_diff_old_line_number_style_with_palette(
+    line: NumberedDiffLine<'_>,
+    palette: &ThemePalette,
+) -> Style {
     if line.old_line.is_none() {
-        return Style::default().fg(dim());
+        return Style::default().fg(palette.text_muted);
     }
-    let style = Style::default().fg(accent_rose());
+    let style = Style::default().fg(palette.diff_removed_fg);
     if matches!(line.kind, DiffLineKind::Removed) {
         style.add_modifier(Modifier::BOLD)
     } else {
@@ -1378,11 +1549,14 @@ fn tool_diff_old_line_number_style(line: NumberedDiffLine<'_>) -> Style {
     }
 }
 
-fn tool_diff_new_line_number_style(line: NumberedDiffLine<'_>) -> Style {
+fn tool_diff_new_line_number_style_with_palette(
+    line: NumberedDiffLine<'_>,
+    palette: &ThemePalette,
+) -> Style {
     if line.new_line.is_none() {
-        return Style::default().fg(dim());
+        return Style::default().fg(palette.text_muted);
     }
-    let style = Style::default().fg(accent_lime());
+    let style = Style::default().fg(palette.diff_added_fg);
     if matches!(line.kind, DiffLineKind::Added) {
         style.add_modifier(Modifier::BOLD)
     } else {
@@ -1390,20 +1564,31 @@ fn tool_diff_new_line_number_style(line: NumberedDiffLine<'_>) -> Style {
     }
 }
 
+#[cfg(test)]
 fn render_generic_tool_preview(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+) -> Vec<Line<'static>> {
+    let palette = crate::ui::theme::default_palette();
+    render_generic_tool_preview_with_palette(summary, accent, max_content_width, &palette)
+}
+
+fn render_generic_tool_preview_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(value) = &summary.preview_value {
         lines.push(timeline_section_line(
             accent,
             "tree",
-            accent_blue(),
+            palette.accent_info,
             vec![Span::styled(
                 "structured payload",
-                Style::default().fg(dim()),
+                Style::default().fg(palette.text_muted),
             )],
         ));
         for line in render_json_tree_preview(value) {
@@ -1411,9 +1596,9 @@ fn render_generic_tool_preview(
                 accent,
                 render_code_line_spans_with_bg(
                     &line,
-                    accent_blue(),
-                    Style::default().fg(ink()),
-                    Color::Rgb(28, 33, 41),
+                    palette.accent_info,
+                    Style::default().fg(palette.markdown_code_fg),
+                    palette.markdown_code_bg,
                 ),
             ));
         }
@@ -1421,38 +1606,45 @@ fn render_generic_tool_preview(
         lines.push(timeline_section_line(
             accent,
             "md",
-            accent_blue(),
+            palette.accent_info,
             vec![Span::styled(
                 "formatted preview",
-                Style::default().fg(dim()),
+                Style::default().fg(palette.text_muted),
             )],
         ));
-        lines.extend(render_markdown_timeline_lines(
+        lines.extend(render_markdown_timeline_lines_with_palette(
             accent,
-            Style::default().fg(ink()),
+            Style::default().fg(palette.text_primary),
             &summary.preview_lines.join("\n"),
             MarkdownRenderOptions::tool_preview(max_content_width),
+            palette,
         ));
     } else {
         lines.push(timeline_section_line(
             accent,
             summary.preview_kind.label(),
-            accent_blue(),
+            palette.accent_info,
             vec![Span::styled(
                 summary.preview_kind.description(),
-                Style::default().fg(dim()),
+                Style::default().fg(palette.text_muted),
             )],
         ));
-        lines.extend(render_code_preview_lines(
+        lines.extend(render_code_preview_lines_with_palette(
             accent,
             &summary.preview_lines,
-            Color::Rgb(38, 28, 34),
+            palette.markdown_code_bg,
+            palette,
         ));
     }
-    lines.extend(render_tool_hidden_tail(accent, summary.hidden_lines));
+    lines.extend(render_tool_hidden_tail(
+        accent,
+        summary.hidden_lines,
+        palette,
+    ));
     lines
 }
 
+#[allow(dead_code)]
 fn render_code_preview_lines(accent: Color, lines: &[String], bg: Color) -> Vec<Line<'static>> {
     let palette = crate::ui::theme::default_palette();
     render_code_preview_lines_with_palette(accent, lines, bg, &palette)
@@ -1480,7 +1672,11 @@ fn render_code_preview_lines_with_palette(
         .collect()
 }
 
-fn render_tool_hidden_tail(accent: Color, hidden_lines: usize) -> Vec<Line<'static>> {
+fn render_tool_hidden_tail(
+    accent: Color,
+    hidden_lines: usize,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     if hidden_lines == 0 {
         return Vec::new();
     }
@@ -1488,7 +1684,9 @@ fn render_tool_hidden_tail(accent: Color, hidden_lines: usize) -> Vec<Line<'stat
         accent,
         vec![Span::styled(
             format!("… {} more lines hidden", hidden_lines),
-            Style::default().fg(dim()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.text_muted)
+                .add_modifier(Modifier::BOLD),
         )],
     )]
 }
@@ -1923,14 +2121,18 @@ fn tool_action_title(summary: &ToolCardRender) -> ToolCardTitle {
     }
 }
 
-fn tool_title_spans(title: &ToolCardTitle, max_chars: usize) -> Vec<Span<'static>> {
+fn tool_title_spans_with_palette(
+    title: &ToolCardTitle,
+    max_chars: usize,
+    palette: &ThemePalette,
+) -> Vec<Span<'static>> {
     let action_style = Style::default()
-        .fg(accent_gold())
+        .fg(palette.accent_warning)
         .add_modifier(Modifier::BOLD);
     let subject_style = Style::default()
-        .fg(accent_blue())
+        .fg(palette.accent_info)
         .add_modifier(Modifier::BOLD);
-    let args_style = Style::default().fg(ink());
+    let args_style = Style::default().fg(palette.text_primary);
     let segments = title_segments(title, action_style, subject_style, args_style);
     let plain_len = title.plain().chars().count();
     if plain_len <= max_chars {
@@ -2653,8 +2855,8 @@ fn parse_mcp_call_subjects(
     (mcp_server, mcp_tool, mcp_trust_class)
 }
 
-fn tool_status_style(kind: StatusKind) -> Style {
-    StatusIndicator::static_kind(kind).badge_style()
+fn tool_status_style(kind: StatusKind, palette: &ThemePalette) -> Style {
+    StatusIndicator::static_kind(kind).badge_style_with_palette(palette)
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
