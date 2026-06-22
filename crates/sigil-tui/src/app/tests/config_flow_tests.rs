@@ -418,10 +418,10 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/10 · provider settings");
+    assert_eq!(lines[0], "Provider 1/11 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] permissions memory compaction code intel terminal agents skills plugins mcp"
+        "[provider] permissions memory compaction code intel terminal appearance agents skills plugins mcp"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -579,7 +579,7 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Code Intel 5/10 · LSP readiness"));
+    assert!(detail.contains("Code Intel 5/11 · LSP readiness"));
     assert!(detail.contains("[controls]"));
     assert!(detail.contains("Code intelligence: yes"));
     assert!(detail.contains("Startup: lazy"));
@@ -610,7 +610,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Terminal 6/10 · terminal integration"));
+    assert!(detail.contains("Terminal 6/11 · terminal integration"));
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("Mouse capture: yes"));
     assert!(detail.contains("OSC52 clipboard: yes"));
@@ -619,6 +619,102 @@ fn config_terminal_step_shows_controls_and_compatibility() {
     assert!(detail.contains("Turn mouse_capture off"));
     assert!(detail.contains("Turn osc52_clipboard off"));
     assert!(detail.contains("Requests terminal mouse events"));
+}
+
+#[test]
+fn config_appearance_step_shows_theme_and_scope() {
+    let mut config = test_config();
+    config.appearance.theme = sigil_kernel::ThemeId::GruvboxDark;
+    let mut colors = std::collections::BTreeMap::new();
+    colors.insert("surface_base".to_owned(), "#282828".to_owned());
+    config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Appearance);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Appearance 7/11 · TUI theme"));
+    assert!(detail.contains("[theme]"));
+    assert!(detail.contains("Theme: gruvbox_dark  [Enter cycle]"));
+    assert!(detail.contains("- Name: Gruvbox Dark"));
+    assert!(detail.contains("sigil_dark, solarized_dark, solarized_light"));
+    assert!(detail.contains("- Overrides: 1 colors"));
+    assert!(detail.contains("[scope]"));
+    assert!(detail.contains("not written to session history"));
+    assert!(detail.contains("Theme draft previews immediately"));
+}
+
+#[test]
+fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let config = test_config();
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.push_timeline(TimelineRole::User, "hello theme");
+    let initial_theme_bg = app
+        .timeline_render_cache
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find_map(|span| span.style.bg)
+        .expect("user bubble should have a themed background");
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Appearance);
+    let initial_control_entries = app.current_session_entries.len();
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("theme -> solarized_dark"));
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should still exist")
+            .draft
+            .appearance_theme,
+        sigil_kernel::ThemeId::SolarizedDark
+    );
+    assert_eq!(
+        app.root_config_snapshot()
+            .expect("runtime config should exist")
+            .appearance
+            .theme,
+        sigil_kernel::ThemeId::SigilDark
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("theme save should return config saved action");
+    };
+
+    assert_eq!(
+        root_config.appearance.theme,
+        sigil_kernel::ThemeId::SolarizedDark
+    );
+    assert_eq!(
+        app.root_config_snapshot()
+            .expect("runtime config should exist")
+            .appearance
+            .theme,
+        sigil_kernel::ThemeId::SolarizedDark
+    );
+    let updated_theme_bg = app
+        .timeline_render_cache
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find_map(|span| span.style.bg)
+        .expect("timeline cache should rebuild with themed background");
+    assert_ne!(initial_theme_bg, updated_theme_bg);
+    assert_eq!(app.current_session_entries.len(), initial_control_entries);
+    let rendered = std::fs::read_to_string(&config_path)?;
+    assert!(rendered.contains("theme = \"solarized_dark\""));
+    Ok(())
 }
 
 #[test]
@@ -658,7 +754,7 @@ slash_names = ["review-agent"]
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Agents 7/10 · agent profiles"));
+    assert!(detail.contains("Agents 8/11 · agent profiles"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 5 agents"));
     assert!(detail.contains("- Compatibility: 0 agents"));
@@ -1371,7 +1467,7 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Plugins 9/10 · plugin trust review"));
+    assert!(detail.contains("Plugins 10/11 · plugin trust review"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 1 plugins"));
     assert!(detail.contains("- Selected: 1 of 1"));

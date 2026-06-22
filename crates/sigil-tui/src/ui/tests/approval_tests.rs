@@ -424,6 +424,7 @@ fn approval_diff_status_line_handles_empty_hunks_without_diagnostics() {
 
 #[test]
 fn approval_diagnostics_helpers_cover_clean_warning_and_error_states() {
+    let palette = crate::ui::theme::default_palette();
     let clean = ApprovalDiagnosticSummary::default();
     let warnings = ApprovalDiagnosticSummary {
         errors: 0,
@@ -441,7 +442,7 @@ fn approval_diagnostics_helpers_cover_clean_warning_and_error_states() {
     assert_eq!(approval_diagnostics_style(warnings).fg, Some(Color::Yellow));
     assert_eq!(approval_diagnostics_style(errors).fg, Some(Color::LightRed));
     assert_eq!(approval_risk_color("low"), Color::Green);
-    assert_eq!(approval_risk_color("unknown"), Color::DarkGray);
+    assert_eq!(approval_risk_color("unknown"), palette.text_muted);
     let selected = approval_file_meta_style("create", true);
     assert_eq!(selected.fg, Some(Color::Black));
     assert_eq!(selected.bg, Some(Color::Green));
@@ -455,6 +456,7 @@ fn approval_count_label_uses_singular_and_plural_forms() {
 
 #[test]
 fn render_approval_diff_line_highlights_active_hunks_and_blank_text() {
+    let palette = crate::ui::theme::default_palette();
     let active = render_approval_diff_line(
         ApprovalDiffLine {
             text: String::new(),
@@ -478,20 +480,20 @@ fn render_approval_diff_line_highlights_active_hunks_and_blank_text() {
 
     assert_eq!(active.spans[0].content.as_ref(), ">");
     assert_eq!(active.spans[0].style.bg, Some(Color::Yellow));
-    assert_eq!(active.spans[1].style.fg, Some(Color::Rgb(226, 103, 110)));
+    assert_eq!(active.spans[1].style.fg, Some(palette.diff_removed_fg));
     assert!(
         active.spans[1]
             .style
             .add_modifier
             .contains(ratatui::style::Modifier::BOLD)
     );
-    assert_eq!(active.spans[3].style.fg, Some(Color::DarkGray));
+    assert_eq!(active.spans[3].style.fg, Some(palette.diff_gutter_fg));
     assert_eq!(active.spans[5].content.as_ref(), " ");
-    assert_eq!(active.spans[5].style.bg, Some(Color::Rgb(58, 52, 18)));
+    assert_eq!(active.spans[5].style.bg, Some(palette.diff_current_hunk_bg));
 
     assert_eq!(inactive.spans[0].content.as_ref(), "│");
-    assert_eq!(inactive.spans[1].style.fg, Some(Color::DarkGray));
-    assert_eq!(inactive.spans[3].style.fg, Some(Color::Rgb(80, 200, 132)));
+    assert_eq!(inactive.spans[1].style.fg, Some(palette.diff_gutter_fg));
+    assert_eq!(inactive.spans[3].style.fg, Some(palette.diff_added_fg));
     assert!(
         inactive.spans[3]
             .style
@@ -701,6 +703,7 @@ fn test_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),

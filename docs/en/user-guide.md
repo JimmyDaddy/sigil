@@ -77,7 +77,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 
 ## Config Panel
 
-The `/config` panel groups provider, permission, memory, compaction, code intelligence, terminal, Agents, Skills, Plugins, and MCP settings. In the `Plugins` section, Sigil discovers workspace plugin manifests under `.sigil/plugins/<id>/plugin.toml`.
+The `/config` panel groups provider, permission, memory, compaction, code intelligence, terminal, appearance, Agents, Skills, Plugins, and MCP settings. In the `Appearance` section, `Enter` cycles built-in themes and previews the draft immediately; `Ctrl-S` saves the selected theme to `sigil.toml`. In the `Plugins` section, Sigil discovers workspace plugin manifests under `.sigil/plugins/<id>/plugin.toml`.
 
 Use `PgUp/PgDn` to move between discovered plugins. The detail view shows the current trust state, manifest path, full manifest hash, skills, hook commands with args and approval mode, and MCP server commands with args, startup, and required status. Footer `approve` trusts the currently displayed manifest hash; footer `deny` disables that hash. Sigil refreshes the manifest before writing the review decision and appends the review to the session log.
 

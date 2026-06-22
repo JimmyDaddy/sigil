@@ -87,6 +87,9 @@ mouse_capture = true
 osc52_clipboard = true
 scroll_sensitivity = 3
 
+[appearance]
+theme = "sigil_dark"
+
 [providers.deepseek]
 model = "deepseek-v4-flash"
 fim_model = "deepseek-v4-pro"
@@ -141,6 +144,51 @@ tool_timeout_secs = 30
 - `model`：默认模型。
 - `tool_timeout_secs`：工具执行超时。
 - `max_turns`：可选保险丝。默认不限制；如果显式设置，模型连续达到阈值仍只请求工具而没有最终回答时，本轮会可恢复地停止。
+
+## Appearance
+
+```toml
+[appearance]
+theme = "sigil_dark"
+
+[appearance.colors]
+surface_base = "#07080A"
+accent_primary = "#91B6AA"
+markdown_code_bg = "#1C2129"
+```
+
+`theme` 控制 TUI 配色。内置值包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。`/config` 面板提供 `Appearance` 区块；在 `Theme` 行按 `Enter` 会循环切换内置主题并立即预览草稿效果，`Ctrl-S` 会把选中主题保存到 `sigil.toml`。
+
+`[appearance.colors]` 可以用 `#RRGGBB` 覆盖稳定语义 color token。未知 token 或非十六进制值会让配置加载失败。覆盖只影响 TUI 渲染，不写入 session history、approval record、tool payload 或 provider 可见上下文。
+
+支持的 color token：
+
+```text
+surface_base, surface_rail, surface_panel, surface_panel_alt, surface_input,
+surface_agent_panel, surface_overlay, surface_overlay_shadow, surface_badge,
+surface_selection, surface_user_message, surface_code,
+border_subtle, border_strong, border_focus, border_danger,
+text_primary, text_secondary, text_muted, text_inverse, text_disabled,
+accent_primary, accent_secondary, accent_info, accent_success, accent_warning,
+accent_danger, accent_streaming, accent_idle,
+selection_fg, selection_bg, button_selected_fg, button_selected_bg,
+button_inactive_fg,
+diff_header_fg, diff_hunk_fg, diff_added_fg, diff_added_bg,
+diff_removed_fg, diff_removed_bg, diff_context_fg, diff_gutter_fg,
+diff_current_hunk_bg,
+approval_bg, approval_backdrop_bg, approval_border, approval_shadow,
+risk_low, risk_medium, risk_high, approval_allow_bg, approval_deny_bg,
+approval_selected_bg,
+markdown_heading, markdown_quote_bar, markdown_quote_text, markdown_rule,
+markdown_code_fg, markdown_code_bg, markdown_link,
+modal_bg, modal_border, modal_shadow, modal_command_bg, modal_selected_bg,
+overlay_bg, overlay_shadow,
+config_bg, config_border, config_primary, config_detail, config_warning,
+config_danger, config_tab_bg, config_section_bg, config_selected_bg,
+setup_bg,
+status_idle, status_thinking, status_tool, status_streaming, status_success,
+status_warning, status_error, status_pending
+```
 
 ## Task Planning
 

@@ -507,11 +507,12 @@ fn markdown_span_renderers_cover_headings_tables_and_code_detection_markers() {
 
 #[test]
 fn markdown_span_helpers_cover_headings_rules_lists_quotes_and_code_fallbacks() {
+    let palette = crate::ui::theme::default_palette();
     for (level, accent) in [
-        (1, accent_gold()),
-        (2, accent_blue()),
-        (3, accent_lime()),
-        (4, accent_teal()),
+        (1, palette.markdown_heading),
+        (2, palette.accent_info),
+        (3, palette.accent_success),
+        (4, palette.accent_secondary),
     ] {
         let heading = render_markdown_spans(
             &format!("{} title", "#".repeat(level)),

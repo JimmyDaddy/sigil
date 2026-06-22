@@ -14,19 +14,22 @@ use crate::view_model::{FooterViewModel, LivePanelViewModel, UiViewModel};
 
 use super::{
     approval::render_approval_modal,
-    composer::{composer_cursor_origin, render_agent_panel, render_input},
+    composer::{composer_cursor_origin, render_agent_panel_with_theme, render_input_with_theme},
     geometry::inset_rect,
-    info_rail::render_info_rail,
+    info_rail::render_info_rail_with_theme,
     layout_snapshot::shell_layout,
-    live_panel::{LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app, render_live_panel},
+    live_panel::{
+        LIVE_PANEL_BOTTOM_PADDING, live_status_rows_for_app, render_live_panel_with_theme,
+    },
     modal::render_modal,
     setup_config::{render_config, render_setup},
-    slash_overlay::render_slash_selector_overlay,
+    slash_overlay::render_slash_selector_overlay_with_theme,
     text::truncate_display_width,
-    theme::{muted, shell_bg},
+    theme::{self, styles},
 };
 
 pub fn render(frame: &mut Frame, app: &AppState) {
+    let theme = theme::resolve_for_app(app);
     if app.is_setup_mode() {
         render_setup(frame, app);
         return;
@@ -37,7 +40,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     }
 
     frame.render_widget(
-        Block::default().style(Style::default().bg(shell_bg())),
+        Block::default().style(Style::default().bg(theme.palette.surface_base)),
         frame.area(),
     );
 
@@ -56,13 +59,13 @@ pub fn render(frame: &mut Frame, app: &AppState) {
         .max(1) as usize;
     let live_view_model = LivePanelViewModel::from_app(app, live_transcript_rows);
 
-    render_live_panel(frame, shell.live_panel, &live_view_model);
-    render_input(frame, shell.composer, &view_model.composer);
-    render_agent_panel(frame, shell.agent_panel, &view_model.composer);
-    render_footer_status(frame, shell.footer, &view_model.footer);
-    render_slash_selector_overlay(frame, shell.live_panel, shell.composer, app);
+    render_live_panel_with_theme(frame, shell.live_panel, &live_view_model, &theme);
+    render_input_with_theme(frame, shell.composer, &view_model.composer, &theme);
+    render_agent_panel_with_theme(frame, shell.agent_panel, &view_model.composer, &theme);
+    render_footer_status(frame, shell.footer, &view_model.footer, &theme);
+    render_slash_selector_overlay_with_theme(frame, shell.live_panel, shell.composer, app, &theme);
     if shell.info_rail.width > 0 {
-        render_info_rail(frame, shell.info_rail, &view_model.info_rail);
+        render_info_rail_with_theme(frame, shell.info_rail, &view_model.info_rail, &theme);
     }
 
     if app.pending_approval.is_some() {
@@ -84,7 +87,12 @@ pub fn render(frame: &mut Frame, app: &AppState) {
     render_modal(frame, app);
 }
 
-fn render_footer_status(frame: &mut Frame, area: Rect, footer: &FooterViewModel) {
+fn render_footer_status(
+    frame: &mut Frame,
+    area: Rect,
+    footer: &FooterViewModel,
+    theme: &theme::Theme,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -94,10 +102,7 @@ fn render_footer_status(frame: &mut Frame, area: Rect, footer: &FooterViewModel)
         &footer.run_label,
         &footer.hints,
     );
-    frame.render_widget(
-        Block::default().style(Style::default().bg(shell_bg())),
-        area,
-    );
+    frame.render_widget(Block::default().style(styles::body(&theme.palette)), area);
     let inner = inset_rect(area, 2, 0);
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -114,9 +119,9 @@ fn render_footer_status(frame: &mut Frame, area: Rect, footer: &FooterViewModel)
         frame.render_widget(
             Paragraph::new(Text::from(vec![Line::from(vec![Span::styled(
                 context,
-                Style::default().fg(muted()),
+                styles::muted(&theme.palette),
             )])]))
-            .style(Style::default().bg(shell_bg()))
+            .style(Style::default().bg(theme.palette.surface_base))
             .alignment(Alignment::Right)
             .wrap(Wrap { trim: false }),
             context_area,

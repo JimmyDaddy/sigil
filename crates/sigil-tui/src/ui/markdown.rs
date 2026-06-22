@@ -9,8 +9,11 @@ use super::{
     primitives::{timeline_content_line, timeline_section_line},
     syntax_highlight::highlight_code_to_spans,
     text::{pad_display_width, truncate_display_width, wrap_display_width},
-    theme::{accent_blue, accent_gold, accent_lime, accent_teal, dim, ink, muted},
+    theme::{self, ThemePalette, accent_blue, accent_gold, dim},
 };
+
+#[cfg(test)]
+use super::theme::{accent_lime, accent_teal, ink, muted};
 
 #[derive(Default)]
 pub(crate) struct MarkdownRenderState {
@@ -79,6 +82,17 @@ pub(crate) fn render_markdown_timeline_lines(
     text: &str,
     options: MarkdownRenderOptions,
 ) -> Vec<Line<'static>> {
+    let palette = theme::default_palette();
+    render_markdown_timeline_lines_with_palette(accent, body_style, text, options, &palette)
+}
+
+pub(crate) fn render_markdown_timeline_lines_with_palette(
+    accent: Color,
+    body_style: Style,
+    text: &str,
+    options: MarkdownRenderOptions,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let source_lines = text.lines().collect::<Vec<_>>();
     let mut rendered = Vec::new();
     let options = options.normalized();
@@ -97,8 +111,8 @@ pub(crate) fn render_markdown_timeline_lines(
             continue;
         }
         if let Some((level, content)) = markdown_heading(line) {
-            rendered.extend(render_markdown_heading_block(
-                level, content, body_style, options,
+            rendered.extend(render_markdown_heading_block_with_palette(
+                level, content, body_style, options, palette,
             ));
             index += 1;
             continue;
@@ -131,9 +145,9 @@ pub(crate) fn render_markdown_timeline_lines(
                     accent,
                     render_code_line_spans_with_bg(
                         "",
-                        accent_blue(),
-                        Style::default().fg(ink()),
-                        Color::Rgb(28, 33, 41),
+                        palette.accent_info,
+                        Style::default().fg(palette.markdown_code_fg),
+                        palette.markdown_code_bg,
                     ),
                 ));
             } else {
@@ -147,6 +161,7 @@ pub(crate) fn render_markdown_timeline_lines(
                             .and_then(|highlighted| highlighted.get(line_index))
                             .map(Vec::as_slice),
                         options,
+                        palette,
                     ));
                 }
             }
@@ -157,11 +172,12 @@ pub(crate) fn render_markdown_timeline_lines(
             while index < source_lines.len() && markdown_table_line(source_lines[index]) {
                 index += 1;
             }
-            rendered.extend(render_markdown_table_block(
+            rendered.extend(render_markdown_table_block_with_palette(
                 accent,
                 body_style,
                 &source_lines[start..index],
                 options,
+                palette,
             ));
             continue;
         }
@@ -173,18 +189,18 @@ pub(crate) fn render_markdown_timeline_lines(
             rendered.push(timeline_section_line(
                 accent,
                 "quote",
-                accent_teal(),
+                palette.markdown_quote_bar,
                 vec![Span::styled("quoted context", Style::default().fg(dim()))],
             ));
             for quote_line in &source_lines[start..index] {
                 let content = markdown_quote(quote_line).unwrap_or_else(|| quote_line.trim());
                 rendered.extend(render_wrapped_content_lines(
                     accent,
-                    quote_prefix_spans(),
-                    quote_prefix_spans(),
+                    quote_prefix_spans(palette),
+                    quote_prefix_spans(palette),
                     render_inline_markdown_spans_with_options(
                         content,
-                        body_style.fg(muted()),
+                        body_style.fg(palette.markdown_quote_text),
                         options,
                     ),
                     options,
@@ -193,8 +209,8 @@ pub(crate) fn render_markdown_timeline_lines(
             continue;
         }
 
-        rendered.extend(render_wrapped_markdown_line(
-            accent, line, body_style, options,
+        rendered.extend(render_wrapped_markdown_line_with_palette(
+            accent, line, body_style, options, palette,
         ));
         index += 1;
     }
@@ -234,6 +250,7 @@ fn render_code_block_line_rows(
     block_line: &str,
     highlighted_spans: Option<&[Span<'static>]>,
     options: MarkdownRenderOptions,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let rows = code_block_render_rows(block_line, options);
     if rows.len() == 1
@@ -244,9 +261,9 @@ fn render_code_block_line_rows(
             accent,
             render_highlighted_code_line_spans(
                 spans,
-                accent_blue(),
-                Style::default().fg(ink()),
-                Color::Rgb(28, 33, 41),
+                palette.accent_info,
+                Style::default().fg(palette.markdown_code_fg),
+                palette.markdown_code_bg,
             ),
         )];
     }
@@ -257,20 +274,32 @@ fn render_code_block_line_rows(
                 accent,
                 render_code_line_spans_with_bg(
                     &code_row,
-                    accent_blue(),
-                    Style::default().fg(ink()),
-                    Color::Rgb(28, 33, 41),
+                    palette.accent_info,
+                    Style::default().fg(palette.markdown_code_fg),
+                    palette.markdown_code_bg,
                 ),
             )
         })
         .collect()
 }
 
+#[cfg(test)]
 fn render_wrapped_markdown_line(
     accent: Color,
     line: &str,
     body_style: Style,
     options: MarkdownRenderOptions,
+) -> Vec<Line<'static>> {
+    let palette = theme::default_palette();
+    render_wrapped_markdown_line_with_palette(accent, line, body_style, options, &palette)
+}
+
+fn render_wrapped_markdown_line_with_palette(
+    accent: Color,
+    line: &str,
+    body_style: Style,
+    options: MarkdownRenderOptions,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let options = options.normalized();
     if markdown_rule(line) {
@@ -278,7 +307,7 @@ fn render_wrapped_markdown_line(
             accent,
             vec![Span::styled(
                 "────────────────────────────────",
-                Style::default().fg(dim()),
+                Style::default().fg(palette.markdown_rule),
             )],
         )];
     }
@@ -289,9 +318,9 @@ fn render_wrapped_markdown_line(
             format!("{}{marker} ", "  ".repeat(indent)),
             Style::default()
                 .fg(if checked {
-                    accent_lime()
+                    palette.accent_success
                 } else {
-                    accent_gold()
+                    palette.accent_warning
                 })
                 .add_modifier(Modifier::BOLD),
         )];
@@ -308,7 +337,7 @@ fn render_wrapped_markdown_line(
         let prefix = vec![Span::styled(
             format!("{}• ", "  ".repeat(indent)),
             Style::default()
-                .fg(accent_gold())
+                .fg(palette.accent_warning)
                 .add_modifier(Modifier::BOLD),
         )];
         return render_wrapped_content_lines(
@@ -324,7 +353,7 @@ fn render_wrapped_markdown_line(
         let prefix = vec![Span::styled(
             format!("{}{number}. ", "  ".repeat(indent)),
             Style::default()
-                .fg(accent_gold())
+                .fg(palette.accent_warning)
                 .add_modifier(Modifier::BOLD),
         )];
         return render_wrapped_content_lines(
@@ -338,9 +367,13 @@ fn render_wrapped_markdown_line(
     if let Some(content) = markdown_quote(line) {
         return render_wrapped_content_lines(
             accent,
-            quote_prefix_spans(),
-            quote_prefix_spans(),
-            render_inline_markdown_spans_with_options(content, body_style.fg(muted()), options),
+            quote_prefix_spans(palette),
+            quote_prefix_spans(palette),
+            render_inline_markdown_spans_with_options(
+                content,
+                body_style.fg(palette.markdown_quote_text),
+                options,
+            ),
             options,
         );
     }
@@ -352,9 +385,9 @@ fn render_wrapped_markdown_line(
                     accent,
                     render_code_line_spans_with_bg(
                         &row,
-                        accent_blue(),
-                        Style::default().fg(ink()),
-                        Color::Rgb(28, 33, 41),
+                        palette.accent_info,
+                        Style::default().fg(palette.markdown_code_fg),
+                        palette.markdown_code_bg,
                     ),
                 )
             })
@@ -437,11 +470,11 @@ fn continuation_indent_spans(prefix: &[Span<'static>], style: Style) -> Vec<Span
     vec![Span::styled(" ".repeat(spans_display_width(prefix)), style)]
 }
 
-fn quote_prefix_spans() -> Vec<Span<'static>> {
+fn quote_prefix_spans(palette: &ThemePalette) -> Vec<Span<'static>> {
     vec![Span::styled(
         "▌ ",
         Style::default()
-            .fg(accent_teal())
+            .fg(palette.markdown_quote_bar)
             .add_modifier(Modifier::BOLD),
     )]
 }
@@ -453,17 +486,29 @@ fn spans_display_width(spans: &[Span<'static>]) -> usize {
         .sum()
 }
 
+#[cfg(test)]
 fn render_markdown_heading_block(
     level: usize,
     content: &str,
     base_style: Style,
     options: MarkdownRenderOptions,
 ) -> Vec<Line<'static>> {
+    let palette = theme::default_palette();
+    render_markdown_heading_block_with_palette(level, content, base_style, options, &palette)
+}
+
+fn render_markdown_heading_block_with_palette(
+    level: usize,
+    content: &str,
+    base_style: Style,
+    options: MarkdownRenderOptions,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let accent = match level {
-        1 => accent_gold(),
-        2 => accent_blue(),
-        3 => accent_lime(),
-        _ => accent_teal(),
+        1 => palette.markdown_heading,
+        2 => palette.accent_info,
+        3 => palette.accent_success,
+        _ => palette.accent_secondary,
     };
     let title_spans = render_inline_markdown_spans_with_options(
         content,
@@ -476,17 +521,29 @@ fn render_markdown_heading_block(
             UnicodeWidthStr::width(content).clamp(8, options.max_content_width.max(8));
         lines.push(Line::from(vec![Span::styled(
             "─".repeat(underline_width),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.markdown_rule),
         )]));
     }
     lines
 }
 
+#[cfg(test)]
 fn render_markdown_table_block(
     accent: Color,
     body_style: Style,
     rows: &[&str],
     options: MarkdownRenderOptions,
+) -> Vec<Line<'static>> {
+    let palette = theme::default_palette();
+    render_markdown_table_block_with_palette(accent, body_style, rows, options, &palette)
+}
+
+fn render_markdown_table_block_with_palette(
+    accent: Color,
+    body_style: Style,
+    rows: &[&str],
+    options: MarkdownRenderOptions,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     if rows.is_empty() {
         return Vec::new();
@@ -543,7 +600,7 @@ fn render_markdown_table_block(
     let mut lines = vec![timeline_section_line(
         accent,
         "table",
-        accent_teal(),
+        palette.accent_secondary,
         vec![Span::styled(summary, Style::default().fg(dim()))],
     )];
 
@@ -551,7 +608,7 @@ fn render_markdown_table_block(
         accent,
         vec![Span::styled(
             markdown_table_border(&widths, '┌', '┬', '┐', '─'),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.markdown_rule),
         )],
     ));
     for header_line in markdown_table_row_lines(&header, &widths) {
@@ -559,7 +616,9 @@ fn render_markdown_table_block(
             accent,
             vec![Span::styled(
                 header_line,
-                body_style.fg(accent_blue()).add_modifier(Modifier::BOLD),
+                body_style
+                    .fg(palette.accent_info)
+                    .add_modifier(Modifier::BOLD),
             )],
         ));
     }
@@ -567,7 +626,7 @@ fn render_markdown_table_block(
         accent,
         vec![Span::styled(
             markdown_table_border(&widths, '├', '┼', '┤', if has_divider { '═' } else { '─' }),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.markdown_rule),
         )],
     ));
     for row in body_rows {
@@ -582,7 +641,7 @@ fn render_markdown_table_block(
         accent,
         vec![Span::styled(
             markdown_table_border(&widths, '└', '┴', '┘', '─'),
-            Style::default().fg(dim()),
+            Style::default().fg(palette.markdown_rule),
         )],
     ));
     lines
@@ -697,21 +756,38 @@ fn markdown_table_total_width(widths: &[usize]) -> usize {
     widths.iter().sum::<usize>() + widths.len() * 3 + 1
 }
 
+#[cfg(test)]
 pub(crate) fn render_markdown_spans(
     line: &str,
     base_style: Style,
     state: &mut MarkdownRenderState,
     options: MarkdownRenderOptions,
 ) -> Vec<Span<'static>> {
+    let palette = theme::default_palette();
+    render_markdown_spans_with_palette(line, base_style, state, options, &palette)
+}
+
+pub(crate) fn render_markdown_spans_with_palette(
+    line: &str,
+    base_style: Style,
+    state: &mut MarkdownRenderState,
+    options: MarkdownRenderOptions,
+    palette: &ThemePalette,
+) -> Vec<Span<'static>> {
     if state.in_fenced_code {
-        return render_code_line_spans(line, accent_blue(), Style::default().fg(ink()));
+        return render_code_line_spans_with_bg(
+            line,
+            palette.accent_info,
+            Style::default().fg(palette.markdown_code_fg),
+            palette.markdown_code_bg,
+        );
     }
     if let Some((level, content)) = markdown_heading(line) {
         let accent = match level {
-            1 => accent_gold(),
-            2 => accent_blue(),
-            3 => accent_lime(),
-            _ => accent_teal(),
+            1 => palette.markdown_heading,
+            2 => palette.accent_info,
+            3 => palette.accent_success,
+            _ => palette.accent_secondary,
         };
         return render_inline_markdown_spans_with_options(
             content,
@@ -722,7 +798,7 @@ pub(crate) fn render_markdown_spans(
     if markdown_rule(line) {
         return vec![Span::styled(
             "────────────────────────────────",
-            Style::default().fg(dim()),
+            Style::default().fg(palette.markdown_rule),
         )];
     }
     if let Some((checked, content)) = markdown_task_item(line) {
@@ -732,9 +808,9 @@ pub(crate) fn render_markdown_spans(
             format!("{}{marker} ", "  ".repeat(indent)),
             Style::default()
                 .fg(if checked {
-                    accent_lime()
+                    palette.accent_success
                 } else {
-                    accent_gold()
+                    palette.accent_warning
                 })
                 .add_modifier(Modifier::BOLD),
         )];
@@ -770,10 +846,13 @@ pub(crate) fn render_markdown_spans(
         return spans;
     }
     if let Some(content) = markdown_quote(line) {
-        let mut spans = vec![Span::styled("│ ", Style::default().fg(accent_teal()))];
+        let mut spans = vec![Span::styled(
+            "│ ",
+            Style::default().fg(palette.markdown_quote_bar),
+        )];
         spans.extend(render_inline_markdown_spans_with_options(
             content,
-            base_style.fg(muted()),
+            base_style.fg(palette.markdown_quote_text),
             options,
         ));
         return spans;
@@ -782,7 +861,12 @@ pub(crate) fn render_markdown_spans(
         return render_table_spans(line, base_style, options);
     }
     if line_looks_like_code(line) {
-        return render_code_line_spans(line, accent_blue(), Style::default().fg(ink()));
+        return render_code_line_spans_with_bg(
+            line,
+            palette.accent_info,
+            Style::default().fg(palette.markdown_code_fg),
+            palette.markdown_code_bg,
+        );
     }
     render_inline_markdown_spans_with_options(line, base_style, options)
 }
@@ -925,6 +1009,7 @@ pub(crate) fn markdown_plain_text(text: &str) -> String {
     plain
 }
 
+#[allow(dead_code)]
 pub(crate) fn render_code_line_spans(
     line: &str,
     accent: Color,

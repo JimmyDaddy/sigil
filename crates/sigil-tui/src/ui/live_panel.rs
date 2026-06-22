@@ -20,7 +20,7 @@ use super::{
     geometry::inset_rect,
     status_indicator::{StatusIndicator, StatusKind},
     text::truncate_display_width,
-    theme::{dock_edge, ink, phase_accent, shell_bg, status_band_bg},
+    theme::Theme,
 };
 
 pub(crate) const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
@@ -28,9 +28,21 @@ pub(crate) const LIVE_PROGRESS_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_ROWS: u16 = 2;
 const LIVE_TASK_ROW_LIMIT: usize = 4;
 
+#[cfg(test)]
 pub(crate) fn render_live_panel(frame: &mut Frame, area: Rect, view_model: &LivePanelViewModel) {
+    let theme = Theme::default();
+    render_live_panel_with_theme(frame, area, view_model, &theme);
+}
+
+pub(crate) fn render_live_panel_with_theme(
+    frame: &mut Frame,
+    area: Rect,
+    view_model: &LivePanelViewModel,
+    theme: &Theme,
+) {
+    let palette = &theme.palette;
     frame.render_widget(
-        Block::default().style(Style::default().bg(shell_bg())),
+        Block::default().style(Style::default().bg(palette.surface_base)),
         area,
     );
     if area.width == 0 || area.height == 0 {
@@ -81,7 +93,7 @@ pub(crate) fn render_live_panel(frame: &mut Frame, area: Rect, view_model: &Live
     );
     frame.render_widget(
         Paragraph::new(Text::from(visual_lines))
-            .style(Style::default().bg(shell_bg()))
+            .style(Style::default().bg(palette.surface_base))
             .wrap(Wrap { trim: false }),
         content_area,
     );
@@ -95,7 +107,7 @@ pub(crate) fn render_live_panel(frame: &mut Frame, area: Rect, view_model: &Live
             content_frame.width,
             status_height,
         );
-        render_live_status_band(frame, status_area, view_model);
+        render_live_status_band(frame, status_area, view_model, theme);
     }
 }
 
@@ -158,17 +170,21 @@ fn live_task_strip_rows(row_count: usize) -> u16 {
     1 + row_count.min(LIVE_TASK_ROW_LIMIT) as u16
 }
 
-fn render_live_status_band(frame: &mut Frame, area: Rect, view_model: &LivePanelViewModel) {
+fn render_live_status_band(
+    frame: &mut Frame,
+    area: Rect,
+    view_model: &LivePanelViewModel,
+    theme: &Theme,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    frame.render_widget(
-        Block::default().style(Style::default().bg(status_band_bg())),
-        area,
-    );
-    let accent = phase_accent(&view_model.phase);
-    render_status_separator(frame, area);
-    render_status_left_rail(frame, area, accent);
+    let palette = &theme.palette;
+    let band_bg = palette.surface_panel_alt;
+    frame.render_widget(Block::default().style(Style::default().bg(band_bg)), area);
+    let accent = palette.phase_accent(&view_model.phase);
+    render_status_separator(frame, area, band_bg, palette.border_subtle);
+    render_status_left_rail(frame, area, accent, band_bg);
     let content_area = Rect::new(
         area.x.saturating_add(2),
         area.y.saturating_add(1),
@@ -181,16 +197,23 @@ fn render_live_status_band(frame: &mut Frame, area: Rect, view_model: &LivePanel
 
     let mut lines = Vec::new();
     if let Some(progress) = &view_model.progress {
-        lines.extend(render_live_progress_lines(progress, accent));
+        lines.extend(render_live_progress_lines_with_theme(
+            progress, accent, theme,
+        ));
     }
     if let Some(plan_approval) = &view_model.plan_approval {
         lines.extend(render_plan_approval_lines(
             plan_approval,
             area.width as usize,
+            theme,
         ));
     }
     if let Some(task_strip) = &view_model.task_strip {
-        lines.extend(render_task_strip_lines(task_strip, area.width as usize));
+        lines.extend(render_task_strip_lines(
+            task_strip,
+            area.width as usize,
+            theme,
+        ));
     }
     let lines = lines
         .into_iter()
@@ -199,40 +222,35 @@ fn render_live_status_band(frame: &mut Frame, area: Rect, view_model: &LivePanel
 
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(status_band_bg()))
+            .style(Style::default().bg(band_bg))
             .wrap(Wrap { trim: false }),
         content_area,
     );
 }
 
-fn render_status_separator(frame: &mut Frame, area: Rect) {
+fn render_status_separator(frame: &mut Frame, area: Rect, bg: Color, edge: Color) {
     if area.width == 0 {
         return;
     }
     let line = Line::from(vec![Span::styled(
         "─".repeat(area.width as usize),
-        Style::default().fg(dock_edge()).bg(status_band_bg()),
+        Style::default().fg(edge).bg(bg),
     )]);
     frame.render_widget(
-        Paragraph::new(Text::from(vec![line])).style(Style::default().bg(status_band_bg())),
+        Paragraph::new(Text::from(vec![line])).style(Style::default().bg(bg)),
         Rect::new(area.x, area.y, area.width, 1),
     );
 }
 
-fn render_status_left_rail(frame: &mut Frame, area: Rect, accent: Color) {
+fn render_status_left_rail(frame: &mut Frame, area: Rect, accent: Color, bg: Color) {
     if area.width == 0 || area.height <= 1 {
         return;
     }
     let lines = (0..area.height.saturating_sub(1))
-        .map(|_| {
-            Line::from(vec![Span::styled(
-                "▌",
-                Style::default().fg(accent).bg(status_band_bg()),
-            )])
-        })
+        .map(|_| Line::from(vec![Span::styled("▌", Style::default().fg(accent).bg(bg))]))
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(Text::from(lines)).style(Style::default().bg(status_band_bg())),
+        Paragraph::new(Text::from(lines)).style(Style::default().bg(bg)),
         Rect::new(
             area.x,
             area.y.saturating_add(1),
@@ -242,7 +260,13 @@ fn render_status_left_rail(frame: &mut Frame, area: Rect, accent: Color) {
     );
 }
 
-fn render_plan_approval_lines(plan: &PlanApprovalViewModel, width: usize) -> Vec<Line<'static>> {
+fn render_plan_approval_lines(
+    plan: &PlanApprovalViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let palette = &theme.palette;
+    let bg = palette.surface_panel_alt;
     let title_width = width.saturating_sub(24);
     let scope = truncate_display_width(&plan.scope_summary, title_width);
     vec![
@@ -250,75 +274,72 @@ fn render_plan_approval_lines(plan: &PlanApprovalViewModel, width: usize) -> Vec
             Span::styled(
                 "Plan",
                 Style::default()
-                    .fg(super::theme::accent_gold())
-                    .bg(status_band_bg())
+                    .fg(palette.accent_warning)
+                    .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
             Span::styled(
                 "ready",
                 Style::default()
-                    .fg(ink())
-                    .bg(status_band_bg())
+                    .fg(palette.text_primary)
+                    .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  ·  {}  ·  {}", plan.hash, scope),
-                Style::default()
-                    .fg(super::theme::muted())
-                    .bg(status_band_bg()),
+                Style::default().fg(palette.text_secondary).bg(bg),
             ),
         ]),
         Line::from(vec![
-            Span::styled("A", Style::default().fg(ink()).bg(status_band_bg())),
-            Span::styled(
-                " ask",
-                Style::default()
-                    .fg(super::theme::muted())
-                    .bg(status_band_bg()),
-            ),
-            Span::styled("  W", Style::default().fg(ink()).bg(status_band_bg())),
+            Span::styled("A", Style::default().fg(palette.text_primary).bg(bg)),
+            Span::styled(" ask", Style::default().fg(palette.text_secondary).bg(bg)),
+            Span::styled("  W", Style::default().fg(palette.text_primary).bg(bg)),
             Span::styled(
                 " workspace edits",
-                Style::default()
-                    .fg(super::theme::muted())
-                    .bg(status_band_bg()),
+                Style::default().fg(palette.text_secondary).bg(bg),
             ),
-            Span::styled("  C", Style::default().fg(ink()).bg(status_band_bg())),
+            Span::styled("  C", Style::default().fg(palette.text_primary).bg(bg)),
             Span::styled(
                 " continue",
-                Style::default()
-                    .fg(super::theme::muted())
-                    .bg(status_band_bg()),
+                Style::default().fg(palette.text_secondary).bg(bg),
             ),
-            Span::styled("  Esc", Style::default().fg(ink()).bg(status_band_bg())),
+            Span::styled("  Esc", Style::default().fg(palette.text_primary).bg(bg)),
             Span::styled(
                 " discard",
-                Style::default()
-                    .fg(super::theme::muted())
-                    .bg(status_band_bg()),
+                Style::default().fg(palette.text_secondary).bg(bg),
             ),
         ]),
     ]
 }
 
-fn render_task_strip_lines(task_strip: &TaskStripViewModel, width: usize) -> Vec<Line<'static>> {
+fn render_task_strip_lines(
+    task_strip: &TaskStripViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     if task_strip.rows.is_empty() {
         return Vec::new();
     }
     let mut lines = Vec::with_capacity(1 + task_strip.rows.len().min(LIVE_TASK_ROW_LIMIT));
-    lines.push(render_task_strip_header(task_strip, width));
+    lines.push(render_task_strip_header(task_strip, width, theme));
     lines.extend(
         task_strip
             .rows
             .iter()
             .take(LIVE_TASK_ROW_LIMIT)
-            .map(|row| render_task_strip_row(row, width)),
+            .map(|row| render_task_strip_row(row, width, theme)),
     );
     lines
 }
 
-fn render_task_strip_header(task_strip: &TaskStripViewModel, width: usize) -> Line<'static> {
+fn render_task_strip_header(
+    task_strip: &TaskStripViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let palette = &theme.palette;
+    let bg = palette.surface_panel_alt;
     let title = task_strip
         .title
         .strip_prefix("Task ")
@@ -329,49 +350,47 @@ fn render_task_strip_header(task_strip: &TaskStripViewModel, width: usize) -> Li
         Span::styled(
             "Task",
             Style::default()
-                .fg(super::theme::accent_gold())
-                .bg(status_band_bg())
+                .fg(palette.accent_warning)
+                .bg(bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
             title,
             Style::default()
-                .fg(ink())
-                .bg(status_band_bg())
+                .fg(palette.text_primary)
+                .bg(bg)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            "  ·  ",
-            Style::default()
-                .fg(super::theme::dim())
-                .bg(status_band_bg()),
-        ),
+        Span::styled("  ·  ", Style::default().fg(palette.text_muted).bg(bg)),
         Span::styled(
             truncate_display_width(&task_strip.detail, detail_width),
-            Style::default()
-                .fg(super::theme::muted())
-                .bg(status_band_bg()),
+            Style::default().fg(palette.text_secondary).bg(bg),
         ),
     ])
 }
 
-fn render_task_strip_row(row: &TaskStripRowViewModel, width: usize) -> Line<'static> {
+fn render_task_strip_row(
+    row: &TaskStripRowViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let palette = &theme.palette;
     let status = StatusIndicator::animated(row.kind);
     let row_bg = if row.active {
-        super::theme::composer_input_bg()
+        palette.surface_input
     } else {
-        status_band_bg()
+        palette.surface_panel_alt
     };
     let label_width = width.saturating_sub(LIVE_TASK_ROW_RESERVED_WIDTH);
     let label = truncate_display_width(&row.label, label_width);
     let label_style = if row.active {
         Style::default()
-            .fg(ink())
+            .fg(palette.text_primary)
             .bg(row_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(ink()).bg(row_bg)
+        Style::default().fg(palette.text_primary).bg(row_bg)
     };
     Line::from(vec![
         Span::styled("  ", Style::default().bg(row_bg)),
@@ -448,10 +467,22 @@ fn live_panel_wrapped_line(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn render_live_progress_lines(
     progress: &LiveProgressViewModel,
     accent: Color,
 ) -> Vec<Line<'static>> {
+    let theme = Theme::default();
+    render_live_progress_lines_with_theme(progress, accent, &theme)
+}
+
+fn render_live_progress_lines_with_theme(
+    progress: &LiveProgressViewModel,
+    accent: Color,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let palette = &theme.palette;
+    let bg = palette.surface_panel_alt;
     let indicator = StatusIndicator::animated(StatusKind::Running);
     vec![
         Line::from(vec![
@@ -461,15 +492,15 @@ pub(crate) fn render_live_progress_lines(
                 format!("{}...", progress.title),
                 Style::default()
                     .fg(accent)
-                    .bg(status_band_bg())
+                    .bg(bg)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("  ↳ ", Style::default().fg(accent).bg(status_band_bg())),
+            Span::styled("  ↳ ", Style::default().fg(accent).bg(bg)),
             Span::styled(
                 progress.detail.clone(),
-                Style::default().fg(ink()).bg(status_band_bg()),
+                Style::default().fg(palette.text_primary).bg(bg),
             ),
         ]),
     ]

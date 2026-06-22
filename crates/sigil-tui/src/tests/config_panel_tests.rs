@@ -16,6 +16,7 @@ fn test_root_config() -> RootConfig {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
@@ -106,7 +107,11 @@ fn config_section_flow_wraps() {
         ConfigSection::CodeIntelligence.next_flow(),
         ConfigSection::Terminal
     );
-    assert_eq!(ConfigSection::Terminal.next_flow(), ConfigSection::Agents);
+    assert_eq!(
+        ConfigSection::Terminal.next_flow(),
+        ConfigSection::Appearance
+    );
+    assert_eq!(ConfigSection::Appearance.next_flow(), ConfigSection::Agents);
     assert_eq!(ConfigSection::Agents.next_flow(), ConfigSection::Skills);
     assert_eq!(ConfigSection::Skills.next_flow(), ConfigSection::Plugins);
     assert_eq!(ConfigSection::Plugins.next_flow(), ConfigSection::Mcp);
@@ -192,6 +197,7 @@ fn compaction_context_field_uses_short_fallback_label() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
@@ -220,6 +226,7 @@ fn config_rows_do_not_pre_pad_labels() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
@@ -252,6 +259,7 @@ fn api_key_display_uses_status_without_secret_length() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
         mcp_servers: Vec::new(),
@@ -406,10 +414,11 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));
     assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(4));
     assert_eq!(ConfigSection::Terminal.flow_index(), Some(5));
-    assert_eq!(ConfigSection::Agents.flow_index(), Some(6));
-    assert_eq!(ConfigSection::Skills.flow_index(), Some(7));
-    assert_eq!(ConfigSection::Plugins.flow_index(), Some(8));
-    assert_eq!(ConfigSection::Mcp.flow_index(), Some(9));
+    assert_eq!(ConfigSection::Appearance.flow_index(), Some(6));
+    assert_eq!(ConfigSection::Agents.flow_index(), Some(7));
+    assert_eq!(ConfigSection::Skills.flow_index(), Some(8));
+    assert_eq!(ConfigSection::Plugins.flow_index(), Some(9));
+    assert_eq!(ConfigSection::Mcp.flow_index(), Some(10));
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
         &[
@@ -426,6 +435,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             ConfigField::TerminalOsc52Clipboard,
             ConfigField::TerminalScrollSensitivity,
         ]
+    );
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Appearance),
+        &[ConfigField::AppearanceTheme]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Mcp),
@@ -458,6 +471,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::TerminalScrollSensitivity.label(),
         "scroll_sensitivity"
     );
+    assert_eq!(ConfigField::AppearanceTheme.label(), "theme");
     assert_eq!(ConfigField::ProviderApiKey.action_label(), "Enter input");
     assert_eq!(ConfigField::CodeIntelStartup.action_label(), "Enter cycle");
     assert_eq!(ConfigField::CodeIntelEnabled.action_label(), "Enter toggle");
@@ -469,6 +483,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::TerminalScrollSensitivity.action_label(),
         "Enter input"
     );
+    assert_eq!(ConfigField::AppearanceTheme.action_label(), "Enter cycle");
     assert_eq!(ConfigField::McpCommand.action_label(), "Enter input");
     assert_eq!(ConfigField::SkillId.action_label(), "");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
@@ -539,6 +554,41 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             .help_text()
             .contains("OSC52")
     );
+    assert!(
+        ConfigField::AppearanceTheme
+            .help_text()
+            .contains("session history")
+    );
+}
+
+#[test]
+fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
+    let mut config = test_root_config();
+    config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
+    let mut state = ConfigState::from_root_config(&config);
+
+    state.set_section(ConfigSection::Appearance);
+    assert_eq!(state.selected_field, Some(ConfigField::AppearanceTheme));
+    assert_eq!(
+        state.display_value(ConfigField::AppearanceTheme),
+        "solarized_light"
+    );
+    assert_eq!(state.field_text_value(ConfigField::AppearanceTheme), None);
+    assert!(
+        state
+            .field_text_value_mut(ConfigField::AppearanceTheme)
+            .is_none()
+    );
+    assert!(!config_field_accepts_char(
+        ConfigField::AppearanceTheme,
+        'n'
+    ));
+
+    state.draft.appearance_theme = sigil_kernel::ThemeId::Nord;
+    let saved = state.draft.to_root_config()?;
+
+    assert_eq!(saved.appearance.theme, sigil_kernel::ThemeId::Nord);
+    Ok(())
 }
 
 #[test]
