@@ -13,11 +13,29 @@ use super::{
     primitives::section_badge,
     status_indicator::{indicator_styles, render_marker_symbol},
     text::truncate_display_width,
-    theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink, rail_bg},
+    theme::Theme,
 };
 
+#[cfg(test)]
+use super::theme::{accent_blue, accent_gold, accent_lime, accent_rose, dim, ink};
+
+#[cfg(test)]
 pub(crate) fn render_info_rail(frame: &mut Frame, area: Rect, view_model: &InfoRailViewModel) {
-    frame.render_widget(Block::default().style(Style::default().bg(rail_bg())), area);
+    let theme = Theme::default();
+    render_info_rail_with_theme(frame, area, view_model, &theme);
+}
+
+pub(crate) fn render_info_rail_with_theme(
+    frame: &mut Frame,
+    area: Rect,
+    view_model: &InfoRailViewModel,
+    theme: &Theme,
+) {
+    let palette = &theme.palette;
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.surface_rail)),
+        area,
+    );
     let inner = inset_rect(area, 3, 1);
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -26,85 +44,95 @@ pub(crate) fn render_info_rail(frame: &mut Frame, area: Rect, view_model: &InfoR
         Span::styled(
             "info",
             Style::default()
-                .fg(accent_blue())
+                .fg(palette.accent_info)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
             truncate_display_width(&view_model.session_title, inner.width as usize),
-            Style::default().fg(ink()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.text_primary)
+                .add_modifier(Modifier::BOLD),
         ),
     ])];
     lines.push(Line::from(vec![Span::styled(
         truncate_display_width(&view_model.workspace_label, inner.width as usize),
-        Style::default().fg(dim()),
+        Style::default().fg(palette.text_muted),
     )]));
     lines.push(Line::raw(String::new()));
 
     push_info_section(
         &mut lines,
         "session",
-        accent_blue(),
+        palette.accent_info,
         view_model.session_lines.iter().cloned(),
         inner.width as usize,
+        theme,
     );
     push_info_section(
         &mut lines,
         "permissions",
-        accent_gold(),
+        palette.accent_warning,
         view_model.permission_lines.iter().cloned(),
         inner.width as usize,
+        theme,
     );
     push_info_section(
         &mut lines,
         "agents",
-        accent_lime(),
+        palette.accent_success,
         view_model.agent_lines.iter().cloned(),
         inner.width as usize,
+        theme,
     );
     if !view_model.task_lines.is_empty() {
         push_info_section(
             &mut lines,
             "task",
-            accent_teal(),
+            palette.accent_secondary,
             view_model.task_lines.iter().cloned(),
             inner.width as usize,
+            theme,
         );
     }
     if !view_model.mcp_lines.is_empty() {
         push_info_section(
             &mut lines,
             "MCP",
-            accent_gold(),
+            palette.accent_warning,
             view_model.mcp_lines.iter().cloned(),
             inner.width as usize,
+            theme,
         );
     }
     push_info_section(
         &mut lines,
         "LSP",
-        accent_teal(),
+        palette.accent_secondary,
         view_model.code_lines.iter().cloned(),
         inner.width as usize,
+        theme,
     );
     push_info_section(
         &mut lines,
         "usage",
-        accent_blue(),
+        palette.accent_info,
         view_model.usage_lines.iter().cloned(),
         inner.width as usize,
+        theme,
     );
     push_info_section(
         &mut lines,
         "controls",
-        accent_rose(),
+        palette.accent_danger,
         view_model.controls.iter().cloned(),
         inner.width as usize,
+        theme,
     );
 
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(rail_bg()))
+            .style(Style::default().bg(palette.surface_rail))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -116,17 +144,25 @@ fn push_info_section<I>(
     accent: Color,
     values: I,
     width: usize,
+    theme: &Theme,
 ) where
     I: IntoIterator<Item = String>,
 {
     lines.push(Line::from(vec![section_badge(title, accent)]));
     for value in values {
-        lines.push(render_info_line(&value, width));
+        lines.push(render_info_line_with_theme(&value, width, theme));
     }
     lines.push(Line::raw(String::new()));
 }
 
+#[cfg(test)]
 fn render_info_line(value: &str, width: usize) -> Line<'static> {
+    let theme = Theme::default();
+    render_info_line_with_theme(value, width, &theme)
+}
+
+fn render_info_line_with_theme(value: &str, width: usize, theme: &Theme) -> Line<'static> {
+    let palette = &theme.palette;
     let clipped = truncate_display_width(value, width.saturating_sub(2).max(1));
     if let Some((marker, after_marker)) = clipped.split_once(' ')
         && let Some((marker_style, _)) = indicator_styles(marker)
@@ -137,11 +173,13 @@ fn render_info_line(value: &str, width: usize) -> Line<'static> {
             Span::styled(format!("{} ", render_marker_symbol(marker)), marker_style),
             Span::styled(
                 format!("{label}:"),
-                Style::default().fg(dim()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(palette.text_muted)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
         ];
-        spans.extend(render_info_value_spans(rest));
+        spans.extend(render_info_value_spans(rest, theme));
         return Line::from(spans);
     }
 
@@ -150,11 +188,13 @@ fn render_info_line(value: &str, width: usize) -> Line<'static> {
             Span::raw("  "),
             Span::styled(
                 format!("{label}:"),
-                Style::default().fg(dim()).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(palette.text_muted)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
         ];
-        spans.extend(render_info_value_spans(rest));
+        spans.extend(render_info_value_spans(rest, theme));
         return Line::from(spans);
     }
 
@@ -171,11 +211,11 @@ fn render_info_line(value: &str, width: usize) -> Line<'static> {
 
     Line::from(vec![
         Span::raw("  "),
-        Span::styled(clipped, Style::default().fg(ink())),
+        Span::styled(clipped, Style::default().fg(palette.text_primary)),
     ])
 }
 
-fn render_info_value_spans(value: &str) -> Vec<Span<'static>> {
+fn render_info_value_spans(value: &str, theme: &Theme) -> Vec<Span<'static>> {
     if let Some((marker, rest)) = value.split_once(' ')
         && let Some((marker_style, rest_style)) = indicator_styles(marker)
     {
@@ -185,7 +225,10 @@ fn render_info_value_spans(value: &str) -> Vec<Span<'static>> {
             Span::styled(rest.to_owned(), rest_style),
         ];
     }
-    vec![Span::styled(value.to_owned(), Style::default().fg(ink()))]
+    vec![Span::styled(
+        value.to_owned(),
+        Style::default().fg(theme.palette.text_primary),
+    )]
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

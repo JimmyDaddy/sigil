@@ -149,6 +149,7 @@ Gemini:
 | `[task]` | Planned task behavior and role settings |
 | `[code_intelligence]` | LSP and code intelligence tools |
 | `[terminal]` | Mouse, OSC52 clipboard, and scroll behavior |
+| `[appearance]` | TUI theme and semantic color overrides |
 | `[[mcp_servers]]` | stdio MCP server configuration |
 
 See [configuration.md](configuration.md) for examples.

@@ -27,6 +27,7 @@ pub(crate) fn test_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: std::collections::BTreeMap::new(),
         mcp_servers: Vec::new(),
