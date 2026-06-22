@@ -606,6 +606,7 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                     followups: Vec::new(),
                     usage: None,
                     output_hash: "sha256:result".to_owned(),
+                    final_answer_ref: None,
                 },
             }),
             "agent_thread_result_recorded",

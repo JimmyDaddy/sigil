@@ -726,6 +726,17 @@ pub struct AgentArtifactRef {
     pub hash: Option<String>,
 }
 
+/// Structured reference to the final answer message produced by a child thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentFinalAnswerRef {
+    pub session_ref: SessionRef,
+    pub message_id: String,
+    pub content_hash: String,
+    #[serde(default)]
+    pub char_count: usize,
+}
+
 /// Structured result payload recorded when a child thread reaches a terminal state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -749,6 +760,8 @@ pub struct AgentThreadResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AgentUsageSummary>,
     pub output_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_answer_ref: Option<AgentFinalAnswerRef>,
 }
 
 /// Append-only profile snapshot capture.

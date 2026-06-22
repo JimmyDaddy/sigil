@@ -10,8 +10,8 @@ use sigil_kernel::{
     Agent, AgentDelegationRequirement, AgentProfileId, AgentRole, AgentRunInput, AgentRunOptions,
     AgentRunResult, AgentThreadId, AgentThreadStatus, ControlEntry, ModelMessage,
     PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry,
-    ProviderCapabilities, RootConfig, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
+    ProviderCapabilities, RootConfig, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest,
+    Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection,
     TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
     TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
@@ -95,7 +95,10 @@ pub(super) fn run_worker_loop<P>(
                 return;
             }
         };
-    let background_agent_runs = sigil_runtime::AgentToolBackgroundRuns::default();
+    let background_agent_runs =
+        sigil_runtime::AgentToolBackgroundRuns::with_event_sink(Arc::new(WorkerAgentEventSink {
+            sender: message_tx.clone(),
+        }));
 
     loop {
         while let Ok(event) = mcp_event_rx.try_recv() {
@@ -263,7 +266,7 @@ pub(super) fn run_worker_loop<P>(
         }
 
         if active_run.is_none() {
-            collect_finished_background_agent_runs(
+            let completed_agent_threads = collect_finished_background_agent_runs(
                 &runtime,
                 &background_agent_runs,
                 &agent_supervisor,
@@ -272,6 +275,26 @@ pub(super) fn run_worker_loop<P>(
                 &mut current_session,
                 &message_tx,
             );
+            if !completed_agent_threads.is_empty() {
+                active_run = start_agent_result_continuation_run(
+                    &runtime,
+                    Arc::clone(&agent),
+                    &agent_supervisor,
+                    &root_config,
+                    agent.tool_registry(),
+                    &options,
+                    &background_agent_runs,
+                    &mut current_session,
+                    &task_result_tx,
+                    &message_tx,
+                    Arc::clone(&elicitation_handler),
+                    &mut next_run_id,
+                    completed_agent_threads,
+                );
+                if active_run.is_some() {
+                    continue;
+                }
+            }
         }
 
         match command_rx.recv_timeout(Duration::from_millis(50)) {
@@ -405,7 +428,11 @@ pub(super) fn run_worker_loop<P>(
                     elicitation_audit_buffer,
                 });
             }
-            Ok(WorkerCommand::InvokeAgentProfile { profile_id, prompt }) => {
+            Ok(WorkerCommand::InvokeAgentProfile {
+                profile_id,
+                prompt,
+                parent_prompt,
+            }) => {
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "agent is already running".to_owned(),
@@ -419,10 +446,20 @@ pub(super) fn run_worker_loop<P>(
                     ));
                     continue;
                 };
+                let mut run_session = run_session;
+                if let Err(error) =
+                    run_session.append_user_message(ModelMessage::user(parent_prompt.clone()))
+                {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                        "failed to persist agent invocation prompt: {error:#}"
+                    )));
+                    current_session = Some(run_session);
+                    continue;
+                }
 
                 let _ = message_tx.send(WorkerMessage::AgentRunStarted {
                     profile_id: profile_id.clone(),
-                    prompt: prompt.clone(),
+                    prompt: parent_prompt,
                 });
 
                 let mut handler = ChannelEventHandler::new(message_tx.clone());
@@ -444,7 +481,7 @@ pub(super) fn run_worker_loop<P>(
                 next_run_id += 1;
 
                 let handle = runtime.spawn(async move {
-                    let mut run_session = run_session;
+                    let profile_id_for_summary = profile_id.clone();
                     let result = {
                         let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
                         match AgentProfileId::new(profile_id.clone()) {
@@ -458,7 +495,19 @@ pub(super) fn run_worker_loop<P>(
                                     &mut approval_handler,
                                 )
                                 .await
-                                .map(manual_agent_invocation_result)
+                                .and_then(|invocation| {
+                                    let run_result = manual_agent_invocation_result(&invocation);
+                                    run_session.append_assistant_message(
+                                        ModelMessage::assistant(
+                                            Some(manual_agent_parent_summary(
+                                                &profile_id_for_summary,
+                                                &invocation,
+                                            )),
+                                            Vec::new(),
+                                        ),
+                                    )?;
+                                    Ok(run_result)
+                                })
                                 .map_err(|error| format!("{error:#}")),
                             Err(error) => Err(format!("{error:#}")),
                         }
@@ -1341,6 +1390,19 @@ pub(super) fn run_worker_loop<P>(
     }
 }
 
+struct WorkerAgentEventSink {
+    sender: mpsc::Sender<WorkerMessage>,
+}
+
+impl sigil_runtime::AgentToolBackgroundEventSink for WorkerAgentEventSink {
+    fn handle_agent_event(&self, thread_id: &AgentThreadId, event: RunEvent) {
+        let _ = self.sender.send(WorkerMessage::AgentThreadEvent {
+            thread_id: thread_id.clone(),
+            event: Box::new(event),
+        });
+    }
+}
+
 pub(super) struct WorkerLoopMcpHandlers {
     pub(super) elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     pub(super) event_handler: Arc<ChannelMcpRuntimeEventHandler>,
@@ -2092,7 +2154,7 @@ enum RunTaskPayload {
 }
 
 fn manual_agent_invocation_result(
-    invocation: sigil_runtime::ManualAgentInvocationResult,
+    invocation: &sigil_runtime::ManualAgentInvocationResult,
 ) -> AgentRunResult {
     let final_text = invocation
         .result
@@ -2116,6 +2178,52 @@ fn manual_agent_invocation_result(
     AgentRunResult {
         final_text,
         tool_calls: 0,
+        final_message_id: None,
+    }
+}
+
+fn manual_agent_parent_summary(
+    profile_id: &str,
+    invocation: &sigil_runtime::ManualAgentInvocationResult,
+) -> String {
+    let status = invocation
+        .status
+        .map(agent_thread_status_label)
+        .unwrap_or("unknown");
+    let mut lines = vec![
+        format!(
+            "Agent @{profile_id} finished. thread_id={} status={status}.",
+            invocation.thread_id.as_str()
+        ),
+        "Use read_agent_result for the full child answer when more detail is needed.".to_owned(),
+    ];
+    if let Some(result) = invocation.result.as_ref() {
+        let summary = result.summary.trim();
+        if !summary.is_empty() {
+            lines.push(String::new());
+            lines.push("Summary:".to_owned());
+            lines.push(summary.to_owned());
+        }
+        if result.final_answer_ref.is_some() {
+            lines.push(String::new());
+            lines.push("Full answer is available through the agent result reference.".to_owned());
+        }
+    }
+    lines.join("\n")
+}
+
+fn agent_thread_status_label(status: AgentThreadStatus) -> &'static str {
+    match status {
+        AgentThreadStatus::Started => "started",
+        AgentThreadStatus::Running => "running",
+        AgentThreadStatus::Blocked => "blocked",
+        AgentThreadStatus::Completed => "completed",
+        AgentThreadStatus::Failed => "failed",
+        AgentThreadStatus::Cancelled => "cancelled",
+        AgentThreadStatus::Interrupted => "interrupted",
+        AgentThreadStatus::Closed => "closed",
+        AgentThreadStatus::Unavailable => "unavailable",
+        AgentThreadStatus::Unknown => "unknown",
     }
 }
 
@@ -2127,12 +2235,12 @@ fn collect_finished_background_agent_runs(
     base_registry: &ToolRegistry,
     current_session: &mut Option<Session>,
     message_tx: &mpsc::Sender<WorkerMessage>,
-) {
+) -> Vec<AgentThreadId> {
     if !background_runs.has_finished() {
-        return;
+        return Vec::new();
     }
     let Some(session) = current_session.as_mut() else {
-        return;
+        return Vec::new();
     };
     let mut handler = ChannelEventHandler::new(message_tx.clone());
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
@@ -2141,13 +2249,121 @@ fn collect_finished_background_agent_runs(
         base_registry.clone(),
     )
     .with_background_runs(background_runs.clone());
-    if let Err(error) =
-        runtime.block_on(agent_delegate.collect_finished_background_runs(session, &mut handler))
-    {
-        let _ = message_tx.send(WorkerMessage::Notice(format!(
-            "agent background collection failed: {error:#}"
-        )));
+    match runtime.block_on(agent_delegate.collect_finished_background_runs(session, &mut handler)) {
+        Ok(thread_ids) => thread_ids,
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "agent background collection failed: {error:#}"
+            )));
+            Vec::new()
+        }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_agent_result_continuation_run<P>(
+    runtime: &tokio::runtime::Runtime,
+    agent: Arc<Agent<P>>,
+    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    root_config: &RootConfig,
+    base_registry: &ToolRegistry,
+    options: &AgentRunOptions,
+    background_runs: &sigil_runtime::AgentToolBackgroundRuns,
+    current_session: &mut Option<Session>,
+    task_result_tx: &mpsc::Sender<RunTaskResult>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    elicitation_handler: Arc<ChannelMcpElicitationHandler>,
+    next_run_id: &mut u64,
+    completed_thread_ids: Vec<AgentThreadId>,
+) -> Option<ActiveRun>
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    let Some(run_session) = current_session.take() else {
+        let _ = message_tx.send(WorkerMessage::RunFailed(
+            "session state is unavailable for agent result continuation".to_owned(),
+        ));
+        return None;
+    };
+
+    let _ = message_tx.send(WorkerMessage::AgentResultContinuationStarted {
+        thread_ids: completed_thread_ids.clone(),
+    });
+
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
+    let (approval_tx, approval_rx) = mpsc::channel();
+    let elicitation_audit_buffer: McpElicitationAuditBuffer =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+    let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+    agent_supervisor.reset_turn_budget();
+    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
+        agent_supervisor.clone(),
+        root_config.clone(),
+        base_registry.clone(),
+    )
+    .with_background_runs(background_runs.clone());
+    let options = options.clone();
+    let task_result_tx = task_result_tx.clone();
+    let run_id = *next_run_id;
+    *next_run_id = (*next_run_id).saturating_add(1);
+    let continuation_prompt = agent_result_continuation_prompt(&completed_thread_ids);
+
+    let handle = runtime.spawn(async move {
+        let mut run_session = run_session;
+        let result = {
+            let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+            agent
+                .run_with_approval_input_and_agent_delegate(
+                    &mut run_session,
+                    AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                        continuation_prompt,
+                    )]),
+                    options,
+                    &mut handler,
+                    &mut approval_handler,
+                    &mut agent_delegate,
+                )
+                .await
+                .map(|output| output.result)
+                .map_err(|error| format!("{error:#}"))
+        };
+        let result =
+            match append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer) {
+                Ok(()) => result,
+                Err(error) => Err(error),
+            };
+        let _ = task_result_tx.send(RunTaskResult {
+            run_id,
+            session: run_session,
+            payload: RunTaskPayload::Chat {
+                result,
+                plan_mode: false,
+            },
+        });
+    });
+
+    Some(ActiveRun {
+        run_id,
+        handle,
+        approval_tx,
+        elicitation_audit_buffer,
+    })
+}
+
+fn agent_result_continuation_prompt(thread_ids: &[AgentThreadId]) -> String {
+    let threads = thread_ids
+        .iter()
+        .map(AgentThreadId::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "One or more background child agents completed: {threads}.\n\
+         Continue the original user request now. First call wait_agent for each completed thread \
+         to collect its terminal status and result reference. Use read_agent_result only when the \
+         bounded summary is insufficient. Do not copy the child transcript directly into the \
+         parent conversation; summarize only the child result needed for the final answer."
+    )
 }
 
 struct ActiveProviderStatusTask {

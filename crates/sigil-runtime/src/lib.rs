@@ -51,10 +51,10 @@ pub use agent_supervisor::{
     AgentTaskChildThread, ForegroundCancelImpact, chat_agent_thread_id_for_call,
 };
 pub use agent_tools::{
-    AgentToolBackgroundRuns, AgentToolProviderFactory, AgentToolRuntime, CLOSE_AGENT_TOOL_NAME,
-    MESSAGE_AGENT_TOOL_NAME, ManualAgentInvocationResult, READ_AGENT_RESULT_TOOL_NAME,
-    SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, close_agent_thread, register_agent_tools,
-    register_agent_tools_with_registry, register_agent_tools_with_workspace,
+    AgentToolBackgroundEventSink, AgentToolBackgroundRuns, AgentToolProviderFactory,
+    AgentToolRuntime, CLOSE_AGENT_TOOL_NAME, MESSAGE_AGENT_TOOL_NAME, ManualAgentInvocationResult,
+    READ_AGENT_RESULT_TOOL_NAME, SPAWN_AGENT_TOOL_NAME, WAIT_AGENT_TOOL_NAME, close_agent_thread,
+    register_agent_tools, register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
 pub use plugins::{

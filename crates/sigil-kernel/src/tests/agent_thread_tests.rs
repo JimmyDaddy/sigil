@@ -271,6 +271,7 @@ fn agent_control_entries_roundtrip() -> Result<()> {
             cached_tokens: Some(4),
         }),
         output_hash: "sha256:result".to_owned(),
+        final_answer_ref: None,
     };
     let entries = vec![
         ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
@@ -504,6 +505,7 @@ fn agent_thread_projection_replays_lifecycle_and_result() -> Result<()> {
                 followups: Vec::new(),
                 usage: None,
                 output_hash: "sha256:done".to_owned(),
+                final_answer_ref: None,
             },
         },
     ))?;
@@ -580,6 +582,7 @@ fn agent_thread_projection_covers_attempt_display_merge_and_close_edges() -> Res
                     followups: Vec::new(),
                     usage: None,
                     output_hash: "sha256:unknown".to_owned(),
+                    final_answer_ref: None,
                 },
             },
         )),
@@ -664,6 +667,7 @@ fn agent_thread_result_statuses_project_to_terminal_thread_statuses() -> Result<
             followups: Vec::new(),
             usage: None,
             output_hash: "sha256:done".to_owned(),
+            final_answer_ref: None,
         };
         let entries = vec![
             SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
@@ -702,6 +706,7 @@ fn agent_result_without_started_entry_stays_unresolved() -> Result<()> {
                 followups: Vec::new(),
                 usage: None,
                 output_hash: "sha256:done".to_owned(),
+                final_answer_ref: None,
             },
         }),
     )];
@@ -1071,6 +1076,7 @@ fn interrupted_agent_attempts_skip_terminal_attempts_and_threads() -> Result<()>
                     followups: Vec::new(),
                     usage: None,
                     output_hash: "sha256:done".to_owned(),
+                    final_answer_ref: None,
                 },
             },
         )),

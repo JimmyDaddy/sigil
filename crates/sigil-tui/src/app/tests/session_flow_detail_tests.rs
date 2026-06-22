@@ -717,6 +717,7 @@ fn render_agent_control_entries_and_status_labels() -> Result<()> {
         followups: Vec::new(),
         usage: None,
         output_hash: "sha256:result".to_owned(),
+        final_answer_ref: None,
     };
 
     let rendered = [

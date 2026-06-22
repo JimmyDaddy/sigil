@@ -288,6 +288,7 @@ pub enum AppAction {
     InvokeAgentProfile {
         profile_id: String,
         prompt: String,
+        parent_prompt: String,
     },
     ContinueTask {
         task_id: Option<String>,
@@ -1425,6 +1426,10 @@ impl AppState {
                 }
                 let arg = command.arg.trim();
                 if arg.is_empty() {
+                    self.input.clear();
+                    self.input_cursor = 0;
+                    self.input_paste_spans.clear();
+                    self.reset_slash_selector();
                     self.composer_mode = ComposerMode::Plan;
                     self.last_notice = Some("plan mode".to_owned());
                     self.push_event("mode", "plan");
@@ -1441,6 +1446,10 @@ impl AppState {
 
                 let plan_prompt = arg.to_owned();
                 self.clear_pending_plan_approval();
+                self.input.clear();
+                self.input_cursor = 0;
+                self.input_paste_spans.clear();
+                self.reset_slash_selector();
                 self.timeline_scroll_back = 0;
                 self.push_timeline(TimelineRole::User, format!("/plan {plan_prompt}"));
                 self.push_event("input", format!("submitted plan prompt {plan_prompt}"));
@@ -1582,7 +1591,7 @@ impl AppState {
         self.input_paste_spans.clear();
         self.reset_slash_selector();
         self.timeline_scroll_back = 0;
-        self.push_timeline(TimelineRole::User, prompt);
+        self.push_timeline(TimelineRole::User, prompt.clone());
         self.push_event("input", format!("invoked agent {profile_id}"));
         self.active_pane = PaneFocus::Composer;
         self.push_event("focus", current_focus_label(self));
@@ -1598,6 +1607,7 @@ impl AppState {
         AppAction::InvokeAgentProfile {
             profile_id,
             prompt: agent_prompt,
+            parent_prompt: prompt,
         }
     }
 

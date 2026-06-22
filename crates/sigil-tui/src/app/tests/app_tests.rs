@@ -882,6 +882,7 @@ fn agent_sidebar_rows_keep_completed_status_when_read_agent_result_fails() -> Re
                     followups: Vec::new(),
                     usage: None,
                     output_hash: "sha256:done".to_owned(),
+                    final_answer_ref: None,
                 },
             },
         )),
@@ -944,6 +945,7 @@ fn alt_a_cycles_agent_view_without_activity_focus() -> Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT))?;
 
     assert_eq!(app.active_agent_label(), "仓库审查");
+    assert!(app.is_composer_agent_panel_focused());
     assert_eq!(
         app.last_notice(),
         Some("agent focus: agent 仓库审查 · started · subagent_read · v1:step_1")
@@ -952,6 +954,7 @@ fn alt_a_cycles_agent_view_without_activity_focus() -> Result<()> {
     app.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT))?;
 
     assert_eq!(app.active_agent_label(), "main");
+    assert!(app.is_composer_agent_panel_focused());
     assert_eq!(
         app.last_notice(),
         Some("agent focus: main · idle in current session")

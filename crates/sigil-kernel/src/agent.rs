@@ -55,6 +55,7 @@ pub struct AgentRunOptions {
 pub struct AgentRunResult {
     pub final_text: String,
     pub tool_calls: usize,
+    pub final_message_id: Option<String>,
 }
 
 /// Input contract for one agent run.
@@ -452,6 +453,7 @@ where
                     result: AgentRunResult {
                         final_text: String::new(),
                         tool_calls: total_tool_calls,
+                        final_message_id: None,
                     },
                     outcome,
                 });
@@ -1098,6 +1100,7 @@ where
                     result: AgentRunResult {
                         final_text: String::new(),
                         tool_calls: total_tool_calls,
+                        final_message_id: None,
                     },
                     outcome,
                 });
@@ -1105,6 +1108,7 @@ where
 
             let assistant_message =
                 ModelMessage::assistant(Some(assistant_text.clone()), Vec::new());
+            let final_message_id = assistant_message.id.clone();
             session.append_assistant_message(assistant_message.clone())?;
             handler.handle(RunEvent::AssistantMessage(assistant_message))?;
 
@@ -1128,6 +1132,7 @@ where
                 result: AgentRunResult {
                     final_text: assistant_text,
                     tool_calls: total_tool_calls,
+                    final_message_id: Some(final_message_id),
                 },
                 outcome,
             });

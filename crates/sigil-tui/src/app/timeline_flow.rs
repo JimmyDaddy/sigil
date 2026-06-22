@@ -968,6 +968,9 @@ impl AppState {
                 detail: format!("waiting for decision on {}", pending.call.name),
             });
         }
+        if let Some(summary) = self.active_child_agent_activity_summary() {
+            return Some(summary);
+        }
         if !self.is_busy {
             return None;
         }
@@ -987,6 +990,57 @@ impl AppState {
         Some(LiveActivitySummary {
             label: label.to_owned(),
             detail,
+        })
+    }
+
+    pub(crate) fn live_panel_phase(&self) -> RunPhase {
+        if matches!(self.active_agent_view, AgentView::Child { .. }) {
+            if let Some(thread) = self.active_agent_thread_projection() {
+                return RunPhase::Agent(
+                    thread
+                        .profile_id
+                        .map(|profile_id| profile_id.as_str().to_owned())
+                        .unwrap_or_else(|| "agent".to_owned()),
+                );
+            }
+            if self.active_agent_child_entry().is_some() {
+                return RunPhase::Agent("agent".to_owned());
+            }
+        }
+        self.run_phase()
+    }
+
+    fn active_child_agent_activity_summary(&self) -> Option<LiveActivitySummary> {
+        if !matches!(self.active_agent_view, AgentView::Child { .. }) {
+            return None;
+        }
+        let label = "agent".to_owned();
+        let active_label = self.active_agent_label();
+        if let Some(thread) = self.active_agent_thread_projection() {
+            let profile = thread
+                .profile_id
+                .as_ref()
+                .map(sigil_kernel::AgentProfileId::as_str)
+                .unwrap_or("agent");
+            return Some(LiveActivitySummary {
+                label,
+                detail: format!(
+                    "{} · {} · {}",
+                    active_label,
+                    agent_thread_status_label(thread.status),
+                    profile
+                ),
+            });
+        }
+        let child = self.active_agent_child_entry()?;
+        Some(LiveActivitySummary {
+            label,
+            detail: format!(
+                "{} · {} · {}",
+                active_label,
+                task_child_session_status_label(child.status),
+                child.role.as_str()
+            ),
         })
     }
 }

@@ -64,6 +64,8 @@ fn plan_command_dispatches_plan_prompt_when_idle() -> Result<()> {
     ));
     assert!(app.is_busy);
     assert_eq!(app.last_notice(), Some("planning"));
+    assert_eq!(app.input, "");
+    assert!(!app.has_slash_selector());
     assert!(app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::User && entry.text == "/plan implement task mode"
     }));
@@ -97,6 +99,8 @@ fn empty_plan_command_enters_one_shot_plan_mode() -> Result<()> {
     assert!(app.submit_input()?.is_none());
     assert_eq!(app.composer_mode_label(), "Plan");
     assert_eq!(app.last_notice(), Some("plan mode"));
+    assert_eq!(app.input, "");
+    assert!(!app.has_slash_selector());
 
     app.input = "inspect crates/sigil-tui".to_owned();
     let action = app.submit_input()?;
@@ -504,8 +508,10 @@ aliases = ["rr"]
 
     assert!(matches!(
         action,
-        Some(AppAction::InvokeAgentProfile { profile_id, prompt })
-            if profile_id == "repo-review" && prompt == "audit crates/sigil-tui"
+        Some(AppAction::InvokeAgentProfile { profile_id, prompt, parent_prompt })
+            if profile_id == "repo-review"
+                && prompt == "audit crates/sigil-tui"
+                && parent_prompt == "@repo-review audit crates/sigil-tui"
     ));
     assert!(app.is_busy);
     assert_eq!(app.last_notice(), Some("waiting for agent @repo-review"));
@@ -537,8 +543,10 @@ aliases = ["rr"]
 
     assert!(matches!(
         action,
-        Some(AppAction::InvokeAgentProfile { profile_id, prompt })
-            if profile_id == "repo-review" && prompt == "audit crates/sigil-tui"
+        Some(AppAction::InvokeAgentProfile { profile_id, prompt, parent_prompt })
+            if profile_id == "repo-review"
+                && prompt == "audit crates/sigil-tui"
+                && parent_prompt == "@rr audit crates/sigil-tui"
     ));
     Ok(())
 }
@@ -571,8 +579,10 @@ slash_names = ["review-agent"]
 
     assert!(matches!(
         action,
-        Some(AppAction::InvokeAgentProfile { profile_id, prompt })
-            if profile_id == "repo-review" && prompt == "audit crates/sigil-tui"
+        Some(AppAction::InvokeAgentProfile { profile_id, prompt, parent_prompt })
+            if profile_id == "repo-review"
+                && prompt == "audit crates/sigil-tui"
+                && parent_prompt == "/review-agent audit crates/sigil-tui"
     ));
     assert_eq!(app.last_notice(), Some("waiting for agent @repo-review"));
     Ok(())

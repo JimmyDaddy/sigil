@@ -22,11 +22,11 @@ pub use agent::{
     AgentRunOutput, AgentRunResult, AgentRunTerminalReason, AgentToolDelegate,
 };
 pub use agent_thread::{
-    AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentInvocationMode,
-    AgentInvocationPolicy, AgentInvocationRequest, AgentInvocationSource, AgentMergeSafePointEntry,
-    AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry, AgentProfileId,
-    AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
-    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
+    AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentFinalAnswerRef,
+    AgentInvocationMode, AgentInvocationPolicy, AgentInvocationRequest, AgentInvocationSource,
+    AgentMergeSafePointEntry, AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry,
+    AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection,
+    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
     AgentProfileTrustProjection, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
     AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection, AgentRunAttemptStartedEntry,
     AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,

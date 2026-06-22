@@ -43,6 +43,7 @@ pub enum WorkerCommand {
     InvokeAgentProfile {
         profile_id: String,
         prompt: String,
+        parent_prompt: String,
     },
     SubmitTask {
         prompt: String,
@@ -106,6 +107,13 @@ pub enum WorkerMessage {
     AgentRunStarted {
         profile_id: String,
         prompt: String,
+    },
+    AgentResultContinuationStarted {
+        thread_ids: Vec<AgentThreadId>,
+    },
+    AgentThreadEvent {
+        thread_id: AgentThreadId,
+        event: Box<RunEvent>,
     },
     AgentRunFinished {
         profile_id: String,

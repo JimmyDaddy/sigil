@@ -9,17 +9,18 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentApprovalRouteEntry, AgentArtifactRef, AgentInvocationMode, AgentInvocationSource,
-    AgentMergeSafePointEntry, AgentProfileCapturedEntry, AgentProfileId, AgentRole, AgentRouteId,
-    AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
-    AgentRunInput, AgentRunInterruptedEntry, AgentThreadId, AgentThreadResult,
-    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
-    ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, Provider, ProviderCapabilities,
-    RunEvent, Session, SessionRef, SessionStats, TaskChildSessionEntry, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
-    TaskRouteId, TaskRouteStatus, TaskStepSpec, TaskSubagentApprovalRouteEntry, ToolApproval,
-    ToolCall, ToolErrorKind, ToolRegistryScope, ToolSpec, WorkspaceRootSnapshot, child_session_ref,
+    Agent, AgentApprovalRouteEntry, AgentArtifactRef, AgentFinalAnswerRef, AgentInvocationMode,
+    AgentInvocationSource, AgentMergeSafePointEntry, AgentProfileCapturedEntry, AgentProfileId,
+    AgentRole, AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry,
+    AgentRunContextSnapshot, AgentRunInput, AgentRunInterruptedEntry, AgentRunResult,
+    AgentThreadId, AgentThreadResult, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
+    AgentUsageSummary, ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, Provider,
+    ProviderCapabilities, RunEvent, Session, SessionRef, SessionStats, TaskChildSessionEntry,
+    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskStepSpec,
+    TaskSubagentApprovalRouteEntry, ToolApproval, ToolCall, ToolErrorKind, ToolRegistryScope,
+    ToolSpec, WorkspaceRootSnapshot, child_session_ref,
 };
 
 use crate::{
@@ -45,19 +46,23 @@ pub struct AgentBudgetPolicy {
 impl AgentBudgetPolicy {
     #[must_use]
     pub fn from_root_config(root_config: &sigil_kernel::RootConfig) -> Self {
-        let max_threads = root_config.task.max_child_sessions.max(1);
+        let task = &root_config.task;
+        let max_threads = task.max_child_sessions.max(1);
+        let default_ro = match task.allow_parallel_readonly_subagents {
+            true => max_threads,
+            false => 1,
+        };
+        let max_parallel_readonly = task.max_parallel_readonly.unwrap_or(default_ro);
+        let max_spawn_fanout_per_turn = task.max_spawn_fanout_per_turn.unwrap_or(max_threads);
+        let max_agent_tokens_per_task = task.max_agent_tokens_per_task.unwrap_or(200_000);
         Self {
             max_threads,
             max_depth: 1,
-            max_parallel_readonly: if root_config.task.allow_parallel_readonly_subagents {
-                max_threads
-            } else {
-                1
-            },
-            max_parallel_write: 1,
-            max_background_threads: 1,
-            max_spawn_fanout_per_turn: max_threads,
-            max_agent_tokens_per_task: 200_000,
+            max_parallel_readonly,
+            max_parallel_write: task.max_parallel_write.unwrap_or(1),
+            max_background_threads: task.max_background_threads.unwrap_or(1),
+            max_spawn_fanout_per_turn,
+            max_agent_tokens_per_task,
         }
     }
 
@@ -647,31 +652,25 @@ impl AgentSupervisor {
         final_text: &str,
         outcome: &sigil_kernel::AgentRunOutcome,
         usage: Option<AgentUsageSummary>,
+        final_answer_ref: Option<AgentFinalAnswerRef>,
     ) -> Result<()>
     where
         H: EventHandler + Send,
     {
         let terminal_status = agent_terminal_status_from_task_child(status);
-        let summary = bounded_agent_summary(final_text);
+        let result = build_agent_thread_result(
+            thread.thread_id.clone(),
+            child_session_ref.clone(),
+            terminal_status,
+            final_text,
+            outcome,
+            usage,
+            final_answer_ref,
+        );
         append_control(
             session,
             handler,
-            ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry {
-                result: AgentThreadResult {
-                    thread_id: thread.thread_id.clone(),
-                    session_ref: child_session_ref.clone(),
-                    status: terminal_status,
-                    summary: summary.text,
-                    summary_truncated: summary.truncated,
-                    original_summary_chars: summary.original_chars,
-                    artifacts: agent_result_artifacts(&child_session_ref, final_text),
-                    changed_paths: outcome.changed_files.clone(),
-                    risks: Vec::new(),
-                    followups: Vec::new(),
-                    usage,
-                    output_hash: hash_text(final_text),
-                },
-            }),
+            ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry { result }),
         )?;
         append_control(
             session,
@@ -695,31 +694,25 @@ impl AgentSupervisor {
         final_text: &str,
         outcome: &sigil_kernel::AgentRunOutcome,
         usage: Option<AgentUsageSummary>,
+        final_answer_ref: Option<AgentFinalAnswerRef>,
     ) -> Result<()>
     where
         H: EventHandler + Send + ?Sized,
     {
         let terminal_status = agent_terminal_status_from_task_child(status);
-        let summary = bounded_agent_summary(final_text);
+        let result = build_agent_thread_result(
+            thread.thread_id.clone(),
+            thread.child_session_ref.clone(),
+            terminal_status,
+            final_text,
+            outcome,
+            usage,
+            final_answer_ref,
+        );
         append_control(
             session,
             handler,
-            ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry {
-                result: AgentThreadResult {
-                    thread_id: thread.thread_id.clone(),
-                    session_ref: thread.child_session_ref.clone(),
-                    status: terminal_status,
-                    summary: summary.text,
-                    summary_truncated: summary.truncated,
-                    original_summary_chars: summary.original_chars,
-                    artifacts: agent_result_artifacts(&thread.child_session_ref, final_text),
-                    changed_paths: outcome.changed_files.clone(),
-                    risks: Vec::new(),
-                    followups: Vec::new(),
-                    usage,
-                    output_hash: hash_text(final_text),
-                },
-            }),
+            ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry { result }),
         )?;
         append_control(
             session,
@@ -939,6 +932,46 @@ fn bounded_agent_summary(final_text: &str) -> BoundedAgentSummary {
     }
 }
 
+fn build_agent_thread_result(
+    thread_id: AgentThreadId,
+    session_ref: SessionRef,
+    status: AgentThreadTerminalStatus,
+    final_text: &str,
+    outcome: &sigil_kernel::AgentRunOutcome,
+    usage: Option<AgentUsageSummary>,
+    final_answer_ref: Option<AgentFinalAnswerRef>,
+) -> AgentThreadResult {
+    let summary = bounded_agent_summary(final_text);
+    AgentThreadResult {
+        thread_id,
+        session_ref: session_ref.clone(),
+        status,
+        summary: summary.text,
+        summary_truncated: summary.truncated,
+        original_summary_chars: summary.original_chars,
+        artifacts: agent_result_artifacts(&session_ref, final_text),
+        changed_paths: outcome.changed_files.clone(),
+        risks: Vec::new(),
+        followups: Vec::new(),
+        usage,
+        output_hash: hash_text(final_text),
+        final_answer_ref,
+    }
+}
+
+pub(crate) fn agent_final_answer_ref(
+    session_ref: &SessionRef,
+    result: &AgentRunResult,
+) -> Option<AgentFinalAnswerRef> {
+    let message_id = result.final_message_id.as_ref()?;
+    Some(AgentFinalAnswerRef {
+        session_ref: session_ref.clone(),
+        message_id: message_id.clone(),
+        content_hash: hash_text(&result.final_text),
+        char_count: result.final_text.chars().count(),
+    })
+}
+
 fn agent_result_artifacts(
     child_session_ref: &SessionRef,
     final_text: &str,
@@ -1108,6 +1141,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 return Err(error);
             }
         };
+        let final_answer_ref = agent_final_answer_ref(&child_session_ref, &output.result);
         let final_text = output.result.final_text;
         let outcome = output.outcome;
         let usage = usage_summary_from_stats(child_session.stats());
@@ -1135,6 +1169,7 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
             &final_text,
             &outcome,
             Some(usage),
+            final_answer_ref,
         )?;
         if let Some(warning) = budget_warning {
             let _ = handler.handle(RunEvent::Notice(format!(

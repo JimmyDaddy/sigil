@@ -531,6 +531,7 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
     let wait_spec = registry
         .spec_for(WAIT_AGENT_TOOL_NAME)
         .expect("wait_agent registered");
+    assert!(wait_spec.description.contains("short bounded interval"));
     assert!(
         wait_spec.input_schema["properties"]
             .get("result_offset_chars")
@@ -1213,6 +1214,13 @@ async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
 
     assert!(!result.is_error());
     assert!(result.content.contains("running"));
+    let payload: serde_json::Value = serde_json::from_str(&result.content)?;
+    assert_eq!(payload["retry_after_ms"], 5_000);
+    assert!(
+        payload["next_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("do not call wait_agent again immediately"))
+    );
     let projection = session.agent_thread_state_projection();
     let thread_id = chat_agent_thread_id_for_call(
         "call-background",
@@ -1521,6 +1529,80 @@ async fn wait_agent_collects_completed_background_result() -> Result<()> {
 }
 
 #[tokio::test]
+async fn wait_agent_waits_briefly_for_running_background_result() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let observed_followup = Arc::new(Mutex::new(false));
+    let mut runtime = AgentToolRuntime::with_provider_factory(
+        supervisor,
+        config,
+        registry,
+        Arc::new(DelayedFollowupProviderFactory { observed_followup }),
+    );
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let thread_id = chat_agent_thread_id_for_call(
+        "call-background-brief-wait",
+        &AgentProfileId::new("explore")?,
+    )?;
+
+    let spawn = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-background-brief-wait".to_owned(),
+                name: SPAWN_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({
+                    "profile_id": "explore",
+                    "objective": "inspect",
+                    "prompt": "inspect",
+                    "mode": "background"
+                })
+                .to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("spawn handled");
+    assert!(!spawn.is_error());
+
+    let wait = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &ToolCall {
+                id: "call-background-brief-wait-result".to_owned(),
+                name: WAIT_AGENT_TOOL_NAME.to_owned(),
+                args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+            },
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("wait handled");
+
+    assert!(!wait.is_error());
+    let payload: serde_json::Value = serde_json::from_str(&wait.content)?;
+    assert_eq!(payload["status"], "completed");
+    let projection = session.agent_thread_state_projection();
+    let thread = projection
+        .threads
+        .get(&thread_id)
+        .expect("background thread should be projected");
+    assert_eq!(thread.status, AgentThreadStatus::Completed);
+    assert_eq!(
+        thread.result.as_ref().map(|result| result.summary.as_str()),
+        Some("initial background done")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn spawn_agent_rejects_model_invisible_profile_before_building_provider() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
@@ -1609,6 +1691,18 @@ async fn manual_agent_invocation_allows_user_invocable_model_hidden_profile() ->
         thread.profile_id.as_ref().map(AgentProfileId::as_str),
         Some("plan")
     );
+    let mut second_session = Session::new("parent", "model");
+    let second_invocation = runtime
+        .invoke_agent_profile(
+            &mut second_session,
+            AgentProfileId::new("plan")?,
+            "draft an implementation plan".to_owned(),
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?;
+    assert_ne!(invocation.thread_id, second_invocation.thread_id);
     assert_child_transcript_events_not_forwarded(&handler);
     assert_parent_agent_thread_controls_forwarded(&handler);
     Ok(())
@@ -1935,6 +2029,18 @@ async fn read_agent_result_page_text_is_transient_not_parent_tool_history() -> R
         &spawn_call.id,
         &sigil_kernel::AgentProfileId::new("explore")?,
     )?;
+    let projection = session.agent_thread_state_projection();
+    let child_result = projection
+        .threads
+        .get(&thread_id)
+        .and_then(|thread| thread.result.as_ref())
+        .expect("child result should be recorded");
+    let final_answer_ref = child_result
+        .final_answer_ref
+        .as_ref()
+        .expect("child result should record final answer ref");
+    assert_eq!(final_answer_ref.session_ref, child_result.session_ref);
+    assert_eq!(final_answer_ref.char_count, full_text.chars().count());
     let observed_second_request = Arc::new(Mutex::new(None));
     let agent = Agent::new(
         ParentReadAgentResultProvider {

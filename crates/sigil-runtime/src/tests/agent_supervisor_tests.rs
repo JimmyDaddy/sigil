@@ -12,9 +12,9 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentConfig, AgentInvocationMode, AgentInvocationSource, AgentRole, AgentRouteId,
-    AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason, AgentThreadId,
-    AgentThreadTerminalStatus, AgentUsageSummary, ApprovalMode, AutoApproveHandler,
+    Agent, AgentConfig, AgentFinalAnswerRef, AgentInvocationMode, AgentInvocationSource, AgentRole,
+    AgentRouteId, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason,
+    AgentThreadId, AgentThreadTerminalStatus, AgentUsageSummary, ApprovalMode, AutoApproveHandler,
     CompactionConfig, CompletionRequest, EventHandler, InteractionMode, JsonlSessionStore,
     MemoryConfig, ModelMessage, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
     ReasoningStreamSupport, RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry,
@@ -598,6 +598,56 @@ fn record_chat_child_failure_appends_failed_status_and_releases_budget() -> Resu
 }
 
 #[test]
+fn record_chat_child_result_persists_final_answer_ref_and_releases_budget() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_parallel_readonly = 2;
+    budget.max_threads = 2;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let thread = supervisor.begin_chat_child_thread(
+        &mut session,
+        &mut handler,
+        chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?,
+    )?;
+    let final_answer_ref = AgentFinalAnswerRef {
+        session_ref: thread.child_session_ref.clone(),
+        message_id: "msg-child-final".to_owned(),
+        content_hash: "sha256:child-final".to_owned(),
+        char_count: "child done".chars().count(),
+    };
+
+    let handler_dyn: &mut (dyn EventHandler + Send) = &mut handler;
+    supervisor.record_chat_child_result(
+        &mut session,
+        handler_dyn,
+        &thread,
+        TaskChildSessionStatus::Completed,
+        "child done",
+        &AgentRunOutcome::default(),
+        None,
+        Some(final_answer_ref.clone()),
+    )?;
+
+    assert!(supervisor.active_profile_ids().is_empty());
+    let projection = session.agent_thread_state_projection();
+    let projected = projection
+        .threads
+        .get(&thread.thread_id)
+        .expect("chat thread projected");
+    assert_eq!(projected.status, sigil_kernel::AgentThreadStatus::Completed);
+    assert_eq!(
+        projected
+            .result
+            .as_ref()
+            .and_then(|result| result.final_answer_ref.as_ref()),
+        Some(&final_answer_ref)
+    );
+    Ok(())
+}
+
+#[test]
 fn send_agent_message_reports_inactive_thread_and_missing_mailbox() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
@@ -859,10 +909,19 @@ fn budget_policy_from_config_exposes_parallel_readonly_and_accessors() -> Result
     let mut config = root_config();
     config.task.max_child_sessions = 3;
     config.task.allow_parallel_readonly_subagents = true;
+    config.task.max_parallel_readonly = Some(2);
+    config.task.max_parallel_write = Some(1);
+    config.task.max_background_threads = Some(2);
+    config.task.max_spawn_fanout_per_turn = Some(2);
+    config.task.max_agent_tokens_per_task = Some(123_456);
     let budget = AgentBudgetPolicy::from_root_config(&config);
 
     assert_eq!(budget.max_threads, 3);
-    assert_eq!(budget.max_parallel_readonly, 3);
+    assert_eq!(budget.max_parallel_readonly, 2);
+    assert_eq!(budget.max_parallel_write, 1);
+    assert_eq!(budget.max_background_threads, 2);
+    assert_eq!(budget.max_spawn_fanout_per_turn, 2);
+    assert_eq!(budget.max_agent_tokens_per_task, 123_456);
 
     let supervisor = AgentSupervisor::new(
         AgentProfileRegistry::from_root_config(&config)?,
@@ -871,7 +930,42 @@ fn budget_policy_from_config_exposes_parallel_readonly_and_accessors() -> Result
     );
     assert_eq!(supervisor.budget().max_threads, 3);
     assert_eq!(supervisor.registry().profiles().len(), 4);
+
+    let mut default_config = root_config();
+    default_config.task.max_child_sessions = 4;
+    default_config.task.allow_parallel_readonly_subagents = true;
+    let default_budget = AgentBudgetPolicy::from_root_config(&default_config);
+    assert_eq!(default_budget.max_threads, 4);
+    assert_eq!(default_budget.max_parallel_readonly, 4);
+    assert_eq!(default_budget.max_spawn_fanout_per_turn, 4);
+    assert_eq!(default_budget.max_agent_tokens_per_task, 200_000);
+
+    default_config.task.allow_parallel_readonly_subagents = false;
+    let serialized_readonly_budget = AgentBudgetPolicy::from_root_config(&default_config);
+    assert_eq!(serialized_readonly_budget.max_parallel_readonly, 1);
     Ok(())
+}
+
+#[test]
+fn budget_policy_uses_default_limits_when_config_values_are_omitted() {
+    let mut config = root_config();
+    config.task.max_child_sessions = 4;
+    config.task.allow_parallel_readonly_subagents = true;
+    config.task.max_parallel_readonly = None;
+    config.task.max_spawn_fanout_per_turn = None;
+    config.task.max_agent_tokens_per_task = None;
+
+    let default_budget = AgentBudgetPolicy::from_root_config(std::hint::black_box(&config));
+
+    assert_eq!(default_budget.max_parallel_readonly, 4);
+    assert_eq!(default_budget.max_spawn_fanout_per_turn, 4);
+    assert_eq!(default_budget.max_agent_tokens_per_task, 200_000);
+
+    config.task.allow_parallel_readonly_subagents = false;
+    let serialized_readonly_budget =
+        AgentBudgetPolicy::from_root_config(std::hint::black_box(&config));
+
+    assert_eq!(serialized_readonly_budget.max_parallel_readonly, 1);
 }
 
 #[test]
@@ -1252,6 +1346,7 @@ fn supervisor_records_changed_paths_and_usage_in_agent_result() -> Result<()> {
         "done",
         &outcome,
         Some(usage.clone()),
+        None,
     )?;
 
     let projection = session.agent_thread_state_projection();

@@ -458,6 +458,9 @@ impl AppState {
         };
         self.sidebar_agent_selected = index;
         self.active_agent_view = target;
+        if self.active_pane == super::PaneFocus::Composer && self.composer_agent_panel_available() {
+            self.composer_agent_panel_focused = true;
+        }
         self.reload_active_agent_child_transcript();
         self.timeline_scroll_back = 0;
         self.last_notice = Some(format!("agent focus: {} · {}", item.label, item.detail));
@@ -658,13 +661,14 @@ impl AppState {
         }
     }
 
-    pub(super) fn reload_active_agent_child_transcript(&mut self) {
+    pub(super) fn reload_active_agent_child_transcript(&mut self) -> bool {
         let AgentView::Child {
             child_session_ref, ..
         } = &self.active_agent_view
         else {
+            let changed = self.active_agent_child_transcript.is_some();
             self.active_agent_child_transcript = None;
-            return;
+            return changed;
         };
         let parent_dir = self
             .session_log_path
@@ -674,16 +678,29 @@ impl AppState {
         let file_signature = match child_transcript_file_signature(&path) {
             Ok(file_signature) => file_signature,
             Err(error) => {
+                let error = error.to_string();
+                let changed =
+                    !self
+                        .active_agent_child_transcript
+                        .as_ref()
+                        .is_some_and(|transcript| {
+                            transcript.path == path
+                                && transcript.file_signature
+                                    == ChildTranscriptFileSignature::empty()
+                                && transcript.load_error.as_deref() == Some(error.as_str())
+                                && transcript.timeline_entries.is_empty()
+                                && transcript.rendered_body_lines.is_empty()
+                        });
                 self.active_agent_child_transcript = Some(ActiveAgentChildTranscript {
-                    path,
+                    path: path.clone(),
                     file_signature: ChildTranscriptFileSignature::empty(),
                     timeline_entries: Vec::new(),
                     rendered_body_lines: Vec::new(),
                     total_timeline_entries: 0,
                     transcript_truncated: false,
-                    load_error: Some(error.to_string()),
+                    load_error: Some(error),
                 });
-                return;
+                return changed;
             }
         };
         if self
@@ -693,7 +710,7 @@ impl AppState {
                 transcript.path == path && transcript.file_signature == file_signature
             })
         {
-            return;
+            return false;
         }
         let load_result = read_recent_session_entries(
             &path,
@@ -725,6 +742,7 @@ impl AppState {
                 load_error: Some(error.to_string()),
             },
         });
+        true
     }
 
     pub(super) fn rerender_active_agent_child_transcript(&mut self) {

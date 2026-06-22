@@ -152,6 +152,11 @@ max_plan_steps = 12
 max_replans = 2
 max_child_sessions = 8
 allow_parallel_readonly_subagents = false
+max_parallel_readonly = 1
+max_parallel_write = 1
+max_background_threads = 1
+max_spawn_fanout_per_turn = 8
+max_agent_tokens_per_task = 200000
 allow_write_subagents = true
 
 [task.planner]
@@ -172,6 +177,8 @@ allow_write_subagents = true
 Planned tasks are started from the TUI with `/task <task>`. `/plan` is reserved for read-only planning prompts and does not create durable task state. `default_mode = "chat"` keeps normal composer submits chat-first even when the current session has unfinished task state; use `/task continue` or a task UI action for explicit continuation. Switch the default mode only when a build intentionally wants planned tasks as the default flow.
 
 Role-specific provider/model settings inherit `[agent]` when omitted. Planner and subagent-read default to read-only file/search/code-intelligence tools. Executor can see the full runtime registry. Subagent-write can see the full runtime registry only when `allow_write_subagents = true`; otherwise it falls back to the read-only scope. Mutating tools still go through the normal approval policy.
+
+Agent fan-out limits live in `[task]`: use `max_parallel_readonly = 1` to serialize read-only child agents, raise `max_background_threads` to allow more background agents, and keep `max_spawn_fanout_per_turn` no higher than the intended per-turn spawn fan-out.
 
 Each role can override visible tools:
 

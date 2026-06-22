@@ -940,6 +940,38 @@ fn running_child_agent_parent_sync_does_not_reload_changing_transcript() -> Resu
 
     assert!(rendered.contains("running cached transcript"));
     assert!(!rendered.contains("second child line"));
+    assert!(app.poll_background_tasks());
+    let refreshed = transcript_plain(app.transcript_lines(16));
+    assert!(refreshed.contains("second child line"));
+    assert!(!app.poll_background_tasks());
+    Ok(())
+}
+
+#[test]
+fn missing_child_agent_transcript_load_error_is_cached() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("children"), "not a directory")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join("parent.jsonl");
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: "missing_child".to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative("children/missing.jsonl")?,
+    };
+
+    assert!(app.reload_active_agent_child_transcript());
+    let transcript = app
+        .active_agent_child_transcript
+        .as_ref()
+        .expect("missing child transcript should record load error");
+    assert!(transcript.load_error.is_some());
+    assert_eq!(
+        transcript.file_signature,
+        super::super::ChildTranscriptFileSignature::empty()
+    );
+    assert!(transcript.timeline_entries.is_empty());
+    assert!(transcript.rendered_body_lines.is_empty());
+
+    assert!(!app.reload_active_agent_child_transcript());
     Ok(())
 }
 
@@ -1854,6 +1886,57 @@ fn live_activity_summary_tracks_busy_phase() {
     let summary = app.live_activity_summary().expect("expected live summary");
     assert_eq!(summary.label, "tool");
     assert_eq!(summary.detail, "running read_file");
+}
+
+#[test]
+fn child_agent_view_live_activity_overrides_parent_busy_phase() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    app.is_busy = true;
+    app.run_phase = RunPhase::Tool("wait_agent".to_owned());
+
+    let summary = app.live_activity_summary().expect("child live summary");
+
+    assert_eq!(summary.label, "agent");
+    assert!(summary.detail.contains("repo read"));
+    assert!(summary.detail.contains("started"));
+    assert!(!summary.detail.contains("wait_agent"));
+    assert!(matches!(app.live_panel_phase(), RunPhase::Agent(_)));
+    Ok(())
+}
+
+#[test]
+fn child_agent_view_live_activity_falls_back_to_legacy_child_entry() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let mut entries = app.current_session_entries.clone();
+    entries.push(SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
+        sigil_kernel::AgentThreadClosedEntry {
+            thread_id: sigil_kernel::AgentThreadId::new("legacy_task_1_v1_step_1_child_1")?,
+            reason: Some("hidden from sidebar".to_owned()),
+        },
+    )));
+    app.sync_current_session_state(entries);
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: "child_1".to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative(
+            "children/task_1/step_1-child_1.jsonl",
+        )?,
+    };
+    app.is_busy = true;
+    app.run_phase = RunPhase::Tool("wait_agent".to_owned());
+
+    let summary = app
+        .live_activity_summary()
+        .expect("legacy child summary should survive closed thread filtering");
+
+    assert!(matches!(app.live_panel_phase(), RunPhase::Agent(profile) if profile == "agent"));
+    assert_eq!(summary.label, "agent");
+    assert!(summary.detail.contains("child_1"));
+    assert!(summary.detail.contains("started"));
+    assert!(summary.detail.contains("subagent_read"));
+    assert!(!summary.detail.contains("wait_agent"));
+    Ok(())
 }
 
 #[test]

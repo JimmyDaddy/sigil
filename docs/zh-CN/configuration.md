@@ -152,6 +152,11 @@ max_plan_steps = 12
 max_replans = 2
 max_child_sessions = 8
 allow_parallel_readonly_subagents = false
+max_parallel_readonly = 1
+max_parallel_write = 1
+max_background_threads = 1
+max_spawn_fanout_per_turn = 8
+max_agent_tokens_per_task = 200000
 allow_write_subagents = true
 
 [task.planner]
@@ -172,6 +177,8 @@ allow_write_subagents = true
 计划任务通过 TUI 里的 `/task <任务>` 发起。`/plan` 只用于只读 planning prompt，不创建 durable task state。`default_mode = "chat"` 会让普通 composer 提交始终保持 chat-first，即使当前 session 里还有未完成 task；需要继续任务时使用 `/task continue` 或 task UI action。只有明确想把计划任务作为默认流程时才改成 `plan`。
 
 各 role 的 provider/model 未配置时继承 `[agent]`。Planner 和 subagent-read 默认只看到只读文件/搜索/code-intelligence 工具。Executor 可以看到完整 runtime registry。Subagent-write 只有在 `allow_write_subagents = true` 时才能看到完整 registry；否则回退到只读工具面。写工具仍然按正常审批策略执行。
+
+Agent fan-out 限制都放在 `[task]`：用 `max_parallel_readonly = 1` 串行化只读子 agent，提高 `max_background_threads` 允许更多后台 agent，并让 `max_spawn_fanout_per_turn` 不超过期望的单轮 spawn 上限。
 
 每个 role 都可以覆盖可见工具：
 

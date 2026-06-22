@@ -352,6 +352,16 @@ pub struct TaskConfig {
     pub max_child_sessions: usize,
     #[serde(default)]
     pub allow_parallel_readonly_subagents: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel_readonly: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel_write: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_background_threads: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_spawn_fanout_per_turn: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_agent_tokens_per_task: Option<u64>,
     #[serde(default = "default_allow_write_subagents")]
     pub allow_write_subagents: bool,
 }
@@ -369,6 +379,11 @@ impl Default for TaskConfig {
             max_replans: default_max_replans(),
             max_child_sessions: default_max_child_sessions(),
             allow_parallel_readonly_subagents: false,
+            max_parallel_readonly: None,
+            max_parallel_write: None,
+            max_background_threads: None,
+            max_spawn_fanout_per_turn: None,
+            max_agent_tokens_per_task: None,
             allow_write_subagents: default_allow_write_subagents(),
         }
     }

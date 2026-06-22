@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -15,16 +15,17 @@ use sigil_kernel::{
     AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
     AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate,
     AgentTrustState, AgentUsageSummary, ApprovalHandler, ControlEntry, EventHandler,
-    JsonlSessionStore, ModelMessage, NoopEventHandler, Provider, RootConfig, RunEvent, Session,
-    SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval,
-    ToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    JsonlSessionStore, ModelMessage, Provider, RootConfig, RunEvent, Session, SessionLogEntry,
+    SessionRef, TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval, ToolCall,
+    ToolCategory, ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
 
 use crate::{
     AgentBudgetPolicy, AgentMailboxMessage, AgentProfileRegistry, AgentSupervisor,
-    ResolvedAgentProfile, WORKER_PROFILE_ID, build_role_provider, build_role_run_options,
-    build_role_tool_registry, chat_agent_thread_id_for_call,
+    ResolvedAgentProfile, WORKER_PROFILE_ID, agent_supervisor::agent_final_answer_ref,
+    build_role_provider, build_role_run_options, build_role_tool_registry,
+    chat_agent_thread_id_for_call,
 };
 
 pub const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
@@ -38,6 +39,8 @@ const DEFAULT_RESULT_SUMMARY_LIMIT: usize = 4_000;
 const MIN_RESULT_SUMMARY_LIMIT: usize = 200;
 const DEFAULT_RESULT_PAGE_LIMIT: usize = 4_000;
 const MAX_RESULT_PAGE_LIMIT: usize = 12_000;
+const WAIT_AGENT_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Registers the model-visible agent tool surface into a runtime tool registry.
 ///
@@ -134,6 +137,12 @@ pub struct AgentToolRuntime {
 #[derive(Clone, Default)]
 pub struct AgentToolBackgroundRuns {
     handles: Arc<Mutex<BTreeMap<AgentThreadId, BackgroundChatAgentHandle>>>,
+    event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
+}
+
+/// Receives live events emitted by detached child-agent runs.
+pub trait AgentToolBackgroundEventSink: Send + Sync {
+    fn handle_agent_event(&self, thread_id: &AgentThreadId, event: RunEvent);
 }
 
 /// Result of a user-directed foreground agent invocation.
@@ -188,9 +197,22 @@ struct BackgroundChatAgentResult {
     outcome: AgentRunOutcome,
     usage: AgentUsageSummary,
     status: TaskChildSessionStatus,
+    final_answer_ref: Option<sigil_kernel::AgentFinalAnswerRef>,
 }
 
 impl AgentToolBackgroundRuns {
+    #[must_use]
+    pub fn with_event_sink(event_sink: Arc<dyn AgentToolBackgroundEventSink>) -> Self {
+        Self {
+            handles: Arc::new(Mutex::new(BTreeMap::new())),
+            event_sink: Some(event_sink),
+        }
+    }
+
+    fn event_sink(&self) -> Option<Arc<dyn AgentToolBackgroundEventSink>> {
+        self.event_sink.clone()
+    }
+
     #[must_use]
     pub fn has_finished(&self) -> bool {
         self.handles
@@ -220,6 +242,13 @@ impl AgentToolBackgroundRuns {
                     .get(thread_id)
                     .is_some_and(|background| !background.handle.is_finished())
             })
+            .unwrap_or(false)
+    }
+
+    fn contains(&self, thread_id: &AgentThreadId) -> bool {
+        self.handles
+            .lock()
+            .map(|handles| handles.contains_key(thread_id))
             .unwrap_or(false)
     }
 
@@ -640,11 +669,14 @@ impl AgentToolRuntime {
             };
             let thread_id = child_thread.thread_id.clone();
             let handle = tokio::spawn(run_background_chat_agent(
+                thread_id.clone(),
                 child_agent,
                 child_session,
+                child_thread.child_session_ref.clone(),
                 child_input,
                 child_options,
                 mailbox_rx,
+                self.background_runs.event_sink(),
             ));
             if let Err(error) = self.background_runs.insert(
                 thread_id.clone(),
@@ -677,7 +709,8 @@ impl AgentToolRuntime {
                 ToolResultMeta {
                     details: json!({
                         "thread_id": thread_id.as_str(),
-                        "status": "running"
+                        "status": "running",
+                        "retry_after_ms": 5_000_u64,
                     }),
                     ..ToolResultMeta::default()
                 },
@@ -740,6 +773,8 @@ impl AgentToolRuntime {
                 );
             }
         };
+        let final_answer_ref =
+            agent_final_answer_ref(&child_thread.child_session_ref, &output.result);
         let final_text = output.result.final_text;
         let outcome = output.outcome;
         let usage = usage_summary_from_stats(child_session.stats());
@@ -757,6 +792,7 @@ impl AgentToolRuntime {
             &final_text,
             &outcome,
             Some(usage),
+            final_answer_ref,
         ) {
             return ToolResult::error(
                 call.id.clone(),
@@ -800,11 +836,14 @@ impl AgentToolRuntime {
         let thread_record = BackgroundChatAgentThreadRecord::from_thread(&child_thread);
         let (_mailbox_tx, mailbox_rx) = mpsc::channel();
         let handle = tokio::spawn(run_background_chat_agent(
+            thread_id.clone(),
             child_agent,
             child_session,
+            child_thread.child_session_ref.clone(),
             child_input,
             child_options,
             mailbox_rx,
+            self.background_runs.event_sink(),
         ));
 
         loop {
@@ -862,7 +901,8 @@ impl AgentToolRuntime {
                     ToolResultMeta {
                         details: json!({
                             "thread_id": thread_id.as_str(),
-                            "status": "running"
+                            "status": "running",
+                            "retry_after_ms": 5_000_u64,
                         }),
                         ..ToolResultMeta::default()
                     },
@@ -915,6 +955,7 @@ impl AgentToolRuntime {
                     &output.final_text,
                     &output.outcome,
                     Some(output.usage),
+                    output.final_answer_ref,
                 ) {
                     return ToolResult::error(
                         call.id.clone(),
@@ -1083,6 +1124,8 @@ impl AgentToolRuntime {
                 return Err(error).context("child agent failed");
             }
         };
+        let final_answer_ref =
+            agent_final_answer_ref(&child_thread.child_session_ref, &output.result);
         let final_text = output.result.final_text;
         let outcome = output.outcome;
         let usage = usage_summary_from_stats(child_session.stats());
@@ -1100,6 +1143,7 @@ impl AgentToolRuntime {
             &final_text,
             &outcome,
             Some(usage),
+            final_answer_ref,
         )?;
         if let Some(warning) = budget_warning {
             let _ = handler.handle(RunEvent::Notice(format!(
@@ -1127,10 +1171,27 @@ impl AgentToolRuntime {
                 );
             }
         };
-        if self.background_runs.is_running(&thread_id) {
-            let projection = session.agent_thread_state_projection();
-            if let Some(thread) = projection.threads.get(&thread_id) {
-                return agent_status_tool_result(call, thread);
+        if self.background_runs.contains(&thread_id) {
+            let deadline = Instant::now() + WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT;
+            loop {
+                if let Some(background) = self.background_runs.remove_if_finished(&thread_id) {
+                    if let Err(error) = self
+                        .record_finished_background_run(session, handler, background)
+                        .await
+                    {
+                        return ToolResult::error(
+                            call.id.clone(),
+                            call.name.clone(),
+                            ToolErrorKind::Internal,
+                            error.to_string(),
+                        );
+                    }
+                    break;
+                }
+                if !self.background_runs.is_running(&thread_id) || Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(WAIT_AGENT_BACKGROUND_POLL_INTERVAL).await;
             }
         }
         if let Some(background) = self.background_runs.remove_if_finished(&thread_id)
@@ -1180,6 +1241,7 @@ impl AgentToolRuntime {
                     &output.final_text,
                     &output.outcome,
                     Some(output.usage),
+                    output.final_answer_ref,
                 )?;
                 if let Some(warning) = budget_warning {
                     let _ = handler.handle(RunEvent::Notice(format!(
@@ -1616,7 +1678,7 @@ impl AgentTool {
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
-                "Wait for an agent thread status update and return lightweight status plus result references only. Does not return child result text; use read_agent_result when the user explicitly needs result details."
+                "Wait briefly for an agent thread status update and return lightweight status plus result references only. This tool may block for a short bounded interval before returning running, so do not call it in a tight polling loop. Does not return child result text; use read_agent_result when the user explicitly needs result details."
                     .to_owned()
             }
             AgentToolKind::ReadResult => {
@@ -1913,13 +1975,19 @@ impl ApprovalHandler for ChatAgentApprovalRouteHandler<'_> {
 }
 
 async fn run_background_chat_agent(
+    thread_id: AgentThreadId,
     child_agent: Agent<Box<dyn Provider>>,
     mut child_session: Session,
+    child_session_ref: SessionRef,
     initial_input: sigil_kernel::AgentRunInput,
     child_options: sigil_kernel::AgentRunOptions,
     mailbox_rx: mpsc::Receiver<AgentMailboxMessage>,
+    event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
 ) -> Result<BackgroundChatAgentResult> {
-    let mut handler = NoopEventHandler;
+    let mut handler = BackgroundChatChildEventHandler {
+        thread_id,
+        sink: event_sink,
+    };
     let mut approval_handler = BackgroundApprovalHandler;
     let mut latest_output = child_agent
         .run_with_approval_input(
@@ -1958,6 +2026,7 @@ async fn run_background_chat_agent(
             .await?;
     }
 
+    let final_answer_ref = agent_final_answer_ref(&child_session_ref, &latest_output.result);
     let final_text = latest_output.result.final_text;
     let outcome = latest_output.outcome;
     let usage = usage_summary_from_stats(child_session.stats());
@@ -1967,7 +2036,22 @@ async fn run_background_chat_agent(
         outcome,
         usage,
         status,
+        final_answer_ref,
     })
+}
+
+struct BackgroundChatChildEventHandler {
+    thread_id: AgentThreadId,
+    sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
+}
+
+impl EventHandler for BackgroundChatChildEventHandler {
+    fn handle(&mut self, event: RunEvent) -> Result<()> {
+        if let Some(sink) = self.sink.as_ref() {
+            sink.handle_agent_event(&self.thread_id, event);
+        }
+        Ok(())
+    }
 }
 
 fn profile_index_description(index: &crate::ModelVisibleAgentIndex) -> String {
@@ -2157,16 +2241,11 @@ fn chat_budget_scope_id(call_id: &str) -> Result<TaskId> {
     TaskId::new(format!("chat_{}", short_digest(&hash_text(call_id))))
 }
 
-fn manual_agent_call_id(session: &Session, profile_id: &AgentProfileId, prompt: &str) -> String {
+fn manual_agent_call_id(_session: &Session, profile_id: &AgentProfileId, _prompt: &str) -> String {
     format!(
         "manual_agent_{}_{}",
         profile_id.as_str(),
-        short_digest(&hash_text(&format!(
-            "{}:{}:{}",
-            session.entries().len(),
-            profile_id.as_str(),
-            prompt
-        )))
+        uuid::Uuid::new_v4().simple()
     )
 }
 
@@ -2207,21 +2286,65 @@ fn read_agent_result_page(
         ));
     };
     let parent_dir = parent_path.parent().unwrap_or_else(|| Path::new("."));
-    let child_path = result.session_ref.resolve(parent_dir);
+    let session_ref = result
+        .final_answer_ref
+        .as_ref()
+        .map(|reference| &reference.session_ref)
+        .unwrap_or(&result.session_ref);
+    let child_path = session_ref.resolve(parent_dir);
     let entries = JsonlSessionStore::read_entries(&child_path).with_context(|| {
         format!(
             "failed to read child agent session {}",
             child_path.display()
         )
     })?;
-    let final_text =
-        agent_final_text_from_entries(&entries, &result.output_hash).with_context(|| {
+    let final_text = if let Some(final_answer_ref) = result.final_answer_ref.as_ref() {
+        agent_final_text_from_ref(&entries, final_answer_ref).with_context(|| {
             format!(
                 "failed to read final answer from child agent session {}",
                 child_path.display()
             )
-        })?;
+        })?
+    } else {
+        agent_final_text_from_entries(&entries, &result.output_hash).with_context(|| {
+            format!(
+                "failed to read legacy final answer from child agent session {}",
+                child_path.display()
+            )
+        })?
+    };
     Ok(slice_result_page(&final_text, request))
+}
+
+fn agent_final_text_from_ref(
+    entries: &[SessionLogEntry],
+    final_answer_ref: &sigil_kernel::AgentFinalAnswerRef,
+) -> Result<String> {
+    let message = entries.iter().find_map(|entry| {
+        let SessionLogEntry::Assistant(message) = entry else {
+            return None;
+        };
+        (message.id == final_answer_ref.message_id).then_some(message)
+    });
+    let Some(message) = message else {
+        return Err(anyhow!(
+            "child agent final answer message {} was not found",
+            final_answer_ref.message_id
+        ));
+    };
+    let content = message
+        .content
+        .as_ref()
+        .filter(|content| !content.is_empty())
+        .ok_or_else(|| anyhow!("child agent final answer message has no content"))?;
+    let hash = hash_text(content);
+    if hash != final_answer_ref.content_hash {
+        return Err(anyhow!(
+            "child agent final answer hash mismatch for message {}",
+            final_answer_ref.message_id
+        ));
+    }
+    Ok(content.clone())
 }
 
 fn agent_final_text_from_entries(entries: &[SessionLogEntry], output_hash: &str) -> Result<String> {
@@ -2280,7 +2403,8 @@ fn agent_result_tool_result(
             ToolResultMeta {
                 details: json!({
                     "thread_id": thread_id.as_str(),
-                    "status": "running"
+                    "status": "running",
+                    "retry_after_ms": 5_000_u64,
                 }),
                 ..ToolResultMeta::default()
             },
@@ -2309,6 +2433,12 @@ fn agent_result_tool_result(
         "followups": result.followups,
         "usage": result.usage,
         "output_hash": result.output_hash,
+        "final_answer_ref": result.final_answer_ref.as_ref().map(|reference| json!({
+            "session_ref": reference.session_ref.as_path().display().to_string(),
+            "message_id": reference.message_id,
+            "content_hash": reference.content_hash,
+            "char_count": reference.char_count
+        })),
         "truncated": summary_truncated,
         "full_result_available": !result.artifacts.is_empty(),
         "result_fetch": result_fetch
@@ -2325,6 +2455,7 @@ fn agent_result_tool_result(
                 "thread_id": result.thread_id.as_str(),
                 "status": terminal_status_label(result.status),
                 "output_hash": result.output_hash,
+                "has_final_answer_ref": result.final_answer_ref.is_some(),
                 "summary_truncated": summary_truncated,
                 "original_summary_chars": result.original_summary_chars,
             }),
@@ -2341,6 +2472,12 @@ fn agent_status_tool_result(call: &ToolCall, thread: &AgentThreadProjection) -> 
         "terminal": thread.status.is_terminal(),
         "reason": &thread.reason,
         "result_available": result.is_some(),
+        "retry_after_ms": (!thread.status.is_terminal()).then_some(5_000_u64),
+        "next_action": if thread.status.is_terminal() {
+            "use result_ref/read_args when more detail is needed"
+        } else {
+            "continue independent parent work; do not call wait_agent again immediately"
+        },
         "result_ref": result.map(|result| json!({
             "thread_id": result.thread_id.as_str(),
             "status": terminal_status_label(result.status),
@@ -2350,6 +2487,12 @@ fn agent_status_tool_result(call: &ToolCall, thread: &AgentThreadProjection) -> 
             "changed_paths_count": result.changed_paths.len(),
             "artifact_count": result.artifacts.len(),
             "output_hash": result.output_hash,
+            "final_answer_ref": result.final_answer_ref.as_ref().map(|reference| json!({
+                "session_ref": reference.session_ref.as_path().display().to_string(),
+                "message_id": reference.message_id,
+                "content_hash": reference.content_hash,
+                "char_count": reference.char_count
+            })),
             "read_tool": READ_AGENT_RESULT_TOOL_NAME,
             "read_args": {
                 "thread_id": result.thread_id.as_str(),
@@ -2369,6 +2512,7 @@ fn agent_status_tool_result(call: &ToolCall, thread: &AgentThreadProjection) -> 
                 "thread_id": thread.thread_id.as_str(),
                 "status": thread_status_label(thread.status),
                 "result_available": result.is_some(),
+                "retry_after_ms": (!thread.status.is_terminal()).then_some(5_000_u64),
             }),
             ..ToolResultMeta::default()
         },
@@ -2385,6 +2529,12 @@ fn agent_result_page_tool_result(
         "status": terminal_status_label(result.status),
         "session_ref": result.session_ref.as_path().display().to_string(),
         "output_hash": result.output_hash,
+        "final_answer_ref": result.final_answer_ref.as_ref().map(|reference| json!({
+            "session_ref": reference.session_ref.as_path().display().to_string(),
+            "message_id": reference.message_id,
+            "content_hash": reference.content_hash,
+            "char_count": reference.char_count
+        })),
         "page": {
             "offset_chars": page.offset_chars,
             "returned_chars": page.returned_chars,
@@ -2400,6 +2550,12 @@ fn agent_result_page_tool_result(
         "status": terminal_status_label(result.status),
         "session_ref": result.session_ref.as_path().display().to_string(),
         "output_hash": result.output_hash,
+        "final_answer_ref": result.final_answer_ref.as_ref().map(|reference| json!({
+            "session_ref": reference.session_ref.as_path().display().to_string(),
+            "message_id": reference.message_id,
+            "content_hash": reference.content_hash,
+            "char_count": reference.char_count
+        })),
         "page": {
             "text": page.text.as_str(),
             "offset_chars": page.offset_chars,

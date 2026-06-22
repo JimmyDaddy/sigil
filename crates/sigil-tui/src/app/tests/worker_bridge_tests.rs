@@ -102,6 +102,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
         result: sigil_kernel::AgentRunResult {
             final_text: "1. inspect\n2. edit with preview".to_owned(),
             tool_calls: 0,
+            final_message_id: None,
         },
         entries: Vec::new(),
     })?;
@@ -128,6 +129,7 @@ fn plan_run_finished_surfaces_pending_plan_approval_and_key_actions() -> Result<
         result: sigil_kernel::AgentRunResult {
             final_text: "   ".to_owned(),
             tool_calls: 1,
+            final_message_id: None,
         },
         entries: Vec::new(),
     })?;
@@ -143,6 +145,7 @@ fn pending_plan_approval_continue_returns_to_plan_composer_without_worker_action
         result: sigil_kernel::AgentRunResult {
             final_text: "1. inspect\n2. revise plan".to_owned(),
             tool_calls: 0,
+            final_message_id: None,
         },
         entries: Vec::new(),
     })?;
@@ -168,6 +171,7 @@ fn pending_plan_approval_discard_clears_surface_without_worker_action() -> Resul
         result: sigil_kernel::AgentRunResult {
             final_text: "1. inspect\n2. revise plan".to_owned(),
             tool_calls: 0,
+            final_message_id: None,
         },
         entries: Vec::new(),
     })?;
@@ -653,12 +657,30 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             .iter()
             .any(|event| event.label == "agent:start" && event.detail == "inspect kernel")
     );
+    app.handle_worker_message(WorkerMessage::AgentResultContinuationStarted {
+        thread_ids: vec![sigil_kernel::AgentThreadId::new("agent_chat_done")?],
+    })?;
+    assert!(app.is_busy);
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.last_notice(), Some("agent result ready; resuming main"));
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry
+                .text
+                .contains("agent result ready; resuming main for agent_chat_done")
+    }));
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "agent:resume" && event.detail == "agent_chat_done")
+    );
 
     app.handle_worker_message(WorkerMessage::AgentRunFinished {
         profile_id: "review".to_owned(),
         result: sigil_kernel::AgentRunResult {
             final_text: "kernel review complete".to_owned(),
             tool_calls: 0,
+            final_message_id: None,
         },
         entries: restored_entries("restored-provider", "restored-model"),
     })?;
@@ -867,6 +889,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         result: sigil_kernel::AgentRunResult {
             final_text: "done".to_owned(),
             tool_calls: 2,
+            final_message_id: None,
         },
         entries: entries.clone(),
     })?;
@@ -992,6 +1015,244 @@ fn worker_events_cover_completion_continuation_and_duplicate_assistant_messages(
         .filter(|entry| entry.role == TimelineRole::Assistant && entry.text == "same answer")
         .count();
     assert_eq!(matching, 1);
+    Ok(())
+}
+
+#[test]
+fn agent_thread_event_updates_only_focused_child_transcript() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_chat_live")?;
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::TextDelta("main ignored".to_owned())),
+    })?;
+    assert!(app.active_agent_child_transcript.is_none());
+
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: thread_id.as_str().to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative(
+            "children/agent_chat_live.jsonl",
+        )?,
+    };
+    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: Path::new("children/agent_chat_live.jsonl").to_path_buf(),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: Vec::new(),
+        rendered_body_lines: Vec::new(),
+        total_timeline_entries: 0,
+        transcript_truncated: false,
+        load_error: Some("not written yet".to_owned()),
+    });
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::TextDelta("hel".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id,
+        event: Box::new(RunEvent::TextDelta("lo".to_owned())),
+    })?;
+
+    let transcript = app
+        .active_agent_child_transcript
+        .as_ref()
+        .expect("focused child transcript should exist");
+    assert_eq!(transcript.timeline_entries.len(), 1);
+    assert_eq!(transcript.timeline_entries[0].role, TimelineRole::Assistant);
+    assert_eq!(transcript.timeline_entries[0].text, "hello");
+    assert!(transcript.load_error.is_none());
+    assert!(!transcript.rendered_body_lines.is_empty());
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: sigil_kernel::AgentThreadId::new("agent_chat_other")?,
+        event: Box::new(RunEvent::Notice("ignore me".to_owned())),
+    })?;
+    let transcript = app
+        .active_agent_child_transcript
+        .as_ref()
+        .expect("focused child transcript should remain loaded");
+    assert_eq!(transcript.timeline_entries.len(), 1);
+    assert!(
+        !transcript
+            .timeline_entries
+            .iter()
+            .any(|entry| entry.text.contains("ignore me"))
+    );
+    Ok(())
+}
+
+#[test]
+fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_chat_events")?;
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: thread_id.as_str().to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative(
+            "children/agent_chat_events.jsonl",
+        )?,
+    };
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ReasoningDelta("think".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolCallStarted(ToolCall {
+            id: "call-read".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: "{}".to_owned(),
+        })),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::Notice("after start".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolCallCompleted(ToolCall {
+            id: "call-read".to_owned(),
+            name: "read_file".to_owned(),
+            args_json: "{}".to_owned(),
+        })),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::Notice("after complete".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolResult(ToolResult::ok(
+            "call-read".to_owned(),
+            "read_file".to_owned(),
+            "file contents".to_owned(),
+            sigil_kernel::ToolResultMeta::default(),
+        ))),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::AssistantMessage(ModelMessage::assistant(
+            Some("draft".to_owned()),
+            Vec::new(),
+        ))),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::AssistantMessage(ModelMessage::assistant(
+            Some("final".to_owned()),
+            Vec::new(),
+        ))),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::AssistantMessage(ModelMessage::assistant(
+            Some(String::new()),
+            Vec::new(),
+        ))),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::Notice("child notice".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::TextDelta("after notice".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolApprovalRequested {
+            call: ToolCall {
+                id: "call-write".to_owned(),
+                name: "write_file".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            spec: ToolSpec {
+                name: "write_file".to_owned(),
+                description: "Write".to_owned(),
+                input_schema: json!({"type":"object"}),
+                category: ToolCategory::File,
+                access: ToolAccess::Write,
+                preview: ToolPreviewCapability::Required,
+            },
+            subjects: Vec::new(),
+            preview: None,
+        }),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::TextDelta(" after approval".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolApprovalResolved {
+            call_id: "call-write".to_owned(),
+            approved: false,
+            reason: Some("scope".to_owned()),
+        }),
+    })?;
+
+    let transcript = app
+        .active_agent_child_transcript
+        .as_ref()
+        .expect("live event should initialize child transcript");
+    assert!(transcript.load_error.is_none());
+    let entries = transcript
+        .timeline_entries
+        .iter()
+        .map(|entry| (entry.role, entry.text.as_str()))
+        .collect::<Vec<_>>();
+    assert!(entries.contains(&(TimelineRole::Thinking, "think")));
+    assert!(entries.contains(&(TimelineRole::Tool, "Started read_file")));
+    assert!(entries.contains(&(TimelineRole::Tool, "Completed read_file")));
+    assert!(entries.contains(&(TimelineRole::Tool, "file contents")));
+    assert!(entries.contains(&(TimelineRole::Assistant, "final")));
+    assert!(!entries.contains(&(TimelineRole::Assistant, "draft")));
+    assert!(entries.contains(&(TimelineRole::Notice, "after start")));
+    assert!(entries.contains(&(TimelineRole::Notice, "after complete")));
+    assert!(entries.contains(&(TimelineRole::Notice, "child notice")));
+    assert!(entries.contains(&(TimelineRole::Notice, "Approve write_file in child agent")));
+    assert!(entries.contains(&(TimelineRole::Notice, "Approval denied for call-write")));
+    let entry_count = transcript.timeline_entries.len();
+
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ToolCallArgsDelta {
+            id: "call-read".to_owned(),
+            delta: "{}".to_owned(),
+        }),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::Usage(UsageStats::default())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::ContinuationState(
+            sigil_kernel::ProviderContinuationState {
+                provider_name: "deepseek".to_owned(),
+                state_kind: "reasoning".to_owned(),
+                message_id: None,
+                opaque_blob: json!({}),
+            },
+        )),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id,
+        event: Box::new(RunEvent::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-pro".to_owned(),
+        })),
+    })?;
+
+    assert_eq!(
+        app.active_agent_child_transcript
+            .as_ref()
+            .expect("transcript should remain loaded")
+            .timeline_entries
+            .len(),
+        entry_count
+    );
     Ok(())
 }
 
@@ -1210,9 +1471,12 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         app.into_worker_command(AppAction::InvokeAgentProfile {
             profile_id: "repo-review".to_owned(),
             prompt: "audit crates".to_owned(),
+            parent_prompt: "@repo-review audit crates".to_owned(),
         }),
-        WorkerCommand::InvokeAgentProfile { profile_id, prompt }
-            if profile_id == "repo-review" && prompt == "audit crates"
+        WorkerCommand::InvokeAgentProfile { profile_id, prompt, parent_prompt }
+            if profile_id == "repo-review"
+                && prompt == "audit crates"
+                && parent_prompt == "@repo-review audit crates"
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::ApprovalDecision {
@@ -1554,6 +1818,7 @@ fn run_finished_clears_modal_pending_approval_and_busy_state() -> Result<()> {
         result: sigil_kernel::AgentRunResult {
             final_text: "done".to_owned(),
             tool_calls: 1,
+            final_message_id: None,
         },
         entries: restored_entries("deepseek", "deepseek-v4-flash"),
     })?;

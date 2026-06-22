@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 
 use super::{
-    AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary, McpServerRuntimeStatus,
-    ModelPickerRefresh, PaneFocus, PendingApproval, RunPhase, TimelineRole,
+    AgentView, AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary,
+    McpServerRuntimeStatus, ModelPickerRefresh, PaneFocus, PendingApproval, RunPhase,
+    TimelineEntry, TimelineRole,
     formatting::{
         format_agent_thread_started_block, format_agent_thread_status_block,
         format_terminal_task_block_redacted, format_tool_result_block_redacted, summarize_error,
@@ -28,7 +29,119 @@ impl AppState {
     }
 
     pub fn poll_background_tasks(&mut self) -> bool {
-        false
+        self.reload_active_agent_child_transcript()
+    }
+
+    fn handle_agent_thread_event(
+        &mut self,
+        thread_id: &sigil_kernel::AgentThreadId,
+        event: RunEvent,
+    ) {
+        let AgentView::Child { child_task_id, .. } = &self.active_agent_view else {
+            return;
+        };
+        if child_task_id != thread_id.as_str() {
+            return;
+        }
+        if self.active_agent_child_transcript.is_none() {
+            self.reload_active_agent_child_transcript();
+        }
+        if self.append_live_agent_thread_event(event) {
+            self.rerender_active_agent_child_transcript();
+        }
+    }
+
+    fn append_live_agent_thread_event(&mut self, event: RunEvent) -> bool {
+        match event {
+            RunEvent::TextDelta(delta) => {
+                self.append_live_child_delta(TimelineRole::Assistant, delta)
+            }
+            RunEvent::ReasoningDelta(delta) => {
+                self.append_live_child_delta(TimelineRole::Thinking, delta)
+            }
+            RunEvent::ToolCallStarted(call) => {
+                self.push_live_child_entry(TimelineRole::Tool, format!("Started {}", call.name))
+            }
+            RunEvent::ToolCallCompleted(call) => {
+                self.push_live_child_entry(TimelineRole::Tool, format!("Completed {}", call.name))
+            }
+            RunEvent::ToolResult(result) => {
+                self.push_live_child_entry(TimelineRole::Tool, result.content)
+            }
+            RunEvent::AssistantMessage(message) => {
+                let Some(content) = message.content.filter(|content| !content.is_empty()) else {
+                    return false;
+                };
+                self.replace_or_push_live_child_entry(TimelineRole::Assistant, content)
+            }
+            RunEvent::Notice(notice) => self.push_live_child_entry(TimelineRole::Notice, notice),
+            RunEvent::ToolApprovalRequested { call, .. } => self.push_live_child_entry(
+                TimelineRole::Notice,
+                format!("Approve {} in child agent", call.name),
+            ),
+            RunEvent::ToolApprovalResolved {
+                call_id, approved, ..
+            } => self.push_live_child_entry(
+                TimelineRole::Notice,
+                format!(
+                    "Approval {} for {}",
+                    if approved { "allowed" } else { "denied" },
+                    call_id
+                ),
+            ),
+            RunEvent::ToolCallArgsDelta { .. }
+            | RunEvent::Usage(_)
+            | RunEvent::ContinuationState(_)
+            | RunEvent::Control(_) => false,
+        }
+    }
+
+    fn append_live_child_delta(&mut self, role: TimelineRole, delta: String) -> bool {
+        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
+            return false;
+        };
+        transcript.load_error = None;
+        if let Some(entry) = transcript
+            .timeline_entries
+            .last_mut()
+            .filter(|entry| entry.role == role)
+        {
+            entry.text.push_str(&delta);
+        } else {
+            transcript
+                .timeline_entries
+                .push(TimelineEntry { role, text: delta });
+            transcript.total_timeline_entries = transcript
+                .total_timeline_entries
+                .max(transcript.timeline_entries.len());
+        }
+        true
+    }
+
+    fn push_live_child_entry(&mut self, role: TimelineRole, text: String) -> bool {
+        self.replace_or_push_live_child_entry(role, text)
+    }
+
+    fn replace_or_push_live_child_entry(&mut self, role: TimelineRole, text: String) -> bool {
+        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
+            return false;
+        };
+        transcript.load_error = None;
+        if let Some(entry) = transcript
+            .timeline_entries
+            .last_mut()
+            .filter(|entry| entry.role == role)
+        {
+            entry.text = text;
+        } else {
+            transcript
+                .timeline_entries
+                .push(TimelineEntry { role, text });
+            transcript.total_timeline_entries = transcript
+                .total_timeline_entries
+                .max(transcript.timeline_entries.len());
+        }
+        true
     }
 
     pub fn has_pending_worker_commands(&self) -> bool {
@@ -165,6 +278,26 @@ impl AppState {
                     format!("agent @{profile_id} started; waiting for result"),
                 );
                 self.push_event("agent:start", prompt);
+            }
+            WorkerMessage::AgentResultContinuationStarted { thread_ids } => {
+                self.is_busy = true;
+                self.run_phase = RunPhase::Thinking;
+                self.mcp_progress = None;
+                self.last_notice = Some("agent result ready; resuming main".to_owned());
+                self.push_phase_marker(format!("agent-result|{}", self.model_name));
+                let threads = thread_ids
+                    .iter()
+                    .map(sigil_kernel::AgentThreadId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.push_timeline(
+                    TimelineRole::Notice,
+                    format!("agent result ready; resuming main for {threads}"),
+                );
+                self.push_event("agent:resume", threads);
+            }
+            WorkerMessage::AgentThreadEvent { thread_id, event } => {
+                self.handle_agent_thread_event(&thread_id, *event);
             }
             WorkerMessage::AgentRunFinished {
                 profile_id,
@@ -591,9 +724,15 @@ impl AppState {
                 skill_id,
                 arguments,
             },
-            AppAction::InvokeAgentProfile { profile_id, prompt } => {
-                WorkerCommand::InvokeAgentProfile { profile_id, prompt }
-            }
+            AppAction::InvokeAgentProfile {
+                profile_id,
+                prompt,
+                parent_prompt,
+            } => WorkerCommand::InvokeAgentProfile {
+                profile_id,
+                prompt,
+                parent_prompt,
+            },
             AppAction::SubmitTask(prompt) => WorkerCommand::SubmitTask { prompt },
             AppAction::ContinueTask { task_id, guidance } => {
                 WorkerCommand::ContinueTask { task_id, guidance }

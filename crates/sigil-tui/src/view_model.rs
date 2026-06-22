@@ -219,7 +219,7 @@ pub(crate) struct LivePanelViewModel {
 impl LivePanelViewModel {
     pub(crate) fn from_app(app: &AppState, transcript_rows: usize) -> Self {
         Self {
-            phase: app.run_phase(),
+            phase: app.live_panel_phase(),
             progress: app
                 .live_activity_summary()
                 .map(|summary| LiveProgressViewModel::from_parts(&summary.label, &summary.detail)),

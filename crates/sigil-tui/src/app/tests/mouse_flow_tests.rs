@@ -1586,6 +1586,7 @@ fn mouse_click_info_rail_agent_row_switches_visible_agent() -> Result<()> {
 
     assert!(matches!(outcome, AppMouseOutcome::Redraw));
     assert_eq!(app.active_pane, PaneFocus::Activity);
+    assert!(!app.is_composer_agent_panel_focused());
     assert_eq!(app.active_agent_label(), "仓库审查");
     assert_eq!(
         app.last_notice(),
