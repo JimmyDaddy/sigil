@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, path::Path};
 
 use super::{
     CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, McpServerConfig,
-    McpServerStartup, McpTrustClass, RootConfig, default_user_config_dir, default_user_config_path,
-    preferred_config_path, resolve_workspace_root,
+    McpServerStartup, McpTrustClass, RootConfig, ThemeId, default_user_config_dir,
+    default_user_config_path, preferred_config_path, resolve_workspace_root,
 };
 use crate::{
     AgentConfig, AgentRole, ApprovalMode, SkillConfig, TaskConfig, TaskMode, WorkspaceConfig,
@@ -118,6 +118,7 @@ fn root_config_save_roundtrips() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
@@ -149,6 +150,7 @@ fn root_config_save_handles_paths_without_parent() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
@@ -179,7 +181,95 @@ model = "deepseek-v4-flash"
     assert_eq!(config.memory, Default::default());
     assert_eq!(config.compaction.tail_messages, 6);
     assert_eq!(config.terminal, Default::default());
+    assert_eq!(config.appearance.theme, ThemeId::SigilDark);
+    assert!(config.appearance.colors.is_empty());
     assert_eq!(config.task.default_mode, TaskMode::Chat);
+}
+
+#[test]
+fn root_config_loads_appearance_config() {
+    let config: RootConfig = toml::from_str(
+        r##"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[appearance]
+theme = "solarized_dark"
+
+[appearance.colors]
+surface_base = "#002b36"
+accent_primary = "#b58900"
+"##,
+    )
+    .expect("appearance config should parse");
+
+    assert_eq!(config.appearance.theme, ThemeId::SolarizedDark);
+    assert_eq!(config.appearance.colors.len(), 2);
+    assert_eq!(
+        config.appearance.colors.get("surface_base"),
+        Some("#002b36")
+    );
+    assert_eq!(
+        config.appearance.colors.get("accent_primary"),
+        Some("#b58900")
+    );
+}
+
+#[test]
+fn root_config_rejects_unknown_theme() {
+    let error = toml::from_str::<RootConfig>(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[appearance]
+theme = "dracula"
+"#,
+    )
+    .expect_err("unknown themes should fail config parsing");
+
+    assert!(error.to_string().contains("unknown variant"));
+    assert!(error.to_string().contains("dracula"));
+}
+
+#[test]
+fn root_config_serializes_appearance_theme_and_colors() {
+    let mut colors = BTreeMap::new();
+    colors.insert("surface_base".to_owned(), "#07080a".to_owned());
+    colors.insert("text_primary".to_owned(), "#ecf0f6".to_owned());
+    let config = RootConfig {
+        workspace: WorkspaceConfig::default(),
+        session: Default::default(),
+        agent: AgentConfig {
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-flash".to_owned(),
+            max_turns: None,
+            tool_timeout_secs: 30,
+        },
+        permission: Default::default(),
+        memory: Default::default(),
+        skills: Default::default(),
+        compaction: Default::default(),
+        code_intelligence: Default::default(),
+        terminal: Default::default(),
+        appearance: crate::AppearanceConfig {
+            theme: ThemeId::Nord,
+            colors: crate::ThemeColorOverrides::new(colors),
+        },
+        task: Default::default(),
+        providers: BTreeMap::new(),
+        mcp_servers: Vec::new(),
+    };
+
+    let rendered = toml::to_string_pretty(&config).expect("appearance should serialize");
+
+    assert!(rendered.contains("[appearance]"));
+    assert!(rendered.contains("theme = \"nord\""));
+    assert!(rendered.contains("[appearance.colors]"));
+    assert!(rendered.contains("surface_base = \"#07080a\""));
+    assert!(rendered.contains("text_primary = \"#ecf0f6\""));
 }
 
 #[test]
@@ -630,6 +720,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),

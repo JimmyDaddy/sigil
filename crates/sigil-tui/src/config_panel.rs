@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig,
-    PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode,
+    PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, ThemeId,
 };
 use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
@@ -33,6 +33,7 @@ pub(crate) enum ConfigSection {
     Compaction,
     CodeIntelligence,
     Terminal,
+    Appearance,
     Agents,
     Skills,
     Plugins,
@@ -40,13 +41,14 @@ pub(crate) enum ConfigSection {
 }
 
 impl ConfigSection {
-    pub(crate) const FLOW: [Self; 10] = [
+    pub(crate) const FLOW: [Self; 11] = [
         Self::Provider,
         Self::Permissions,
         Self::Memory,
         Self::Compaction,
         Self::CodeIntelligence,
         Self::Terminal,
+        Self::Appearance,
         Self::Agents,
         Self::Skills,
         Self::Plugins,
@@ -61,6 +63,7 @@ impl ConfigSection {
             Self::Compaction => "Compaction",
             Self::CodeIntelligence => "Code Intel",
             Self::Terminal => "Terminal",
+            Self::Appearance => "Appearance",
             Self::Agents => "Agents",
             Self::Skills => "Skills",
             Self::Plugins => "Plugins",
@@ -76,6 +79,7 @@ impl ConfigSection {
             Self::Compaction => "context and thresholds",
             Self::CodeIntelligence => "LSP readiness",
             Self::Terminal => "terminal integration",
+            Self::Appearance => "TUI theme",
             Self::Agents => "agent profiles",
             Self::Skills => "reusable skills",
             Self::Plugins => "plugin trust review",
@@ -135,6 +139,7 @@ pub(crate) enum ConfigField {
     TerminalMouseCapture,
     TerminalOsc52Clipboard,
     TerminalScrollSensitivity,
+    AppearanceTheme,
     SkillId,
     PluginId,
     McpName,
@@ -171,6 +176,7 @@ impl ConfigField {
         Self::TerminalOsc52Clipboard,
         Self::TerminalScrollSensitivity,
     ];
+    const APPEARANCE_FIELDS: [Self; 1] = [Self::AppearanceTheme];
     const SKILL_FIELDS: [Self; 1] = [Self::SkillId];
     const PLUGIN_FIELDS: [Self; 1] = [Self::PluginId];
     const MCP_FIELDS: [Self; 4] = [
@@ -188,6 +194,7 @@ impl ConfigField {
             ConfigSection::Compaction => &Self::COMPACTION_FIELDS,
             ConfigSection::CodeIntelligence => &Self::CODE_INTELLIGENCE_FIELDS,
             ConfigSection::Terminal => &Self::TERMINAL_FIELDS,
+            ConfigSection::Appearance => &Self::APPEARANCE_FIELDS,
             ConfigSection::Agents => &Self::SKILL_FIELDS,
             ConfigSection::Skills => &Self::SKILL_FIELDS,
             ConfigSection::Plugins => &Self::PLUGIN_FIELDS,
@@ -220,6 +227,7 @@ impl ConfigField {
             Self::TerminalMouseCapture => "mouse_capture",
             Self::TerminalOsc52Clipboard => "osc52_clipboard",
             Self::TerminalScrollSensitivity => "scroll_sensitivity",
+            Self::AppearanceTheme => "theme",
             Self::SkillId => "skill",
             Self::PluginId => "plugin",
             Self::McpName => "name",
@@ -250,6 +258,7 @@ impl ConfigField {
             Self::TerminalMouseCapture => "Mouse capture",
             Self::TerminalOsc52Clipboard => "OSC52 clipboard",
             Self::TerminalScrollSensitivity => "Scroll sensitivity",
+            Self::AppearanceTheme => "Theme",
             Self::SkillId => "Skill",
             Self::PluginId => "Plugin",
             Self::McpName => "Name",
@@ -318,6 +327,9 @@ impl ConfigField {
             Self::TerminalScrollSensitivity => {
                 "Mouse wheel rows per tick for transcript and approval diff scrolling."
             }
+            Self::AppearanceTheme => {
+                "Color palette for the TUI. Saved themes apply immediately and do not affect session history."
+            }
             Self::SkillId => {
                 "Selected reusable skill. Up/Down moves through skills; footer actions load or invoke it."
             }
@@ -354,7 +366,9 @@ impl ConfigField {
             Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
             Self::ProviderName => "Enter cycle",
             Self::ProviderApiKey => "Enter input",
-            Self::PermissionsDefaultMode | Self::CodeIntelStartup => "Enter cycle",
+            Self::PermissionsDefaultMode | Self::CodeIntelStartup | Self::AppearanceTheme => {
+                "Enter cycle"
+            }
             Self::MemoryEnabled
             | Self::CompactionEnabled
             | Self::CodeIntelEnabled
@@ -417,7 +431,8 @@ impl ConfigFooterAction {
             | ConfigSection::Memory
             | ConfigSection::Compaction
             | ConfigSection::CodeIntelligence
-            | ConfigSection::Terminal => &Self::DEFAULT_ORDER,
+            | ConfigSection::Terminal
+            | ConfigSection::Appearance => &Self::DEFAULT_ORDER,
         }
     }
 
@@ -579,6 +594,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) terminal_mouse_capture: bool,
     pub(crate) terminal_osc52_clipboard: bool,
     pub(crate) terminal_scroll_sensitivity: String,
+    pub(crate) appearance_theme: ThemeId,
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
 
@@ -700,6 +716,7 @@ impl ConfigDraft {
             terminal_mouse_capture: root_config.terminal.mouse_capture,
             terminal_osc52_clipboard: root_config.terminal.osc52_clipboard,
             terminal_scroll_sensitivity: root_config.terminal.scroll_sensitivity.to_string(),
+            appearance_theme: root_config.appearance.theme,
             mcp_servers: root_config
                 .mcp_servers
                 .iter()
@@ -845,6 +862,7 @@ impl ConfigDraft {
         root_config.terminal.mouse_capture = self.terminal_mouse_capture;
         root_config.terminal.osc52_clipboard = self.terminal_osc52_clipboard;
         root_config.terminal.scroll_sensitivity = terminal_scroll_sensitivity;
+        root_config.appearance.theme = self.appearance_theme;
         root_config.mcp_servers = self
             .mcp_servers
             .iter()
@@ -1431,7 +1449,8 @@ impl ConfigState {
             | ConfigField::CodeIntelDiscoveryEnabled
             | ConfigField::CodeIntelDiscoveryReportMissing
             | ConfigField::TerminalMouseCapture
-            | ConfigField::TerminalOsc52Clipboard => None,
+            | ConfigField::TerminalOsc52Clipboard
+            | ConfigField::AppearanceTheme => None,
         }
     }
 
@@ -1476,7 +1495,8 @@ impl ConfigState {
             | ConfigField::CodeIntelDiscoveryEnabled
             | ConfigField::CodeIntelDiscoveryReportMissing
             | ConfigField::TerminalMouseCapture
-            | ConfigField::TerminalOsc52Clipboard => None,
+            | ConfigField::TerminalOsc52Clipboard
+            | ConfigField::AppearanceTheme => None,
         }
     }
 
@@ -1533,6 +1553,9 @@ impl ConfigState {
             }
             ConfigField::TerminalOsc52Clipboard => {
                 return bool_label(self.draft.terminal_osc52_clipboard).to_owned();
+            }
+            ConfigField::AppearanceTheme => {
+                return self.draft.appearance_theme.as_str().to_owned();
             }
             _ => self.field_text_value(field).unwrap_or_default(),
         };
@@ -1741,7 +1764,8 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::CodeIntelDiscoveryEnabled
         | ConfigField::CodeIntelDiscoveryReportMissing
         | ConfigField::TerminalMouseCapture
-        | ConfigField::TerminalOsc52Clipboard => false,
+        | ConfigField::TerminalOsc52Clipboard
+        | ConfigField::AppearanceTheme => false,
     }
 }
 

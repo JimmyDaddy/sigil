@@ -902,6 +902,7 @@ impl AppState {
             expanded_thinking_entry_indices: self.expanded_thinking_entry_indices.clone(),
             collapsed_thinking_entry_indices: self.collapsed_thinking_entry_indices.clone(),
             hovered_thinking_entry_index: self.hovered_thinking_entry_index(),
+            theme: crate::ui::theme::resolve_for_app(self),
         }
     }
 

@@ -12,10 +12,7 @@ use super::{
     geometry::inset_rect,
     status_indicator::{FocusKind, StatusIndicator, focus_style},
     text::{pad_display_width, truncate_display_width, wrap_composer_input},
-    theme::{
-        accent_blue, accent_gold, agent_panel_bg, composer_bg, composer_input_bg, dim, dock_edge,
-        ink, muted, phase_accent,
-    },
+    theme::Theme,
 };
 
 const COMPOSER_HORIZONTAL_INSET: u16 = 3;
@@ -24,14 +21,24 @@ const COMPOSER_HEADER_HEIGHT: u16 = 1;
 const COMPOSER_HEADER_INPUT_GAP: u16 = 1;
 const COMPOSER_AGENT_LABEL_WIDTH: usize = 22;
 
+#[cfg(test)]
 pub(crate) fn render_input(frame: &mut Frame, area: Rect, view_model: &ComposerViewModel) {
-    let accent = phase_accent(&view_model.phase);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(composer_bg())),
-        area,
-    );
-    render_panel_separator(frame, area, composer_bg());
-    render_composer_gutter(frame, area, accent);
+    let theme = Theme::default();
+    render_input_with_theme(frame, area, view_model, &theme);
+}
+
+pub(crate) fn render_input_with_theme(
+    frame: &mut Frame,
+    area: Rect,
+    view_model: &ComposerViewModel,
+    theme: &Theme,
+) {
+    let palette = &theme.palette;
+    let accent = palette.phase_accent(&view_model.phase);
+    let panel_bg = palette.surface_panel;
+    frame.render_widget(Block::default().style(Style::default().bg(panel_bg)), area);
+    render_panel_separator(frame, area, panel_bg, palette.border_subtle);
+    render_composer_gutter(frame, area, accent, panel_bg);
 
     let inner = inset_rect(area, COMPOSER_HORIZONTAL_INSET, COMPOSER_VERTICAL_INSET);
     if inner.width == 0 || inner.height == 0 {
@@ -52,26 +59,29 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, view_model: &ComposerV
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  ·  "),
-        Span::styled(view_model.model_name.clone(), Style::default().fg(ink())),
+        Span::styled(
+            view_model.model_name.clone(),
+            Style::default().fg(palette.text_primary),
+        ),
         Span::raw("  ·  "),
         Span::styled(
             view_model.provider_name.clone(),
-            Style::default().fg(muted()),
+            Style::default().fg(palette.text_secondary),
         ),
         Span::raw("  ·  "),
         Span::styled(
             view_model.reasoning_effort_label.clone(),
-            Style::default().fg(accent_gold()),
+            Style::default().fg(palette.accent_warning),
         ),
     ]);
     frame.render_widget(
         Paragraph::new(Text::from(vec![header]))
-            .style(Style::default().bg(composer_bg()))
+            .style(Style::default().bg(panel_bg))
             .wrap(Wrap { trim: false }),
         header_area,
     );
 
-    let input_bg = composer_input_bg();
+    let input_bg = palette.surface_input;
     frame.render_widget(
         Block::default().style(Style::default().bg(input_bg)),
         input_area,
@@ -90,7 +100,7 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, view_model: &ComposerV
             .map(|row| {
                 Line::from(vec![Span::styled(
                     pad_display_width(&row, input_width),
-                    Style::default().fg(ink()).bg(input_bg),
+                    Style::default().fg(palette.text_primary).bg(input_bg),
                 )])
             })
             .collect::<Vec<_>>();
@@ -146,15 +156,25 @@ pub(crate) fn composer_input_area(area: Rect, _input_rows: u16) -> Rect {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn render_agent_panel(frame: &mut Frame, area: Rect, view_model: &ComposerViewModel) {
+    let theme = Theme::default();
+    render_agent_panel_with_theme(frame, area, view_model, &theme);
+}
+
+pub(crate) fn render_agent_panel_with_theme(
+    frame: &mut Frame,
+    area: Rect,
+    view_model: &ComposerViewModel,
+    theme: &Theme,
+) {
     if area.width == 0 || area.height == 0 || view_model.agent_rows.len() <= 1 {
         return;
     }
-    frame.render_widget(
-        Block::default().style(Style::default().bg(agent_panel_bg())),
-        area,
-    );
-    render_panel_separator(frame, area, agent_panel_bg());
+    let palette = &theme.palette;
+    let agent_bg = palette.surface_agent_panel;
+    frame.render_widget(Block::default().style(Style::default().bg(agent_bg)), area);
+    render_panel_separator(frame, area, agent_bg, palette.border_subtle);
     let content = Rect::new(
         area.x.saturating_add(COMPOSER_HORIZONTAL_INSET),
         area.y.saturating_add(1),
@@ -169,12 +189,12 @@ pub(crate) fn render_agent_panel(frame: &mut Frame, area: Rect, view_model: &Com
         .agent_rows
         .iter()
         .take(content.height as usize)
-        .map(|row| render_agent_row(row, width, view_model.agent_panel_focused))
+        .map(|row| render_agent_row(row, width, view_model.agent_panel_focused, theme))
         .collect::<Vec<_>>();
 
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(agent_panel_bg()))
+            .style(Style::default().bg(agent_bg))
             .wrap(Wrap { trim: false }),
         content,
     );
@@ -184,7 +204,10 @@ fn render_agent_row(
     row: &crate::timeline::SidebarAgentRow,
     width: usize,
     panel_focused: bool,
+    theme: &Theme,
 ) -> Line<'static> {
+    let palette = &theme.palette;
+    let agent_bg = palette.surface_agent_panel;
     let selected = panel_focused && row.selected;
     let focus = row.focus_symbol(panel_focused);
     let label = row.label.strip_prefix("agent ").unwrap_or(&row.label);
@@ -197,14 +220,16 @@ fn render_agent_row(
     let reserved_width = 1 + 1 + COMPOSER_AGENT_LABEL_WIDTH + 1 + 1 + 1;
     let detail_text = truncate_display_width(&detail, width.saturating_sub(reserved_width));
     let style = if selected {
-        Style::default().fg(Color::Black).bg(accent_gold())
+        Style::default()
+            .fg(palette.selection_fg)
+            .bg(palette.selection_bg)
     } else if row.active {
         Style::default()
-            .fg(accent_blue())
-            .bg(agent_panel_bg())
+            .fg(palette.accent_info)
+            .bg(agent_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(accent_blue()).bg(agent_panel_bg())
+        Style::default().fg(palette.accent_info).bg(agent_bg)
     };
     if selected {
         return Line::from(vec![Span::styled(
@@ -235,40 +260,39 @@ fn render_agent_row(
         Span::styled(
             detail_text,
             Style::default()
-                .fg(if row.muted { dim() } else { muted() })
-                .bg(agent_panel_bg()),
+                .fg(if row.muted {
+                    palette.text_muted
+                } else {
+                    palette.text_secondary
+                })
+                .bg(agent_bg),
         ),
     ])
 }
 
-fn render_composer_gutter(frame: &mut Frame, area: Rect, accent: Color) {
+fn render_composer_gutter(frame: &mut Frame, area: Rect, accent: Color, bg: Color) {
     let gutter = Rect::new(area.x.saturating_add(1), area.y, 1, area.height);
     if gutter.width == 0 || gutter.height == 0 {
         return;
     }
     let lines = (0..gutter.height)
-        .map(|_| {
-            Line::from(vec![Span::styled(
-                "▌",
-                Style::default().fg(accent).bg(composer_bg()),
-            )])
-        })
+        .map(|_| Line::from(vec![Span::styled("▌", Style::default().fg(accent).bg(bg))]))
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(composer_bg()))
+            .style(Style::default().bg(bg))
             .wrap(Wrap { trim: false }),
         gutter,
     );
 }
 
-fn render_panel_separator(frame: &mut Frame, area: Rect, bg: Color) {
+fn render_panel_separator(frame: &mut Frame, area: Rect, bg: Color, edge: Color) {
     if area.width == 0 {
         return;
     }
     let line = Line::from(vec![Span::styled(
         "─".repeat(area.width as usize),
-        Style::default().fg(dock_edge()).bg(bg),
+        Style::default().fg(edge).bg(bg),
     )]);
     frame.render_widget(
         Paragraph::new(Text::from(vec![line])).style(Style::default().bg(bg)),

@@ -1,6 +1,9 @@
 use ratatui::{Terminal, backend::TestBackend};
 
-use crate::timeline::{RunPhase, SidebarAgentRow};
+use crate::{
+    timeline::{RunPhase, SidebarAgentRow},
+    ui::theme::Theme,
+};
 
 use super::*;
 
@@ -147,7 +150,7 @@ fn render_composer_gutter_with_zero_height_does_not_panic() -> anyhow::Result<()
     let zero_height_area = ratatui::layout::Rect::new(0, 0, 1, 0);
     let full_area = ratatui::layout::Rect::new(0, 0, 1, 1);
     terminal.draw(|frame| {
-        render_composer_gutter(frame, zero_height_area, Color::Red);
+        render_composer_gutter(frame, zero_height_area, Color::Red, Color::Black);
         render_input(
             frame,
             full_area,
@@ -193,6 +196,7 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
     };
     let backend = TestBackend::new(8, 2);
     let mut terminal = Terminal::new(backend)?;
+    let theme = Theme::default();
 
     assert_eq!(
         composer_input_area(Rect::new(0, 0, 2, 5), 1),
@@ -205,7 +209,7 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
         active: false,
         muted: true,
     };
-    let muted_line = render_agent_row(&muted, 18, false);
+    let muted_line = render_agent_row(&muted, 18, false, &theme);
     let muted_text = muted_line
         .spans
         .iter()
@@ -217,14 +221,14 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
         selected: true,
         ..muted
     };
-    let selected_line = render_agent_row(&selected, 10, true);
+    let selected_line = render_agent_row(&selected, 10, true, &theme);
     assert_eq!(
         selected_line.spans.first().and_then(|span| span.style.bg),
-        Some(accent_gold())
+        Some(theme.palette.selection_bg)
     );
 
     terminal.draw(|frame| {
-        render_panel_separator(frame, Rect::new(0, 0, 0, 1), Color::Black);
+        render_panel_separator(frame, Rect::new(0, 0, 0, 1), Color::Black, Color::White);
         render_agent_panel(frame, Rect::new(0, 0, 0, 0), &view_model);
         render_agent_panel(frame, Rect::new(0, 0, 8, 1), &view_model);
     })?;

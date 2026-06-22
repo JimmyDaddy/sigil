@@ -64,6 +64,8 @@ Flow tests live in `crates/sigil-tui/src/app/tests/*_tests.rs`. New TUI behavior
 
 `ui.rs` is the renderer module entrypoint. Shell layout, theme, geometry, text, timeline, tool card, markdown, approval, setup/config, and modal renderers live under `ui/*`.
 
+TUI theme handling lives in `crates/sigil-tui/src/ui/theme/`. `sigil-kernel` only stores `[appearance]`, `ThemeId`, and raw color override strings, keeping it independent from `ratatui`; `sigil-tui` resolves that config into a `ThemePalette`, and renderers consume semantic tokens from the AppState config snapshot or `TimelineRenderOptions`. Theme switching affects TUI appearance only and is not written to session/control logs, approval records, or provider-visible context.
+
 ## User Interaction State
 
 The TUI is currently chat-first:

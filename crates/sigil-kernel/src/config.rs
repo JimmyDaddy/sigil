@@ -36,6 +36,8 @@ pub struct RootConfig {
     #[serde(default)]
     pub terminal: TerminalConfig,
     #[serde(default)]
+    pub appearance: AppearanceConfig,
+    #[serde(default)]
     pub task: TaskConfig,
     #[serde(default)]
     pub providers: BTreeMap<String, Value>,
@@ -120,6 +122,110 @@ impl Default for TerminalConfig {
             osc52_clipboard: default_terminal_osc52_clipboard(),
             scroll_sensitivity: default_terminal_scroll_sensitivity(),
         }
+    }
+}
+
+/// TUI appearance preferences shared by interactive entrypoints.
+///
+/// Theme choices are user-interface preferences only. They must not affect session history,
+/// provider-visible request material, tool approval audit entries, or cache-stable state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AppearanceConfig {
+    #[serde(default)]
+    pub theme: ThemeId,
+    #[serde(default, skip_serializing_if = "ThemeColorOverrides::is_empty")]
+    pub colors: ThemeColorOverrides,
+}
+
+/// Stable identifiers for built-in TUI themes.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeId {
+    #[default]
+    SigilDark,
+    SolarizedDark,
+    SolarizedLight,
+    GruvboxDark,
+    Nord,
+    HighContrastDark,
+}
+
+impl ThemeId {
+    pub const ALL: [Self; 6] = [
+        Self::SigilDark,
+        Self::SolarizedDark,
+        Self::SolarizedLight,
+        Self::GruvboxDark,
+        Self::Nord,
+        Self::HighContrastDark,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SigilDark => "sigil_dark",
+            Self::SolarizedDark => "solarized_dark",
+            Self::SolarizedLight => "solarized_light",
+            Self::GruvboxDark => "gruvbox_dark",
+            Self::Nord => "nord",
+            Self::HighContrastDark => "high_contrast_dark",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::SigilDark => "Sigil Dark",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::SolarizedLight => "Solarized Light",
+            Self::GruvboxDark => "Gruvbox Dark",
+            Self::Nord => "Nord",
+            Self::HighContrastDark => "High Contrast Dark",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|theme| *theme == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+/// Raw user-provided semantic color overrides.
+///
+/// Values stay as strings here so the kernel remains independent from any terminal renderer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct ThemeColorOverrides {
+    values: BTreeMap<String, String>,
+}
+
+impl ThemeColorOverrides {
+    pub fn new(values: BTreeMap<String, String>) -> Self {
+        Self { values }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 }
 

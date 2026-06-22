@@ -1,5 +1,7 @@
 use ratatui::style::{Color, Modifier, Style};
 
+use super::theme::{self, ThemePalette};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiffLineKind {
     Header,
@@ -132,28 +134,43 @@ pub(crate) fn diff_line_number_text(line: Option<usize>, width: usize) -> String
 }
 
 pub(crate) fn diff_line_style(kind: DiffLineKind) -> (Color, Style) {
+    let palette = theme::default_palette();
+    diff_line_style_for_palette(kind, &palette)
+}
+
+pub(crate) fn diff_line_style_for_palette(
+    kind: DiffLineKind,
+    palette: &ThemePalette,
+) -> (Color, Style) {
     match kind {
         DiffLineKind::Header => (
-            Color::Blue,
+            palette.diff_header_fg,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette.diff_header_fg)
                 .add_modifier(Modifier::BOLD),
         ),
         DiffLineKind::Hunk => (
-            Color::Yellow,
+            palette.diff_hunk_fg,
             Style::default()
-                .fg(Color::Yellow)
+                .fg(palette.diff_hunk_fg)
                 .add_modifier(Modifier::BOLD),
         ),
         DiffLineKind::Added => (
-            Color::Green,
-            Style::default().fg(Color::Green).bg(Color::Rgb(16, 34, 22)),
+            palette.diff_added_fg,
+            Style::default()
+                .fg(palette.diff_added_fg)
+                .bg(palette.diff_added_bg),
         ),
         DiffLineKind::Removed => (
-            Color::Red,
-            Style::default().fg(Color::Red).bg(Color::Rgb(40, 18, 18)),
+            palette.diff_removed_fg,
+            Style::default()
+                .fg(palette.diff_removed_fg)
+                .bg(palette.diff_removed_bg),
         ),
-        DiffLineKind::Context => (Color::DarkGray, Style::default().fg(Color::Gray)),
+        DiffLineKind::Context => (
+            palette.diff_gutter_fg,
+            Style::default().fg(palette.diff_context_fg),
+        ),
     }
 }
 

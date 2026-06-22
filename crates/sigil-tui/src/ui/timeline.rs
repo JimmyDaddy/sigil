@@ -9,21 +9,24 @@ use crate::app::{TimelineEntry, TimelineRole};
 
 use super::{
     markdown::{
-        MarkdownRenderOptions, MarkdownRenderState, render_code_line_spans,
-        render_inline_markdown_spans_with_options, render_markdown_spans,
-        render_markdown_timeline_lines,
+        MarkdownRenderOptions, MarkdownRenderState, render_code_line_spans_with_bg,
+        render_inline_markdown_spans_with_options, render_markdown_spans_with_palette,
+        render_markdown_timeline_lines_with_palette,
     },
     primitives::{
         spans_with_background, timeline_content_line, timeline_header_line,
         timeline_minor_header_line,
     },
     text::{pad_display_width, wrap_display_width},
-    theme::{
-        accent_blue, accent_gold, accent_lime, accent_rose, dim, ink, muted, selector_accent,
-        user_message_bg,
-    },
+    theme::{self, ThemePalette, dim},
     tool_card::render_tool_entry_lines,
 };
+
+#[cfg(test)]
+use super::theme::{accent_blue, accent_gold, ink};
+
+#[cfg(test)]
+use super::theme::user_message_bg;
 
 const COLLAPSED_THINKING_PREVIEW_LINES: usize = 3;
 const COLLAPSED_THINKING_CODE_PREVIEW_LINES: usize = 2;
@@ -43,6 +46,7 @@ pub(crate) struct TimelineRenderOptions {
     pub expanded_thinking_entry_indices: BTreeSet<usize>,
     pub collapsed_thinking_entry_indices: BTreeSet<usize>,
     pub hovered_thinking_entry_index: Option<usize>,
+    pub theme: theme::Theme,
 }
 
 pub(crate) fn render_timeline_entry_lines_with_options(
@@ -51,7 +55,7 @@ pub(crate) fn render_timeline_entry_lines_with_options(
     entry_index: usize,
 ) -> Vec<Line<'static>> {
     let lines = if entry.role == TimelineRole::User {
-        render_user_entry_lines(entry, options.max_content_width)
+        render_user_entry_lines(entry, options.max_content_width, &options.theme.palette)
     } else if entry.role == TimelineRole::Assistant {
         render_assistant_entry_lines(
             entry,
@@ -60,9 +64,10 @@ pub(crate) fn render_timeline_entry_lines_with_options(
             options
                 .intermediate_assistant_indices
                 .contains(&entry_index),
+            &options.theme.palette,
         )
     } else if entry.role == TimelineRole::Phase {
-        render_phase_entry_lines(entry)
+        render_phase_entry_lines(entry, &options.theme.palette)
     } else if entry.role == TimelineRole::Thinking {
         let active = options.streaming_reasoning_index == Some(entry_index);
         let expanded = active
@@ -79,25 +84,34 @@ pub(crate) fn render_timeline_entry_lines_with_options(
             expanded,
             options.hovered_thinking_entry_index == Some(entry_index),
             options.max_content_width,
+            &options.theme.palette,
         )
     } else if entry.role == TimelineRole::Tool {
         render_tool_entry_lines(entry, options, entry_index)
     } else if entry.role == TimelineRole::Notice {
-        render_notice_entry_lines(entry)
+        render_notice_entry_lines(entry, &options.theme.palette)
     } else {
-        let mut lines = vec![timeline_header_line("system", Color::Cyan, "")];
+        let mut lines = vec![timeline_header_line(
+            "system",
+            options.theme.palette.accent_info,
+            "",
+        )];
         let mut markdown_state = MarkdownRenderState::default();
         let markdown_options = MarkdownRenderOptions::timeline(options.max_content_width);
         if !entry.text.is_empty() {
             for chunk in entry.text.split('\n') {
-                let content = render_timeline_content_spans(
+                let content = render_timeline_content_spans_with_palette(
                     entry.role,
                     chunk,
-                    Style::default().fg(muted()),
+                    Style::default().fg(options.theme.palette.text_secondary),
                     &mut markdown_state,
                     markdown_options,
+                    &options.theme.palette,
                 );
-                lines.push(timeline_content_line(Color::Cyan, content));
+                lines.push(timeline_content_line(
+                    options.theme.palette.accent_info,
+                    content,
+                ));
             }
         }
         lines
@@ -112,9 +126,13 @@ fn append_entry_gap(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
     lines
 }
 
-fn render_user_entry_lines(entry: &TimelineEntry, max_content_width: usize) -> Vec<Line<'static>> {
-    let accent = selector_accent();
-    let bubble_bg = user_message_bg();
+fn render_user_entry_lines(
+    entry: &TimelineEntry,
+    max_content_width: usize,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let accent = palette.accent_primary;
+    let bubble_bg = palette.surface_user_message;
     let mut lines = Vec::new();
     if entry.text.trim().is_empty() {
         return lines;
@@ -132,6 +150,7 @@ fn render_user_entry_lines(entry: &TimelineEntry, max_content_width: usize) -> V
                 accent,
                 bubble_bg,
                 content_width,
+                palette,
             ));
         }
     }
@@ -164,6 +183,7 @@ fn user_bubble_content_line(
     accent: Color,
     bubble_bg: Color,
     content_width: usize,
+    palette: &ThemePalette,
 ) -> Line<'static> {
     let padded = pad_display_width(row, content_width);
     let mut spans = vec![Span::styled(
@@ -177,7 +197,7 @@ fn user_bubble_content_line(
         render_inline_markdown_spans_with_options(
             &padded,
             Style::default()
-                .fg(Color::Rgb(230, 236, 244))
+                .fg(palette.text_primary)
                 .add_modifier(Modifier::BOLD),
             MarkdownRenderOptions::timeline(content_width),
         ),
@@ -192,19 +212,21 @@ fn render_assistant_entry_lines(
     max_content_width: usize,
     highlight_code: bool,
     intermediate_info: bool,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let accent = accent_blue();
+    let accent = palette.accent_info;
     if entry.text.trim().is_empty() {
         return Vec::new();
     }
-    let mut lines = render_markdown_timeline_lines(
+    let mut lines = render_markdown_timeline_lines_with_palette(
         accent,
-        Style::default().fg(ink()),
+        Style::default().fg(palette.text_primary),
         &entry.text,
         MarkdownRenderOptions {
             highlight_code,
             ..MarkdownRenderOptions::timeline(max_content_width)
         },
+        palette,
     );
     if intermediate_info {
         mark_first_visible_assistant_line(&mut lines);
@@ -245,11 +267,12 @@ fn render_thinking_entry_lines(
     expanded: bool,
     hovered: bool,
     max_content_width: usize,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let accent = if hovered {
-        accent_gold()
+        palette.accent_warning
     } else {
-        Color::Rgb(158, 148, 120)
+        palette.accent_idle
     };
     let header_modifier = if hovered {
         Modifier::ITALIC | Modifier::BOLD | Modifier::UNDERLINED
@@ -257,7 +280,7 @@ fn render_thinking_entry_lines(
         Modifier::ITALIC | Modifier::BOLD
     };
     let body_style = Style::default()
-        .fg(Color::Rgb(170, 166, 152))
+        .fg(palette.text_secondary)
         .add_modifier(Modifier::ITALIC);
     let total_lines = thinking_line_count(&entry.text);
     let preview_lines = thinking_preview_lines(&entry.text, COLLAPSED_THINKING_PREVIEW_LINES);
@@ -278,18 +301,21 @@ fn render_thinking_entry_lines(
             } else {
                 thinking_line_label(total_lines)
             },
-            Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(palette.text_muted)
+                .add_modifier(Modifier::ITALIC),
         ),
     ])];
     if entry.text.trim().is_empty() {
         return lines;
     }
     if !expanded {
-        lines.extend(render_markdown_timeline_lines(
+        lines.extend(render_markdown_timeline_lines_with_palette(
             accent,
             body_style,
             &preview_lines.join("\n"),
             MarkdownRenderOptions::timeline(max_content_width),
+            palette,
         ));
         if hidden_lines > 0 {
             lines.push(timeline_content_line(
@@ -297,23 +323,24 @@ fn render_thinking_entry_lines(
                 vec![Span::styled(
                     format!("… {hidden_lines} more lines hidden"),
                     Style::default()
-                        .fg(dim())
+                        .fg(palette.text_muted)
                         .add_modifier(Modifier::ITALIC | Modifier::BOLD),
                 )],
             ));
         }
         return lines;
     }
-    lines.extend(render_markdown_timeline_lines(
+    lines.extend(render_markdown_timeline_lines_with_palette(
         accent,
         body_style,
         &entry.text,
         MarkdownRenderOptions::timeline(max_content_width),
+        palette,
     ));
     lines
 }
 
-fn render_phase_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
+fn render_phase_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Vec<Line<'static>> {
     let (kind, detail) = entry
         .text
         .split_once('|')
@@ -322,27 +349,34 @@ fn render_phase_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
     let (label, accent, summary) = match kind {
         "thinking" => (
             "thinking",
-            accent_gold(),
+            palette.status_thinking,
             detail
                 .map(|model| format!("reasoning with {model}"))
                 .unwrap_or_else(|| "reasoning".to_owned()),
         ),
         "tool" => (
             "tool",
-            accent_rose(),
+            palette.status_tool,
             detail
                 .map(|tool| format!("running {tool}"))
                 .unwrap_or_else(|| "running tool".to_owned()),
         ),
-        "streaming" => ("streaming", accent_blue(), "writing the reply".to_owned()),
-        _ => ("phase", muted(), entry.text.clone()),
+        "streaming" => (
+            "streaming",
+            palette.status_streaming,
+            "writing the reply".to_owned(),
+        ),
+        _ => ("phase", palette.text_secondary, entry.text.clone()),
     };
 
     vec![
         timeline_minor_header_line(label, accent, "live"),
         timeline_content_line(
             accent,
-            vec![Span::styled(summary, Style::default().fg(dim()))],
+            vec![Span::styled(
+                summary,
+                Style::default().fg(palette.text_muted),
+            )],
         ),
     ]
 }
@@ -418,10 +452,10 @@ fn is_markdown_fence(line: &str) -> bool {
     trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
-fn render_notice_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
+fn render_notice_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Vec<Line<'static>> {
     let tone = notice_tone(&entry.text);
-    let accent = notice_accent(tone);
-    let body_style = notice_body_style(tone);
+    let accent = notice_accent(tone, palette);
+    let body_style = notice_body_style(tone, palette);
     let mut lines = vec![timeline_minor_header_line(
         notice_inline_label(tone),
         accent,
@@ -434,7 +468,7 @@ fn render_notice_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
         }
         lines.push(timeline_content_line(
             accent,
-            render_notice_body_spans(display_text, body_style),
+            render_notice_body_spans(display_text, body_style, palette),
         ));
     }
     lines
@@ -447,6 +481,7 @@ enum NoticeTone {
     Info,
 }
 
+#[cfg(test)]
 fn render_timeline_content_spans(
     role: TimelineRole,
     line: &str,
@@ -454,12 +489,38 @@ fn render_timeline_content_spans(
     state: &mut MarkdownRenderState,
     markdown_options: MarkdownRenderOptions,
 ) -> Vec<Span<'static>> {
+    let palette = theme::default_palette();
+    render_timeline_content_spans_with_palette(
+        role,
+        line,
+        base_style,
+        state,
+        markdown_options,
+        &palette,
+    )
+}
+
+fn render_timeline_content_spans_with_palette(
+    role: TimelineRole,
+    line: &str,
+    base_style: Style,
+    state: &mut MarkdownRenderState,
+    markdown_options: MarkdownRenderOptions,
+    palette: &ThemePalette,
+) -> Vec<Span<'static>> {
     match role {
-        TimelineRole::Assistant => render_markdown_spans(line, base_style, state, markdown_options),
-        TimelineRole::Thinking => render_markdown_spans(line, base_style, state, markdown_options),
-        TimelineRole::Tool => {
-            render_code_line_spans(line, accent_rose(), Style::default().fg(ink()))
+        TimelineRole::Assistant => {
+            render_markdown_spans_with_palette(line, base_style, state, markdown_options, palette)
         }
+        TimelineRole::Thinking => {
+            render_markdown_spans_with_palette(line, base_style, state, markdown_options, palette)
+        }
+        TimelineRole::Tool => render_code_line_spans_with_bg(
+            line,
+            palette.accent_danger,
+            Style::default().fg(palette.markdown_code_fg),
+            palette.markdown_code_bg,
+        ),
         TimelineRole::System | TimelineRole::Phase => render_inline_markdown_spans_with_options(
             line,
             base_style.add_modifier(Modifier::BOLD),
@@ -499,18 +560,18 @@ fn notice_inline_label(tone: NoticeTone) -> &'static str {
     }
 }
 
-fn notice_accent(tone: NoticeTone) -> Color {
+fn notice_accent(tone: NoticeTone, palette: &ThemePalette) -> Color {
     match tone {
-        NoticeTone::Error => accent_rose(),
-        NoticeTone::Ok => accent_lime(),
-        NoticeTone::Info => accent_gold(),
+        NoticeTone::Error => palette.status_error,
+        NoticeTone::Ok => palette.status_success,
+        NoticeTone::Info => palette.status_warning,
     }
 }
 
-fn notice_body_style(tone: NoticeTone) -> Style {
+fn notice_body_style(tone: NoticeTone, palette: &ThemePalette) -> Style {
     let color = match tone {
-        NoticeTone::Error => muted(),
-        NoticeTone::Ok | NoticeTone::Info => dim(),
+        NoticeTone::Error => palette.text_secondary,
+        NoticeTone::Ok | NoticeTone::Info => palette.text_muted,
     };
     Style::default().fg(color)
 }
@@ -526,7 +587,11 @@ fn notice_display_text(line: &str) -> &str {
     trimmed
 }
 
-fn render_notice_body_spans(line: &str, base_style: Style) -> Vec<Span<'static>> {
+fn render_notice_body_spans(
+    line: &str,
+    base_style: Style,
+    _palette: &ThemePalette,
+) -> Vec<Span<'static>> {
     render_inline_markdown_spans_with_options(line, base_style, MarkdownRenderOptions::timeline(80))
 }
 

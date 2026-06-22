@@ -14,7 +14,7 @@ mod slash_overlay;
 mod status_indicator;
 mod syntax_highlight;
 mod text;
-mod theme;
+pub(crate) mod theme;
 mod timeline;
 mod tool_card;
 

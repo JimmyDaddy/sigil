@@ -1,13 +1,12 @@
 use std::{collections::BTreeMap, path::Path};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::Color;
 use sigil_kernel::{
     AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
     WorkspaceConfig,
 };
 
-use crate::app::AppState;
+use crate::{app::AppState, ui::theme::Theme};
 
 use super::*;
 
@@ -31,6 +30,7 @@ fn test_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
@@ -61,10 +61,11 @@ fn modal_visual_uses_setup_title_palettes_for_model_and_api_key() -> anyhow::Res
     let _ = model_app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     let _ = model_app.handle_key_event(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))?;
     assert_eq!(model_app.modal_title(), Some("Model ID"));
+    let theme = Theme::default();
 
     let model_visual = modal_visual(&model_app);
-    assert_eq!(model_visual.accent, Color::Cyan);
-    assert_eq!(model_visual.command_bg, Color::Rgb(22, 32, 38));
+    assert_eq!(model_visual.accent, theme.palette.accent_info);
+    assert_eq!(model_visual.command_bg, theme.palette.modal_command_bg);
 
     let mut api_app = AppState::from_setup(
         Path::new("sigil.toml").to_path_buf(),
@@ -77,7 +78,7 @@ fn modal_visual_uses_setup_title_palettes_for_model_and_api_key() -> anyhow::Res
     assert_eq!(api_app.modal_title(), Some("API Key"));
 
     let api_visual = modal_visual(&api_app);
-    assert_eq!(api_visual.accent, Color::Yellow);
-    assert_eq!(api_visual.backdrop_border, Color::Rgb(90, 82, 30));
+    assert_eq!(api_visual.accent, theme.palette.accent_warning);
+    assert_eq!(api_visual.backdrop_border, theme.palette.accent_warning);
     Ok(())
 }

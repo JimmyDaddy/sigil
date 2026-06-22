@@ -16,7 +16,8 @@ use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, ControlEntry, JsonlSessionStore, McpServerConfig,
     McpServerStartup, PluginCapability, PluginManifestSnapshot, PluginStateProjection,
     PluginTrustDecision, PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor,
-    SkillRunMode, SkillSource, SkillTrustState, ToolRegistryScope, default_user_config_dir,
+    SkillRunMode, SkillSource, SkillTrustState, ThemeId, ToolRegistryScope,
+    default_user_config_dir,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -356,6 +357,39 @@ impl AppState {
                 ));
                 lines.push(render_config_hint_row(
                     "Turn osc52_clipboard off when clipboard writes are blocked or noisy",
+                ));
+                lines.extend(render_config_selection_details(config_state));
+            }
+            ConfigSection::Appearance => {
+                lines.push("[theme]".to_owned());
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::AppearanceTheme,
+                ));
+                lines.push(render_config_readonly_row(
+                    "Name",
+                    config_state.draft.appearance_theme.display_label(),
+                ));
+                let available = ThemeId::all()
+                    .iter()
+                    .map(|theme| theme.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(render_config_readonly_row("Built-ins", &available));
+                lines.push(render_config_readonly_row(
+                    "Overrides",
+                    &format!(
+                        "{} colors",
+                        config_state.draft.base_root_config.appearance.colors.len()
+                    ),
+                ));
+                lines.push(String::new());
+                lines.push("[scope]".to_owned());
+                lines.push(render_config_hint_row(
+                    "Theme choices affect only the TUI and are not written to session history",
+                ));
+                lines.push(render_config_hint_row(
+                    "Saved themes apply immediately; unsaved draft changes do not preview",
                 ));
                 lines.extend(render_config_selection_details(config_state));
             }
@@ -1007,6 +1041,16 @@ impl AppState {
                                 !config_state.draft.terminal_osc52_clipboard;
                             config_state.dirty = true;
                             self.last_notice = Some(format!("updated {}", field.label()));
+                            return Ok(None);
+                        }
+                        ConfigField::AppearanceTheme => {
+                            config_state.draft.appearance_theme =
+                                config_state.draft.appearance_theme.next();
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!(
+                                "theme -> {}",
+                                config_state.draft.appearance_theme.as_str()
+                            ));
                             return Ok(None);
                         }
                         _ if field.accepts_text_input() => {
@@ -1758,6 +1802,10 @@ impl AppState {
     }
 
     pub(super) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {
+        let appearance_changed = self
+            .config_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.appearance != root_config.appearance);
         self.config_snapshot = Some(root_config.clone());
         self.secret_redactor = sigil_runtime::secret_redactor_for_root_config(root_config);
         self.permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
@@ -1783,6 +1831,9 @@ impl AppState {
             config_state.set_agent_discovery(agents, agent_warnings);
             config_state.set_skill_discovery(skills, warnings);
             config_state.set_plugin_discovery(plugins, plugin_warnings);
+        }
+        if appearance_changed {
+            self.rebuild_timeline_render_cache();
         }
     }
 

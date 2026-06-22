@@ -64,6 +64,8 @@ sigil/
 
 `ui.rs` 是 renderer 模块入口。shell layout、theme、geometry、text、timeline、tool card、markdown、approval、setup/config、modal 等渲染块维护在 `ui/*`。
 
+TUI 主题处理集中在 `crates/sigil-tui/src/ui/theme/`。`sigil-kernel` 只保存 `[appearance]`、`ThemeId` 和原始颜色 override 字符串，保持对 `ratatui` 零依赖；`sigil-tui` 将配置解析为 `ThemePalette`，renderer 通过 `AppState` 的 config snapshot 或 `TimelineRenderOptions` 消费语义 token。主题切换只影响 TUI 外观，不写入 session/control log、approval 记录或 provider-visible context。
+
 ## 用户交互状态
 
 TUI 当前保持 chat-first：

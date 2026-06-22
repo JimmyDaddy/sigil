@@ -14,11 +14,14 @@ use super::{
     },
     markdown::{
         MarkdownRenderOptions, render_code_line_spans_with_bg, render_markdown_timeline_lines,
+        render_markdown_timeline_lines_with_palette,
     },
     primitives::{section_badge, timeline_badge, timeline_content_line, timeline_section_line},
     status_indicator::{StatusIndicator, StatusKind, status_kind_from_label},
     text::truncate_inline_text,
-    theme::{accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink},
+    theme::{
+        ThemePalette, accent_blue, accent_gold, accent_lime, accent_rose, accent_teal, dim, ink,
+    },
 };
 
 const COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS: usize = 4;
@@ -47,7 +50,8 @@ pub(crate) fn render_tool_entry_lines(
     let summary = parse_tool_summary(&entry.text);
     let display = build_tool_card_display(&summary);
     let activity = build_tool_activity_view(&summary, &entry.text);
-    let accent = accent_rose();
+    let palette = &options.theme.palette;
+    let accent = palette.accent_danger;
     let selected = options
         .selected_tool_activity_key
         .as_deref()
@@ -72,22 +76,26 @@ pub(crate) fn render_tool_entry_lines(
             accent,
             vec![Span::styled(
                 summary_line,
-                Style::default().fg(dim()).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(palette.text_muted)
+                    .add_modifier(Modifier::ITALIC),
             )],
         ));
     }
     if tool_has_preview(&summary) {
         if expanded {
-            lines.extend(render_tool_preview_body(
+            lines.extend(render_tool_preview_body_with_palette(
                 &summary,
                 accent,
                 options.max_content_width,
+                palette,
             ));
         } else {
-            lines.extend(render_tool_collapsed_preview_body(
+            lines.extend(render_tool_collapsed_preview_body_with_palette(
                 &summary,
                 accent,
                 options.max_content_width,
+                palette,
             ));
         }
     }
@@ -101,12 +109,23 @@ fn tool_has_preview(summary: &ToolCardRender) -> bool {
         || summary.diff.is_some()
 }
 
+#[cfg(test)]
 fn render_tool_collapsed_preview_body(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
 ) -> Vec<Line<'static>> {
-    let body = render_tool_preview_body(summary, accent, max_content_width);
+    let palette = crate::ui::theme::default_palette();
+    render_tool_collapsed_preview_body_with_palette(summary, accent, max_content_width, &palette)
+}
+
+fn render_tool_collapsed_preview_body_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let body = render_tool_preview_body_with_palette(summary, accent, max_content_width, palette);
     if body.len() <= COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS {
         return body;
     }
@@ -199,10 +218,21 @@ fn tool_title_width(display: &ToolCardDisplay, max_content_width: usize) -> usiz
         .clamp(32, 160)
 }
 
+#[cfg(test)]
 fn render_tool_preview_body(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+) -> Vec<Line<'static>> {
+    let palette = crate::ui::theme::default_palette();
+    render_tool_preview_body_with_palette(summary, accent, max_content_width, &palette)
+}
+
+fn render_tool_preview_body_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     if (tool_name_matches(&summary.tool_name, "ls")
         || tool_name_matches(&summary.tool_name, "glob"))
@@ -230,7 +260,7 @@ fn render_tool_preview_body(
         return lines;
     }
     if tool_name_matches(&summary.tool_name, "read_file") {
-        return render_read_file_preview(summary, accent, max_content_width);
+        return render_read_file_preview_with_palette(summary, accent, max_content_width, palette);
     }
     if code_intelligence_tool(summary) {
         return render_code_intelligence_preview(summary, accent, max_content_width);
@@ -238,10 +268,21 @@ fn render_tool_preview_body(
     render_generic_tool_preview(summary, accent, max_content_width)
 }
 
+#[cfg(test)]
 fn render_read_file_preview(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+) -> Vec<Line<'static>> {
+    let palette = crate::ui::theme::default_palette();
+    render_read_file_preview_with_palette(summary, accent, max_content_width, &palette)
+}
+
+fn render_read_file_preview_with_palette(
+    summary: &ToolCardRender,
+    accent: Color,
+    max_content_width: usize,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![timeline_section_line(
         accent,
@@ -262,18 +303,20 @@ fn render_read_file_preview(
     )];
     match summary.preview_kind {
         ToolPreviewKind::Markdown => {
-            lines.extend(render_markdown_timeline_lines(
+            lines.extend(render_markdown_timeline_lines_with_palette(
                 accent,
-                Style::default().fg(ink()),
+                Style::default().fg(palette.text_primary),
                 &summary.preview_lines.join("\n"),
                 MarkdownRenderOptions::tool_preview(max_content_width),
+                palette,
             ));
         }
         ToolPreviewKind::Json | ToolPreviewKind::Text => {
-            lines.extend(render_code_preview_lines(
+            lines.extend(render_code_preview_lines_with_palette(
                 accent,
                 &summary.preview_lines,
-                Color::Rgb(28, 33, 41),
+                palette.markdown_code_bg,
+                palette,
             ));
         }
     }
@@ -1411,12 +1454,27 @@ fn render_generic_tool_preview(
 }
 
 fn render_code_preview_lines(accent: Color, lines: &[String], bg: Color) -> Vec<Line<'static>> {
+    let palette = crate::ui::theme::default_palette();
+    render_code_preview_lines_with_palette(accent, lines, bg, &palette)
+}
+
+fn render_code_preview_lines_with_palette(
+    accent: Color,
+    lines: &[String],
+    bg: Color,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     lines
         .iter()
         .map(|line| {
             timeline_content_line(
                 accent,
-                render_code_line_spans_with_bg(line, accent_blue(), Style::default().fg(ink()), bg),
+                render_code_line_spans_with_bg(
+                    line,
+                    palette.accent_info,
+                    Style::default().fg(palette.markdown_code_fg),
+                    bg,
+                ),
             )
         })
         .collect()
