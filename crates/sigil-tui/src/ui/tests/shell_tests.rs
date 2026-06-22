@@ -315,6 +315,40 @@ fn render_main_screen_uses_configured_theme_surface() -> anyhow::Result<()> {
 }
 
 #[test]
+fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    for _ in 0..6 {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let backend = TestBackend::new(120, 28);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let expected = Theme::builtin(sigil_kernel::ThemeId::SigilDark.next())
+        .palette
+        .config_bg;
+    let actual = terminal
+        .backend()
+        .buffer()
+        .cell((0, 0))
+        .expect("top-left cell should exist")
+        .bg;
+    assert_eq!(actual, expected);
+    assert_eq!(
+        app.root_config_snapshot()
+            .expect("config snapshot should exist")
+            .appearance
+            .theme,
+        sigil_kernel::ThemeId::SigilDark
+    );
+    Ok(())
+}
+
+#[test]
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
@@ -352,6 +386,29 @@ fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn render_config_step_tabs_keep_selected_section_visible_on_narrow_width() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    for _ in 0..10 {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    }
+    let backend = TestBackend::new(80, 28);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rows = rendered_rows(&terminal);
+    let step_row = rows
+        .iter()
+        .find(|row| row.contains("plugins") && row.contains("mcp"))
+        .expect("current section should remain visible in the section tabs");
+    assert!(step_row.contains("..."));
+    assert!(!step_row.contains("provider"));
     Ok(())
 }
 

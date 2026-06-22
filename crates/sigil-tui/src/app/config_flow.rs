@@ -13,10 +13,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
     AgentProfileSnapshot, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
-    ApprovalMode, CodeIntelStartup, ControlEntry, JsonlSessionStore, McpServerConfig,
-    McpServerStartup, PluginCapability, PluginManifestSnapshot, PluginStateProjection,
-    PluginTrustDecision, PluginTrustEntry, RootConfig, SessionLogEntry, SkillDescriptor,
-    SkillRunMode, SkillSource, SkillTrustState, ThemeId, ToolRegistryScope,
+    AppearanceConfig, ApprovalMode, CodeIntelStartup, ControlEntry, JsonlSessionStore,
+    McpServerConfig, McpServerStartup, PluginCapability, PluginManifestSnapshot,
+    PluginStateProjection, PluginTrustDecision, PluginTrustEntry, RootConfig, SessionLogEntry,
+    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, ThemeId, ToolRegistryScope,
     default_user_config_dir,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
@@ -78,6 +78,13 @@ impl AppState {
             .and_then(|value| value.to_str())
             .unwrap_or("config");
         format!("{section} · {saved} · {config_label}")
+    }
+
+    pub(crate) fn config_preview_appearance(&self) -> Option<AppearanceConfig> {
+        let config_state = self.config_state.as_ref()?;
+        let mut appearance = config_state.draft.base_root_config.appearance.clone();
+        appearance.theme = config_state.draft.appearance_theme;
+        Some(appearance)
     }
 
     pub fn config_selected_footer_action_label(&self) -> Option<&'static str> {
@@ -389,7 +396,7 @@ impl AppState {
                     "Theme choices affect only the TUI and are not written to session history",
                 ));
                 lines.push(render_config_hint_row(
-                    "Saved themes apply immediately; unsaved draft changes do not preview",
+                    "Theme draft previews immediately; Ctrl-S persists it",
                 ));
                 lines.extend(render_config_selection_details(config_state));
             }

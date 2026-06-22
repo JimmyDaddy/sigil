@@ -89,7 +89,8 @@ fn config_header_notice_uses_hint_and_note_chips() {
 
 #[test]
 fn config_step_line_only_highlights_selected_step() {
-    let line = render_config_step_line("[provider] permissions memory", theme::config_primary());
+    let line =
+        render_config_step_line("[provider] permissions memory", theme::config_primary(), 80);
     let text = line_text(&line);
     let selected_width = background_width(&line, theme::config_primary());
     let inactive_width = background_width(&line, theme::config_tab_bg());
@@ -99,6 +100,21 @@ fn config_step_line_only_highlights_selected_step() {
     assert!(text.contains("memory"));
     assert_eq!(selected_width, " provider ".chars().count());
     assert_eq!(inactive_width, 0);
+}
+
+#[test]
+fn config_step_line_keeps_current_tail_section_visible_when_narrow() {
+    let line = render_config_step_line(
+        "provider permissions memory compaction code intel terminal appearance agents skills plugins [mcp]",
+        theme::config_primary(),
+        64,
+    );
+    let text = line_text(&line);
+
+    assert!(text.contains("..."));
+    assert!(text.contains("plugins"));
+    assert!(text.contains(" mcp "));
+    assert!(!text.contains("provider"));
 }
 
 #[test]

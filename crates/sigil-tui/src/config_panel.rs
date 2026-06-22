@@ -328,7 +328,7 @@ impl ConfigField {
                 "Mouse wheel rows per tick for transcript and approval diff scrolling."
             }
             Self::AppearanceTheme => {
-                "Color palette for the TUI. Saved themes apply immediately and do not affect session history."
+                "Color palette for the TUI. Draft themes preview immediately; saving persists the choice and does not affect session history."
             }
             Self::SkillId => {
                 "Selected reusable skill. Up/Down moves through skills; footer actions load or invoke it."

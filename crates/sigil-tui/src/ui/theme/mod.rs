@@ -56,6 +56,9 @@ pub(crate) fn default_palette() -> ThemePalette {
 }
 
 pub(crate) fn resolve_for_app(app: &AppState) -> Theme {
+    if let Some(appearance) = app.config_preview_appearance() {
+        return Theme::from_config_lossy(&appearance);
+    }
     app.root_config_snapshot()
         .map(|config| Theme::from_config_lossy(&config.appearance))
         .unwrap_or_default()

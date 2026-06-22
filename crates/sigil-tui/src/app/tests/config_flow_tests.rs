@@ -645,7 +645,7 @@ fn config_appearance_step_shows_theme_and_scope() {
     assert!(detail.contains("- Overrides: 1 colors"));
     assert!(detail.contains("[scope]"));
     assert!(detail.contains("not written to session history"));
-    assert!(detail.contains("unsaved draft changes do not preview"));
+    assert!(detail.contains("Theme draft previews immediately"));
 }
 
 #[test]
