@@ -19,7 +19,7 @@ use sigil_kernel::{
 use sigil_provider_deepseek::{
     DeepSeekFimCompletionRequest, DeepSeekPrefixCompletionRequest, DeepSeekProvider,
 };
-use sigil_runtime::doctor::{DoctorReport, build_doctor_report};
+use sigil_runtime::doctor::{DoctorReport, DoctorReportOptions, build_doctor_report_with_options};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BuildInfo {
@@ -155,9 +155,23 @@ fn render_version(info: BuildInfo) -> String {
 }
 
 fn doctor_command(config_path: &Path, launch_cwd: &Path) -> Result<()> {
-    let report = build_doctor_report(config_path, launch_cwd);
-    print!("{}", render_doctor_report(&report));
+    print!("{}", render_cli_doctor_report(config_path, launch_cwd));
     Ok(())
+}
+
+fn render_cli_doctor_report(config_path: &Path, launch_cwd: &Path) -> String {
+    let report = build_cli_doctor_report(config_path, launch_cwd);
+    render_doctor_report(&report)
+}
+
+fn build_cli_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorReport {
+    build_doctor_report_with_options(
+        config_path,
+        launch_cwd,
+        DoctorReportOptions {
+            appearance_checks: Some(&sigil_tui::appearance_diagnostics::appearance_doctor_checks),
+        },
+    )
 }
 
 fn render_doctor_report(report: &DoctorReport) -> String {

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs, process::Command, sync::Arc, time::Instant};
+use std::{collections::BTreeSet, fs, sync::Arc, time::Instant};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -17,7 +17,7 @@ use super::{
         diagnostics::{
             attach_diagnostics_context, changed_source_files, check_changed_files_diagnostics,
             collect_nul_paths, diagnostics_paths_from_call, diagnostics_tool_event, duration_ms,
-            ensure_git_workspace, git_output, has_head, is_supported_source_file,
+            ensure_git_workspace, git_command, git_output, has_head, is_supported_source_file,
             permission_block_reason,
         },
     },
@@ -348,9 +348,7 @@ fn changed_source_files_uses_cached_and_untracked_files_without_head() -> Result
     fs::write(workspace_root.join("tracked.rs"), "fn tracked() {}\n")?;
     fs::write(workspace_root.join("untracked.ts"), "export const x = 1;\n")?;
     fs::write(workspace_root.join("ignored.txt"), "ignore me\n")?;
-    let add_status = Command::new("git")
-        .arg("-C")
-        .arg(&workspace_root)
+    let add_status = git_command(&workspace_root)
         .args(["add", "tracked.rs"])
         .status()?;
     assert!(add_status.success());
@@ -847,11 +845,7 @@ fn init_git_repo(workspace_root: &std::path::Path) -> Result<()> {
 }
 
 fn run_git_status(workspace_root: &std::path::Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
-        .args(args)
-        .status()?;
+    let status = git_command(workspace_root).args(args).status()?;
     if !status.success() {
         Err(anyhow!(
             "git {} failed under {}",

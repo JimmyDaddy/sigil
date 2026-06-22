@@ -29,6 +29,7 @@ Report 会展示状态摘要、warning/error 和 remediation line。它会说明
 | `sigil run` 显示需要审批 | Headless mode 不能展示 approval card | [Headless run 里工具需要审批](#headless-run-里工具需要审批) |
 | Approval 消失或被拒绝 | Timeout 或 deny action | [审批被拒绝或超时](#审批被拒绝或超时) |
 | 鼠标或复制不可用 | `/config` 和 `/doctor` 中的 Terminal section | [鼠标或剪贴板不可用](#鼠标或剪贴板不可用) |
+| 主题颜色难以阅读 | `sigil doctor` 或 `/doctor` 中的 appearance warning | [主题颜色难以阅读](#主题颜色难以阅读) |
 | 恢复 session 后显示 interrupted tools | Recovery 投影了未完成工具 | [Session 恢复后显示 Interrupted Tools](#session-恢复后显示-interrupted-tools) |
 | MCP tools 缺失 | Server startup mode 和 lifecycle state | [MCP Server 缺失、失败或 Deferred](#mcp-server-缺失失败或-deferred) |
 | LSP tools 不可用 | Code-intelligence readiness rows | [Code Intelligence 未就绪](#code-intelligence-未就绪) |
@@ -88,6 +89,12 @@ export SIGIL_GEMINI_API_KEY="..."
 `GEMINI_API_KEY` 和 `GOOGLE_API_KEY` 是 Gemini provider 的 fallback。
 
 如果通过 `/config` 保存 key，它会以明文写入 `sigil.toml`。私有本地配置可以这样做，但不要提交。
+
+## 主题颜色难以阅读
+
+运行 `sigil doctor` 或 `/doctor` 并检查 `appearance:*` warning。这些检查覆盖用户可见的文字/背景对比、语义颜色区分度，以及边框和相邻背景之间的结构提示。
+
+移除或编辑 warning 中列出的 `[appearance.colors]` 项，让对应 token 组合有更强对比或更清晰区分。只有在没有覆盖项、或现有覆盖项与新内置主题兼容时，才适合通过 `/config` 切换主题来修复。
 
 ## Workspace 不对
 

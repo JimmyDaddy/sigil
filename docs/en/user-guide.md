@@ -61,7 +61,7 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | Command | Purpose |
 | --- | --- |
 | `/config` | Open the TUI config panel |
-| `/doctor` | Run local setup diagnostics with a summary and remediation list |
+| `/doctor` | Run local setup and appearance diagnostics with a summary and remediation list |
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |

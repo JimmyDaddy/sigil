@@ -161,6 +161,145 @@ fn builtin_themes_keep_core_text_and_ui_contrast_readable() {
 }
 
 #[test]
+fn theme_diagnostics_passes_builtin_themes() {
+    for theme_id in ThemeId::all() {
+        let appearance = AppearanceConfig {
+            theme: *theme_id,
+            colors: ThemeColorOverrides::default(),
+        };
+
+        let report =
+            diagnostics::diagnose_appearance(&appearance).expect("built-in theme should resolve");
+
+        assert!(report.checked > 0);
+        assert!(
+            report.diagnostics.is_empty(),
+            "{theme_id:?} should not emit diagnostics: {:?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn theme_diagnostics_reports_low_contrast_override() {
+    let mut colors = BTreeMap::new();
+    colors.insert("surface_base".to_owned(), "#101010".to_owned());
+    colors.insert("text_primary".to_owned(), "#111111".to_owned());
+    let appearance = AppearanceConfig {
+        theme: ThemeId::SigilDark,
+        colors: ThemeColorOverrides::new(colors),
+    };
+
+    let report = diagnostics::diagnose_appearance(&appearance).expect("override should resolve");
+
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.name == "text-base"
+            && diagnostic.kind == diagnostics::ThemeDiagnosticKind::ContrastPair
+            && diagnostic.metric == diagnostics::ThemeDiagnosticMetric::ContrastRatio
+            && diagnostic.actual < diagnostic.minimum
+    }));
+}
+
+#[test]
+fn theme_diagnostics_reports_surface_pair_override() {
+    let mut colors = BTreeMap::new();
+    colors.insert("surface_input".to_owned(), "#101010".to_owned());
+    colors.insert("text_primary".to_owned(), "#111111".to_owned());
+    let appearance = AppearanceConfig {
+        theme: ThemeId::SigilDark,
+        colors: ThemeColorOverrides::new(colors),
+    };
+
+    let report = diagnostics::diagnose_appearance(&appearance).expect("override should resolve");
+
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.name == "composer-input"
+            && diagnostic.tier == diagnostics::ThemeDiagnosticTier::Surface
+    }));
+}
+
+#[test]
+fn theme_diagnostics_reports_visible_foreground_overrides() {
+    let mut colors = BTreeMap::new();
+    for token in [
+        "markdown_heading",
+        "markdown_link",
+        "diff_header_fg",
+        "diff_hunk_fg",
+        "diff_context_fg",
+        "diff_gutter_fg",
+        "config_warning",
+        "config_danger",
+    ] {
+        colors.insert(token.to_owned(), "#07080A".to_owned());
+    }
+    let appearance = AppearanceConfig {
+        theme: ThemeId::SigilDark,
+        colors: ThemeColorOverrides::new(colors),
+    };
+
+    let report = diagnostics::diagnose_appearance(&appearance).expect("override should resolve");
+
+    for expected in [
+        "markdown-heading",
+        "markdown-link",
+        "diff-header",
+        "diff-hunk",
+        "diff-context",
+        "diff-gutter",
+        "config-warning",
+        "config-danger",
+    ] {
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.name == expected),
+            "{expected} should report a contrast warning"
+        );
+    }
+}
+
+#[test]
+fn theme_diagnostics_reports_semantic_similarity() {
+    let mut colors = BTreeMap::new();
+    colors.insert("status_success".to_owned(), "#445566".to_owned());
+    colors.insert("status_warning".to_owned(), "#445567".to_owned());
+    let appearance = AppearanceConfig {
+        theme: ThemeId::SigilDark,
+        colors: ThemeColorOverrides::new(colors),
+    };
+
+    let report = diagnostics::diagnose_appearance(&appearance).expect("override should resolve");
+
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.name == "status-success-warning"
+            && diagnostic.kind == diagnostics::ThemeDiagnosticKind::SemanticSeparation
+            && diagnostic.metric == diagnostics::ThemeDiagnosticMetric::SrgbDistance
+            && diagnostic.actual < diagnostic.minimum
+    }));
+}
+
+#[test]
+fn theme_diagnostics_reports_structural_cue_warning() {
+    let mut colors = BTreeMap::new();
+    colors.insert("border_subtle".to_owned(), "#202020".to_owned());
+    colors.insert("surface_panel".to_owned(), "#202020".to_owned());
+    let appearance = AppearanceConfig {
+        theme: ThemeId::SigilDark,
+        colors: ThemeColorOverrides::new(colors),
+    };
+
+    let report = diagnostics::diagnose_appearance(&appearance).expect("override should resolve");
+
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.name == "border-subtle-panel"
+            && diagnostic.kind == diagnostics::ThemeDiagnosticKind::StructuralCue
+            && diagnostic.tier == diagnostics::ThemeDiagnosticTier::Structural
+    }));
+}
+
+#[test]
 fn color_token_allowlist_contains_documented_core_tokens() {
     for token in [
         "surface_base",

@@ -16,7 +16,7 @@ fn relative_luminance(color: Color) -> Option<f32> {
     Some(0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue))
 }
 
-fn rgb(color: Color) -> Option<(f32, f32, f32)> {
+pub(crate) fn rgb(color: Color) -> Option<(f32, f32, f32)> {
     match color {
         Color::Rgb(red, green, blue) => Some((
             red as f32 / 255.0,

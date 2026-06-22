@@ -1,10 +1,19 @@
-use sigil_runtime::doctor::{DoctorReport, DoctorStatus, build_doctor_report};
+use sigil_runtime::doctor::{
+    DoctorReport, DoctorReportOptions, DoctorStatus, build_doctor_report_with_options,
+};
 
 use super::{AppState, TimelineRole};
+use crate::appearance_diagnostics::appearance_doctor_checks;
 
 impl AppState {
     pub(super) fn show_doctor_report(&mut self) {
-        let report = build_doctor_report(&self.config_path, &self.workspace_root);
+        let report = build_doctor_report_with_options(
+            &self.config_path,
+            &self.workspace_root,
+            DoctorReportOptions {
+                appearance_checks: Some(&appearance_doctor_checks),
+            },
+        );
         let status = report.overall_status().as_str();
         self.last_notice = Some(format!("doctor: {status}"));
         self.push_event("doctor", status);

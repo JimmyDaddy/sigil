@@ -1,6 +1,7 @@
 mod builtin;
 #[allow(dead_code)]
 pub(crate) mod contrast;
+pub(crate) mod diagnostics;
 mod overrides;
 mod palette;
 pub(crate) mod styles;

@@ -82,6 +82,80 @@ fn doctor_reports_invalid_config_parse_error() -> Result<()> {
 }
 
 #[test]
+fn doctor_report_options_injects_appearance_checks() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+api_key = "test-secret-key"
+"#,
+    )?;
+
+    let report = build_doctor_report_with_options(
+        &config_path,
+        &workspace,
+        DoctorReportOptions {
+            appearance_checks: Some(&|appearance| {
+                vec![DoctorCheck {
+                    status: DoctorStatus::Warn,
+                    name: "appearance:test".to_owned(),
+                    message: format!("theme={}", appearance.theme.as_str()),
+                    remediation: Some("fix appearance".to_owned()),
+                }]
+            }),
+        },
+    );
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "appearance:test"
+            && check.status == DoctorStatus::Warn
+            && check.message == "theme=sigil_dark"
+    }));
+    Ok(())
+}
+
+#[test]
+fn doctor_default_report_keeps_empty_appearance_extension() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+api_key = "test-secret-key"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(
+        report
+            .checks
+            .iter()
+            .all(|check| !check.name.starts_with("appearance:"))
+    );
+    Ok(())
+}
+
+#[test]
 fn doctor_reports_valid_config_without_leaking_plaintext_secret() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().to_path_buf();
