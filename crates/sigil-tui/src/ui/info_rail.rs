@@ -10,8 +10,8 @@ use crate::view_model::InfoRailViewModel;
 
 use super::{
     geometry::inset_rect,
-    primitives::section_badge,
-    status_indicator::{indicator_styles, render_marker_symbol},
+    primitives::section_badge_with_palette,
+    status_indicator::{indicator_styles_with_palette, render_marker_symbol},
     text::truncate_display_width,
     theme::Theme,
 };
@@ -148,7 +148,11 @@ fn push_info_section<I>(
 ) where
     I: IntoIterator<Item = String>,
 {
-    lines.push(Line::from(vec![section_badge(title, accent)]));
+    lines.push(Line::from(vec![section_badge_with_palette(
+        title,
+        accent,
+        &theme.palette,
+    )]));
     for value in values {
         lines.push(render_info_line_with_theme(&value, width, theme));
     }
@@ -165,7 +169,7 @@ fn render_info_line_with_theme(value: &str, width: usize, theme: &Theme) -> Line
     let palette = &theme.palette;
     let clipped = truncate_display_width(value, width.saturating_sub(2).max(1));
     if let Some((marker, after_marker)) = clipped.split_once(' ')
-        && let Some((marker_style, _)) = indicator_styles(marker)
+        && let Some((marker_style, _)) = indicator_styles_with_palette(marker, palette)
         && let Some((label, rest)) = after_marker.split_once(": ")
     {
         let mut spans = vec![
@@ -199,7 +203,7 @@ fn render_info_line_with_theme(value: &str, width: usize, theme: &Theme) -> Line
     }
 
     if let Some((marker, rest)) = clipped.split_once(' ')
-        && let Some((marker_style, rest_style)) = indicator_styles(marker)
+        && let Some((marker_style, rest_style)) = indicator_styles_with_palette(marker, palette)
     {
         let marker = render_marker_symbol(marker);
         return Line::from(vec![
@@ -216,8 +220,9 @@ fn render_info_line_with_theme(value: &str, width: usize, theme: &Theme) -> Line
 }
 
 fn render_info_value_spans(value: &str, theme: &Theme) -> Vec<Span<'static>> {
+    let palette = &theme.palette;
     if let Some((marker, rest)) = value.split_once(' ')
-        && let Some((marker_style, rest_style)) = indicator_styles(marker)
+        && let Some((marker_style, rest_style)) = indicator_styles_with_palette(marker, palette)
     {
         return vec![
             Span::styled(render_marker_symbol(marker).to_owned(), marker_style),

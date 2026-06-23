@@ -5,7 +5,8 @@ use std::{
 };
 
 use sigil_kernel::{
-    McpServerConfig, McpServerStartup, RootConfig, config::TerminalConfig, resolve_workspace_root,
+    AppearanceConfig, McpServerConfig, McpServerStartup, RootConfig, config::TerminalConfig,
+    resolve_workspace_root,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -96,9 +97,28 @@ impl DoctorReport {
     }
 }
 
+/// Entrypoint-supplied appearance diagnostics hook.
+pub type AppearanceDoctorChecks = dyn Fn(&AppearanceConfig) -> Vec<DoctorCheck>;
+
+/// Optional diagnostics supplied by higher-level entrypoints.
+#[derive(Clone, Copy, Default)]
+pub struct DoctorReportOptions<'a> {
+    pub appearance_checks: Option<&'a AppearanceDoctorChecks>,
+}
+
 /// Builds a local diagnostics report without starting providers or MCP servers.
 #[must_use]
 pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorReport {
+    build_doctor_report_with_options(config_path, launch_cwd, DoctorReportOptions::default())
+}
+
+/// Builds a local diagnostics report with entrypoint-specific extension checks.
+#[must_use]
+pub fn build_doctor_report_with_options(
+    config_path: &Path,
+    launch_cwd: &Path,
+    options: DoctorReportOptions<'_>,
+) -> DoctorReport {
     let mut report = DoctorReport::default();
     report.push(
         DoctorStatus::Ok,
@@ -133,6 +153,12 @@ pub fn build_doctor_report(config_path: &Path, launch_cwd: &Path) -> DoctorRepor
             return report;
         }
     };
+
+    if let Some(appearance_checks) = options.appearance_checks {
+        report
+            .checks
+            .extend(appearance_checks(&root_config.appearance));
+    }
 
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);

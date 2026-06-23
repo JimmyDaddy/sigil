@@ -29,6 +29,7 @@ Start here when you know the symptom:
 | `sigil run` says approval is required | Headless mode cannot show approval cards | [A Tool Needs Approval In Headless run](#a-tool-needs-approval-in-headless-run) |
 | Approval disappeared or was denied | Timeout or deny action | [An Approval Was Denied Or Timed Out](#an-approval-was-denied-or-timed-out) |
 | Mouse or copy does not work | Terminal section in `/config` and `/doctor` | [Mouse Or Clipboard Does Not Work](#mouse-or-clipboard-does-not-work) |
+| Theme colors are hard to read | Appearance warnings in `sigil doctor` or `/doctor` | [Theme Colors Are Hard To Read](#theme-colors-are-hard-to-read) |
 | Restored session shows interrupted tools | Recovery projected unfinished tools | [Session Restore Shows Interrupted Tools](#session-restore-shows-interrupted-tools) |
 | MCP tools are missing | Server startup mode and lifecycle state | [MCP Server Is Missing, Failed, Or Deferred](#mcp-server-is-missing-failed-or-deferred) |
 | LSP tools are unavailable | Code-intelligence readiness rows | [Code Intelligence Is Not Ready](#code-intelligence-is-not-ready) |
@@ -88,6 +89,12 @@ export SIGIL_GEMINI_API_KEY="..."
 `GEMINI_API_KEY` and `GOOGLE_API_KEY` are read as fallbacks for the Gemini provider.
 
 If you saved a key in `/config`, it is stored as plaintext in `sigil.toml`. That can be acceptable for a private local config, but do not commit it.
+
+## Theme Colors Are Hard To Read
+
+Run `sigil doctor` or `/doctor` and check `appearance:*` warnings. These checks cover user-visible text/surface contrast, semantic color separation, and structural cues such as borders against nearby surfaces.
+
+Remove or edit the listed `[appearance.colors]` entries so the warning's token pair has stronger contrast or clearer separation. Switching themes in `/config` can help when no overrides remain, or when the existing overrides are compatible with the new built-in theme.
 
 ## The Wrong Workspace Is Being Used
 

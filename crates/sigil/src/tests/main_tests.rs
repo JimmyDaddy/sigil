@@ -24,8 +24,8 @@ use tokio::{
 use super::{
     BuildInfo, Cli, Commands, DEFAULT_HTTP_TOKEN_ENV, ServeOptions, ServeStartupPlan,
     StdoutEventHandler, build_serve_startup_plan, default_session_path, drain_provider_stream,
-    render_doctor_report, render_provider_chunk, render_run_event, render_serve_startup_plan,
-    render_version, resolve_workspace_root, serve_command,
+    render_cli_doctor_report, render_doctor_report, render_provider_chunk, render_run_event,
+    render_serve_startup_plan, render_version, resolve_workspace_root, serve_command,
 };
 
 fn boxed_chunk_stream(
@@ -518,6 +518,28 @@ fn doctor_command_renders_report_for_missing_config() -> Result<()> {
     let workspace = create_test_workspace("doctor-command");
 
     super::doctor_command(&workspace.join("missing.toml"), &workspace)
+}
+
+#[test]
+fn doctor_command_report_includes_appearance_warnings() -> Result<()> {
+    let workspace = create_test_workspace("doctor-appearance");
+    let config_path = workspace.join("sigil.toml");
+    write_test_config(&config_path, "https://example.com")?;
+    let mut config = fs::read_to_string(&config_path)?;
+    config.push_str(
+        r##"
+[appearance.colors]
+surface_base = "#101010"
+text_primary = "#101010"
+"##,
+    );
+    fs::write(&config_path, config)?;
+
+    let output = render_cli_doctor_report(&config_path, &workspace);
+
+    assert!(output.contains("[warn] appearance:contrast:text-base"));
+    assert!(output.contains("text_primary on surface_base"));
+    Ok(())
 }
 
 #[tokio::test]

@@ -16,7 +16,10 @@ use super::{
         MarkdownRenderOptions, render_code_line_spans_with_bg,
         render_markdown_timeline_lines_with_palette,
     },
-    primitives::{section_badge, timeline_badge, timeline_content_line, timeline_section_line},
+    primitives::{
+        section_badge_with_palette, timeline_badge_with_palette, timeline_content_line,
+        timeline_section_line_with_palette,
+    },
     status_indicator::{StatusIndicator, StatusKind, status_kind_from_label},
     text::truncate_inline_text,
     theme::ThemePalette,
@@ -293,7 +296,7 @@ fn render_read_file_preview_with_palette(
     max_content_width: usize,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         if summary.preview_kind == ToolPreviewKind::Markdown {
             "doc"
@@ -309,6 +312,7 @@ fn render_read_file_preview_with_palette(
             },
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     match summary.preview_kind {
         ToolPreviewKind::Markdown => {
@@ -355,7 +359,7 @@ fn render_path_list_preview_with_palette(
         .or_else(|| Some(infer_string_list_preview(&summary.preview_lines)))
         .filter(|entries| !entries.is_empty())?;
 
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         if tool_name_matches(&summary.tool_name, "glob") {
             "matches"
@@ -367,6 +371,7 @@ fn render_path_list_preview_with_palette(
             format!("{} paths", entries.len() + summary.hidden_lines),
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     for path in entries {
         lines.push(timeline_content_line(
@@ -415,7 +420,7 @@ fn render_grep_preview_with_palette(
         }
     }
 
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         "matches",
         palette.accent_info,
@@ -423,12 +428,13 @@ fn render_grep_preview_with_palette(
             format!("{} files", grouped.len()),
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     for (path, rows) in grouped {
         lines.push(timeline_content_line(
             accent,
             vec![
-                section_badge("file", palette.accent_secondary),
+                section_badge_with_palette("file", palette.accent_secondary, palette),
                 Span::raw(" "),
                 Span::styled(
                     path,
@@ -488,7 +494,7 @@ fn render_bash_preview_with_palette(
         (None, Some(code)) => format!("exit {code}"),
         (None, None) => "terminal tail".to_owned(),
     };
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         section,
         palette.accent_warning,
@@ -496,6 +502,7 @@ fn render_bash_preview_with_palette(
             subtitle,
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     if summary.preview_lines.is_empty() {
         lines.push(timeline_content_line(
@@ -533,7 +540,7 @@ fn render_terminal_task_preview_with_palette(
         .map(|command| truncate_inline_text(command, 120))
         .or_else(|| summary.metadata.terminal_log_path.clone())
         .unwrap_or_else(|| "terminal task".to_owned());
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         "terminal",
         palette.accent_warning,
@@ -541,12 +548,13 @@ fn render_terminal_task_preview_with_palette(
             subtitle,
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     if let Some(log_path) = &summary.metadata.terminal_log_path {
         lines.push(timeline_content_line(
             accent,
             vec![
-                section_badge("log", palette.accent_secondary),
+                section_badge_with_palette("log", palette.accent_secondary, palette),
                 Span::raw(" "),
                 Span::styled(log_path.clone(), Style::default().fg(palette.text_muted)),
             ],
@@ -661,7 +669,7 @@ fn render_file_change_preview_with_palette(
     }
     let mut lines = Vec::new();
     if !summary.metadata.changed_files.is_empty() {
-        lines.push(timeline_section_line(
+        lines.push(timeline_section_line_with_palette(
             accent,
             "files",
             palette.accent_info,
@@ -673,6 +681,7 @@ fn render_file_change_preview_with_palette(
                 ),
                 Style::default().fg(palette.text_muted),
             )],
+            palette,
         ));
         for path in &summary.metadata.changed_files {
             lines.push(timeline_content_line(
@@ -695,7 +704,7 @@ fn render_file_change_preview_with_palette(
         ));
     }
     if !summary.preview_lines.is_empty() {
-        lines.push(timeline_section_line(
+        lines.push(timeline_section_line_with_palette(
             accent,
             "result",
             palette.accent_warning,
@@ -703,6 +712,7 @@ fn render_file_change_preview_with_palette(
                 file_change_result_label(summary),
                 Style::default().fg(palette.text_muted),
             )],
+            palette,
         ));
         lines.extend(render_code_preview_lines_with_palette(
             accent,
@@ -760,7 +770,7 @@ fn render_code_intelligence_preview_with_palette(
         .and_then(Value::as_u64)
         .or(summary.metadata.total_entries)
         .unwrap_or(returned);
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         code_intelligence_section(summary),
         palette.accent_info,
@@ -773,6 +783,7 @@ fn render_code_intelligence_preview_with_palette(
             ),
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     if let Some(server_line) = code_intelligence_servers_line_with_palette(value, palette) {
         lines.push(timeline_content_line(accent, server_line));
@@ -853,9 +864,10 @@ fn code_intelligence_row_with_palette(
             .and_then(Value::as_str)
             .map(str::to_owned);
         let mut spans = vec![
-            section_badge(
+            section_badge_with_palette(
                 &severity,
                 diagnostic_severity_color_with_palette(&severity, palette),
+                palette,
             ),
             Span::raw(" "),
             Span::styled(
@@ -891,7 +903,7 @@ fn code_intelligence_row_with_palette(
             "inspect"
         };
         return Some(vec![
-            section_badge(&label, palette.accent_secondary),
+            section_badge_with_palette(&label, palette.accent_secondary, palette),
             Span::raw(" "),
             Span::styled(capability, Style::default().fg(palette.accent_info)),
             Span::raw(" "),
@@ -923,7 +935,7 @@ fn code_intelligence_row_with_palette(
         .unwrap_or("")
         .to_owned();
     let mut spans = vec![
-        section_badge(&label, palette.accent_secondary),
+        section_badge_with_palette(&label, palette.accent_secondary, palette),
         Span::raw(" "),
         Span::styled(
             code_location_label(&path, entry),
@@ -1014,7 +1026,7 @@ fn code_intelligence_servers_line_with_palette(
         return None;
     }
     Some(vec![
-        section_badge("servers", palette.accent_info),
+        section_badge_with_palette("servers", palette.accent_info, palette),
         Span::raw(" "),
         Span::styled(labels.join(" · "), Style::default().fg(palette.text_muted)),
     ])
@@ -1104,7 +1116,7 @@ fn render_agent_result_page_preview(
     _max_content_width: usize,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         "result",
         palette.accent_info,
@@ -1112,6 +1124,7 @@ fn render_agent_result_page_preview(
             agent_result_page_summary(summary).unwrap_or_else(|| "agent result page".to_owned()),
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     lines.extend(render_agent_status_preview(summary, accent, palette));
     lines
@@ -1123,7 +1136,7 @@ fn render_agent_summary_preview(
     max_content_width: usize,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         "summary",
         palette.accent_info,
@@ -1131,6 +1144,7 @@ fn render_agent_summary_preview(
             agent_status_detail(summary),
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     lines.extend(render_markdown_timeline_lines_with_palette(
         accent,
@@ -1176,11 +1190,12 @@ fn render_agent_status_preview(
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         "agent",
         palette.accent_info,
         details,
+        palette,
     )];
     if let Some(reason) =
         agent_payload_string(summary, "reason").filter(|reason| !reason.is_empty())
@@ -1395,7 +1410,7 @@ fn render_tool_diff_preview_with_palette(
     accent: Color,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         "diff",
         palette.accent_warning,
@@ -1403,12 +1418,17 @@ fn render_tool_diff_preview_with_palette(
             diff.summary.clone(),
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
     for file in &diff.files {
         lines.push(timeline_content_line(
             accent,
             vec![
-                timeline_badge(tool_diff_file_label(summary, file), palette.accent_info),
+                timeline_badge_with_palette(
+                    tool_diff_file_label(summary, file),
+                    palette.accent_info,
+                    palette,
+                ),
                 Span::raw(" "),
                 Span::styled(file.path.clone(), Style::default().fg(palette.text_primary)),
                 Span::raw(" "),
@@ -1582,7 +1602,7 @@ fn render_generic_tool_preview_with_palette(
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     if let Some(value) = &summary.preview_value {
-        lines.push(timeline_section_line(
+        lines.push(timeline_section_line_with_palette(
             accent,
             "tree",
             palette.accent_info,
@@ -1590,6 +1610,7 @@ fn render_generic_tool_preview_with_palette(
                 "structured payload",
                 Style::default().fg(palette.text_muted),
             )],
+            palette,
         ));
         for line in render_json_tree_preview(value) {
             lines.push(timeline_content_line(
@@ -1603,7 +1624,7 @@ fn render_generic_tool_preview_with_palette(
             ));
         }
     } else if summary.preview_kind == ToolPreviewKind::Markdown {
-        lines.push(timeline_section_line(
+        lines.push(timeline_section_line_with_palette(
             accent,
             "md",
             palette.accent_info,
@@ -1611,6 +1632,7 @@ fn render_generic_tool_preview_with_palette(
                 "formatted preview",
                 Style::default().fg(palette.text_muted),
             )],
+            palette,
         ));
         lines.extend(render_markdown_timeline_lines_with_palette(
             accent,
@@ -1620,7 +1642,7 @@ fn render_generic_tool_preview_with_palette(
             palette,
         ));
     } else {
-        lines.push(timeline_section_line(
+        lines.push(timeline_section_line_with_palette(
             accent,
             summary.preview_kind.label(),
             palette.accent_info,
@@ -1628,6 +1650,7 @@ fn render_generic_tool_preview_with_palette(
                 summary.preview_kind.description(),
                 Style::default().fg(palette.text_muted),
             )],
+            palette,
         ));
         lines.extend(render_code_preview_lines_with_palette(
             accent,

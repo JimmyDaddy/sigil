@@ -507,6 +507,44 @@ fn render_config_line_routes_warning_meta_field_and_muted_variants() {
 #[test]
 fn render_config_line_styles_theme_preview_with_current_palette() {
     let palette = theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight).palette;
+    let compare = render_config_line_with_palette(
+        2,
+        "preview compare: current sigil_dark -> draft solarized_light (unsaved draft)",
+        80,
+        &palette,
+    );
+    let page = render_config_line_with_palette(
+        2,
+        "preview page: rail timeline composer tool modal",
+        80,
+        &palette,
+    );
+    let shell = render_config_line_with_palette(
+        2,
+        "preview shell: rail live composer footer",
+        80,
+        &palette,
+    );
+    let composer = render_config_line_with_palette(
+        2,
+        "preview composer: Build · agent: main · deepseek-v4-flash",
+        80,
+        &palette,
+    );
+    let tool = render_config_line_with_palette(
+        2,
+        "preview tool: read_file ✓ ok · doc excerpt · 2 hidden",
+        80,
+        &palette,
+    );
+    let modal = render_config_line_with_palette(
+        2,
+        "preview modal: Review Tool Call allow deny selected",
+        80,
+        &palette,
+    );
+    let token =
+        render_config_line_with_palette(2, "preview token: surface_base #010203", 80, &palette);
     let text =
         render_config_line_with_palette(2, "preview text: primary secondary muted", 80, &palette);
     let selection =
@@ -534,6 +572,51 @@ fn render_config_line_styles_theme_preview_with_current_palette() {
     let unknown = render_theme_preview_line_with_palette("preview custom: fallback", 80, &palette)
         .expect("unknown preview should render as text");
 
+    assert_eq!(
+        span_style(&compare, "draft").bg,
+        Some(palette.config_primary)
+    );
+    assert_eq!(span_style(&page, "rail").bg, Some(palette.surface_rail));
+    assert_eq!(span_style(&page, "timeline").bg, Some(palette.surface_base));
+    assert_eq!(span_style(&page, "tool").bg, Some(palette.markdown_code_bg));
+    assert_eq!(
+        span_style(&page, "modal").bg,
+        Some(palette.approval_selected_bg)
+    );
+    assert_eq!(span_style(&shell, "rail").bg, Some(palette.surface_rail));
+    assert_eq!(
+        span_style(&shell, "composer").bg,
+        Some(palette.surface_panel)
+    );
+    assert_eq!(
+        span_style(&composer, "Build").fg,
+        Some(palette.accent_streaming)
+    );
+    assert_eq!(
+        span_style(&composer, "agent: main").bg,
+        Some(palette.surface_agent_panel)
+    );
+    assert_eq!(span_style(&tool, "✓ ok").fg, Some(palette.status_success));
+    assert_eq!(
+        span_style(&tool, "doc excerpt").bg,
+        Some(palette.markdown_code_bg)
+    );
+    assert_eq!(
+        span_style(&modal, "Review Tool Call").bg,
+        Some(palette.approval_selected_bg)
+    );
+    assert_eq!(
+        span_style(&modal, "deny").bg,
+        Some(palette.approval_deny_bg)
+    );
+    assert_eq!(
+        span_style(&token, "surface_base").bg,
+        Some(palette.config_section_bg)
+    );
+    assert_eq!(
+        span_style(&token, "#010203").bg,
+        Some(palette.markdown_code_bg)
+    );
     assert_eq!(span_style(&text, "primary").fg, Some(palette.text_primary));
     assert_eq!(
         span_style(&text, "secondary").fg,

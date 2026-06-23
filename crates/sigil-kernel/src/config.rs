@@ -222,6 +222,18 @@ impl ThemeColorOverrides {
         self.values.get(key).map(String::as_str)
     }
 
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) -> Option<String> {
+        self.values.insert(key.into(), value.into())
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<String> {
+        self.values.remove(key)
+    }
+
+    pub fn clear(&mut self) {
+        self.values.clear();
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.values
             .iter()

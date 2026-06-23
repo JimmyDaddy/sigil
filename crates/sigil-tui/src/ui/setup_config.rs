@@ -967,7 +967,7 @@ fn render_theme_preview_line_with_palette(
     palette: &ThemePalette,
 ) -> Option<Line<'static>> {
     let rest = line.strip_prefix("preview ")?;
-    let (kind, _samples) = rest.split_once(':')?;
+    let (kind, samples) = rest.split_once(':')?;
     let mut remaining = content_width;
     let mut spans = Vec::new();
     if !push_theme_preview_span(
@@ -1001,6 +1001,253 @@ fn render_theme_preview_line_with_palette(
     }
 
     match kind {
+        "compare" => {
+            if let Some((current, draft)) = theme_preview_compare_values(samples) {
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    "current",
+                    Style::default()
+                        .fg(palette.text_muted)
+                        .bg(palette.config_tab_bg)
+                        .add_modifier(Modifier::BOLD),
+                );
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    current,
+                    Style::default().fg(palette.text_secondary),
+                );
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    "->",
+                    Style::default().fg(palette.text_muted),
+                );
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    "draft",
+                    Style::default()
+                        .fg(palette.button_selected_fg)
+                        .bg(palette.config_primary)
+                        .add_modifier(Modifier::BOLD),
+                );
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    draft,
+                    Style::default()
+                        .fg(palette.text_primary)
+                        .add_modifier(Modifier::BOLD),
+                );
+            } else {
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    samples.trim(),
+                    Style::default().fg(palette.text_secondary),
+                );
+            }
+        }
+        "page" => {
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "rail",
+                Style::default()
+                    .fg(palette.text_primary)
+                    .bg(palette.surface_rail)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "timeline",
+                Style::default()
+                    .fg(palette.text_primary)
+                    .bg(palette.surface_base),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "composer",
+                Style::default()
+                    .fg(palette.text_primary)
+                    .bg(palette.surface_input),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "tool",
+                Style::default()
+                    .fg(palette.markdown_code_fg)
+                    .bg(palette.markdown_code_bg),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "modal",
+                Style::default()
+                    .fg(palette.text_inverse)
+                    .bg(palette.approval_selected_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+        "shell" => {
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "rail",
+                Style::default()
+                    .fg(palette.text_primary)
+                    .bg(palette.surface_rail),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "live",
+                Style::default()
+                    .fg(palette.text_primary)
+                    .bg(palette.surface_base),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "composer",
+                Style::default()
+                    .fg(palette.text_primary)
+                    .bg(palette.surface_panel),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "footer",
+                Style::default()
+                    .fg(palette.text_secondary)
+                    .bg(palette.surface_panel_alt),
+            );
+        }
+        "composer" => {
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "Build",
+                Style::default()
+                    .fg(palette.accent_streaming)
+                    .bg(palette.surface_panel)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "agent: main",
+                Style::default()
+                    .fg(palette.accent_info)
+                    .bg(palette.surface_agent_panel)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "deepseek-v4-flash",
+                Style::default()
+                    .fg(palette.text_primary)
+                    .bg(palette.surface_input),
+            );
+        }
+        "tool" => {
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "read_file",
+                Style::default()
+                    .fg(palette.accent_info)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_theme_preview_status_sample(
+                &mut spans,
+                &mut remaining,
+                StatusKind::Success,
+                "ok",
+                palette,
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "doc excerpt",
+                Style::default()
+                    .fg(palette.markdown_code_fg)
+                    .bg(palette.markdown_code_bg),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "2 hidden",
+                Style::default().fg(palette.text_muted),
+            );
+        }
+        "modal" => {
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "Review Tool Call",
+                Style::default()
+                    .fg(palette.text_inverse)
+                    .bg(palette.approval_selected_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "allow",
+                Style::default()
+                    .fg(palette.button_selected_fg)
+                    .bg(palette.approval_allow_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "deny",
+                Style::default()
+                    .fg(palette.button_selected_fg)
+                    .bg(palette.approval_deny_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                "selected",
+                Style::default()
+                    .fg(palette.button_selected_fg)
+                    .bg(palette.approval_selected_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
+        "token" => {
+            let mut parts = samples.split_whitespace();
+            let token = parts.next().unwrap_or("token");
+            let value = parts.next().unwrap_or("inherited");
+            push_theme_preview_sample(
+                &mut spans,
+                &mut remaining,
+                token,
+                Style::default()
+                    .fg(palette.config_primary)
+                    .bg(palette.config_section_bg)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let value_style = if value == "inherited" {
+                Style::default().fg(palette.text_muted)
+            } else {
+                Style::default()
+                    .fg(palette.markdown_code_fg)
+                    .bg(palette.markdown_code_bg)
+                    .add_modifier(Modifier::BOLD)
+            };
+            push_theme_preview_sample(&mut spans, &mut remaining, value, value_style);
+        }
         "text" => {
             push_theme_preview_sample(
                 &mut spans,
@@ -1161,6 +1408,12 @@ fn render_theme_preview_line_with_palette(
     }
 
     Some(Line::from(spans))
+}
+
+fn theme_preview_compare_values(samples: &str) -> Option<(&str, &str)> {
+    let rest = samples.trim().strip_prefix("current ")?;
+    let (current, draft) = rest.split_once(" -> draft ")?;
+    Some((current.trim(), draft.trim()))
 }
 
 fn push_theme_preview_status_sample(

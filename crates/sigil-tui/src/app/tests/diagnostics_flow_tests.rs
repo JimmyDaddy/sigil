@@ -1,4 +1,7 @@
+use std::collections::BTreeMap;
+
 use serde_json::json;
+use sigil_kernel::ThemeColorOverrides;
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tempfile::tempdir;
 
@@ -38,12 +41,40 @@ fn doctor_slash_command_renders_runtime_report_without_secret() -> anyhow::Resul
         .expect("doctor report should be rendered")
         .text
         .clone();
-    assert!(rendered.contains("[ok] config:load - config parsed"));
+    assert!(rendered.contains("[ok] config:load\n  config parsed"));
     assert!(rendered.contains("summary:"));
     assert!(rendered.contains("needs attention:"));
     assert!(rendered.contains("provider:auth"));
     assert!(rendered.contains("fix: prefer SIGIL_API_KEY"));
     assert!(!rendered.contains("super-secret-test-key"));
+    Ok(())
+}
+
+#[test]
+fn doctor_slash_command_renders_appearance_warnings() -> anyhow::Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let mut config = test_config();
+    let mut colors = BTreeMap::new();
+    colors.insert("surface_base".to_owned(), "#101010".to_owned());
+    colors.insert("text_primary".to_owned(), "#101010".to_owned());
+    config.appearance.colors = ThemeColorOverrides::new(colors);
+    config.save(&config_path)?;
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.input = "/doctor".to_owned();
+
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    let rendered = app
+        .timeline
+        .iter()
+        .find(|entry| entry.role == TimelineRole::Notice && entry.text.starts_with("doctor:"))
+        .expect("doctor report should be rendered")
+        .text
+        .clone();
+    assert!(rendered.contains("appearance:contrast:text-base"));
+    assert!(rendered.contains("text_primary on surface_base"));
     Ok(())
 }
 
@@ -69,11 +100,10 @@ fn render_doctor_report_includes_summary_and_check_lines() {
     let rendered = render_doctor_report(&report);
 
     assert!(rendered.starts_with("doctor: warn\nsummary: 0 error · 1 warn · 1 ok"));
-    assert!(rendered.contains("needs attention:\n- [warn] terminal - TERM is not set"));
+    assert!(rendered.contains("needs attention:\n- [warn] terminal\n  TERM is not set"));
     assert!(rendered.contains("  fix: set TERM in the shell before launching the TUI"));
-    assert!(rendered.contains("checks:\n[ok] config:load - config parsed"));
-    assert!(rendered.contains("[warn] terminal - TERM is not set"));
-    assert!(rendered.contains("    fix: set TERM in the shell before launching the TUI"));
+    assert!(rendered.contains("checks:\n[ok] config:load\n  config parsed"));
+    assert!(rendered.contains("[warn] terminal\n  TERM is not set"));
 }
 
 #[test]

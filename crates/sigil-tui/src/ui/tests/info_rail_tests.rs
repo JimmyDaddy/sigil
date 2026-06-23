@@ -179,3 +179,27 @@ fn render_info_line_formats_labels_markers_and_plain_values() {
     assert_eq!(plain.spans[1].content.as_ref(), "plain value");
     assert_eq!(plain.spans[1].style, Style::default().fg(super::ink()));
 }
+
+#[test]
+fn render_info_line_with_theme_uses_configured_palette_for_markers() {
+    let theme = crate::ui::theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight);
+    let palette = theme.palette.clone();
+
+    let completed = render_info_line_with_theme("✓ ready", 32, &theme);
+    assert_eq!(completed.spans[1].content.as_ref(), "✓ ");
+    assert_eq!(
+        completed.spans[1].style,
+        Style::default().fg(palette.status_success)
+    );
+    assert_eq!(
+        completed.spans[2].style,
+        Style::default().fg(palette.status_success)
+    );
+
+    let labeled = render_info_line_with_theme("mode: ✓ ready", 32, &theme);
+    assert_eq!(labeled.spans[3].content.as_ref(), "✓");
+    assert_eq!(
+        labeled.spans[3].style,
+        Style::default().fg(palette.status_success)
+    );
+}

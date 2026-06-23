@@ -34,8 +34,9 @@ fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
     assert!(rendered.contains("deepseek"));
     assert!(rendered.contains("max"));
     assert!(!rendered.contains("Composer"));
-    assert_eq!(content[0].symbol(), "─");
+    assert_eq!(content[0].symbol(), " ");
     assert_eq!(content[1].symbol(), "▌");
+    assert_eq!(content[3].symbol(), "─");
     assert_eq!(content[width + 3].symbol(), "B");
     assert_eq!(content[(2 * width) + 3].symbol(), " ");
     assert_eq!(content[(3 * width) + 3].symbol(), "/");
@@ -201,6 +202,11 @@ fn composer_helpers_cover_zero_width_and_agent_row_styles() -> anyhow::Result<()
     assert_eq!(
         composer_input_area(Rect::new(0, 0, 2, 5), 1),
         Rect::default()
+    );
+    assert_eq!(panel_separator_area(Rect::new(4, 2, 3, 5)), None);
+    assert_eq!(
+        panel_separator_area(Rect::new(4, 2, 12, 5)),
+        Some(Rect::new(7, 2, 9, 1))
     );
     let muted = SidebarAgentRow {
         label: "agent quiet reviewer".to_owned(),

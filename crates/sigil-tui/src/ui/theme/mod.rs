@@ -1,6 +1,7 @@
 mod builtin;
 #[allow(dead_code)]
 pub(crate) mod contrast;
+pub(crate) mod diagnostics;
 mod overrides;
 mod palette;
 pub(crate) mod styles;
@@ -129,6 +130,7 @@ pub(crate) fn muted() -> Color {
     default_palette().text_secondary
 }
 
+#[allow(dead_code)]
 pub(crate) fn dim() -> Color {
     default_palette().text_muted
 }
@@ -158,6 +160,7 @@ pub(crate) fn accent_rose() -> Color {
     default_palette().accent_danger
 }
 
+#[allow(dead_code)]
 pub(crate) fn badge_bg() -> Color {
     default_palette().surface_badge
 }

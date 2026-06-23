@@ -6,7 +6,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
-    primitives::{timeline_content_line, timeline_section_line},
+    primitives::{timeline_content_line, timeline_section_line_with_palette},
     syntax_highlight::highlight_code_to_spans,
     text::{pad_display_width, truncate_display_width, wrap_display_width},
     theme::{self, ThemePalette},
@@ -132,7 +132,7 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
                 block_lines.push(source_lines[index]);
                 index += 1;
             }
-            rendered.push(timeline_section_line(
+            rendered.push(timeline_section_line_with_palette(
                 accent,
                 "code",
                 palette.accent_info,
@@ -140,6 +140,7 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
                     label.to_owned(),
                     Style::default().fg(palette.text_muted),
                 )],
+                palette,
             ));
             if block_lines.is_empty() {
                 rendered.push(timeline_content_line(
@@ -187,7 +188,7 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
             while index < source_lines.len() && markdown_quote(source_lines[index]).is_some() {
                 index += 1;
             }
-            rendered.push(timeline_section_line(
+            rendered.push(timeline_section_line_with_palette(
                 accent,
                 "quote",
                 palette.markdown_quote_bar,
@@ -195,6 +196,7 @@ pub(crate) fn render_markdown_timeline_lines_with_palette(
                     "quoted context",
                     Style::default().fg(palette.text_muted),
                 )],
+                palette,
             ));
             for quote_line in &source_lines[start..index] {
                 let content = markdown_quote(quote_line).unwrap_or_else(|| quote_line.trim());
@@ -604,7 +606,7 @@ fn render_markdown_table_block_with_palette(
         column_count,
         body_rows.len().saturating_add(1)
     );
-    let mut lines = vec![timeline_section_line(
+    let mut lines = vec![timeline_section_line_with_palette(
         accent,
         "table",
         palette.accent_secondary,
@@ -612,6 +614,7 @@ fn render_markdown_table_block_with_palette(
             summary,
             Style::default().fg(palette.text_muted),
         )],
+        palette,
     )];
 
     lines.push(timeline_content_line(
@@ -799,10 +802,11 @@ pub(crate) fn render_markdown_spans_with_palette(
             3 => palette.accent_success,
             _ => palette.accent_secondary,
         };
-        return render_inline_markdown_spans_with_options(
+        return render_inline_markdown_spans_with_palette(
             content,
             base_style.fg(accent).add_modifier(Modifier::BOLD),
             options,
+            palette,
         );
     }
     if markdown_rule(line) {
@@ -882,6 +886,7 @@ pub(crate) fn render_markdown_spans_with_palette(
     render_inline_markdown_spans_with_palette(line, base_style, options, palette)
 }
 
+#[allow(dead_code)]
 pub(crate) fn render_inline_markdown_spans_with_options(
     text: &str,
     base_style: Style,

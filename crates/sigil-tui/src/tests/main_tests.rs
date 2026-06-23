@@ -425,6 +425,19 @@ fn scrollback_separator_includes_session_provider_and_model() {
 }
 
 #[test]
+fn scrollback_separator_uses_configured_theme() {
+    let mut config = test_config();
+    config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let separator = scrollback_separator(&app);
+    let expected = crate::ui::theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight).palette;
+
+    assert_eq!(separator.spans[0].style.fg, Some(expected.text_muted));
+    assert_eq!(separator.spans[1].style.fg, Some(expected.accent_info));
+    assert_eq!(separator.spans[2].style.fg, Some(expected.text_muted));
+}
+
+#[test]
 fn wrap_scrollback_text_preserves_empty_and_zero_width_inputs() {
     assert_eq!(wrap_scrollback_text("", 10), vec![""]);
     assert_eq!(wrap_scrollback_text("hello", 0), vec!["hello"]);

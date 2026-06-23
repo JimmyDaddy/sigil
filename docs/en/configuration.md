@@ -157,38 +157,36 @@ accent_primary = "#91B6AA"
 markdown_code_bg = "#1C2129"
 ```
 
-`theme` controls the TUI color palette. Built-in values are `sigil_dark`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `nord`, and `high_contrast_dark`. The `/config` panel includes an `Appearance` section; pressing `Enter` on `Theme` cycles through the built-ins and previews the draft palette immediately, including config backgrounds, borders, text, selection, status, and hint colors. `Ctrl-S` saves the selection to `sigil.toml`.
+`theme` controls the TUI color palette. Built-in values are `sigil_dark`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `nord`, and `high_contrast_dark`. The `/config` panel includes an `Appearance` section; pressing `Enter` on `Theme` cycles through the built-ins and previews the draft palette immediately with compare, page, shell, composer, tool-card, approval-modal, status, diff, and markdown samples. `Ctrl-S` saves the selection to `sigil.toml`.
 
-`[appearance.colors]` can override stable semantic color tokens with `#RRGGBB` values. Unknown tokens or non-hex values make the config invalid. Overrides affect TUI rendering only; they are not written to session history, approval records, tool payloads, or provider-visible context.
+`[appearance.colors]` can override stable semantic color tokens with `#RRGGBB` values. Unknown tokens or non-hex values are reported by appearance diagnostics instead of becoming provider-visible state. Overrides affect TUI rendering only; they are not written to session history, approval records, tool payloads, or provider-visible context.
 
-Supported color tokens:
+In `/config` Appearance, `Color token` selects the semantic token and `Override` edits the selected token value. Press `Enter` on `Color token` to cycle tokens, type or paste `#RRGGBB` on `Override` to set the override, press `Backspace` or `Delete` to clear the selected token, and press `Ctrl-R` to clear all color overrides in the draft.
 
-```text
-surface_base, surface_rail, surface_panel, surface_panel_alt, surface_input,
-surface_agent_panel, surface_overlay, surface_overlay_shadow, surface_badge,
-surface_selection, surface_user_message, surface_code,
-border_subtle, border_strong, border_focus, border_danger,
-text_primary, text_secondary, text_muted, text_inverse, text_disabled,
-accent_primary, accent_secondary, accent_info, accent_success, accent_warning,
-accent_danger, accent_streaming, accent_idle,
-selection_fg, selection_bg, button_selected_fg, button_selected_bg,
-button_inactive_fg,
-diff_header_fg, diff_hunk_fg, diff_added_fg, diff_added_bg,
-diff_removed_fg, diff_removed_bg, diff_context_fg, diff_gutter_fg,
-diff_current_hunk_bg,
-approval_bg, approval_backdrop_bg, approval_border, approval_shadow,
-risk_low, risk_medium, risk_high, approval_allow_bg, approval_deny_bg,
-approval_selected_bg,
-markdown_heading, markdown_quote_bar, markdown_quote_text, markdown_rule,
-markdown_code_fg, markdown_code_bg, markdown_link,
-modal_bg, modal_border, modal_shadow, modal_command_bg, modal_selected_bg,
-overlay_bg, overlay_shadow,
-config_bg, config_border, config_primary, config_detail, config_warning,
-config_danger, config_tab_bg, config_section_bg, config_selected_bg,
-setup_bg,
-status_idle, status_thinking, status_tool, status_streaming, status_success,
-status_warning, status_error, status_pending
-```
+`sigil doctor` and TUI `/doctor` validate appearance overrides after config load. Low-contrast text/surface pairs, indistinct semantic colors, and weak structural cues are reported as warnings with remediation text; invalid override values appear under `appearance:colors`.
+
+Supported color tokens are stable semantic names. Prefer overriding the smallest group that expresses the desired change; for example, change `accent_info` before changing every status or tool-card color individually.
+
+| Group | Tokens | Used for | Guidance |
+| --- | --- | --- | --- |
+| Surfaces | `surface_base`, `surface_rail`, `surface_panel`, `surface_panel_alt`, `surface_input`, `surface_agent_panel`, `surface_overlay`, `surface_overlay_shadow`, `surface_badge`, `surface_selection`, `surface_user_message`, `surface_code` | Shell background, info rail, composer, agent panel, overlays, badges, selected rows, user bubbles, code blocks | Keep `text_primary` readable on `surface_base`, `surface_panel`, `surface_input`, and `surface_user_message`. |
+| Borders | `border_subtle`, `border_strong`, `border_focus`, `border_danger` | Panel dividers, focused borders, danger borders | Keep subtle borders visible without competing with focus/danger borders. |
+| Text | `text_primary`, `text_secondary`, `text_muted`, `text_inverse`, `text_disabled` | Body text, secondary details, hints, selected button text, disabled text | Keep `text_primary` high contrast; use `text_muted` only for nonessential labels. |
+| Accents | `accent_primary`, `accent_secondary`, `accent_info`, `accent_success`, `accent_warning`, `accent_danger`, `accent_streaming`, `accent_idle` | Composer state, section labels, info/success/warning/danger semantics, streaming/idle state | Keep success, warning, danger, and info visually distinct. |
+| Selection and buttons | `selection_fg`, `selection_bg`, `button_selected_fg`, `button_selected_bg`, `button_inactive_fg` | Active rows, selected footer/config actions, button-like chips | Keep selected foreground readable on both `selection_bg` and button backgrounds. |
+| Diff | `diff_header_fg`, `diff_hunk_fg`, `diff_added_fg`, `diff_added_bg`, `diff_removed_fg`, `diff_removed_bg`, `diff_context_fg`, `diff_gutter_fg`, `diff_current_hunk_bg` | Tool previews and approval diff panes | Keep added and removed colors separable, including their backgrounds. |
+| Approval and risk | `approval_bg`, `approval_backdrop_bg`, `approval_border`, `approval_shadow`, `risk_low`, `risk_medium`, `risk_high`, `approval_allow_bg`, `approval_deny_bg`, `approval_selected_bg` | Tool approval modal, risk badges, allow/deny actions | Make allow and deny backgrounds distinct; keep `risk_high` visibly stronger than `risk_low`. |
+| Markdown | `markdown_heading`, `markdown_quote_bar`, `markdown_quote_text`, `markdown_rule`, `markdown_code_fg`, `markdown_code_bg`, `markdown_link` | Timeline markdown, tool-card markdown previews, approval summary markdown | Keep inline code readable on `markdown_code_bg`; keep links distinguishable from headings. |
+| Modal and overlay | `modal_bg`, `modal_border`, `modal_shadow`, `modal_command_bg`, `modal_selected_bg`, `overlay_bg`, `overlay_shadow` | Modal dialogs and slash-command overlays | Keep command chips readable on `modal_command_bg`; keep selected rows visible. |
+| Config and setup | `config_bg`, `config_border`, `config_primary`, `config_detail`, `config_warning`, `config_danger`, `config_tab_bg`, `config_section_bg`, `config_selected_bg`, `setup_bg` | `/config`, setup flow, config preview, config footer/actions | Keep `config_selected_bg` distinct from `config_bg`; keep warning/danger colors separate. |
+| Status | `status_idle`, `status_thinking`, `status_tool`, `status_streaming`, `status_success`, `status_warning`, `status_error`, `status_pending` | Live status, doctor results, task/agent indicators, info rail markers | Keep success, warning, error, and pending indicators distinct at a glance. |
+
+Recommended constraints:
+
+- Use only `#RRGGBB` values. Named colors and alpha values are rejected.
+- Treat tokens as semantic roles, not component-private CSS variables. A token may affect several TUI surfaces.
+- Run `sigil doctor` after changing overrides; warnings mean the override is accepted but likely hard to read.
+- Start from a built-in theme and override a few tokens. A fully custom palette is possible but harder to keep readable.
 
 ## Task Planning
 

@@ -800,13 +800,29 @@ impl AppState {
                     self.last_notice = Some(format!("updated model {value}"));
                 }
                 TextInputTarget::ConfigField(field) => {
-                    if let Some(state) = self.config_state.as_mut()
-                        && let Some(target) = state.field_text_value_mut(field)
-                    {
-                        let changed = *target != value;
-                        *target = value.clone();
-                        if changed {
-                            state.dirty = true;
+                    if let Some(state) = self.config_state.as_mut() {
+                        if field == ConfigField::AppearanceColorOverride {
+                            match state
+                                .draft
+                                .set_selected_appearance_color_override(value.clone())
+                            {
+                                Ok(changed) => {
+                                    if changed {
+                                        state.dirty = true;
+                                    }
+                                }
+                                Err(error) => {
+                                    self.last_notice =
+                                        Some(format!("invalid color override: {error}"));
+                                    return;
+                                }
+                            }
+                        } else if let Some(target) = state.field_text_value_mut(field) {
+                            let changed = *target != value;
+                            *target = value.clone();
+                            if changed {
+                                state.dirty = true;
+                            }
                         }
                     }
                     self.last_notice = Some(format!("updated {}", field.label()));

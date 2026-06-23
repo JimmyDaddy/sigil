@@ -231,9 +231,7 @@ pub(super) fn diagnostics_tool_event(result: ToolResult) -> RunEvent {
 }
 
 pub(super) fn ensure_git_workspace(workspace_root: &Path) -> Result<()> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
+    let output = git_command(workspace_root)
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
         .with_context(|| format!("failed to run git under {}", workspace_root.display()))?;
@@ -248,9 +246,7 @@ pub(super) fn ensure_git_workspace(workspace_root: &Path) -> Result<()> {
 }
 
 pub(super) fn has_head(workspace_root: &Path) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
+    git_command(workspace_root)
         .args(["rev-parse", "--verify", "HEAD"])
         .output()
         .map(|output| output.status.success())
@@ -258,9 +254,7 @@ pub(super) fn has_head(workspace_root: &Path) -> bool {
 }
 
 pub(super) fn git_output(workspace_root: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(workspace_root)
+    let output = git_command(workspace_root)
         .args(args)
         .output()
         .with_context(|| {
@@ -285,6 +279,22 @@ pub(super) fn git_output(workspace_root: &Path, args: &[&str]) -> Result<Vec<u8>
             }
         ))
     }
+}
+
+pub(super) fn git_command(workspace_root: &Path) -> Command {
+    let mut command = Command::new("git");
+    for name in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_WORK_TREE",
+    ] {
+        command.env_remove(name);
+    }
+    command.arg("-C").arg(workspace_root);
+    command
 }
 
 pub(super) fn collect_nul_paths(paths: &mut BTreeSet<String>, output: Vec<u8>) {

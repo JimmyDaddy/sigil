@@ -438,7 +438,11 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Appearance),
-        &[ConfigField::AppearanceTheme]
+        &[
+            ConfigField::AppearanceTheme,
+            ConfigField::AppearanceColorToken,
+            ConfigField::AppearanceColorOverride,
+        ]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Mcp),
@@ -472,6 +476,11 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         "scroll_sensitivity"
     );
     assert_eq!(ConfigField::AppearanceTheme.label(), "theme");
+    assert_eq!(ConfigField::AppearanceColorToken.label(), "color_token");
+    assert_eq!(
+        ConfigField::AppearanceColorOverride.label(),
+        "color_override"
+    );
     assert_eq!(ConfigField::ProviderApiKey.action_label(), "Enter input");
     assert_eq!(ConfigField::CodeIntelStartup.action_label(), "Enter cycle");
     assert_eq!(ConfigField::CodeIntelEnabled.action_label(), "Enter toggle");
@@ -484,6 +493,14 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         "Enter input"
     );
     assert_eq!(ConfigField::AppearanceTheme.action_label(), "Enter cycle");
+    assert_eq!(
+        ConfigField::AppearanceColorToken.action_label(),
+        "Enter cycle"
+    );
+    assert_eq!(
+        ConfigField::AppearanceColorOverride.action_label(),
+        "Enter input"
+    );
     assert_eq!(ConfigField::McpCommand.action_label(), "Enter input");
     assert_eq!(ConfigField::SkillId.action_label(), "");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
@@ -559,6 +576,16 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             .help_text()
             .contains("session history")
     );
+    assert!(
+        ConfigField::AppearanceColorToken
+            .help_text()
+            .contains("next token")
+    );
+    assert!(
+        ConfigField::AppearanceColorOverride
+            .help_text()
+            .contains("#RRGGBB")
+    );
 }
 
 #[test]
@@ -588,6 +615,74 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
     let saved = state.draft.to_root_config()?;
 
     assert_eq!(saved.appearance.theme, sigil_kernel::ThemeId::Nord);
+    Ok(())
+}
+
+#[test]
+fn appearance_color_override_draft_tracks_tokens_and_empty_reset() -> anyhow::Result<()> {
+    let mut config = test_root_config();
+    let mut colors = std::collections::BTreeMap::new();
+    colors.insert("surface_rail".to_owned(), "#010203".to_owned());
+    config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
+    let mut state = ConfigState::from_root_config(&config);
+
+    state.set_section(ConfigSection::Appearance);
+
+    assert_eq!(
+        state.draft.selected_appearance_color_token(),
+        "surface_rail"
+    );
+    assert_eq!(
+        state.field_text_value(ConfigField::AppearanceColorOverride),
+        Some("#010203")
+    );
+    assert!(config_field_accepts_char(
+        ConfigField::AppearanceColorOverride,
+        '#'
+    ));
+    assert!(config_field_accepts_char(
+        ConfigField::AppearanceColorOverride,
+        'F'
+    ));
+    assert!(!config_field_accepts_char(
+        ConfigField::AppearanceColorOverride,
+        'g'
+    ));
+
+    state.draft.cycle_appearance_color_token(false);
+    assert_eq!(
+        state.draft.selected_appearance_color_token(),
+        "surface_base"
+    );
+    state.draft.cycle_appearance_color_token(false);
+    assert_eq!(
+        state.draft.selected_appearance_color_token(),
+        "status_pending"
+    );
+    state.draft.cycle_appearance_color_token(true);
+    assert_eq!(
+        state.draft.selected_appearance_color_token(),
+        "surface_base"
+    );
+
+    assert!(
+        state
+            .draft
+            .set_selected_appearance_color_override("#aabbcc".to_owned())?
+    );
+    assert_eq!(
+        state.draft.selected_appearance_color_override(),
+        Some("#AABBCC")
+    );
+    assert!(
+        state
+            .draft
+            .set_selected_appearance_color_override(" ".to_owned())?
+    );
+    assert!(state.draft.selected_appearance_color_override().is_none());
+
+    let mut empty_draft = ConfigDraft::from_root_config(&test_root_config());
+    assert!(!empty_draft.reset_all_appearance_color_overrides());
     Ok(())
 }
 

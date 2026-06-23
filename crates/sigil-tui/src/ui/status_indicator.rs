@@ -169,6 +169,7 @@ pub(crate) fn focus_style_with_palette(kind: FocusKind, palette: &ThemePalette) 
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn indicator_styles(marker: &str) -> Option<(Style, Style)> {
     indicator_styles_with_palette(marker, &theme::default_palette())
 }

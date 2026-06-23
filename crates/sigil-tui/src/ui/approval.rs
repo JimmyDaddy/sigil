@@ -20,7 +20,7 @@ use super::{
     layout_snapshot::{
         approval_diff_view_control_label, approval_metadata_control_label, approval_modal_area,
     },
-    markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_options},
+    markdown::{MarkdownRenderOptions, render_inline_markdown_spans_with_palette},
     theme::{self, ThemePalette},
 };
 
@@ -275,10 +275,11 @@ fn approval_header_lines_with_palette(
     } else {
         let markdown_options = MarkdownRenderOptions::modal(max_content_width);
         lines.extend(view.preview_summary.lines().take(2).map(|line| {
-            Line::from(render_inline_markdown_spans_with_options(
+            Line::from(render_inline_markdown_spans_with_palette(
                 line,
                 Style::default().fg(palette.text_secondary),
                 markdown_options,
+                palette,
             ))
         }));
     }

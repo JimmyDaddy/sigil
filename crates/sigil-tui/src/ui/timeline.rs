@@ -10,15 +10,15 @@ use crate::app::{TimelineEntry, TimelineRole};
 use super::{
     markdown::{
         MarkdownRenderOptions, MarkdownRenderState, render_code_line_spans_with_bg,
-        render_inline_markdown_spans_with_options, render_markdown_spans_with_palette,
+        render_inline_markdown_spans_with_palette, render_markdown_spans_with_palette,
         render_markdown_timeline_lines_with_palette,
     },
     primitives::{
-        spans_with_background, timeline_content_line, timeline_header_line,
-        timeline_minor_header_line,
+        spans_with_background, timeline_content_line, timeline_header_line_with_palette,
+        timeline_minor_header_line_with_palette,
     },
     text::{pad_display_width, wrap_display_width},
-    theme::{self, ThemePalette, dim},
+    theme::{self, ThemePalette},
     tool_card::render_tool_entry_lines,
 };
 
@@ -91,10 +91,11 @@ pub(crate) fn render_timeline_entry_lines_with_options(
     } else if entry.role == TimelineRole::Notice {
         render_notice_entry_lines(entry, &options.theme.palette)
     } else {
-        let mut lines = vec![timeline_header_line(
+        let mut lines = vec![timeline_header_line_with_palette(
             "system",
             options.theme.palette.accent_info,
             "",
+            &options.theme.palette,
         )];
         let mut markdown_state = MarkdownRenderState::default();
         let markdown_options = MarkdownRenderOptions::timeline(options.max_content_width);
@@ -194,12 +195,13 @@ fn user_bubble_content_line(
             .add_modifier(Modifier::BOLD),
     )];
     spans.extend(spans_with_background(
-        render_inline_markdown_spans_with_options(
+        render_inline_markdown_spans_with_palette(
             &padded,
             Style::default()
                 .fg(palette.text_primary)
                 .add_modifier(Modifier::BOLD),
             MarkdownRenderOptions::timeline(content_width),
+            palette,
         ),
         bubble_bg,
     ));
@@ -229,12 +231,12 @@ fn render_assistant_entry_lines(
         palette,
     );
     if intermediate_info {
-        mark_first_visible_assistant_line(&mut lines);
+        mark_first_visible_assistant_line(&mut lines, palette);
     }
     lines
 }
 
-fn mark_first_visible_assistant_line(lines: &mut [Line<'static>]) {
+fn mark_first_visible_assistant_line(lines: &mut [Line<'static>], palette: &ThemePalette) {
     for line in lines {
         let visible = line
             .spans
@@ -246,18 +248,20 @@ fn mark_first_visible_assistant_line(lines: &mut [Line<'static>]) {
         if let Some(first) = line.spans.first_mut()
             && first.content.as_ref() == "  "
         {
-            *first = assistant_info_marker_span();
+            *first = assistant_info_marker_span(palette);
         } else {
-            line.spans.insert(0, assistant_info_marker_span());
+            line.spans.insert(0, assistant_info_marker_span(palette));
         }
         return;
     }
 }
 
-fn assistant_info_marker_span() -> Span<'static> {
+fn assistant_info_marker_span(palette: &ThemePalette) -> Span<'static> {
     Span::styled(
         "• ",
-        Style::default().fg(dim()).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(palette.text_muted)
+            .add_modifier(Modifier::BOLD),
     )
 }
 
@@ -370,7 +374,7 @@ fn render_phase_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Ve
     };
 
     vec![
-        timeline_minor_header_line(label, accent, "live"),
+        timeline_minor_header_line_with_palette(label, accent, "live", palette),
         timeline_content_line(
             accent,
             vec![Span::styled(
@@ -456,10 +460,11 @@ fn render_notice_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> V
     let tone = notice_tone(&entry.text);
     let accent = notice_accent(tone, palette);
     let body_style = notice_body_style(tone, palette);
-    let mut lines = vec![timeline_minor_header_line(
+    let mut lines = vec![timeline_minor_header_line_with_palette(
         notice_inline_label(tone),
         accent,
         "",
+        palette,
     )];
     for line in entry.text.lines().filter(|line| !line.trim().is_empty()) {
         let display_text = notice_display_text(line);
@@ -521,19 +526,23 @@ fn render_timeline_content_spans_with_palette(
             Style::default().fg(palette.markdown_code_fg),
             palette.markdown_code_bg,
         ),
-        TimelineRole::System | TimelineRole::Phase => render_inline_markdown_spans_with_options(
+        TimelineRole::System | TimelineRole::Phase => render_inline_markdown_spans_with_palette(
             line,
             base_style.add_modifier(Modifier::BOLD),
             markdown_options,
+            palette,
         ),
         TimelineRole::Notice => {
-            render_inline_markdown_spans_with_options(line, base_style, markdown_options)
+            render_inline_markdown_spans_with_palette(line, base_style, markdown_options, palette)
         }
         TimelineRole::User => vec![Span::styled(line.to_owned(), base_style)],
     }
 }
 
 fn notice_tone(text: &str) -> NoticeTone {
+    if let Some(tone) = doctor_notice_tone(text) {
+        return tone;
+    }
     let lower = text.to_ascii_lowercase();
     if lower.contains("failed")
         || lower.contains("error")
@@ -549,6 +558,20 @@ fn notice_tone(text: &str) -> NoticeTone {
         NoticeTone::Ok
     } else {
         NoticeTone::Info
+    }
+}
+
+fn doctor_notice_tone(text: &str) -> Option<NoticeTone> {
+    let first_line = text.lines().find(|line| !line.trim().is_empty())?;
+    let (label, status) = first_line.trim().split_once(':')?;
+    if !label.trim().eq_ignore_ascii_case("doctor") {
+        return None;
+    }
+    let normalized_status = status.trim().to_ascii_lowercase();
+    match normalized_status.as_str() {
+        "error" => Some(NoticeTone::Error),
+        "ok" => Some(NoticeTone::Ok),
+        _ => Some(NoticeTone::Info),
     }
 }
 
@@ -590,9 +613,14 @@ fn notice_display_text(line: &str) -> &str {
 fn render_notice_body_spans(
     line: &str,
     base_style: Style,
-    _palette: &ThemePalette,
+    palette: &ThemePalette,
 ) -> Vec<Span<'static>> {
-    render_inline_markdown_spans_with_options(line, base_style, MarkdownRenderOptions::timeline(80))
+    render_inline_markdown_spans_with_palette(
+        line,
+        base_style,
+        MarkdownRenderOptions::timeline(80),
+        palette,
+    )
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
