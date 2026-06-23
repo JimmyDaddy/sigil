@@ -3,29 +3,42 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use super::theme::{badge_bg, dim};
+use super::theme::ThemePalette;
 
-pub(crate) fn section_badge(label: &str, accent: Color) -> Span<'static> {
+pub(crate) fn section_badge_with_palette(
+    label: &str,
+    accent: Color,
+    palette: &ThemePalette,
+) -> Span<'static> {
     Span::styled(
         format!(" {label} "),
         Style::default()
             .fg(accent)
-            .bg(badge_bg())
+            .bg(palette.surface_badge)
             .add_modifier(Modifier::BOLD),
     )
 }
 
-pub(crate) fn timeline_badge(label: &str, color: Color) -> Span<'static> {
+pub(crate) fn timeline_badge_with_palette(
+    label: &str,
+    color: Color,
+    palette: &ThemePalette,
+) -> Span<'static> {
     Span::styled(
         format!(" {label} "),
         Style::default()
             .fg(color)
-            .bg(badge_bg())
+            .bg(palette.surface_badge)
             .add_modifier(Modifier::BOLD),
     )
 }
 
-pub(crate) fn timeline_header_line(label: &str, accent: Color, subtitle: &str) -> Line<'static> {
+pub(crate) fn timeline_header_line_with_palette(
+    label: &str,
+    accent: Color,
+    subtitle: &str,
+    palette: &ThemePalette,
+) -> Line<'static> {
     let mut spans = vec![Span::styled(
         label.to_owned(),
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
@@ -34,21 +47,27 @@ pub(crate) fn timeline_header_line(label: &str, accent: Color, subtitle: &str) -
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
             subtitle.to_owned(),
-            Style::default().fg(dim()).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.text_muted)
+                .add_modifier(Modifier::BOLD),
         ));
     }
     Line::from(spans)
 }
 
-pub(crate) fn timeline_minor_header_line(
+pub(crate) fn timeline_minor_header_line_with_palette(
     label: &str,
     accent: Color,
     detail: &str,
+    palette: &ThemePalette,
 ) -> Line<'static> {
     let mut spans = vec![Span::styled(label.to_owned(), Style::default().fg(accent))];
     if !detail.is_empty() {
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(detail.to_owned(), Style::default().fg(dim())));
+        spans.push(Span::styled(
+            detail.to_owned(),
+            Style::default().fg(palette.text_muted),
+        ));
     }
     Line::from(spans)
 }
@@ -70,13 +89,22 @@ pub(crate) fn spans_with_background(spans: Vec<Span<'static>>, bg: Color) -> Vec
         .collect()
 }
 
-pub(crate) fn timeline_section_line(
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[path = "tests/primitives_tests.rs"]
+mod tests;
+
+pub(crate) fn timeline_section_line_with_palette(
     rail_accent: Color,
     badge_label: &str,
     badge_accent: Color,
     detail_spans: Vec<Span<'static>>,
+    palette: &ThemePalette,
 ) -> Line<'static> {
-    let mut spans = vec![section_badge(badge_label, badge_accent)];
+    let mut spans = vec![section_badge_with_palette(
+        badge_label,
+        badge_accent,
+        palette,
+    )];
     if !detail_spans.is_empty() {
         spans.push(Span::raw(" "));
         spans.extend(detail_spans);

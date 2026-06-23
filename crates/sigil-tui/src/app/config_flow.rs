@@ -390,14 +390,20 @@ impl AppState {
                         config_state.draft.base_root_config.appearance.colors.len()
                     ),
                 ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::AppearanceColorToken,
+                ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::AppearanceColorOverride,
+                ));
+                lines.push(render_config_hint_row(
+                    "Backspace/Delete clears the selected token override; Ctrl-R clears all overrides",
+                ));
                 lines.push(String::new());
                 lines.push("[preview]".to_owned());
-                lines.push("preview text: primary secondary muted".to_owned());
-                lines.push("preview selection: selected row".to_owned());
-                lines.push("preview status: success warning error pending".to_owned());
-                lines.push("preview diff: +added -removed @@ hunk".to_owned());
-                lines.push("preview approval: allow deny selected".to_owned());
-                lines.push("preview markdown: heading link code".to_owned());
+                lines.extend(render_appearance_preview_lines(config_state));
                 lines.push(String::new());
                 lines.push("[scope]".to_owned());
                 lines.push(render_config_hint_row(
@@ -702,6 +708,20 @@ impl AppState {
                         }
                     } else {
                         self.last_notice = Some("Ctrl-D: MCP only".to_owned());
+                    }
+                }
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(config_state) = self.config_state.as_mut() {
+                    if config_state.selected_section == ConfigSection::Appearance {
+                        if config_state.draft.reset_all_appearance_color_overrides() {
+                            config_state.dirty = true;
+                            self.last_notice = Some("reset all color overrides".to_owned());
+                        } else {
+                            self.last_notice = Some("color overrides already empty".to_owned());
+                        }
+                    } else {
+                        self.last_notice = Some("Ctrl-R: Appearance only".to_owned());
                     }
                 }
             }
@@ -1068,6 +1088,14 @@ impl AppState {
                             ));
                             return Ok(None);
                         }
+                        ConfigField::AppearanceColorToken => {
+                            config_state.draft.cycle_appearance_color_token(true);
+                            self.last_notice = Some(format!(
+                                "color token -> {}",
+                                config_state.draft.selected_appearance_color_token()
+                            ));
+                            return Ok(None);
+                        }
                         _ if field.accepts_text_input() => {
                             let current = config_state
                                 .field_text_value(field)
@@ -1093,6 +1121,51 @@ impl AppState {
                 }
             }
             KeyCode::Backspace => {
+                if let Some(config_state) = self.config_state.as_mut()
+                    && !config_state.footer_selected
+                    && matches!(
+                        config_state.selected_field,
+                        Some(
+                            ConfigField::AppearanceColorToken
+                                | ConfigField::AppearanceColorOverride
+                        )
+                    )
+                {
+                    let token = config_state.draft.selected_appearance_color_token();
+                    if config_state
+                        .draft
+                        .reset_selected_appearance_color_override()
+                    {
+                        config_state.dirty = true;
+                        self.last_notice = Some(format!("reset color {token}"));
+                    } else {
+                        self.last_notice = Some(format!("color {token} already inherits"));
+                    }
+                }
+                return Ok(None);
+            }
+            KeyCode::Delete => {
+                if let Some(config_state) = self.config_state.as_mut()
+                    && !config_state.footer_selected
+                    && matches!(
+                        config_state.selected_field,
+                        Some(
+                            ConfigField::AppearanceColorToken
+                                | ConfigField::AppearanceColorOverride
+                        )
+                    )
+                {
+                    let token = config_state.draft.selected_appearance_color_token();
+                    if config_state
+                        .draft
+                        .reset_selected_appearance_color_override()
+                    {
+                        config_state.dirty = true;
+                        self.last_notice = Some(format!("reset color {token}"));
+                    } else {
+                        self.last_notice = Some(format!("color {token} already inherits"));
+                    }
+                }
                 return Ok(None);
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1163,11 +1236,25 @@ impl AppState {
         if value.is_empty() {
             return;
         }
-        let Some(target) = config_state.field_text_value_mut(field) else {
-            return;
+        let changed = if field == ConfigField::AppearanceColorOverride {
+            match config_state
+                .draft
+                .set_selected_appearance_color_override(value)
+            {
+                Ok(changed) => changed,
+                Err(error) => {
+                    self.last_notice = Some(format!("invalid color override: {error}"));
+                    return;
+                }
+            }
+        } else {
+            let Some(target) = config_state.field_text_value_mut(field) else {
+                return;
+            };
+            let changed = *target != value;
+            *target = value;
+            changed
         };
-        let changed = *target != value;
-        *target = value;
         if changed {
             config_state.dirty = true;
         }
@@ -1922,6 +2009,40 @@ impl AppState {
     }
 }
 
+fn render_appearance_preview_lines(config_state: &ConfigState) -> Vec<String> {
+    let saved = config_state.draft.base_root_config.appearance.theme;
+    let draft = config_state.draft.appearance_theme;
+    let state = if saved == draft {
+        "saved"
+    } else {
+        "unsaved draft"
+    };
+    vec![
+        format!(
+            "preview compare: current {} -> draft {} ({state})",
+            saved.as_str(),
+            draft.as_str()
+        ),
+        "preview page: rail timeline composer tool modal".to_owned(),
+        "preview shell: rail live composer footer".to_owned(),
+        "preview composer: Build · agent: main · deepseek-v4-flash".to_owned(),
+        "preview tool: read_file ✓ ok · doc excerpt · 2 hidden".to_owned(),
+        "preview modal: Review Tool Call allow deny selected".to_owned(),
+        format!(
+            "preview token: {} {}",
+            config_state.draft.selected_appearance_color_token(),
+            config_state
+                .draft
+                .selected_appearance_color_override()
+                .unwrap_or("inherited")
+        ),
+        "preview text: primary secondary muted".to_owned(),
+        "preview status: success warning error pending".to_owned(),
+        "preview diff: +added -removed @@ hunk".to_owned(),
+        "preview markdown: heading link code".to_owned(),
+    ]
+}
+
 pub(super) fn cycle_approval_mode(mode: ApprovalMode) -> ApprovalMode {
     match mode {
         ApprovalMode::Allow => ApprovalMode::Ask,
@@ -2114,6 +2235,15 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     }
     if matches!(field, ConfigField::ProviderFimModel) {
         lines.push("advanced: provider-specific fields remain in config file or env".to_owned());
+    }
+    if matches!(field, ConfigField::AppearanceColorToken) {
+        lines.push("appearance: Enter cycles token · Down edits its override".to_owned());
+    }
+    if matches!(field, ConfigField::AppearanceColorOverride) {
+        lines.push(
+            "appearance: empty value inherits · Backspace/Delete resets · Ctrl-R clears all"
+                .to_owned(),
+        );
     }
     if config_state.selected_section == ConfigSection::Mcp {
         lines.push("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server".to_owned());

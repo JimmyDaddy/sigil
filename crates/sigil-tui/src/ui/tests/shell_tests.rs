@@ -315,6 +315,74 @@ fn render_main_screen_uses_configured_theme_surface() -> anyhow::Result<()> {
 }
 
 #[test]
+fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> anyhow::Result<()> {
+    let mut config = test_config();
+    let mut colors = BTreeMap::new();
+    colors.insert("surface_base".to_owned(), "#010203".to_owned());
+    colors.insert("surface_panel".to_owned(), "#111213".to_owned());
+    colors.insert("surface_input".to_owned(), "#212223".to_owned());
+    colors.insert("surface_user_message".to_owned(), "#515253".to_owned());
+    colors.insert("text_primary".to_owned(), "#F0F1F2".to_owned());
+    colors.insert("markdown_code_fg".to_owned(), "#D0D1D2".to_owned());
+    colors.insert("markdown_code_bg".to_owned(), "#313233".to_owned());
+    config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.set_terminal_size(160, 36);
+    app.input = "composer-visible".to_owned();
+    app.handle(RunEvent::TextDelta("assistant `inline-code`".to_owned()))?;
+    let call = ToolCall {
+        id: "call-themed-read".to_owned(),
+        name: "read_file".to_owned(),
+        args_json: r#"{"path":"Cargo.toml"}"#.to_owned(),
+    };
+    app.handle(RunEvent::ToolCallStarted(call.clone()))?;
+    app.handle(RunEvent::ToolCallCompleted(call.clone()))?;
+    let mut meta = ToolResultMeta {
+        returned_bytes: Some(64),
+        total_bytes: Some(64),
+        ..ToolResultMeta::default()
+    };
+    meta.details = json!({"path":"Cargo.toml"});
+    app.handle(RunEvent::ToolResult(ToolResult::ok(
+        call.id,
+        call.name,
+        "# Tool\n`tool-code`",
+        meta,
+    )))?;
+    let backend = TestBackend::new(160, 36);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((0, 0))
+            .expect("top-left cell should exist")
+            .bg,
+        Color::Rgb(1, 2, 3)
+    );
+    assert_eq!(
+        cell_bg_at_text(&terminal, "composer-visible", "composer-visible"),
+        Color::Rgb(33, 34, 35)
+    );
+    assert_eq!(
+        cell_bg_at_text(&terminal, "inline-code", "inline-code"),
+        Color::Rgb(49, 50, 51)
+    );
+    assert_eq!(
+        cell_bg_at_text(&terminal, "tool-code", "tool-code"),
+        Color::Rgb(49, 50, 51)
+    );
+    assert_eq!(
+        cell_fg_at_text(&terminal, "tool-code", "tool-code"),
+        Color::Rgb(208, 209, 210)
+    );
+    Ok(())
+}
+
+#[test]
 fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/config".to_owned();
@@ -391,6 +459,40 @@ fn render_config_saved_theme_uses_theme_text_palette() -> anyhow::Result<()> {
         cell_fg_at_text(&terminal, "file sigil.toml", "sigil.toml"),
         expected.palette.text_secondary
     );
+    Ok(())
+}
+
+#[test]
+fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Result<()> {
+    let mut config = test_config();
+    let mut colors = BTreeMap::new();
+    colors.insert("config_bg".to_owned(), "#010203".to_owned());
+    colors.insert("text_primary".to_owned(), "#F0F1F2".to_owned());
+    config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    for _ in 0..6 {
+        let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    }
+    let backend = TestBackend::new(128, 32);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    assert_eq!(
+        terminal
+            .backend()
+            .buffer()
+            .cell((0, 0))
+            .expect("top-left cell should exist")
+            .bg,
+        Color::Rgb(1, 2, 3)
+    );
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("preview page"));
+    assert!(rendered.contains("Color token"));
+    assert!(rendered.contains("Ctrl-R clears all"));
     Ok(())
 }
 
@@ -1342,6 +1444,21 @@ fn cell_fg_at_text(terminal: &Terminal<TestBackend>, row_needle: &str, text: &st
         .cell((column_index as u16, row_index as u16))
         .expect("cell in bounds")
         .fg
+}
+
+fn cell_bg_at_text(terminal: &Terminal<TestBackend>, row_needle: &str, text: &str) -> Color {
+    let rows = rendered_rows(terminal);
+    let row_index = rows
+        .iter()
+        .position(|row| row.contains(row_needle))
+        .expect("row should render");
+    let column_index = char_index_of(&rows[row_index], text).expect("text should render in row");
+    terminal
+        .backend()
+        .buffer()
+        .cell((column_index as u16, row_index as u16))
+        .expect("cell in bounds")
+        .bg
 }
 
 #[test]

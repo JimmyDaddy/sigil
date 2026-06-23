@@ -792,7 +792,8 @@ fn render_scrollback_rows(buf: &mut Buffer, rows: &[(String, Style)]) {
 }
 
 fn scrollback_separator(app: &AppState) -> Line<'static> {
-    let palette = theme::default_palette();
+    let theme = theme::resolve_for_app(app);
+    let palette = &theme.palette;
     Line::from(vec![
         Span::styled("---- session ", Style::default().fg(palette.text_muted)),
         Span::styled(

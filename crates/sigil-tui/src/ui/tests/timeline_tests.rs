@@ -110,6 +110,33 @@ fn render_timeline_entry_lines_marks_intermediate_assistant_info_only() {
 }
 
 #[test]
+fn render_timeline_entry_lines_marks_flush_left_intermediate_assistant_heading() {
+    let entry = TimelineEntry {
+        role: TimelineRole::Assistant,
+        text: "## Heading\nbody".to_owned(),
+    };
+
+    let marked = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            intermediate_assistant_indices: std::collections::BTreeSet::from([0]),
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+
+    assert_eq!(marked[0].spans[0].content.as_ref(), "• ");
+    assert_eq!(
+        marked[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "• Heading"
+    );
+}
+
+#[test]
 fn render_timeline_entry_lines_separates_tool_header_and_json_body() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
@@ -958,7 +985,7 @@ fn render_timeline_entry_lines_formats_tool_cards() {
         .iter()
         .find(|span| span.content.as_ref().contains("64 B"))
         .expect("expected execution summary span");
-    assert_eq!(summary_span.style.fg, Some(dim()));
+    assert_eq!(summary_span.style.fg, Some(theme::dim()));
     assert!(summary_span.style.add_modifier.contains(Modifier::ITALIC));
     assert!(!summary_span.style.add_modifier.contains(Modifier::BOLD));
     assert!(!lines.iter().any(|line| {
@@ -2050,4 +2077,69 @@ fn render_timeline_entry_lines_keeps_notice_visible_without_info_subtitle() {
         user.first().map(|span| span.content.as_ref()),
         Some("plain user")
     );
+}
+
+#[test]
+fn timeline_render_options_theme_reaches_visible_content_spans() {
+    let theme = theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight);
+    let palette = theme.palette.clone();
+    let options = TimelineRenderOptions {
+        theme,
+        max_content_width: 48,
+        intermediate_assistant_indices: std::collections::BTreeSet::from([0]),
+        ..TimelineRenderOptions::default()
+    };
+
+    let user = TimelineEntry {
+        role: TimelineRole::User,
+        text: "`code`".to_owned(),
+    };
+    let user_lines = render_timeline_entry_lines_with_options(&user, &options, 1);
+    let user_code = user_lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "code")
+        .expect("user inline code should render");
+    assert_eq!(user_code.style.fg, Some(palette.markdown_code_fg));
+    assert_eq!(user_code.style.bg, Some(palette.surface_user_message));
+
+    let assistant = TimelineEntry {
+        role: TimelineRole::Assistant,
+        text: "ready".to_owned(),
+    };
+    let assistant_lines = render_timeline_entry_lines_with_options(&assistant, &options, 0);
+    let marker = assistant_lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "• ")
+        .expect("intermediate assistant marker should render");
+    assert_eq!(marker.style.fg, Some(palette.text_muted));
+
+    let system = TimelineEntry {
+        role: TimelineRole::System,
+        text: "`sys`".to_owned(),
+    };
+    let system_lines = render_timeline_entry_lines_with_options(&system, &options, 1);
+    let system_code = system_lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "sys")
+        .expect("system inline code should render");
+    assert_eq!(system_code.style.fg, Some(palette.markdown_code_fg));
+    assert_eq!(system_code.style.bg, Some(palette.markdown_code_bg));
+
+    let notice = TimelineEntry {
+        role: TimelineRole::Notice,
+        text: "info: `notice`".to_owned(),
+    };
+    let notice_lines = render_timeline_entry_lines_with_options(&notice, &options, 1);
+    let notice_code = notice_lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| {
+            span.content.as_ref() == "notice" && span.style.bg == Some(palette.markdown_code_bg)
+        })
+        .expect("notice inline code should render");
+    assert_eq!(notice_code.style.fg, Some(palette.markdown_code_fg));
+    assert_eq!(notice_code.style.bg, Some(palette.markdown_code_bg));
 }

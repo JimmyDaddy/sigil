@@ -11,6 +11,8 @@ use sigil_provider_gemini::GeminiProviderConfig;
 use sigil_provider_openai_compat::OpenAiCompatibleProviderConfig;
 use sigil_runtime::{ResolvedAgentProfile, provider_config_key};
 
+use crate::ui::theme::COLOR_TOKEN_NAMES;
+
 pub(crate) const DEEPSEEK_PROVIDER_KEY: &str = "deepseek";
 pub(crate) const OPENAI_COMPAT_PROVIDER_KEY: &str = "openai_compat";
 pub(crate) const ANTHROPIC_PROVIDER_KEY: &str = "anthropic";
@@ -140,6 +142,8 @@ pub(crate) enum ConfigField {
     TerminalOsc52Clipboard,
     TerminalScrollSensitivity,
     AppearanceTheme,
+    AppearanceColorToken,
+    AppearanceColorOverride,
     SkillId,
     PluginId,
     McpName,
@@ -176,7 +180,11 @@ impl ConfigField {
         Self::TerminalOsc52Clipboard,
         Self::TerminalScrollSensitivity,
     ];
-    const APPEARANCE_FIELDS: [Self; 1] = [Self::AppearanceTheme];
+    const APPEARANCE_FIELDS: [Self; 3] = [
+        Self::AppearanceTheme,
+        Self::AppearanceColorToken,
+        Self::AppearanceColorOverride,
+    ];
     const SKILL_FIELDS: [Self; 1] = [Self::SkillId];
     const PLUGIN_FIELDS: [Self; 1] = [Self::PluginId];
     const MCP_FIELDS: [Self; 4] = [
@@ -228,6 +236,8 @@ impl ConfigField {
             Self::TerminalOsc52Clipboard => "osc52_clipboard",
             Self::TerminalScrollSensitivity => "scroll_sensitivity",
             Self::AppearanceTheme => "theme",
+            Self::AppearanceColorToken => "color_token",
+            Self::AppearanceColorOverride => "color_override",
             Self::SkillId => "skill",
             Self::PluginId => "plugin",
             Self::McpName => "name",
@@ -259,6 +269,8 @@ impl ConfigField {
             Self::TerminalOsc52Clipboard => "OSC52 clipboard",
             Self::TerminalScrollSensitivity => "Scroll sensitivity",
             Self::AppearanceTheme => "Theme",
+            Self::AppearanceColorToken => "Color token",
+            Self::AppearanceColorOverride => "Override",
             Self::SkillId => "Skill",
             Self::PluginId => "Plugin",
             Self::McpName => "Name",
@@ -330,6 +342,12 @@ impl ConfigField {
             Self::AppearanceTheme => {
                 "Color palette for the TUI. Draft themes preview immediately; saving persists the choice and does not affect session history."
             }
+            Self::AppearanceColorToken => {
+                "Semantic color token selected for override editing. Press Enter to move to the next token."
+            }
+            Self::AppearanceColorOverride => {
+                "Optional #RRGGBB override for the selected color token. Empty value inherits from the current theme."
+            }
             Self::SkillId => {
                 "Selected reusable skill. Up/Down moves through skills; footer actions load or invoke it."
             }
@@ -354,6 +372,7 @@ impl ConfigField {
                 | Self::CompactionContextWindowTokens
                 | Self::CompactionTailMessages
                 | Self::TerminalScrollSensitivity
+                | Self::AppearanceColorOverride
                 | Self::McpName
                 | Self::McpCommand
                 | Self::McpArgsCsv
@@ -366,9 +385,10 @@ impl ConfigField {
             Self::ProviderModel | Self::ProviderFimModel => "Enter choose",
             Self::ProviderName => "Enter cycle",
             Self::ProviderApiKey => "Enter input",
-            Self::PermissionsDefaultMode | Self::CodeIntelStartup | Self::AppearanceTheme => {
-                "Enter cycle"
-            }
+            Self::PermissionsDefaultMode
+            | Self::CodeIntelStartup
+            | Self::AppearanceTheme
+            | Self::AppearanceColorToken => "Enter cycle",
             Self::MemoryEnabled
             | Self::CompactionEnabled
             | Self::CodeIntelEnabled
@@ -377,6 +397,7 @@ impl ConfigField {
             | Self::TerminalMouseCapture
             | Self::TerminalOsc52Clipboard => "Enter toggle",
             Self::TerminalScrollSensitivity => "Enter input",
+            Self::AppearanceColorOverride => "Enter input",
             Self::SkillId | Self::PluginId => "",
             _ if self.accepts_text_input() => "Enter input",
             _ => "",
@@ -595,6 +616,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) terminal_osc52_clipboard: bool,
     pub(crate) terminal_scroll_sensitivity: String,
     pub(crate) appearance_theme: ThemeId,
+    pub(crate) appearance_color_token_index: usize,
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
 
@@ -717,6 +739,7 @@ impl ConfigDraft {
             terminal_osc52_clipboard: root_config.terminal.osc52_clipboard,
             terminal_scroll_sensitivity: root_config.terminal.scroll_sensitivity.to_string(),
             appearance_theme: root_config.appearance.theme,
+            appearance_color_token_index: first_appearance_color_token_index(root_config),
             mcp_servers: root_config
                 .mcp_servers
                 .iter()
@@ -863,6 +886,7 @@ impl ConfigDraft {
         root_config.terminal.osc52_clipboard = self.terminal_osc52_clipboard;
         root_config.terminal.scroll_sensitivity = terminal_scroll_sensitivity;
         root_config.appearance.theme = self.appearance_theme;
+        root_config.appearance.colors = self.base_root_config.appearance.colors.clone();
         root_config.mcp_servers = self
             .mcp_servers
             .iter()
@@ -948,6 +972,85 @@ impl ConfigDraft {
         root_config.code_intelligence = self.code_intelligence_config();
         root_config
     }
+
+    pub(crate) fn selected_appearance_color_token(&self) -> &'static str {
+        COLOR_TOKEN_NAMES[self
+            .appearance_color_token_index
+            .min(COLOR_TOKEN_NAMES.len() - 1)]
+    }
+
+    pub(crate) fn cycle_appearance_color_token(&mut self, forward: bool) {
+        let len = COLOR_TOKEN_NAMES.len();
+        if forward {
+            self.appearance_color_token_index = (self.appearance_color_token_index + 1) % len;
+        } else if self.appearance_color_token_index == 0 {
+            self.appearance_color_token_index = len - 1;
+        } else {
+            self.appearance_color_token_index -= 1;
+        }
+    }
+
+    pub(crate) fn selected_appearance_color_override(&self) -> Option<&str> {
+        self.base_root_config
+            .appearance
+            .colors
+            .get(self.selected_appearance_color_token())
+    }
+
+    pub(crate) fn set_selected_appearance_color_override(&mut self, value: String) -> Result<bool> {
+        let token = self.selected_appearance_color_token();
+        let value = value.trim();
+        if value.is_empty() {
+            return Ok(self.reset_selected_appearance_color_override());
+        }
+        let normalized = normalize_hex_color_override(value)?;
+        let changed =
+            self.base_root_config.appearance.colors.get(token) != Some(normalized.as_str());
+        if changed {
+            self.base_root_config
+                .appearance
+                .colors
+                .insert(token.to_owned(), normalized);
+        }
+        Ok(changed)
+    }
+
+    pub(crate) fn reset_selected_appearance_color_override(&mut self) -> bool {
+        let token = self.selected_appearance_color_token();
+        self.base_root_config
+            .appearance
+            .colors
+            .remove(token)
+            .is_some()
+    }
+
+    pub(crate) fn reset_all_appearance_color_overrides(&mut self) -> bool {
+        if self.base_root_config.appearance.colors.is_empty() {
+            return false;
+        }
+        self.base_root_config.appearance.colors.clear();
+        true
+    }
+}
+
+fn first_appearance_color_token_index(root_config: &RootConfig) -> usize {
+    COLOR_TOKEN_NAMES
+        .iter()
+        .position(|token| root_config.appearance.colors.get(token).is_some())
+        .unwrap_or(0)
+}
+
+fn normalize_hex_color_override(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.len() != 7
+        || !value.starts_with('#')
+        || !value[1..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        bail!("color override must be #RRGGBB");
+    }
+    Ok(format!("#{}", value[1..].to_ascii_uppercase()))
 }
 
 #[derive(Debug, Clone)]
@@ -1450,7 +1553,9 @@ impl ConfigState {
             | ConfigField::CodeIntelDiscoveryReportMissing
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
-            | ConfigField::AppearanceTheme => None,
+            | ConfigField::AppearanceTheme
+            | ConfigField::AppearanceColorToken => None,
+            ConfigField::AppearanceColorOverride => self.draft.selected_appearance_color_override(),
         }
     }
 
@@ -1496,7 +1601,9 @@ impl ConfigState {
             | ConfigField::CodeIntelDiscoveryReportMissing
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
-            | ConfigField::AppearanceTheme => None,
+            | ConfigField::AppearanceTheme
+            | ConfigField::AppearanceColorToken
+            | ConfigField::AppearanceColorOverride => None,
         }
     }
 
@@ -1556,6 +1663,16 @@ impl ConfigState {
             }
             ConfigField::AppearanceTheme => {
                 return self.draft.appearance_theme.as_str().to_owned();
+            }
+            ConfigField::AppearanceColorToken => {
+                return self.draft.selected_appearance_color_token().to_owned();
+            }
+            ConfigField::AppearanceColorOverride => {
+                return self
+                    .draft
+                    .selected_appearance_color_override()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| "inherited".to_owned());
             }
             _ => self.field_text_value(field).unwrap_or_default(),
         };
@@ -1753,6 +1870,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::McpName
         | ConfigField::McpCommand
         | ConfigField::McpArgsCsv => !character.is_control(),
+        ConfigField::AppearanceColorOverride => character == '#' || character.is_ascii_hexdigit(),
         ConfigField::SkillId | ConfigField::PluginId => false,
         ConfigField::ProviderApiKey
         | ConfigField::ProviderName
@@ -1765,7 +1883,8 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::CodeIntelDiscoveryReportMissing
         | ConfigField::TerminalMouseCapture
         | ConfigField::TerminalOsc52Clipboard
-        | ConfigField::AppearanceTheme => false,
+        | ConfigField::AppearanceTheme
+        | ConfigField::AppearanceColorToken => false,
     }
 }
 

@@ -155,6 +155,25 @@ fn approval_header_lines_cover_hidden_empty_and_markdown_summary_states() {
 }
 
 #[test]
+fn approval_header_lines_with_palette_use_configured_markdown_colors() {
+    let palette = crate::ui::theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight).palette;
+    let view = ApprovalModalView {
+        preview_summary: "`code` summary".to_owned(),
+        ..modal_view("file write")
+    };
+
+    let lines = approval_header_lines_with_palette(&view, 40, &palette);
+    let code_span = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "code")
+        .expect("approval summary inline code should render");
+
+    assert_eq!(code_span.style.fg, Some(palette.markdown_code_fg));
+    assert_eq!(code_span.style.bg, Some(palette.markdown_code_bg));
+}
+
+#[test]
 fn approval_header_lines_render_changeset_risk_and_format_hint() {
     let lines = approval_header_lines(
         &ApprovalModalView {
@@ -569,6 +588,65 @@ fn render_approval_modal_renders_file_list_diff_and_actions() -> anyhow::Result<
 }
 
 #[test]
+fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
+    let mut config = test_config();
+    let mut colors = BTreeMap::new();
+    colors.insert("approval_bg".to_owned(), "#010203".to_owned());
+    colors.insert("approval_selected_bg".to_owned(), "#112233".to_owned());
+    colors.insert("approval_allow_bg".to_owned(), "#214365".to_owned());
+    colors.insert("approval_deny_bg".to_owned(), "#654321".to_owned());
+    colors.insert("text_inverse".to_owned(), "#F1F2F3".to_owned());
+    colors.insert("markdown_code_fg".to_owned(), "#D0E0F0".to_owned());
+    colors.insert("markdown_code_bg".to_owned(), "#203040".to_owned());
+    config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-themed-approval".to_owned(),
+            name: "write_file".to_owned(),
+            args_json: r#"{"path":"src/lib.rs"}"#.to_owned(),
+        },
+        spec: ToolSpec {
+            name: "write_file".to_owned(),
+            description: "Write file".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Required,
+        },
+        subjects: Vec::new(),
+        preview: Some(ToolPreview {
+            title: "Edit src/lib.rs".to_owned(),
+            summary: "`approval-code` summary".to_owned(),
+            body: "--- src/lib.rs\n+++ src/lib.rs\n@@ -1 +1 @@\n-old\n+new".to_owned(),
+            changed_files: vec!["src/lib.rs".to_owned()],
+            file_diffs: vec![ToolPreviewFile {
+                path: "src/lib.rs".to_owned(),
+                diff: "--- src/lib.rs\n+++ src/lib.rs\n@@ -1 +1 @@\n-old\n+new".to_owned(),
+            }],
+        }),
+    })?;
+    let backend = TestBackend::new(140, 32);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_approval_modal(frame, &app))?;
+
+    assert_eq!(
+        cell_colors_at_text(&terminal, "Review Tool Call", "Review Tool Call"),
+        (Color::Rgb(241, 242, 243), Color::Rgb(17, 34, 51))
+    );
+    assert_eq!(
+        cell_colors_at_text(&terminal, "approval-code", "approval-code"),
+        (Color::Rgb(208, 224, 240), Color::Rgb(32, 48, 64))
+    );
+    assert_eq!(
+        cell_colors_at_text(&terminal, "Allow", "Allow"),
+        (Color::Rgb(241, 242, 243), Color::Rgb(33, 67, 101))
+    );
+    Ok(())
+}
+
+#[test]
 fn render_approval_modal_uses_hidden_metadata_and_preview_fallback() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle(RunEvent::ToolApprovalRequested {
@@ -681,6 +759,41 @@ fn rendered_content(terminal: &Terminal<TestBackend>) -> String {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>()
+}
+
+fn rendered_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer.cell((x, y)).expect("cell in bounds").symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+fn char_index_of(row: &str, needle: &str) -> Option<usize> {
+    row.find(needle)
+        .map(|byte_index| row[..byte_index].chars().count())
+}
+
+fn cell_colors_at_text(
+    terminal: &Terminal<TestBackend>,
+    row_needle: &str,
+    text: &str,
+) -> (Color, Color) {
+    let rows = rendered_rows(terminal);
+    let row_index = rows
+        .iter()
+        .position(|row| row.contains(row_needle))
+        .expect("row should render");
+    let column_index = char_index_of(&rows[row_index], text).expect("text should render in row");
+    let cell = terminal
+        .backend()
+        .buffer()
+        .cell((column_index as u16, row_index as u16))
+        .expect("cell in bounds");
+    (cell.fg, cell.bg)
 }
 
 fn test_config() -> RootConfig {
