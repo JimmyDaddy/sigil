@@ -2,12 +2,13 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use sigil_kernel::SyntaxThemeId;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::{
     primitives::{timeline_content_line, timeline_section_line_with_palette},
-    syntax_highlight::highlight_code_to_spans,
+    syntax_highlight::highlight_code_to_spans_with_theme,
     text::{pad_display_width, truncate_display_width, wrap_display_width},
     theme::{self, ThemePalette},
 };
@@ -22,6 +23,7 @@ pub(crate) struct MarkdownRenderOptions {
     pub max_content_width: usize,
     pub code_wrap: CodeWrapMode,
     pub highlight_code: bool,
+    pub syntax_theme: SyntaxThemeId,
     pub show_link_urls: bool,
     pub table_mode: TableRenderMode,
 }
@@ -37,6 +39,7 @@ impl MarkdownRenderOptions {
             max_content_width,
             code_wrap: CodeWrapMode::Preserve,
             highlight_code: true,
+            syntax_theme: SyntaxThemeId::default(),
             show_link_urls: true,
             table_mode: TableRenderMode::Compact,
         }
@@ -53,6 +56,11 @@ impl MarkdownRenderOptions {
 
     fn normalized(mut self) -> Self {
         self.max_content_width = self.max_content_width.max(20);
+        self
+    }
+
+    pub(crate) fn with_syntax_theme(mut self, syntax_theme: SyntaxThemeId) -> Self {
+        self.syntax_theme = syntax_theme;
         self
     }
 }
@@ -249,7 +257,7 @@ fn highlight_code_block_lines(
     if !options.highlight_code {
         return None;
     }
-    highlight_code_to_spans(&block_lines.join("\n"), language)
+    highlight_code_to_spans_with_theme(&block_lines.join("\n"), language, options.syntax_theme)
 }
 
 fn render_code_block_line_rows(

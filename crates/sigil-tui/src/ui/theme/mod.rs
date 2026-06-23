@@ -8,19 +8,20 @@ pub(crate) mod styles;
 
 use anyhow::Result;
 use ratatui::style::Color;
-use sigil_kernel::{AppearanceConfig, ThemeId};
+use sigil_kernel::{AppearanceConfig, SyntaxThemeId, ThemeId};
 
 use crate::app::AppState;
 #[cfg(test)]
 use crate::app::RunPhase;
 
 #[allow(unused_imports)]
-pub(crate) use overrides::COLOR_TOKEN_NAMES;
+pub(crate) use overrides::{COLOR_TOKEN_GROUPS, COLOR_TOKEN_NAMES, ColorTokenGroup};
 pub(crate) use palette::ThemePalette;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Theme {
     pub(crate) id: ThemeId,
+    pub(crate) syntax_theme: SyntaxThemeId,
     pub(crate) palette: ThemePalette,
 }
 
@@ -30,6 +31,7 @@ impl Theme {
         overrides::apply_overrides(&mut palette, &appearance.colors)?;
         Ok(Self {
             id: appearance.theme,
+            syntax_theme: appearance.syntax_theme.resolved_for_theme(appearance.theme),
             palette,
         })
     }
@@ -41,6 +43,7 @@ impl Theme {
     pub(crate) fn builtin(id: ThemeId) -> Self {
         Self {
             id,
+            syntax_theme: SyntaxThemeId::Auto.resolved_for_theme(id),
             palette: builtin::palette_for(id),
         }
     }

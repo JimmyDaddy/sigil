@@ -1,3 +1,4 @@
+use crate::appearance_diagnostics::appearance_doctor_checks;
 use crate::config_panel::{
     ANTHROPIC_PROVIDER_KEY, CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT,
     CONFIG_FIELD_NAV_HINT, CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField,
@@ -16,8 +17,8 @@ use sigil_kernel::{
     AppearanceConfig, ApprovalMode, CodeIntelStartup, ControlEntry, JsonlSessionStore,
     McpServerConfig, McpServerStartup, PluginCapability, PluginManifestSnapshot,
     PluginStateProjection, PluginTrustDecision, PluginTrustEntry, RootConfig, SessionLogEntry,
-    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, ThemeId, ToolRegistryScope,
-    default_user_config_dir,
+    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, SyntaxThemeId, ThemeId,
+    ToolRegistryScope, default_user_config_dir,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -82,9 +83,7 @@ impl AppState {
 
     pub(crate) fn config_preview_appearance(&self) -> Option<AppearanceConfig> {
         let config_state = self.config_state.as_ref()?;
-        let mut appearance = config_state.draft.base_root_config.appearance.clone();
-        appearance.theme = config_state.draft.appearance_theme;
-        Some(appearance)
+        Some(draft_appearance_config(config_state))
     }
 
     pub fn config_selected_footer_action_label(&self) -> Option<&'static str> {
@@ -184,6 +183,10 @@ impl AppState {
             lines.push("Plugins: Up/Down select".to_owned());
             lines.push("Plugins: PgUp/PgDn wrap".to_owned());
             lines.push("Plugins: footer approve/deny".to_owned());
+        } else if state.selected_section == ConfigSection::Appearance {
+            lines.push("Appearance: Enter cycle".to_owned());
+            lines.push("Appearance: Backspace reset".to_owned());
+            lines.push("Appearance: Ctrl-R clear all".to_owned());
         }
         lines
     }
@@ -377,6 +380,14 @@ impl AppState {
                     "Name",
                     config_state.draft.appearance_theme.display_label(),
                 ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::AppearanceSyntaxTheme,
+                ));
+                lines.push(render_config_readonly_row(
+                    "Syntax source",
+                    &render_syntax_theme_source(config_state),
+                ));
                 let available = ThemeId::all()
                     .iter()
                     .map(|theme| theme.as_str())
@@ -392,6 +403,24 @@ impl AppState {
                 ));
                 lines.push(render_config_value_row(
                     config_state,
+                    ConfigField::AppearanceColorGroup,
+                ));
+                lines.push(render_config_readonly_row(
+                    "Group overrides",
+                    &format!(
+                        "{} of {}",
+                        config_state
+                            .draft
+                            .selected_appearance_color_group_override_count(),
+                        config_state
+                            .draft
+                            .selected_appearance_color_group()
+                            .tokens
+                            .len()
+                    ),
+                ));
+                lines.push(render_config_value_row(
+                    config_state,
                     ConfigField::AppearanceColorToken,
                 ));
                 lines.push(render_config_value_row(
@@ -401,6 +430,12 @@ impl AppState {
                 lines.push(render_config_hint_row(
                     "Backspace/Delete clears the selected token override; Ctrl-R clears all overrides",
                 ));
+                lines.push(render_config_hint_row(
+                    "Backspace/Delete on Color group clears overrides in that group",
+                ));
+                lines.push(String::new());
+                lines.push("[diagnostics]".to_owned());
+                lines.extend(render_appearance_diagnostic_lines(config_state));
                 lines.push(String::new());
                 lines.push("[preview]".to_owned());
                 lines.extend(render_appearance_preview_lines(config_state));
@@ -1088,6 +1123,23 @@ impl AppState {
                             ));
                             return Ok(None);
                         }
+                        ConfigField::AppearanceSyntaxTheme => {
+                            config_state.draft.cycle_appearance_syntax_theme();
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!(
+                                "syntax theme -> {}",
+                                config_state.draft.appearance_syntax_theme.as_str()
+                            ));
+                            return Ok(None);
+                        }
+                        ConfigField::AppearanceColorGroup => {
+                            config_state.draft.cycle_appearance_color_group(true);
+                            self.last_notice = Some(format!(
+                                "color group -> {}",
+                                config_state.draft.selected_appearance_color_group().key
+                            ));
+                            return Ok(None);
+                        }
                         ConfigField::AppearanceColorToken => {
                             config_state.draft.cycle_appearance_color_token(true);
                             self.last_notice = Some(format!(
@@ -1121,51 +1173,11 @@ impl AppState {
                 }
             }
             KeyCode::Backspace => {
-                if let Some(config_state) = self.config_state.as_mut()
-                    && !config_state.footer_selected
-                    && matches!(
-                        config_state.selected_field,
-                        Some(
-                            ConfigField::AppearanceColorToken
-                                | ConfigField::AppearanceColorOverride
-                        )
-                    )
-                {
-                    let token = config_state.draft.selected_appearance_color_token();
-                    if config_state
-                        .draft
-                        .reset_selected_appearance_color_override()
-                    {
-                        config_state.dirty = true;
-                        self.last_notice = Some(format!("reset color {token}"));
-                    } else {
-                        self.last_notice = Some(format!("color {token} already inherits"));
-                    }
-                }
+                self.reset_selected_appearance_color_selection();
                 return Ok(None);
             }
             KeyCode::Delete => {
-                if let Some(config_state) = self.config_state.as_mut()
-                    && !config_state.footer_selected
-                    && matches!(
-                        config_state.selected_field,
-                        Some(
-                            ConfigField::AppearanceColorToken
-                                | ConfigField::AppearanceColorOverride
-                        )
-                    )
-                {
-                    let token = config_state.draft.selected_appearance_color_token();
-                    if config_state
-                        .draft
-                        .reset_selected_appearance_color_override()
-                    {
-                        config_state.dirty = true;
-                        self.last_notice = Some(format!("reset color {token}"));
-                    } else {
-                        self.last_notice = Some(format!("color {token} already inherits"));
-                    }
-                }
+                self.reset_selected_appearance_color_selection();
                 return Ok(None);
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1207,6 +1219,43 @@ impl AppState {
         }
 
         Ok(None)
+    }
+
+    pub(super) fn reset_selected_appearance_color_selection(&mut self) {
+        let Some(config_state) = self.config_state.as_mut() else {
+            return;
+        };
+        if config_state.footer_selected {
+            return;
+        }
+        match config_state.selected_field {
+            Some(ConfigField::AppearanceColorGroup) => {
+                let group = config_state.draft.selected_appearance_color_group();
+                let removed = config_state
+                    .draft
+                    .reset_selected_appearance_color_group_overrides();
+                if removed > 0 {
+                    config_state.dirty = true;
+                    self.last_notice =
+                        Some(format!("reset {removed} color overrides in {}", group.key));
+                } else {
+                    self.last_notice = Some(format!("color group {} already inherits", group.key));
+                }
+            }
+            Some(ConfigField::AppearanceColorToken | ConfigField::AppearanceColorOverride) => {
+                let token = config_state.draft.selected_appearance_color_token();
+                if config_state
+                    .draft
+                    .reset_selected_appearance_color_override()
+                {
+                    config_state.dirty = true;
+                    self.last_notice = Some(format!("reset color {token}"));
+                } else {
+                    self.last_notice = Some(format!("color {token} already inherits"));
+                }
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn handle_config_paste_text(&mut self, text: &str) {
@@ -2009,6 +2058,53 @@ impl AppState {
     }
 }
 
+fn draft_appearance_config(config_state: &ConfigState) -> AppearanceConfig {
+    let mut appearance = config_state.draft.base_root_config.appearance.clone();
+    appearance.theme = config_state.draft.appearance_theme;
+    appearance.syntax_theme = config_state.draft.appearance_syntax_theme;
+    appearance
+}
+
+fn render_syntax_theme_source(config_state: &ConfigState) -> String {
+    let configured = config_state.draft.appearance_syntax_theme;
+    let resolved = config_state.draft.resolved_appearance_syntax_theme();
+    if configured == SyntaxThemeId::Auto {
+        format!("auto -> {}", resolved.display_label())
+    } else {
+        format!("manual -> {}", resolved.display_label())
+    }
+}
+
+fn render_appearance_diagnostic_lines(config_state: &ConfigState) -> Vec<String> {
+    let appearance = draft_appearance_config(config_state);
+    let checks = appearance_doctor_checks(&appearance);
+    let warnings = checks
+        .iter()
+        .filter(|check| check.status != DoctorStatus::Ok)
+        .collect::<Vec<_>>();
+    if warnings.is_empty() {
+        return vec![render_config_readonly_row("Status", "ok")];
+    }
+
+    let mut lines = vec![render_config_readonly_row(
+        "Status",
+        &format!("{} warnings", warnings.len()),
+    )];
+    for check in warnings.iter().take(3) {
+        lines.push(render_config_readonly_row(
+            check.name.trim_start_matches("appearance:"),
+            &format!("{}: {}", check.status.as_str(), check.message),
+        ));
+        if let Some(remediation) = &check.remediation {
+            lines.push(render_config_hint_row(remediation));
+        }
+    }
+    if warnings.len() > 3 {
+        lines.push(format!("... {} more warnings", warnings.len() - 3));
+    }
+    lines
+}
+
 fn render_appearance_preview_lines(config_state: &ConfigState) -> Vec<String> {
     let saved = config_state.draft.base_root_config.appearance.theme;
     let draft = config_state.draft.appearance_theme;
@@ -2022,6 +2118,14 @@ fn render_appearance_preview_lines(config_state: &ConfigState) -> Vec<String> {
             "preview compare: current {} -> draft {} ({state})",
             saved.as_str(),
             draft.as_str()
+        ),
+        format!(
+            "preview syntax: {} -> {}",
+            config_state.draft.appearance_syntax_theme.as_str(),
+            config_state
+                .draft
+                .resolved_appearance_syntax_theme()
+                .display_label()
         ),
         "preview page: rail timeline composer tool modal".to_owned(),
         "preview shell: rail live composer footer".to_owned(),
@@ -2236,8 +2340,14 @@ fn render_config_selection_details(config_state: &ConfigState) -> Vec<String> {
     if matches!(field, ConfigField::ProviderFimModel) {
         lines.push("advanced: provider-specific fields remain in config file or env".to_owned());
     }
+    if matches!(field, ConfigField::AppearanceSyntaxTheme) {
+        lines.push("appearance: auto follows the selected TUI theme for code blocks".to_owned());
+    }
+    if matches!(field, ConfigField::AppearanceColorGroup) {
+        lines.push("appearance: Enter cycles group · Backspace/Delete resets group".to_owned());
+    }
     if matches!(field, ConfigField::AppearanceColorToken) {
-        lines.push("appearance: Enter cycles token · Down edits its override".to_owned());
+        lines.push("appearance: Enter cycles token in group · Down edits its override".to_owned());
     }
     if matches!(field, ConfigField::AppearanceColorOverride) {
         lines.push(

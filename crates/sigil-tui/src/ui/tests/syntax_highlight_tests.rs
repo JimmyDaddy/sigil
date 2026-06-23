@@ -74,7 +74,8 @@ fn blank_lines_and_cache_hits_cover_internal_paths() {
     assert_eq!(spans[0].len(), 1);
     assert_eq!(spans[0][0].content.as_ref(), "");
 
-    let cached = cached_highlight("\n", "rust").expect("highlight should be cached");
+    let cached = cached_highlight("\n", "rust", SyntaxThemeId::CatppuccinMocha)
+        .expect("highlight should be cached");
     assert_eq!(cached[0][0].content.as_ref(), "");
 }
 
@@ -86,6 +87,7 @@ fn cache_eviction_and_style_conversion_cover_remaining_helpers() {
         push_cache_entry(
             &mut cache,
             HighlightCacheEntry {
+                syntax_theme: SyntaxThemeId::CatppuccinMocha,
                 code: format!("code {index}"),
                 language: "rust".to_owned(),
                 lines: vec![vec![Span::raw(format!("line {index}"))]],
@@ -176,7 +178,11 @@ fn highlight_code_to_spans_prefers_cache_after_first_call() {
         let cache = highlight_cache().lock().expect("cache lock");
         cache
             .iter()
-            .filter(|entry| entry.language == "rust" && entry.code == "let a = 1;")
+            .filter(|entry| {
+                entry.syntax_theme == SyntaxThemeId::CatppuccinMocha
+                    && entry.language == "rust"
+                    && entry.code == "let a = 1;"
+            })
             .count()
     };
     assert_eq!(matching_entries, 1);
@@ -187,10 +193,94 @@ fn highlight_code_to_spans_prefers_cache_after_first_call() {
 }
 
 #[test]
+fn highlight_cache_is_partitioned_by_syntax_theme() {
+    let _cache_guard = HIGHLIGHT_CACHE_TEST_LOCK.lock().expect("cache test lock");
+    highlight_cache().lock().expect("cache lock").clear();
+
+    let code = "fn main() { let value = 1; }";
+    let mocha = highlight_code_to_spans_with_theme(code, "rust", SyntaxThemeId::CatppuccinMocha)
+        .expect("mocha should highlight");
+    let solarized = highlight_code_to_spans_with_theme(code, "rust", SyntaxThemeId::SolarizedLight)
+        .expect("solarized should highlight");
+
+    assert_ne!(
+        mocha
+            .iter()
+            .flat_map(|line| line.iter())
+            .find(|span| span.style != Style::default())
+            .map(|span| span.style),
+        solarized
+            .iter()
+            .flat_map(|line| line.iter())
+            .find(|span| span.style != Style::default())
+            .map(|span| span.style)
+    );
+    let cache = highlight_cache().lock().expect("cache lock");
+    assert!(cache.iter().any(|entry| {
+        entry.syntax_theme == SyntaxThemeId::CatppuccinMocha
+            && entry.language == "rust"
+            && entry.code == code
+    }));
+    assert!(cache.iter().any(|entry| {
+        entry.syntax_theme == SyntaxThemeId::SolarizedLight
+            && entry.language == "rust"
+            && entry.code == code
+    }));
+}
+
+#[test]
+fn embedded_theme_mapping_covers_all_syntax_theme_ids() {
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::Auto),
+        EmbeddedThemeName::CatppuccinMocha
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::CatppuccinMocha),
+        EmbeddedThemeName::CatppuccinMocha
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::CatppuccinLatte),
+        EmbeddedThemeName::CatppuccinLatte
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::SolarizedDark),
+        EmbeddedThemeName::SolarizedDark
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::SolarizedLight),
+        EmbeddedThemeName::SolarizedLight
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::GruvboxDark),
+        EmbeddedThemeName::GruvboxDark
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::GruvboxLight),
+        EmbeddedThemeName::GruvboxLight
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::Nord),
+        EmbeddedThemeName::Nord
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::OneHalfDark),
+        EmbeddedThemeName::OneHalfDark
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::OneHalfLight),
+        EmbeddedThemeName::OneHalfLight
+    );
+    assert_eq!(
+        embedded_theme_for(SyntaxThemeId::Monokai),
+        EmbeddedThemeName::MonokaiExtended
+    );
+}
+
+#[test]
 fn fetch_cached_highlight_handles_missing_cache_gracefully() {
     let _cache_guard = HIGHLIGHT_CACHE_TEST_LOCK.lock().expect("cache test lock");
     highlight_cache().lock().expect("cache lock").clear();
-    assert!(cached_highlight("not-found", "rust").is_none());
+    assert!(cached_highlight("not-found", "rust", SyntaxThemeId::CatppuccinMocha).is_none());
 }
 
 #[test]
@@ -201,6 +291,7 @@ fn cache_helpers_handle_capacity_boundaries() {
         push_cache_entry(
             &mut cache,
             HighlightCacheEntry {
+                syntax_theme: SyntaxThemeId::CatppuccinMocha,
                 code: format!("entry {index}"),
                 language: "rust".to_owned(),
                 lines: vec![vec![Span::raw(format!("line {index}"))]],
@@ -217,6 +308,7 @@ fn cache_helpers_handle_capacity_boundaries() {
     push_cache_entry(
         &mut cache,
         HighlightCacheEntry {
+            syntax_theme: SyntaxThemeId::CatppuccinMocha,
             code: "overflow".to_owned(),
             language: "rust".to_owned(),
             lines: vec![vec![Span::raw("overflow".to_owned())]],

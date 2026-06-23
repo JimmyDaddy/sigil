@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use ratatui::style::Color;
-use sigil_kernel::{AppearanceConfig, ThemeColorOverrides, ThemeId};
+use sigil_kernel::{AppearanceConfig, SyntaxThemeId, ThemeColorOverrides, ThemeId};
 
 use super::*;
 
@@ -30,6 +30,7 @@ fn theme_resolve_applies_color_overrides() {
     colors.insert("diff_added_bg".to_owned(), "#102216".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SolarizedLight,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -41,11 +42,39 @@ fn theme_resolve_applies_color_overrides() {
 }
 
 #[test]
+fn theme_resolve_maps_auto_and_explicit_syntax_themes() {
+    let auto = AppearanceConfig {
+        theme: ThemeId::SolarizedLight,
+        syntax_theme: SyntaxThemeId::Auto,
+        colors: ThemeColorOverrides::default(),
+    };
+    let explicit = AppearanceConfig {
+        theme: ThemeId::SolarizedLight,
+        syntax_theme: SyntaxThemeId::Nord,
+        colors: ThemeColorOverrides::default(),
+    };
+
+    assert_eq!(
+        Theme::try_from_config(&auto)
+            .expect("auto syntax theme should resolve")
+            .syntax_theme,
+        SyntaxThemeId::SolarizedLight
+    );
+    assert_eq!(
+        Theme::try_from_config(&explicit)
+            .expect("explicit syntax theme should resolve")
+            .syntax_theme,
+        SyntaxThemeId::Nord
+    );
+}
+
+#[test]
 fn theme_resolve_rejects_unknown_override_token() {
     let mut colors = BTreeMap::new();
     colors.insert("component_specific_blue".to_owned(), "#010203".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -60,6 +89,7 @@ fn theme_resolve_rejects_invalid_hex_override() {
     colors.insert("surface_base".to_owned(), "blue".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -165,6 +195,7 @@ fn theme_diagnostics_passes_builtin_themes() {
     for theme_id in ThemeId::all() {
         let appearance = AppearanceConfig {
             theme: *theme_id,
+            syntax_theme: Default::default(),
             colors: ThemeColorOverrides::default(),
         };
 
@@ -187,6 +218,7 @@ fn theme_diagnostics_reports_low_contrast_override() {
     colors.insert("text_primary".to_owned(), "#111111".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -207,6 +239,7 @@ fn theme_diagnostics_reports_surface_pair_override() {
     colors.insert("text_primary".to_owned(), "#111111".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -235,6 +268,7 @@ fn theme_diagnostics_reports_visible_foreground_overrides() {
     }
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -267,6 +301,7 @@ fn theme_diagnostics_reports_semantic_similarity() {
     colors.insert("status_warning".to_owned(), "#445567".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -287,6 +322,7 @@ fn theme_diagnostics_reports_structural_cue_warning() {
     colors.insert("surface_panel".to_owned(), "#202020".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -312,4 +348,22 @@ fn color_token_allowlist_contains_documented_core_tokens() {
     ] {
         assert!(COLOR_TOKEN_NAMES.contains(&token));
     }
+}
+
+#[test]
+fn color_token_groups_cover_every_override_token_once() {
+    let mut grouped = Vec::new();
+    for group in COLOR_TOKEN_GROUPS {
+        assert!(!group.key.is_empty());
+        assert!(!group.label.is_empty());
+        assert!(!group.tokens.is_empty());
+        grouped.extend(group.tokens.iter().copied());
+    }
+    grouped.sort_unstable();
+    grouped.dedup();
+
+    let mut tokens = COLOR_TOKEN_NAMES.to_vec();
+    tokens.sort_unstable();
+
+    assert_eq!(grouped, tokens);
 }

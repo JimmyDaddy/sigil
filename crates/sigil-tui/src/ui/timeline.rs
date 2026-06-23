@@ -4,6 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
+use sigil_kernel::SyntaxThemeId;
 
 use crate::app::{TimelineEntry, TimelineRole};
 
@@ -64,6 +65,7 @@ pub(crate) fn render_timeline_entry_lines_with_options(
             options
                 .intermediate_assistant_indices
                 .contains(&entry_index),
+            options.theme.syntax_theme,
             &options.theme.palette,
         )
     } else if entry.role == TimelineRole::Phase {
@@ -84,6 +86,7 @@ pub(crate) fn render_timeline_entry_lines_with_options(
             expanded,
             options.hovered_thinking_entry_index == Some(entry_index),
             options.max_content_width,
+            options.theme.syntax_theme,
             &options.theme.palette,
         )
     } else if entry.role == TimelineRole::Tool {
@@ -98,7 +101,8 @@ pub(crate) fn render_timeline_entry_lines_with_options(
             &options.theme.palette,
         )];
         let mut markdown_state = MarkdownRenderState::default();
-        let markdown_options = MarkdownRenderOptions::timeline(options.max_content_width);
+        let markdown_options = MarkdownRenderOptions::timeline(options.max_content_width)
+            .with_syntax_theme(options.theme.syntax_theme);
         if !entry.text.is_empty() {
             for chunk in entry.text.split('\n') {
                 let content = render_timeline_content_spans_with_palette(
@@ -214,6 +218,7 @@ fn render_assistant_entry_lines(
     max_content_width: usize,
     highlight_code: bool,
     intermediate_info: bool,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let accent = palette.accent_info;
@@ -227,7 +232,8 @@ fn render_assistant_entry_lines(
         MarkdownRenderOptions {
             highlight_code,
             ..MarkdownRenderOptions::timeline(max_content_width)
-        },
+        }
+        .with_syntax_theme(syntax_theme),
         palette,
     );
     if intermediate_info {
@@ -271,6 +277,7 @@ fn render_thinking_entry_lines(
     expanded: bool,
     hovered: bool,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let accent = if hovered {
@@ -318,7 +325,7 @@ fn render_thinking_entry_lines(
             accent,
             body_style,
             &preview_lines.join("\n"),
-            MarkdownRenderOptions::timeline(max_content_width),
+            MarkdownRenderOptions::timeline(max_content_width).with_syntax_theme(syntax_theme),
             palette,
         ));
         if hidden_lines > 0 {
@@ -338,7 +345,7 @@ fn render_thinking_entry_lines(
         accent,
         body_style,
         &entry.text,
-        MarkdownRenderOptions::timeline(max_content_width),
+        MarkdownRenderOptions::timeline(max_content_width).with_syntax_theme(syntax_theme),
         palette,
     ));
     lines

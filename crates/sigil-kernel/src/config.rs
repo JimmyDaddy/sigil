@@ -134,6 +134,8 @@ impl Default for TerminalConfig {
 pub struct AppearanceConfig {
     #[serde(default)]
     pub theme: ThemeId,
+    #[serde(default)]
+    pub syntax_theme: SyntaxThemeId,
     #[serde(default, skip_serializing_if = "ThemeColorOverrides::is_empty")]
     pub colors: ThemeColorOverrides,
 }
@@ -193,6 +195,98 @@ impl ThemeId {
             .position(|theme| *theme == self)
             .unwrap_or(0);
         Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
+/// Stable identifiers for syntax highlighting themes used by TUI markdown/code previews.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SyntaxThemeId {
+    #[default]
+    Auto,
+    CatppuccinMocha,
+    CatppuccinLatte,
+    SolarizedDark,
+    SolarizedLight,
+    GruvboxDark,
+    GruvboxLight,
+    Nord,
+    OneHalfDark,
+    OneHalfLight,
+    Monokai,
+}
+
+impl SyntaxThemeId {
+    pub const ALL: [Self; 11] = [
+        Self::Auto,
+        Self::CatppuccinMocha,
+        Self::CatppuccinLatte,
+        Self::SolarizedDark,
+        Self::SolarizedLight,
+        Self::GruvboxDark,
+        Self::GruvboxLight,
+        Self::Nord,
+        Self::OneHalfDark,
+        Self::OneHalfLight,
+        Self::Monokai,
+    ];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::CatppuccinMocha => "catppuccin_mocha",
+            Self::CatppuccinLatte => "catppuccin_latte",
+            Self::SolarizedDark => "solarized_dark",
+            Self::SolarizedLight => "solarized_light",
+            Self::GruvboxDark => "gruvbox_dark",
+            Self::GruvboxLight => "gruvbox_light",
+            Self::Nord => "nord",
+            Self::OneHalfDark => "one_half_dark",
+            Self::OneHalfLight => "one_half_light",
+            Self::Monokai => "monokai",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::CatppuccinMocha => "Catppuccin Mocha",
+            Self::CatppuccinLatte => "Catppuccin Latte",
+            Self::SolarizedDark => "Solarized Dark",
+            Self::SolarizedLight => "Solarized Light",
+            Self::GruvboxDark => "Gruvbox Dark",
+            Self::GruvboxLight => "Gruvbox Light",
+            Self::Nord => "Nord",
+            Self::OneHalfDark => "One Half Dark",
+            Self::OneHalfLight => "One Half Light",
+            Self::Monokai => "Monokai",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|theme| *theme == self)
+            .unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    pub fn resolved_for_theme(self, theme: ThemeId) -> Self {
+        if self != Self::Auto {
+            return self;
+        }
+        match theme {
+            ThemeId::SigilDark => Self::CatppuccinMocha,
+            ThemeId::SolarizedDark => Self::SolarizedDark,
+            ThemeId::SolarizedLight => Self::SolarizedLight,
+            ThemeId::GruvboxDark => Self::GruvboxDark,
+            ThemeId::Nord => Self::Nord,
+            ThemeId::HighContrastDark => Self::OneHalfDark,
+        }
     }
 }
 
