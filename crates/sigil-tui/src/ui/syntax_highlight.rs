@@ -7,16 +7,17 @@ use ratatui::{
     style::{Color as RatatuiColor, Modifier, Style},
     text::Span,
 };
+use sigil_kernel::{SyntaxThemeId, ThemeId};
 use syntect::{
     easy::HighlightLines,
     highlighting::{Color as SyntectColor, FontStyle, Style as SyntectStyle, Theme},
     parsing::{SyntaxReference, SyntaxSet},
     util::LinesWithEndings,
 };
-use two_face::theme::EmbeddedThemeName;
+use two_face::theme::{EmbeddedLazyThemeSet, EmbeddedThemeName};
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
-static THEME: OnceLock<Theme> = OnceLock::new();
+static THEME_SET: OnceLock<EmbeddedLazyThemeSet> = OnceLock::new();
 static HIGHLIGHT_CACHE: OnceLock<Mutex<VecDeque<HighlightCacheEntry>>> = OnceLock::new();
 
 const ANSI_ALPHA_INDEX: u8 = 0x00;
@@ -30,6 +31,7 @@ type HighlightedLines = Vec<Vec<Span<'static>>>;
 
 #[derive(Clone)]
 struct HighlightCacheEntry {
+    syntax_theme: SyntaxThemeId,
     language: String,
     code: String,
     lines: HighlightedLines,
@@ -39,15 +41,39 @@ fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
-fn theme() -> &'static Theme {
-    THEME.get_or_init(|| {
-        two_face::theme::extra()
-            .get(EmbeddedThemeName::CatppuccinMocha)
-            .clone()
-    })
+fn theme_set() -> &'static EmbeddedLazyThemeSet {
+    THEME_SET.get_or_init(two_face::theme::extra)
 }
 
+fn theme(syntax_theme: SyntaxThemeId) -> Theme {
+    theme_set().get(embedded_theme_for(syntax_theme)).clone()
+}
+
+fn embedded_theme_for(syntax_theme: SyntaxThemeId) -> EmbeddedThemeName {
+    match syntax_theme.resolved_for_theme(ThemeId::SigilDark) {
+        SyntaxThemeId::Auto | SyntaxThemeId::CatppuccinMocha => EmbeddedThemeName::CatppuccinMocha,
+        SyntaxThemeId::CatppuccinLatte => EmbeddedThemeName::CatppuccinLatte,
+        SyntaxThemeId::SolarizedDark => EmbeddedThemeName::SolarizedDark,
+        SyntaxThemeId::SolarizedLight => EmbeddedThemeName::SolarizedLight,
+        SyntaxThemeId::GruvboxDark => EmbeddedThemeName::GruvboxDark,
+        SyntaxThemeId::GruvboxLight => EmbeddedThemeName::GruvboxLight,
+        SyntaxThemeId::Nord => EmbeddedThemeName::Nord,
+        SyntaxThemeId::OneHalfDark => EmbeddedThemeName::OneHalfDark,
+        SyntaxThemeId::OneHalfLight => EmbeddedThemeName::OneHalfLight,
+        SyntaxThemeId::Monokai => EmbeddedThemeName::MonokaiExtended,
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn highlight_code_to_spans(code: &str, language: &str) -> Option<HighlightedLines> {
+    highlight_code_to_spans_with_theme(code, language, SyntaxThemeId::default())
+}
+
+pub(crate) fn highlight_code_to_spans_with_theme(
+    code: &str,
+    language: &str,
+    syntax_theme: SyntaxThemeId,
+) -> Option<HighlightedLines> {
     if code.is_empty()
         || language.trim().is_empty()
         || code.len() > MAX_HIGHLIGHT_BYTES
@@ -59,12 +85,14 @@ pub(crate) fn highlight_code_to_spans(code: &str, language: &str) -> Option<High
     if language.is_empty() {
         return None;
     }
-    if let Some(lines) = cached_highlight(code, language) {
+    let syntax_theme = syntax_theme.resolved_for_theme(ThemeId::SigilDark);
+    if let Some(lines) = cached_highlight(code, language, syntax_theme) {
         return Some(lines);
     }
 
     let syntax = find_syntax(language)?;
-    let mut highlighter = HighlightLines::new(syntax, theme());
+    let theme = theme(syntax_theme);
+    let mut highlighter = HighlightLines::new(syntax, &theme);
     let mut lines = Vec::new();
 
     for line in LinesWithEndings::from(code) {
@@ -82,7 +110,7 @@ pub(crate) fn highlight_code_to_spans(code: &str, language: &str) -> Option<High
         lines.push(spans);
     }
 
-    cache_highlight(code, language, lines.clone());
+    cache_highlight(code, language, syntax_theme, lines.clone());
     Some(lines)
 }
 
@@ -90,21 +118,30 @@ fn highlight_cache() -> &'static Mutex<VecDeque<HighlightCacheEntry>> {
     HIGHLIGHT_CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-fn cached_highlight(code: &str, language: &str) -> Option<HighlightedLines> {
+fn cached_highlight(
+    code: &str,
+    language: &str,
+    syntax_theme: SyntaxThemeId,
+) -> Option<HighlightedLines> {
     let mut cache = match highlight_cache().lock() {
         Ok(cache) => cache,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let position = cache
-        .iter()
-        .position(|entry| entry.language == language && entry.code == code)?;
+    let position = cache.iter().position(|entry| {
+        entry.syntax_theme == syntax_theme && entry.language == language && entry.code == code
+    })?;
     let entry = cache.remove(position)?;
     let lines = entry.lines.clone();
     cache.push_back(entry);
     Some(lines)
 }
 
-fn cache_highlight(code: &str, language: &str, lines: HighlightedLines) {
+fn cache_highlight(
+    code: &str,
+    language: &str,
+    syntax_theme: SyntaxThemeId,
+    lines: HighlightedLines,
+) {
     let mut cache = match highlight_cache().lock() {
         Ok(cache) => cache,
         Err(poisoned) => poisoned.into_inner(),
@@ -112,6 +149,7 @@ fn cache_highlight(code: &str, language: &str, lines: HighlightedLines) {
     push_cache_entry(
         &mut cache,
         HighlightCacheEntry {
+            syntax_theme,
             language: language.to_owned(),
             code: code.to_owned(),
             lines,

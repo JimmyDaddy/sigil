@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig,
-    PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, ThemeId,
+    PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, SyntaxThemeId, ThemeId,
 };
 use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
@@ -11,7 +11,7 @@ use sigil_provider_gemini::GeminiProviderConfig;
 use sigil_provider_openai_compat::OpenAiCompatibleProviderConfig;
 use sigil_runtime::{ResolvedAgentProfile, provider_config_key};
 
-use crate::ui::theme::COLOR_TOKEN_NAMES;
+use crate::ui::theme::{COLOR_TOKEN_GROUPS, COLOR_TOKEN_NAMES, ColorTokenGroup};
 
 pub(crate) const DEEPSEEK_PROVIDER_KEY: &str = "deepseek";
 pub(crate) const OPENAI_COMPAT_PROVIDER_KEY: &str = "openai_compat";
@@ -142,6 +142,8 @@ pub(crate) enum ConfigField {
     TerminalOsc52Clipboard,
     TerminalScrollSensitivity,
     AppearanceTheme,
+    AppearanceSyntaxTheme,
+    AppearanceColorGroup,
     AppearanceColorToken,
     AppearanceColorOverride,
     SkillId,
@@ -180,8 +182,10 @@ impl ConfigField {
         Self::TerminalOsc52Clipboard,
         Self::TerminalScrollSensitivity,
     ];
-    const APPEARANCE_FIELDS: [Self; 3] = [
+    const APPEARANCE_FIELDS: [Self; 5] = [
         Self::AppearanceTheme,
+        Self::AppearanceSyntaxTheme,
+        Self::AppearanceColorGroup,
         Self::AppearanceColorToken,
         Self::AppearanceColorOverride,
     ];
@@ -236,6 +240,8 @@ impl ConfigField {
             Self::TerminalOsc52Clipboard => "osc52_clipboard",
             Self::TerminalScrollSensitivity => "scroll_sensitivity",
             Self::AppearanceTheme => "theme",
+            Self::AppearanceSyntaxTheme => "syntax_theme",
+            Self::AppearanceColorGroup => "color_group",
             Self::AppearanceColorToken => "color_token",
             Self::AppearanceColorOverride => "color_override",
             Self::SkillId => "skill",
@@ -269,6 +275,8 @@ impl ConfigField {
             Self::TerminalOsc52Clipboard => "OSC52 clipboard",
             Self::TerminalScrollSensitivity => "Scroll sensitivity",
             Self::AppearanceTheme => "Theme",
+            Self::AppearanceSyntaxTheme => "Syntax theme",
+            Self::AppearanceColorGroup => "Color group",
             Self::AppearanceColorToken => "Color token",
             Self::AppearanceColorOverride => "Override",
             Self::SkillId => "Skill",
@@ -342,8 +350,14 @@ impl ConfigField {
             Self::AppearanceTheme => {
                 "Color palette for the TUI. Draft themes preview immediately; saving persists the choice and does not affect session history."
             }
+            Self::AppearanceSyntaxTheme => {
+                "Syntax highlighting theme for markdown code blocks and tool previews. Auto follows the selected TUI theme."
+            }
+            Self::AppearanceColorGroup => {
+                "Semantic token group used to narrow color override editing. Press Enter to move to the next group."
+            }
             Self::AppearanceColorToken => {
-                "Semantic color token selected for override editing. Press Enter to move to the next token."
+                "Semantic color token selected for override editing. Press Enter to move within the current group."
             }
             Self::AppearanceColorOverride => {
                 "Optional #RRGGBB override for the selected color token. Empty value inherits from the current theme."
@@ -388,6 +402,8 @@ impl ConfigField {
             Self::PermissionsDefaultMode
             | Self::CodeIntelStartup
             | Self::AppearanceTheme
+            | Self::AppearanceSyntaxTheme
+            | Self::AppearanceColorGroup
             | Self::AppearanceColorToken => "Enter cycle",
             Self::MemoryEnabled
             | Self::CompactionEnabled
@@ -616,6 +632,8 @@ pub(crate) struct ConfigDraft {
     pub(crate) terminal_osc52_clipboard: bool,
     pub(crate) terminal_scroll_sensitivity: String,
     pub(crate) appearance_theme: ThemeId,
+    pub(crate) appearance_syntax_theme: SyntaxThemeId,
+    pub(crate) appearance_color_group_index: usize,
     pub(crate) appearance_color_token_index: usize,
     pub(crate) mcp_servers: Vec<McpServerDraft>,
 }
@@ -739,6 +757,8 @@ impl ConfigDraft {
             terminal_osc52_clipboard: root_config.terminal.osc52_clipboard,
             terminal_scroll_sensitivity: root_config.terminal.scroll_sensitivity.to_string(),
             appearance_theme: root_config.appearance.theme,
+            appearance_syntax_theme: root_config.appearance.syntax_theme,
+            appearance_color_group_index: first_appearance_color_group_index(root_config),
             appearance_color_token_index: first_appearance_color_token_index(root_config),
             mcp_servers: root_config
                 .mcp_servers
@@ -886,6 +906,7 @@ impl ConfigDraft {
         root_config.terminal.osc52_clipboard = self.terminal_osc52_clipboard;
         root_config.terminal.scroll_sensitivity = terminal_scroll_sensitivity;
         root_config.appearance.theme = self.appearance_theme;
+        root_config.appearance.syntax_theme = self.appearance_syntax_theme;
         root_config.appearance.colors = self.base_root_config.appearance.colors.clone();
         root_config.mcp_servers = self
             .mcp_servers
@@ -979,7 +1000,63 @@ impl ConfigDraft {
             .min(COLOR_TOKEN_NAMES.len() - 1)]
     }
 
+    pub(crate) fn selected_appearance_color_group(&self) -> ColorTokenGroup {
+        COLOR_TOKEN_GROUPS[self
+            .appearance_color_group_index
+            .min(COLOR_TOKEN_GROUPS.len() - 1)]
+    }
+
+    pub(crate) fn cycle_appearance_syntax_theme(&mut self) {
+        self.appearance_syntax_theme = self.appearance_syntax_theme.next();
+    }
+
+    pub(crate) fn resolved_appearance_syntax_theme(&self) -> SyntaxThemeId {
+        self.appearance_syntax_theme
+            .resolved_for_theme(self.appearance_theme)
+    }
+
+    pub(crate) fn cycle_appearance_color_group(&mut self, forward: bool) {
+        let len = COLOR_TOKEN_GROUPS.len();
+        if forward {
+            self.appearance_color_group_index = (self.appearance_color_group_index + 1) % len;
+        } else if self.appearance_color_group_index == 0 {
+            self.appearance_color_group_index = len - 1;
+        } else {
+            self.appearance_color_group_index -= 1;
+        }
+        self.appearance_color_token_index = COLOR_TOKEN_NAMES
+            .iter()
+            .position(|token| {
+                self.selected_appearance_color_group()
+                    .tokens
+                    .contains(token)
+            })
+            .unwrap_or(0);
+    }
+
     pub(crate) fn cycle_appearance_color_token(&mut self, forward: bool) {
+        let group = self.selected_appearance_color_group();
+        let tokens = group.tokens;
+        let current_group_index = tokens
+            .iter()
+            .position(|token| *token == self.selected_appearance_color_token())
+            .unwrap_or(0);
+        let next_group_index = if forward {
+            (current_group_index + 1) % tokens.len()
+        } else if current_group_index == 0 {
+            tokens.len() - 1
+        } else {
+            current_group_index - 1
+        };
+        let next_token = tokens[next_group_index];
+        self.appearance_color_token_index = COLOR_TOKEN_NAMES
+            .iter()
+            .position(|token| *token == next_token)
+            .unwrap_or(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cycle_all_appearance_color_tokens(&mut self, forward: bool) {
         let len = COLOR_TOKEN_NAMES.len();
         if forward {
             self.appearance_color_token_index = (self.appearance_color_token_index + 1) % len;
@@ -988,6 +1065,9 @@ impl ConfigDraft {
         } else {
             self.appearance_color_token_index -= 1;
         }
+        self.appearance_color_group_index =
+            appearance_color_group_index_for_token(self.selected_appearance_color_token())
+                .unwrap_or(0);
     }
 
     pub(crate) fn selected_appearance_color_override(&self) -> Option<&str> {
@@ -1031,6 +1111,31 @@ impl ConfigDraft {
         self.base_root_config.appearance.colors.clear();
         true
     }
+
+    pub(crate) fn reset_selected_appearance_color_group_overrides(&mut self) -> usize {
+        let tokens = self.selected_appearance_color_group().tokens;
+        let mut removed = 0usize;
+        for token in tokens {
+            if self
+                .base_root_config
+                .appearance
+                .colors
+                .remove(token)
+                .is_some()
+            {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    pub(crate) fn selected_appearance_color_group_override_count(&self) -> usize {
+        self.selected_appearance_color_group()
+            .tokens
+            .iter()
+            .filter(|token| self.base_root_config.appearance.colors.get(token).is_some())
+            .count()
+    }
 }
 
 fn first_appearance_color_token_index(root_config: &RootConfig) -> usize {
@@ -1038,6 +1143,20 @@ fn first_appearance_color_token_index(root_config: &RootConfig) -> usize {
         .iter()
         .position(|token| root_config.appearance.colors.get(token).is_some())
         .unwrap_or(0)
+}
+
+fn first_appearance_color_group_index(root_config: &RootConfig) -> usize {
+    COLOR_TOKEN_NAMES
+        .iter()
+        .find(|token| root_config.appearance.colors.get(token).is_some())
+        .and_then(|token| appearance_color_group_index_for_token(token))
+        .unwrap_or(0)
+}
+
+fn appearance_color_group_index_for_token(token: &str) -> Option<usize> {
+    COLOR_TOKEN_GROUPS
+        .iter()
+        .position(|group| group.tokens.contains(&token))
 }
 
 fn normalize_hex_color_override(value: &str) -> Result<String> {
@@ -1554,6 +1673,8 @@ impl ConfigState {
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
             | ConfigField::AppearanceTheme
+            | ConfigField::AppearanceSyntaxTheme
+            | ConfigField::AppearanceColorGroup
             | ConfigField::AppearanceColorToken => None,
             ConfigField::AppearanceColorOverride => self.draft.selected_appearance_color_override(),
         }
@@ -1602,6 +1723,8 @@ impl ConfigState {
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
             | ConfigField::AppearanceTheme
+            | ConfigField::AppearanceSyntaxTheme
+            | ConfigField::AppearanceColorGroup
             | ConfigField::AppearanceColorToken
             | ConfigField::AppearanceColorOverride => None,
         }
@@ -1663,6 +1786,12 @@ impl ConfigState {
             }
             ConfigField::AppearanceTheme => {
                 return self.draft.appearance_theme.as_str().to_owned();
+            }
+            ConfigField::AppearanceSyntaxTheme => {
+                return self.draft.appearance_syntax_theme.as_str().to_owned();
+            }
+            ConfigField::AppearanceColorGroup => {
+                return self.draft.selected_appearance_color_group().key.to_owned();
             }
             ConfigField::AppearanceColorToken => {
                 return self.draft.selected_appearance_color_token().to_owned();
@@ -1884,6 +2013,8 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::TerminalMouseCapture
         | ConfigField::TerminalOsc52Clipboard
         | ConfigField::AppearanceTheme
+        | ConfigField::AppearanceSyntaxTheme
+        | ConfigField::AppearanceColorGroup
         | ConfigField::AppearanceColorToken => false,
     }
 }

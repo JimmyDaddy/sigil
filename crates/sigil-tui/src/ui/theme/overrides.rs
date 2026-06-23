@@ -93,6 +93,167 @@ pub(crate) const COLOR_TOKEN_NAMES: &[&str] = &[
     "status_pending",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColorTokenGroup {
+    pub(crate) key: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) tokens: &'static [&'static str],
+}
+
+pub(crate) const COLOR_TOKEN_GROUPS: &[ColorTokenGroup] = &[
+    ColorTokenGroup {
+        key: "surfaces",
+        label: "Surfaces",
+        tokens: &[
+            "surface_base",
+            "surface_rail",
+            "surface_panel",
+            "surface_panel_alt",
+            "surface_input",
+            "surface_agent_panel",
+            "surface_overlay",
+            "surface_overlay_shadow",
+            "surface_badge",
+            "surface_selection",
+            "surface_user_message",
+            "surface_code",
+        ],
+    },
+    ColorTokenGroup {
+        key: "borders",
+        label: "Borders",
+        tokens: &[
+            "border_subtle",
+            "border_strong",
+            "border_focus",
+            "border_danger",
+        ],
+    },
+    ColorTokenGroup {
+        key: "text",
+        label: "Text",
+        tokens: &[
+            "text_primary",
+            "text_secondary",
+            "text_muted",
+            "text_inverse",
+            "text_disabled",
+        ],
+    },
+    ColorTokenGroup {
+        key: "accents",
+        label: "Accents",
+        tokens: &[
+            "accent_primary",
+            "accent_secondary",
+            "accent_info",
+            "accent_success",
+            "accent_warning",
+            "accent_danger",
+            "accent_streaming",
+            "accent_idle",
+        ],
+    },
+    ColorTokenGroup {
+        key: "selection_buttons",
+        label: "Selection/buttons",
+        tokens: &[
+            "selection_fg",
+            "selection_bg",
+            "button_selected_fg",
+            "button_selected_bg",
+            "button_inactive_fg",
+        ],
+    },
+    ColorTokenGroup {
+        key: "status",
+        label: "Status",
+        tokens: &[
+            "status_idle",
+            "status_thinking",
+            "status_tool",
+            "status_streaming",
+            "status_success",
+            "status_warning",
+            "status_error",
+            "status_pending",
+        ],
+    },
+    ColorTokenGroup {
+        key: "diff",
+        label: "Diff",
+        tokens: &[
+            "diff_header_fg",
+            "diff_hunk_fg",
+            "diff_added_fg",
+            "diff_added_bg",
+            "diff_removed_fg",
+            "diff_removed_bg",
+            "diff_context_fg",
+            "diff_gutter_fg",
+            "diff_current_hunk_bg",
+        ],
+    },
+    ColorTokenGroup {
+        key: "approval",
+        label: "Approval",
+        tokens: &[
+            "approval_bg",
+            "approval_backdrop_bg",
+            "approval_border",
+            "approval_shadow",
+            "risk_low",
+            "risk_medium",
+            "risk_high",
+            "approval_allow_bg",
+            "approval_deny_bg",
+            "approval_selected_bg",
+        ],
+    },
+    ColorTokenGroup {
+        key: "markdown",
+        label: "Markdown",
+        tokens: &[
+            "markdown_heading",
+            "markdown_quote_bar",
+            "markdown_quote_text",
+            "markdown_rule",
+            "markdown_code_fg",
+            "markdown_code_bg",
+            "markdown_link",
+        ],
+    },
+    ColorTokenGroup {
+        key: "modal_overlay",
+        label: "Modal/overlay",
+        tokens: &[
+            "modal_bg",
+            "modal_border",
+            "modal_shadow",
+            "modal_command_bg",
+            "modal_selected_bg",
+            "overlay_bg",
+            "overlay_shadow",
+        ],
+    },
+    ColorTokenGroup {
+        key: "config",
+        label: "Config",
+        tokens: &[
+            "config_bg",
+            "config_border",
+            "config_primary",
+            "config_detail",
+            "config_warning",
+            "config_danger",
+            "config_tab_bg",
+            "config_section_bg",
+            "config_selected_bg",
+            "setup_bg",
+        ],
+    },
+];
+
 pub(crate) fn apply_overrides(
     palette: &mut ThemePalette,
     overrides: &ThemeColorOverrides,

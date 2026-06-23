@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
+use sigil_kernel::SyntaxThemeId;
 
 use crate::app::{
     AppState, ApprovalAction, ApprovalChangeSetSummary, ApprovalDiagnosticSummary,
@@ -69,8 +70,12 @@ pub(super) fn render_approval_modal(frame: &mut Frame, app: &AppState) {
         return;
     }
 
-    let header_lines =
-        approval_header_lines_with_palette(&view, area.width.saturating_sub(2) as usize, palette);
+    let header_lines = approval_header_lines_with_palette(
+        &view,
+        area.width.saturating_sub(2) as usize,
+        current_theme.syntax_theme,
+        palette,
+    );
     let footer_lines = approval_footer_lines_with_palette(&view, palette);
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -200,12 +205,13 @@ fn approval_block_title(_app: &AppState) -> &'static str {
 #[cfg(test)]
 fn approval_header_lines(view: &ApprovalModalView, max_content_width: usize) -> Vec<Line<'static>> {
     let palette = theme::default_palette();
-    approval_header_lines_with_palette(view, max_content_width, &palette)
+    approval_header_lines_with_palette(view, max_content_width, SyntaxThemeId::default(), &palette)
 }
 
 fn approval_header_lines_with_palette(
     view: &ApprovalModalView,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
@@ -273,7 +279,8 @@ fn approval_header_lines_with_palette(
             Style::default().fg(palette.text_muted),
         ));
     } else {
-        let markdown_options = MarkdownRenderOptions::modal(max_content_width);
+        let markdown_options =
+            MarkdownRenderOptions::modal(max_content_width).with_syntax_theme(syntax_theme);
         lines.extend(view.preview_summary.lines().take(2).map(|line| {
             Line::from(render_inline_markdown_spans_with_palette(
                 line,

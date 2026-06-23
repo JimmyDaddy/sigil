@@ -89,6 +89,7 @@ scroll_sensitivity = 3
 
 [appearance]
 theme = "sigil_dark"
+syntax_theme = "auto"
 
 [providers.deepseek]
 model = "deepseek-v4-flash"
@@ -150,6 +151,7 @@ tool_timeout_secs = 30
 ```toml
 [appearance]
 theme = "sigil_dark"
+syntax_theme = "auto"
 
 [appearance.colors]
 surface_base = "#07080A"
@@ -157,13 +159,15 @@ accent_primary = "#91B6AA"
 markdown_code_bg = "#1C2129"
 ```
 
-`theme` 控制 TUI 配色。内置值包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。`/config` 面板提供 `Appearance` 区块；在 `Theme` 行按 `Enter` 会循环切换内置主题并立即预览草稿 palette，包括 current/draft 对比、page、shell、composer、tool-card、approval modal、状态、diff 和 markdown 样片。`Ctrl-S` 会把选中主题保存到 `sigil.toml`。
+`theme` 控制 TUI 配色。内置值包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。`/config` 面板提供 `Appearance` 区块；在 `Theme` 行按 `Enter` 会循环切换内置主题并立即预览草稿 palette，包括 current/draft 对比、syntax、page、shell、composer、tool-card、approval modal、状态、diff 和 markdown 样片。`Ctrl-S` 会把选中主题保存到 `sigil.toml`。
+
+`syntax_theme` 控制 markdown code block、工具 markdown preview 和 approval preview summary 的 syntect/two-face 语法高亮。默认 `auto` 会跟随选中的 TUI theme。显式值包括 `catppuccin_mocha`、`catppuccin_latte`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`gruvbox_light`、`nord`、`one_half_dark`、`one_half_light` 和 `monokai`。
 
 `[appearance.colors]` 可以用 `#RRGGBB` 覆盖稳定语义 color token。未知 token 或非十六进制值会由 appearance diagnostics 报告，不会变成 provider 可见状态。覆盖只影响 TUI 渲染，不写入 session history、approval record、tool payload 或 provider 可见上下文。
 
-在 `/config` 的 Appearance 中，`Color token` 选择语义 token，`Override` 编辑当前 token 的覆盖值。在 `Color token` 行按 `Enter` 可循环 token；在 `Override` 行输入或粘贴 `#RRGGBB` 可设置覆盖；`Backspace` 或 `Delete` 会清除当前 token；`Ctrl-R` 会清空草稿里的全部颜色覆盖。
+在 `/config` 的 Appearance 中，`Syntax theme` 会在 `auto` 和显式代码高亮主题之间循环。`Color group` 会把颜色编辑器限制在一个 token 分组内，`Color token` 选择该分组里的语义 token，`Override` 编辑当前 token 的覆盖值。在 `Color group` 或 `Color token` 行按 `Enter` 可循环选项；在 `Override` 行输入或粘贴 `#RRGGBB` 可设置覆盖；在 token 或 override 行按 `Backspace` 或 `Delete` 会清除当前 token；在 group 行按 `Backspace` 或 `Delete` 会清除该分组；`Ctrl-R` 会清空草稿里的全部颜色覆盖。
 
-`sigil doctor` 和 TUI `/doctor` 会在 config load 后校验 appearance 覆盖。文字/背景低对比、语义颜色过近和结构提示过弱会作为 warning 展示并附带修复建议；非法覆盖值会显示在 `appearance:colors`。
+`sigil doctor`、TUI `/doctor` 和 `/config` Appearance 实时 diagnostics 会在 config load 或草稿编辑后校验 appearance 覆盖。文字/背景低对比、语义颜色过近和结构提示过弱会作为 warning 展示并附带修复建议；非法覆盖值会显示在 `appearance:colors`。
 
 支持的 color token 是稳定语义名。优先只覆盖表达目标变化的最小 token 组；例如想改变信息强调色时，先改 `accent_info`，不要把每个状态或工具卡颜色都单独覆盖一遍。
 
@@ -174,12 +178,12 @@ markdown_code_bg = "#1C2129"
 | Text | `text_primary`, `text_secondary`, `text_muted`, `text_inverse`, `text_disabled` | 正文、次级详情、提示、选中按钮文字、禁用文字 | `text_primary` 需要高对比；`text_muted` 只用于非关键标签。 |
 | Accent | `accent_primary`, `accent_secondary`, `accent_info`, `accent_success`, `accent_warning`, `accent_danger`, `accent_streaming`, `accent_idle` | Composer 状态、section label、信息/成功/警告/危险语义、streaming/idle 状态 | success、warning、danger、info 需要能一眼区分。 |
 | Selection / Button | `selection_fg`, `selection_bg`, `button_selected_fg`, `button_selected_bg`, `button_inactive_fg` | 活跃行、选中的 footer/config action、按钮式 chip | 选中态前景色要在 `selection_bg` 和按钮背景上都可读。 |
+| Status | `status_idle`, `status_thinking`, `status_tool`, `status_streaming`, `status_success`, `status_warning`, `status_error`, `status_pending` | live status、doctor 结果、task/agent indicator、info rail marker | success、warning、error、pending 需要能快速区分。 |
 | Diff | `diff_header_fg`, `diff_hunk_fg`, `diff_added_fg`, `diff_added_bg`, `diff_removed_fg`, `diff_removed_bg`, `diff_context_fg`, `diff_gutter_fg`, `diff_current_hunk_bg` | 工具预览和 approval diff 面板 | added/removed 颜色及背景要彼此可区分。 |
 | Approval / Risk | `approval_bg`, `approval_backdrop_bg`, `approval_border`, `approval_shadow`, `risk_low`, `risk_medium`, `risk_high`, `approval_allow_bg`, `approval_deny_bg`, `approval_selected_bg` | 工具审批 modal、risk badge、allow/deny action | allow 和 deny 背景要明显不同；`risk_high` 要比 `risk_low` 更醒目。 |
 | Markdown | `markdown_heading`, `markdown_quote_bar`, `markdown_quote_text`, `markdown_rule`, `markdown_code_fg`, `markdown_code_bg`, `markdown_link` | Timeline markdown、tool-card markdown preview、approval summary markdown | inline code 要在 `markdown_code_bg` 上可读；link 要和 heading 可区分。 |
 | Modal / Overlay | `modal_bg`, `modal_border`, `modal_shadow`, `modal_command_bg`, `modal_selected_bg`, `overlay_bg`, `overlay_shadow` | 弹窗和 slash command overlay | command chip 要在 `modal_command_bg` 上可读；选中行要明显。 |
 | Config / Setup | `config_bg`, `config_border`, `config_primary`, `config_detail`, `config_warning`, `config_danger`, `config_tab_bg`, `config_section_bg`, `config_selected_bg`, `setup_bg` | `/config`、setup flow、config preview、config footer/action | `config_selected_bg` 要和 `config_bg` 区分；warning/danger 要分开。 |
-| Status | `status_idle`, `status_thinking`, `status_tool`, `status_streaming`, `status_success`, `status_warning`, `status_error`, `status_pending` | live status、doctor 结果、task/agent indicator、info rail marker | success、warning、error、pending 需要能快速区分。 |
 
 推荐约束：
 

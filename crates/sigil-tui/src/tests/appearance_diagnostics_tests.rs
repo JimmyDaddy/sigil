@@ -21,6 +21,7 @@ fn appearance_doctor_checks_reports_invalid_override_as_appearance_colors() {
     colors.insert("surface_base".to_owned(), "blue".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -45,6 +46,7 @@ fn appearance_doctor_checks_reports_low_contrast_override() {
     colors.insert("text_primary".to_owned(), "#111111".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -68,6 +70,7 @@ fn appearance_doctor_checks_groups_semantic_and_structural_warnings() {
     colors.insert("surface_panel".to_owned(), "#202020".to_owned());
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
+        syntax_theme: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 

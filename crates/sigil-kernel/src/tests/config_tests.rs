@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use super::{
     CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, McpServerConfig,
-    McpServerStartup, McpTrustClass, RootConfig, ThemeId, default_user_config_dir,
+    McpServerStartup, McpTrustClass, RootConfig, SyntaxThemeId, ThemeId, default_user_config_dir,
     default_user_config_path, preferred_config_path, resolve_workspace_root,
 };
 use crate::{
@@ -182,6 +182,7 @@ model = "deepseek-v4-flash"
     assert_eq!(config.compaction.tail_messages, 6);
     assert_eq!(config.terminal, Default::default());
     assert_eq!(config.appearance.theme, ThemeId::SigilDark);
+    assert_eq!(config.appearance.syntax_theme, SyntaxThemeId::Auto);
     assert!(config.appearance.colors.is_empty());
     assert_eq!(config.task.default_mode, TaskMode::Chat);
 }
@@ -196,6 +197,7 @@ model = "deepseek-v4-flash"
 
 [appearance]
 theme = "solarized_dark"
+syntax_theme = "solarized_dark"
 
 [appearance.colors]
 surface_base = "#002b36"
@@ -205,6 +207,7 @@ accent_primary = "#b58900"
     .expect("appearance config should parse");
 
     assert_eq!(config.appearance.theme, ThemeId::SolarizedDark);
+    assert_eq!(config.appearance.syntax_theme, SyntaxThemeId::SolarizedDark);
     assert_eq!(config.appearance.colors.len(), 2);
     assert_eq!(
         config.appearance.colors.get("surface_base"),
@@ -213,6 +216,31 @@ accent_primary = "#b58900"
     assert_eq!(
         config.appearance.colors.get("accent_primary"),
         Some("#b58900")
+    );
+}
+
+#[test]
+fn syntax_theme_ids_have_stable_labels_and_display_names() {
+    let values = SyntaxThemeId::all()
+        .iter()
+        .map(|theme| (theme.as_str(), theme.display_label()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        values,
+        vec![
+            ("auto", "Auto"),
+            ("catppuccin_mocha", "Catppuccin Mocha"),
+            ("catppuccin_latte", "Catppuccin Latte"),
+            ("solarized_dark", "Solarized Dark"),
+            ("solarized_light", "Solarized Light"),
+            ("gruvbox_dark", "Gruvbox Dark"),
+            ("gruvbox_light", "Gruvbox Light"),
+            ("nord", "Nord"),
+            ("one_half_dark", "One Half Dark"),
+            ("one_half_light", "One Half Light"),
+            ("monokai", "Monokai"),
+        ]
     );
 }
 
@@ -229,6 +257,24 @@ theme = "dracula"
 "#,
     )
     .expect_err("unknown themes should fail config parsing");
+
+    assert!(error.to_string().contains("unknown variant"));
+    assert!(error.to_string().contains("dracula"));
+}
+
+#[test]
+fn root_config_rejects_unknown_syntax_theme() {
+    let error = toml::from_str::<RootConfig>(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[appearance]
+syntax_theme = "dracula"
+"#,
+    )
+    .expect_err("unknown syntax themes should fail config parsing");
 
     assert!(error.to_string().contains("unknown variant"));
     assert!(error.to_string().contains("dracula"));
@@ -256,6 +302,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
         terminal: Default::default(),
         appearance: crate::AppearanceConfig {
             theme: ThemeId::Nord,
+            syntax_theme: SyntaxThemeId::Nord,
             colors: crate::ThemeColorOverrides::new(colors),
         },
         task: Default::default(),
@@ -267,6 +314,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
 
     assert!(rendered.contains("[appearance]"));
     assert!(rendered.contains("theme = \"nord\""));
+    assert!(rendered.contains("syntax_theme = \"nord\""));
     assert!(rendered.contains("[appearance.colors]"));
     assert!(rendered.contains("surface_base = \"#07080a\""));
     assert!(rendered.contains("text_primary = \"#ecf0f6\""));

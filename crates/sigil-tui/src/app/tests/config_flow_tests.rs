@@ -636,19 +636,30 @@ fn config_appearance_step_shows_theme_and_scope() {
         .set_section(ConfigSection::Appearance);
 
     let detail = app.config_detail_lines().join("\n");
+    let nav = app.config_nav_lines().join("\n");
 
     assert!(detail.contains("Appearance 7/11 · TUI theme"));
+    assert!(nav.contains("Appearance: Enter cycle"));
+    assert!(nav.contains("Appearance: Backspace reset"));
+    assert!(nav.contains("Appearance: Ctrl-R clear all"));
     assert!(detail.contains("[theme]"));
     assert!(detail.contains("Theme: gruvbox_dark  [Enter cycle]"));
     assert!(detail.contains("- Name: Gruvbox Dark"));
+    assert!(detail.contains("Syntax theme: auto"));
+    assert!(detail.contains("- Syntax source: auto -> Gruvbox Dark"));
     assert!(detail.contains("sigil_dark, solarized_dark, solarized_light"));
     assert!(detail.contains("- Overrides: 1 colors"));
+    assert!(detail.contains("Color group: surfaces"));
+    assert!(detail.contains("- Group overrides: 1 of 12"));
     assert!(detail.contains("Color token: surface_base"));
     assert!(detail.contains("Override: #282828"));
     assert!(detail.contains("Backspace/Delete clears the selected token override"));
     assert!(detail.contains("Ctrl-R clears all overrides"));
+    assert!(detail.contains("[diagnostics]"));
+    assert!(detail.contains("- Status: ok"));
     assert!(detail.contains("[preview]"));
     assert!(detail.contains("preview compare: current gruvbox_dark -> draft gruvbox_dark (saved)"));
+    assert!(detail.contains("preview syntax: auto -> Gruvbox Dark"));
     assert!(detail.contains("preview page: rail timeline composer tool modal"));
     assert!(detail.contains("preview shell: rail live composer footer"));
     assert!(detail.contains("preview composer: Build"));
@@ -662,6 +673,30 @@ fn config_appearance_step_shows_theme_and_scope() {
     assert!(detail.contains("[scope]"));
     assert!(detail.contains("not written to session history"));
     assert!(detail.contains("Theme draft previews immediately"));
+}
+
+#[test]
+fn config_appearance_step_shows_live_diagnostics_for_bad_draft() {
+    let mut config = test_config();
+    let mut colors = std::collections::BTreeMap::new();
+    colors.insert("surface_base".to_owned(), "#101010".to_owned());
+    colors.insert("text_primary".to_owned(), "#111111".to_owned());
+    config.appearance.colors = sigil_kernel::ThemeColorOverrides::new(colors);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Appearance);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("[diagnostics]"));
+    assert!(detail.contains("- Status:"));
+    assert!(detail.contains("warnings"));
+    assert!(detail.contains("contrast:text-base"));
+    assert!(detail.contains("text_primary on surface_base contrast"));
+    assert!(detail.contains("run /config Appearance to preview"));
 }
 
 #[test]
@@ -869,6 +904,79 @@ fn config_appearance_color_shortcuts_cover_noop_and_token_edges() -> Result<()> 
         app.last_notice(),
         Some("color surface_rail already inherits")
     );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        assert!(state.focus_field(ConfigField::AppearanceColorGroup));
+        state
+            .draft
+            .set_selected_appearance_color_override("#010203".to_owned())?;
+    }
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("reset 1 color overrides in surfaces")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("color group surfaces already inherits")
+    );
+    Ok(())
+}
+
+#[test]
+fn config_appearance_group_enter_and_reset_guards_are_noops() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.reset_selected_appearance_color_selection();
+    assert!(app.config_state.is_none());
+    assert_eq!(app.last_notice(), None);
+
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Appearance);
+        assert!(state.focus_field(ConfigField::AppearanceColorGroup));
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("color group -> borders"));
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should still exist")
+            .draft
+            .selected_appearance_color_group()
+            .key,
+        "borders"
+    );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.footer_selected = true;
+    }
+    let previous_notice = app.last_notice().map(ToOwned::to_owned);
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), previous_notice.as_deref());
     Ok(())
 }
 
@@ -887,7 +995,19 @@ fn config_appearance_color_field_context_lines_explain_token_and_override() {
 
     let token_detail = app.config_detail_lines().join("\n");
 
-    assert!(token_detail.contains("appearance: Enter cycles token"));
+    assert!(token_detail.contains("appearance: Enter cycles token in group"));
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        assert!(state.focus_field(ConfigField::AppearanceColorGroup));
+    }
+
+    let group_detail = app.config_detail_lines().join("\n");
+
+    assert!(group_detail.contains("appearance: Enter cycles group"));
 
     {
         let state = app
@@ -900,6 +1020,18 @@ fn config_appearance_color_field_context_lines_explain_token_and_override() {
     let override_detail = app.config_detail_lines().join("\n");
 
     assert!(override_detail.contains("appearance: empty value inherits"));
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        assert!(state.focus_field(ConfigField::AppearanceSyntaxTheme));
+    }
+
+    let syntax_detail = app.config_detail_lines().join("\n");
+
+    assert!(syntax_detail.contains("auto follows the selected TUI theme"));
 }
 
 #[test]
@@ -968,6 +1100,46 @@ fn config_appearance_theme_enter_cycles_and_save_updates_snapshot() -> Result<()
     assert_eq!(app.current_session_entries.len(), initial_control_entries);
     let rendered = std::fs::read_to_string(&config_path)?;
     assert!(rendered.contains("theme = \"solarized_dark\""));
+    Ok(())
+}
+
+#[test]
+fn config_appearance_syntax_theme_enter_cycles_and_saves() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let config = test_config();
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Appearance);
+        assert!(state.focus_field(ConfigField::AppearanceSyntaxTheme));
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("syntax theme -> catppuccin_mocha"));
+    assert!(
+        app.config_detail_lines()
+            .join("\n")
+            .contains("- Syntax source: manual -> Catppuccin Mocha")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("syntax theme save should return config saved action");
+    };
+
+    assert_eq!(
+        root_config.appearance.syntax_theme,
+        sigil_kernel::SyntaxThemeId::CatppuccinMocha
+    );
+    let rendered = std::fs::read_to_string(&config_path)?;
+    assert!(rendered.contains("syntax_theme = \"catppuccin_mocha\""));
     Ok(())
 }
 

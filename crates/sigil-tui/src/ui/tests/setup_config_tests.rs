@@ -559,6 +559,9 @@ fn render_config_line_styles_theme_preview_with_current_palette() {
         render_config_line_with_palette(2, "preview diff: +added -removed @@ hunk", 80, &palette);
     let markdown =
         render_config_line_with_palette(2, "preview markdown: heading link code", 80, &palette);
+    let syntax_fallback =
+        render_theme_preview_line_with_palette("preview syntax: monokai", 80, &palette)
+            .expect("syntax preview fallback should render");
     let narrow =
         render_config_line_with_palette(2, "preview approval: allow deny selected", 24, &palette);
     let marker_only = render_theme_preview_line_with_palette("preview text: primary", 0, &palette)
@@ -649,6 +652,10 @@ fn render_config_line_styles_theme_preview_with_current_palette() {
     );
     assert_eq!(
         span_style(&markdown, "code").bg,
+        Some(palette.markdown_code_bg)
+    );
+    assert_eq!(
+        span_style(&syntax_fallback, "monokai").bg,
         Some(palette.markdown_code_bg)
     );
     assert!(line_text(&narrow).chars().count() <= 24);

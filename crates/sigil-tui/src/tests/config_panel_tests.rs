@@ -440,6 +440,8 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigField::fields_for_section(ConfigSection::Appearance),
         &[
             ConfigField::AppearanceTheme,
+            ConfigField::AppearanceSyntaxTheme,
+            ConfigField::AppearanceColorGroup,
             ConfigField::AppearanceColorToken,
             ConfigField::AppearanceColorOverride,
         ]
@@ -476,6 +478,8 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         "scroll_sensitivity"
     );
     assert_eq!(ConfigField::AppearanceTheme.label(), "theme");
+    assert_eq!(ConfigField::AppearanceSyntaxTheme.label(), "syntax_theme");
+    assert_eq!(ConfigField::AppearanceColorGroup.label(), "color_group");
     assert_eq!(ConfigField::AppearanceColorToken.label(), "color_token");
     assert_eq!(
         ConfigField::AppearanceColorOverride.label(),
@@ -493,6 +497,14 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         "Enter input"
     );
     assert_eq!(ConfigField::AppearanceTheme.action_label(), "Enter cycle");
+    assert_eq!(
+        ConfigField::AppearanceSyntaxTheme.action_label(),
+        "Enter cycle"
+    );
+    assert_eq!(
+        ConfigField::AppearanceColorGroup.action_label(),
+        "Enter cycle"
+    );
     assert_eq!(
         ConfigField::AppearanceColorToken.action_label(),
         "Enter cycle"
@@ -577,9 +589,19 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             .contains("session history")
     );
     assert!(
+        ConfigField::AppearanceSyntaxTheme
+            .help_text()
+            .contains("code blocks")
+    );
+    assert!(
+        ConfigField::AppearanceColorGroup
+            .help_text()
+            .contains("token group")
+    );
+    assert!(
         ConfigField::AppearanceColorToken
             .help_text()
-            .contains("next token")
+            .contains("current group")
     );
     assert!(
         ConfigField::AppearanceColorOverride
@@ -592,6 +614,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
 fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
     let mut config = test_root_config();
     config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
+    config.appearance.syntax_theme = sigil_kernel::SyntaxThemeId::SolarizedDark;
     let mut state = ConfigState::from_root_config(&config);
 
     state.set_section(ConfigSection::Appearance);
@@ -601,6 +624,14 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
         "solarized_light"
     );
     assert_eq!(state.field_text_value(ConfigField::AppearanceTheme), None);
+    assert_eq!(
+        state.display_value(ConfigField::AppearanceSyntaxTheme),
+        "solarized_dark"
+    );
+    assert_eq!(
+        state.field_text_value(ConfigField::AppearanceSyntaxTheme),
+        None
+    );
     assert!(
         state
             .field_text_value_mut(ConfigField::AppearanceTheme)
@@ -612,9 +643,14 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
     ));
 
     state.draft.appearance_theme = sigil_kernel::ThemeId::Nord;
+    state.draft.cycle_appearance_syntax_theme();
     let saved = state.draft.to_root_config()?;
 
     assert_eq!(saved.appearance.theme, sigil_kernel::ThemeId::Nord);
+    assert_eq!(
+        saved.appearance.syntax_theme,
+        sigil_kernel::SyntaxThemeId::SolarizedLight
+    );
     Ok(())
 }
 
@@ -628,6 +664,14 @@ fn appearance_color_override_draft_tracks_tokens_and_empty_reset() -> anyhow::Re
 
     state.set_section(ConfigSection::Appearance);
 
+    assert_eq!(
+        state.draft.selected_appearance_color_group().key,
+        "surfaces"
+    );
+    assert_eq!(
+        state.display_value(ConfigField::AppearanceColorGroup),
+        "surfaces"
+    );
     assert_eq!(
         state.draft.selected_appearance_color_token(),
         "surface_rail"
@@ -657,12 +701,27 @@ fn appearance_color_override_draft_tracks_tokens_and_empty_reset() -> anyhow::Re
     state.draft.cycle_appearance_color_token(false);
     assert_eq!(
         state.draft.selected_appearance_color_token(),
-        "status_pending"
+        "surface_code"
     );
     state.draft.cycle_appearance_color_token(true);
     assert_eq!(
         state.draft.selected_appearance_color_token(),
         "surface_base"
+    );
+    state.draft.cycle_appearance_color_group(true);
+    assert_eq!(state.draft.selected_appearance_color_group().key, "borders");
+    assert_eq!(
+        state.draft.selected_appearance_color_token(),
+        "border_subtle"
+    );
+    state.draft.cycle_all_appearance_color_tokens(false);
+    assert_eq!(
+        state.draft.selected_appearance_color_token(),
+        "surface_code"
+    );
+    assert_eq!(
+        state.draft.selected_appearance_color_group().key,
+        "surfaces"
     );
 
     assert!(
@@ -683,6 +742,10 @@ fn appearance_color_override_draft_tracks_tokens_and_empty_reset() -> anyhow::Re
 
     let mut empty_draft = ConfigDraft::from_root_config(&test_root_config());
     assert!(!empty_draft.reset_all_appearance_color_overrides());
+    assert_eq!(
+        empty_draft.reset_selected_appearance_color_group_overrides(),
+        0
+    );
     Ok(())
 }
 

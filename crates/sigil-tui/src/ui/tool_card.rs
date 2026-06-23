@@ -3,6 +3,7 @@ use ratatui::{
     text::{Line, Span},
 };
 use serde_json::Value;
+use sigil_kernel::SyntaxThemeId;
 
 use crate::app::TimelineEntry;
 
@@ -90,6 +91,7 @@ pub(crate) fn render_tool_entry_lines(
                 &summary,
                 accent,
                 options.max_content_width,
+                options.theme.syntax_theme,
                 palette,
             ));
         } else {
@@ -97,6 +99,7 @@ pub(crate) fn render_tool_entry_lines(
                 &summary,
                 accent,
                 options.max_content_width,
+                options.theme.syntax_theme,
                 palette,
             ));
         }
@@ -118,16 +121,29 @@ fn render_tool_collapsed_preview_body(
     max_content_width: usize,
 ) -> Vec<Line<'static>> {
     let palette = crate::ui::theme::default_palette();
-    render_tool_collapsed_preview_body_with_palette(summary, accent, max_content_width, &palette)
+    render_tool_collapsed_preview_body_with_palette(
+        summary,
+        accent,
+        max_content_width,
+        SyntaxThemeId::default(),
+        &palette,
+    )
 }
 
 fn render_tool_collapsed_preview_body_with_palette(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let body = render_tool_preview_body_with_palette(summary, accent, max_content_width, palette);
+    let body = render_tool_preview_body_with_palette(
+        summary,
+        accent,
+        max_content_width,
+        syntax_theme,
+        palette,
+    );
     if body.len() <= COLLAPSED_TOOL_PREVIEW_VISIBLE_ROWS {
         return body;
     }
@@ -232,13 +248,20 @@ fn render_tool_preview_body(
     max_content_width: usize,
 ) -> Vec<Line<'static>> {
     let palette = crate::ui::theme::default_palette();
-    render_tool_preview_body_with_palette(summary, accent, max_content_width, &palette)
+    render_tool_preview_body_with_palette(
+        summary,
+        accent,
+        max_content_width,
+        SyntaxThemeId::default(),
+        &palette,
+    )
 }
 
 fn render_tool_preview_body_with_palette(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     if (tool_name_matches(&summary.tool_name, "ls")
@@ -259,7 +282,13 @@ fn render_tool_preview_body_with_palette(
         return render_terminal_task_preview_with_palette(summary, accent, palette);
     }
     if agent_tool(summary) {
-        return render_agent_tool_preview(summary, accent, max_content_width, palette);
+        return render_agent_tool_preview(
+            summary,
+            accent,
+            max_content_width,
+            syntax_theme,
+            palette,
+        );
     }
     if file_change_tool(summary)
         && let Some(lines) = render_file_change_preview_with_palette(summary, accent, palette)
@@ -267,17 +296,30 @@ fn render_tool_preview_body_with_palette(
         return lines;
     }
     if tool_name_matches(&summary.tool_name, "read_file") {
-        return render_read_file_preview_with_palette(summary, accent, max_content_width, palette);
+        return render_read_file_preview_with_palette(
+            summary,
+            accent,
+            max_content_width,
+            syntax_theme,
+            palette,
+        );
     }
     if code_intelligence_tool(summary) {
         return render_code_intelligence_preview_with_palette(
             summary,
             accent,
             max_content_width,
+            syntax_theme,
             palette,
         );
     }
-    render_generic_tool_preview_with_palette(summary, accent, max_content_width, palette)
+    render_generic_tool_preview_with_palette(
+        summary,
+        accent,
+        max_content_width,
+        syntax_theme,
+        palette,
+    )
 }
 
 #[cfg(test)]
@@ -287,13 +329,20 @@ fn render_read_file_preview(
     max_content_width: usize,
 ) -> Vec<Line<'static>> {
     let palette = crate::ui::theme::default_palette();
-    render_read_file_preview_with_palette(summary, accent, max_content_width, &palette)
+    render_read_file_preview_with_palette(
+        summary,
+        accent,
+        max_content_width,
+        SyntaxThemeId::default(),
+        &palette,
+    )
 }
 
 fn render_read_file_preview_with_palette(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![timeline_section_line_with_palette(
@@ -320,7 +369,8 @@ fn render_read_file_preview_with_palette(
                 accent,
                 Style::default().fg(palette.text_primary),
                 &summary.preview_lines.join("\n"),
-                MarkdownRenderOptions::tool_preview(max_content_width),
+                MarkdownRenderOptions::tool_preview(max_content_width)
+                    .with_syntax_theme(syntax_theme),
                 palette,
             ));
         }
@@ -731,13 +781,20 @@ fn render_code_intelligence_preview(
     max_content_width: usize,
 ) -> Vec<Line<'static>> {
     let palette = crate::ui::theme::default_palette();
-    render_code_intelligence_preview_with_palette(summary, accent, max_content_width, &palette)
+    render_code_intelligence_preview_with_palette(
+        summary,
+        accent,
+        max_content_width,
+        SyntaxThemeId::default(),
+        &palette,
+    )
 }
 
 fn render_code_intelligence_preview_with_palette(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let Some(value) = &summary.preview_value else {
@@ -745,6 +802,7 @@ fn render_code_intelligence_preview_with_palette(
             summary,
             accent,
             max_content_width,
+            syntax_theme,
             palette,
         );
     };
@@ -801,6 +859,7 @@ fn render_code_intelligence_preview_with_palette(
             summary,
             accent,
             max_content_width,
+            syntax_theme,
             palette,
         ));
     }
@@ -1099,13 +1158,20 @@ fn render_agent_tool_preview(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     if tool_name_matches(&summary.tool_name, "read_agent_result") {
         return render_agent_result_page_preview(summary, accent, max_content_width, palette);
     }
     if tool_name_matches(&summary.tool_name, "spawn_agent") && !summary.preview_lines.is_empty() {
-        return render_agent_summary_preview(summary, accent, max_content_width, palette);
+        return render_agent_summary_preview(
+            summary,
+            accent,
+            max_content_width,
+            syntax_theme,
+            palette,
+        );
     }
     render_agent_status_preview(summary, accent, palette)
 }
@@ -1134,6 +1200,7 @@ fn render_agent_summary_preview(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![timeline_section_line_with_palette(
@@ -1150,7 +1217,7 @@ fn render_agent_summary_preview(
         accent,
         Style::default().fg(palette.text_primary),
         &summary.preview_lines.join("\n"),
-        MarkdownRenderOptions::tool_preview(max_content_width),
+        MarkdownRenderOptions::tool_preview(max_content_width).with_syntax_theme(syntax_theme),
         palette,
     ));
     lines.extend(render_tool_hidden_tail(
@@ -1591,13 +1658,20 @@ fn render_generic_tool_preview(
     max_content_width: usize,
 ) -> Vec<Line<'static>> {
     let palette = crate::ui::theme::default_palette();
-    render_generic_tool_preview_with_palette(summary, accent, max_content_width, &palette)
+    render_generic_tool_preview_with_palette(
+        summary,
+        accent,
+        max_content_width,
+        SyntaxThemeId::default(),
+        &palette,
+    )
 }
 
 fn render_generic_tool_preview_with_palette(
     summary: &ToolCardRender,
     accent: Color,
     max_content_width: usize,
+    syntax_theme: SyntaxThemeId,
     palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -1638,7 +1712,7 @@ fn render_generic_tool_preview_with_palette(
             accent,
             Style::default().fg(palette.text_primary),
             &summary.preview_lines.join("\n"),
-            MarkdownRenderOptions::tool_preview(max_content_width),
+            MarkdownRenderOptions::tool_preview(max_content_width).with_syntax_theme(syntax_theme),
             palette,
         ));
     } else {

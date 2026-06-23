@@ -1094,6 +1094,43 @@ fn render_theme_preview_line_with_palette(
                     .add_modifier(Modifier::BOLD),
             );
         }
+        "syntax" => {
+            if let Some((configured, resolved)) = samples.trim().split_once(" -> ") {
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    configured.trim(),
+                    Style::default()
+                        .fg(palette.config_warning)
+                        .bg(palette.config_tab_bg)
+                        .add_modifier(Modifier::BOLD),
+                );
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    "->",
+                    Style::default().fg(palette.text_muted),
+                );
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    resolved.trim(),
+                    Style::default()
+                        .fg(palette.markdown_code_fg)
+                        .bg(palette.markdown_code_bg)
+                        .add_modifier(Modifier::BOLD),
+                );
+            } else {
+                push_theme_preview_sample(
+                    &mut spans,
+                    &mut remaining,
+                    samples.trim(),
+                    Style::default()
+                        .fg(palette.markdown_code_fg)
+                        .bg(palette.markdown_code_bg),
+                );
+            }
+        }
         "shell" => {
             push_theme_preview_sample(
                 &mut spans,

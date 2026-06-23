@@ -5,7 +5,7 @@ use ratatui::{Terminal, backend::TestBackend, style::Color};
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, CompactionConfig, EventHandler, MemoryConfig, PermissionConfig, RootConfig,
-    RunEvent, SessionConfig, ToolAccess, ToolCall, ToolCategory, ToolPreview,
+    RunEvent, SessionConfig, SyntaxThemeId, ToolAccess, ToolCall, ToolCategory, ToolPreview,
     ToolPreviewCapability, ToolPreviewFile, ToolSpec, WorkspaceConfig,
 };
 
@@ -162,7 +162,7 @@ fn approval_header_lines_with_palette_use_configured_markdown_colors() {
         ..modal_view("file write")
     };
 
-    let lines = approval_header_lines_with_palette(&view, 40, &palette);
+    let lines = approval_header_lines_with_palette(&view, 40, SyntaxThemeId::default(), &palette);
     let code_span = lines
         .iter()
         .flat_map(|line| line.spans.iter())
