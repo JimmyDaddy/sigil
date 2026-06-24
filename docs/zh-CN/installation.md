@@ -1,26 +1,70 @@
-# 源码安装
+# 安装
 
 [文档首页](README.md) · [快速上手](quickstart.md) · [English](../en/installation.md)
 
-本文说明当前支持的源码 checkout 安装路径。如果你想按首次使用流程走一遍，先看 [quickstart.md](quickstart.md)。Release archive 可以在本地构建用于验证；包管理器和自更新还不属于这条路径。
+本文说明首个 release 的安装路径。如果你想按首次使用流程走一遍，先看 [quickstart.md](quickstart.md)。
 
 ## 前置条件
 
-- 已通过 `rustup` 或系统包安装 Rust toolchain。
-- 已有 Sigil 仓库 checkout。
-- Cargo 的 binary 目录在 `PATH` 里。macOS 和 Linux 默认是 `~/.cargo/bin`，Windows 默认是 `%USERPROFILE%\.cargo\bin`。
+- 一个现代终端模拟器。
+- 一种安装器：npm、Homebrew，或通过 `rustup` / 系统包安装的 Rust toolchain。
+- 一个模型 provider 凭据。首次启动时可以通过 Quick Setup 填写。
 
-## 安装
+## 通过 npm 安装
 
-在仓库根目录运行：
+npm 包名使用 scoped package：`@jimmydaddy/sigil`。它安装一个很小的 Node.js launcher，并通过 platform-specific optional package 携带实际 binary。最终命令仍然是 `sigil`。
+
+```bash
+npm install -g @jimmydaddy/sigil
+```
+
+确认安装：
+
+```bash
+sigil --version
+sigil doctor
+```
+
+首个 release 不使用 unscoped npm 包名 `sigil`。
+
+## 通过 Homebrew 安装
+
+Homebrew 使用专用 tap formula `sigil-ai`，避免和其他名为 Sigil 的 Homebrew 软件混淆。formula 安装后的 binary 仍然叫 `sigil`。
+
+```bash
+brew install JimmyDaddy/sigil/sigil-ai
+```
+
+确认安装：
+
+```bash
+sigil --version
+sigil doctor
+```
+
+release workflow 会从 macOS release archives 生成 `sigil-ai.rb`。维护者把该 formula 发布到 `JimmyDaddy/homebrew-sigil` tap。
+
+## 通过 Cargo 安装
+
+首个 release 通过 Git tag 安装，而不是 crates.io：
+
+```bash
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+```
+
+这会把 `sigil` binary 安装到 Cargo 的 binary 目录。macOS 和 Linux 默认是 `~/.cargo/bin`，Windows 默认是 `%USERPROFILE%\.cargo\bin`。
+
+crates.io 上 `sigil` 包名已被其他 crate 使用，因此 crates.io 分发需要后续再决定 package name；binary 仍然可以保持 `sigil`。
+
+## 从 checkout 安装
+
+本地开发时，在仓库根目录运行：
 
 ```bash
 cargo install --path crates/sigil --locked
 ```
 
-这会安装 `sigil` binary。直接运行 `sigil` 会打开 TUI；自动化和诊断能力放在显式子命令后面。
-
-确认已安装 binary：
+确认安装：
 
 ```bash
 sigil --version
@@ -68,25 +112,28 @@ dist/sigil-<version>-<target>.tar.gz.sha256
 scripts/build-release-archive.sh --target aarch64-apple-darwin
 ```
 
-archive 内包含 `sigil` binary、README、logo assets 和安装文档。tagged release 会由 release workflow 构建，并附带 checksum、GitHub artifact provenance attestation、生成的 release notes，以及供 tap 维护者使用的 `sigil.rb` Homebrew formula asset。自更新仍是后续工作。
+archive 内包含 `sigil` binary、README、logo assets 和安装文档。tagged release 会由 release workflow 构建，并附带 checksum、GitHub artifact provenance attestation、生成的 release notes、供 tap 维护者使用的 `sigil-ai.rb` Homebrew formula asset，以及从 release archives 生成的 npm package tarballs。自更新仍是后续工作。
 
 ## 更新
 
-从已更新的 checkout 重新安装时，加 `--force`：
+使用原来的安装器更新：
 
 ```bash
+npm install -g @jimmydaddy/sigil@latest
+brew upgrade sigil-ai
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 
 ## 卸载
 
-按 package 名卸载：
+使用对应卸载命令：
 
 ```bash
+npm uninstall -g @jimmydaddy/sigil
+brew uninstall sigil-ai
 cargo uninstall sigil
 ```
-
-`cargo uninstall sigil` 会移除 `sigil` binary。
 
 ## 开发运行
 

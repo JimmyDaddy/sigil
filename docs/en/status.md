@@ -9,7 +9,10 @@ This page separates what users can rely on today from what is experimental, limi
 | Area | Status |
 | --- | --- |
 | TUI entrypoint | `sigil` opens the TUI and is the primary product surface. |
-| Source install | `cargo install --path crates/sigil --locked` is the recommended install path. |
+| npm install | `npm install -g @jimmydaddy/sigil` is the scoped first-release npm package path. |
+| Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` installs the tap formula while keeping the binary name `sigil`. |
+| Cargo git install | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil` installs from the release tag. |
+| Source install | `cargo install --path crates/sigil --locked` remains supported for local checkout development. |
 | Quick Setup | First-run setup can create a usable local config. |
 | Doctor | `sigil doctor` and `/doctor` report config, auth, workspace, MCP, code intelligence, and terminal readiness. |
 | Chat workflow | Users can work through the composer with visible tool activity. |
@@ -28,8 +31,9 @@ This page separates what users can rely on today from what is experimental, limi
 
 | Area | Current expectation |
 | --- | --- |
-| Release archives | Can be built locally and by tagged release workflows; source install remains the main path. |
-| Homebrew formula asset | Generated for tap maintainers, but independent tap publishing is separate work. |
+| Release archives | Can be built locally and by tagged release workflows; package-manager artifacts are derived from them. |
+| Homebrew formula asset | `sigil-ai.rb` is generated for tap maintainers; the tap repository update is performed outside this repository. |
+| npm package tarballs | Generated from release archives for registry publishing and release-asset inspection. |
 | OpenAI-compatible differences | The provider intentionally omits DeepSeek-only prefix/FIM/beta behaviors. |
 | Provider-specific semantics | Anthropic and Gemini request/event details stay in provider crates; `sigil-kernel` only exposes provider-neutral capabilities and chunks. |
 | Code intelligence | Depends on installed language servers and local environment; normal chat does not require it. |
@@ -42,7 +46,6 @@ This page separates what users can rely on today from what is experimental, limi
 
 These are not the current supported path unless a later release says otherwise:
 
-- package-manager distribution as the main install path;
 - self-update;
 - desktop shell;
 - hosted documentation search;

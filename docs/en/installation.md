@@ -1,26 +1,70 @@
-# Installing From Source
+# Installation
 
 [Docs home](README.md) · [Quickstart](quickstart.md) · [简体中文](../zh-CN/installation.md)
 
-This guide covers the current supported install path from a local repository checkout. If you want a first-run walkthrough, start with [quickstart.md](quickstart.md). Release archives can be built locally for validation, but package managers and self-update are not part of this path yet.
+This guide covers the first-release install paths. If you want a first-run walkthrough, start with [quickstart.md](quickstart.md).
 
 ## Requirements
 
-- Rust toolchain installed through `rustup` or an equivalent system package.
-- A Sigil repository checkout.
-- Cargo's binary directory on `PATH`. The default is `~/.cargo/bin` on macOS and Linux, and `%USERPROFILE%\.cargo\bin` on Windows.
+- A modern terminal emulator.
+- One installer: npm, Homebrew, or a Rust toolchain installed through `rustup` or an equivalent system package.
+- A model provider credential. Quick Setup can collect it on first launch.
 
-## Install
+## Install With npm
 
-Run these commands from the repository root:
+The npm package is scoped as `@jimmydaddy/sigil`. It installs a small Node.js launcher plus a platform-specific optional binary package. The installed command is still `sigil`.
+
+```bash
+npm install -g @jimmydaddy/sigil
+```
+
+Confirm the install:
+
+```bash
+sigil --version
+sigil doctor
+```
+
+The unscoped npm package name `sigil` is not the first-release package name.
+
+## Install With Homebrew
+
+The Homebrew path uses a dedicated tap formula named `sigil-ai` to avoid confusing this project with other Homebrew software named Sigil. The formula installs the `sigil` binary.
+
+```bash
+brew install JimmyDaddy/sigil/sigil-ai
+```
+
+Confirm the install:
+
+```bash
+sigil --version
+sigil doctor
+```
+
+The release workflow generates `sigil-ai.rb` from the macOS release archives. Maintainers publish that formula to the `JimmyDaddy/homebrew-sigil` tap.
+
+## Install With Cargo
+
+For the first release, Cargo installs from the Git tag rather than crates.io:
+
+```bash
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+```
+
+This installs the `sigil` binary into Cargo's binary directory. The default is `~/.cargo/bin` on macOS and Linux, and `%USERPROFILE%\.cargo\bin` on Windows.
+
+The crates.io package name `sigil` is already used by another crate, so crates.io distribution needs a later package-name decision. The binary can still remain `sigil`.
+
+## Install From A Checkout
+
+For local development, run these commands from a repository checkout:
 
 ```bash
 cargo install --path crates/sigil --locked
 ```
 
-This installs the `sigil` binary. Running `sigil` without a subcommand opens the TUI. Automation and diagnostics live behind explicit subcommands.
-
-Confirm the installed binary:
+Confirm the install:
 
 ```bash
 sigil --version
@@ -69,28 +113,28 @@ scripts/build-release-archive.sh --target aarch64-apple-darwin
 ```
 
 The archive contains the `sigil` binary plus the README files, logo assets, and installation docs.
-Tagged releases are built by the release workflow and include checksums,
-GitHub artifact provenance attestations, generated release notes, and a
-`sigil.rb` Homebrew formula asset for tap maintainers. Self-update is still
-future work.
+Tagged releases are built by the release workflow and include checksums, GitHub artifact provenance attestations, generated release notes, a `sigil-ai.rb` Homebrew formula asset for tap maintainers, and npm package tarballs generated from the release archives. Self-update is still future work.
 
 ## Update
 
-From an updated checkout, reinstall with `--force`:
+Use the installer you used originally:
 
 ```bash
+npm install -g @jimmydaddy/sigil@latest
+brew upgrade sigil-ai
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil --force
 cargo install --path crates/sigil --locked --force
 ```
 
 ## Uninstall
 
-Uninstall by package name:
+Use the matching uninstall command:
 
 ```bash
+npm uninstall -g @jimmydaddy/sigil
+brew uninstall sigil-ai
 cargo uninstall sigil
 ```
-
-`cargo uninstall sigil` removes the `sigil` binary.
 
 ## Development Runs
 

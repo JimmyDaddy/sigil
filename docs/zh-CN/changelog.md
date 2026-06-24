@@ -20,7 +20,7 @@
 当前文档覆盖这些用户可见能力：
 
 - 通过 `sigil` 使用 TUI-first workflow。
-- 从 repository checkout 源码安装。
+- npm、Homebrew tap、Cargo git-tag、GitHub release archive 和 checkout 安装路径。
 - Quick Setup 和 `/config`。
 - `sigil doctor` 和 `/doctor`。
 - 通过 `/task` 使用 durable multi-step tasks，`/plan` 保留给只读 planning prompts。
@@ -39,7 +39,7 @@ Release archive 验证入口：
 scripts/build-release-archive.sh
 ```
 
-Tagged releases 可以构建 archives 和 checksums。除非后续 release 明确说明，包管理器分发和 self-update 仍是未来 packaging work。
+Tagged releases 会构建 archives、checksums、GitHub provenance attestations、用于 Homebrew tap 的 `sigil-ai.rb`，以及从 archives 派生的 npm package tarballs。除非后续 release 明确说明，self-update 仍是未来 packaging work。
 
 ## 更多细节
 

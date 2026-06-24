@@ -9,7 +9,10 @@
 | 领域 | 状态 |
 | --- | --- |
 | TUI 入口 | `sigil` 打开 TUI，是主要产品表面。 |
-| 源码安装 | `cargo install --path crates/sigil --locked` 是推荐安装路径。 |
+| npm 安装 | `npm install -g @jimmydaddy/sigil` 是首个 release 的 scoped npm package 路径。 |
+| Homebrew tap | `brew install JimmyDaddy/sigil/sigil-ai` 安装 tap formula，binary 名仍然是 `sigil`。 |
+| Cargo git 安装 | `cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil` 从 release tag 安装。 |
+| 源码安装 | `cargo install --path crates/sigil --locked` 仍支持本地 checkout 开发。 |
 | Quick Setup | 首次运行 setup 可以创建可用本地配置。 |
 | Doctor | `sigil doctor` 和 `/doctor` 报告 config、auth、workspace、MCP、code intelligence 和 terminal readiness。 |
 | Chat workflow | 用户可以通过 composer 工作，并查看可见 tool activity。 |
@@ -28,8 +31,9 @@
 
 | 领域 | 当前预期 |
 | --- | --- |
-| Release archives | 可以本地构建，也可由 tag release workflow 构建；源码安装仍是主要路径。 |
-| Homebrew formula asset | 为 tap maintainer 生成，但独立 tap 发布是另一项工作。 |
+| Release archives | 可以本地构建，也可由 tag release workflow 构建；包管理器 artifacts 从这些 archives 派生。 |
+| Homebrew formula asset | 为 tap maintainer 生成 `sigil-ai.rb`；tap 仓库更新在本仓库外执行。 |
+| npm package tarballs | 从 release archives 生成，用于 registry 发布和 release asset 检查。 |
 | OpenAI-compatible 差异 | 该 provider 有意不暴露 DeepSeek-only prefix/FIM/beta 行为。 |
 | Provider-specific 语义 | Anthropic 和 Gemini 的 request/event 细节留在 provider crate；`sigil-kernel` 只暴露 provider-neutral capabilities 和 chunks。 |
 | Code intelligence | 依赖本地 language servers 和环境；普通 chat 不依赖它。 |
@@ -42,7 +46,6 @@
 
 除非后续 release 明确说明，否则这些不是当前支持路径：
 
-- 以包管理器作为主要安装路径；
 - self-update；
 - desktop shell；
 - hosted documentation search；

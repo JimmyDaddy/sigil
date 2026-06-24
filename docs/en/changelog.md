@@ -20,7 +20,7 @@ The user documentation has been reorganized around task paths:
 Sigil currently documents these user-facing capabilities:
 
 - TUI-first workflow through `sigil`.
-- Source install from repository checkout.
+- npm, Homebrew tap, Cargo git-tag, GitHub release archive, and checkout install paths.
 - Quick Setup and `/config`.
 - `sigil doctor` and `/doctor`.
 - Durable multi-step tasks through `/task`, with `/plan` reserved for read-only planning prompts.
@@ -39,7 +39,7 @@ Release archive validation is available through:
 scripts/build-release-archive.sh
 ```
 
-Tagged releases can build archives and checksums. Package-manager distribution and self-update remain future packaging work unless a later release states otherwise.
+Tagged releases build archives, checksums, GitHub provenance attestations, `sigil-ai.rb` for the Homebrew tap, and npm package tarballs derived from the archives. Self-update remains future packaging work unless a later release states otherwise.
 
 ## Where To Find More Detail
 

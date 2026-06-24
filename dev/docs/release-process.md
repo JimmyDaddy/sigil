@@ -1,8 +1,8 @@
 # Sigil Release Process
 
 This document describes the maintainer release path. The user-facing install
-entrypoint remains `sigil`; release automation must not introduce a new product
-surface.
+entrypoint remains `sigil`; package manager wrappers must not introduce a new
+product surface.
 
 ## Release Trigger
 
@@ -24,9 +24,10 @@ The release workflow is `.github/workflows/release.yml`.
 3. Generate GitHub artifact provenance attestations for each archive.
 4. Upload archives and SHA-256 checksum files as workflow artifacts.
 5. Generate release notes from Conventional Commit subjects.
-6. Render a Homebrew formula from the macOS archive URL and checksum.
-7. Publish a GitHub release with archives, checksum files, `checksums.txt`,
-   `sigil.rb`, and generated notes.
+6. Render a Homebrew tap formula from the macOS archive URL and checksum.
+7. Generate npm package tarballs from the release archives.
+8. Publish a GitHub release with archives, checksum files, `checksums.txt`,
+   `sigil-ai.rb`, npm package tarballs, and generated notes.
 
 GitHub artifact attestations require `id-token: write`, `contents: read`, and
 `attestations: write` permissions on the build job. The publish job only needs
@@ -39,13 +40,51 @@ Each release should contain:
 - `sigil-<version>-<target>.tar.gz`
 - `sigil-<version>-<target>.tar.gz.sha256`
 - `checksums.txt`
-- `sigil.rb` with arm64 and Intel macOS archive URLs when both macOS artifacts are available
+- `sigil-ai.rb` with arm64 and Intel macOS archive URLs when both macOS artifacts are available
+- `jimmydaddy-sigil-<version>.tgz`
+- `jimmydaddy-sigil-<platform>-<version>.tgz` for each supported npm platform package
 
 Each tar archive should include the `sigil` binary, README files, `assets/logo/*`, and installation docs so repository-relative README image links keep working after extraction.
 
-The generated `sigil.rb` is a release asset for a Homebrew tap update. Publishing
-or updating a tap repository is intentionally kept outside this repository until
-there is a dedicated tap.
+The generated `sigil-ai.rb` is a release asset for the `JimmyDaddy/homebrew-sigil`
+tap update. Publishing or updating the tap repository is intentionally kept
+outside this repository.
+
+The npm package tarballs are generated from the same release archives:
+
+```bash
+scripts/prepare-npm-packages.sh \
+  --version 0.1.0 \
+  --dist-dir dist \
+  --out-dir dist/npm-packages \
+  --pack-destination dist
+```
+
+The root npm package is `@jimmydaddy/sigil`; platform-specific optional packages
+carry the actual binaries. Publish the platform packages first, then publish the
+root package:
+
+```bash
+npm publish dist/npm-packages/sigil-darwin-arm64 --access public
+npm publish dist/npm-packages/sigil-darwin-x64 --access public
+npm publish dist/npm-packages/sigil-linux-x64 --access public
+npm publish dist/npm-packages/sigil-win32-x64 --access public
+npm publish dist/npm-packages/sigil --access public
+```
+
+Prefer npm trusted publishing or provenance-capable CI for registry publication.
+If a platform archive is not present, do not list or publish that optional
+package for the release.
+
+Cargo distribution for the first release uses the Git tag:
+
+```bash
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+```
+
+Do not publish this workspace to crates.io as `sigil`; that crate name is already
+owned by another package. A future crates.io release needs a separate package
+name decision while keeping the installed binary named `sigil`.
 
 ## Release Notes
 
@@ -73,6 +112,7 @@ cargo check
 cargo test
 cargo clippy --all-targets -- -D warnings
 scripts/build-release-archive.sh
+scripts/render-homebrew-formula.sh --version 0.1.0 --url https://example.invalid/sigil.tar.gz --sha256 0000000000000000000000000000000000000000000000000000000000000000 --output /tmp/sigil-ai.rb
 scripts/generate-release-notes.sh HEAD >/tmp/sigil-release-notes.md
 ```
 

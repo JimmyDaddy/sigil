@@ -48,7 +48,7 @@
 | P2 | PTY / background tasks | `bash` 是一次性命令 | 交互式 shell、后台任务、恢复与进程控制 |
 | P2 | 更强编辑工具 | exact snippet replace | patch plan、多文件变更集、冲突检测、可回滚 |
 | P2 | CLI / HTTP automation | CLI 公开 `run` | JSON 输出、headless 审批策略、HTTP streaming adapter |
-| P3 | Packaging / distribution | source `cargo install` 文档、`sigil --version` 构建元数据、本地 release archive、release CI matrix、GitHub provenance attestation、Homebrew formula asset 和 release notes 生成已落地 | 后续补真实 tag 发布验证、自更新和可选 tap 仓库 |
+| P3 | Packaging / distribution | npm scoped wrapper/package tarball 生成、Cargo git-tag 安装文档、`sigil --version` 构建元数据、本地 release archive、release CI matrix、GitHub provenance attestation、`sigil-ai.rb` Homebrew tap formula 和 release notes 生成已落地 | 后续补真实 tag 发布验证、npm registry 发布、tap 仓库同步和自更新策略 |
 | P3 | Auto memory / indexed facts | 文档型 memory boot | 可审计自动记忆和 fact index |
 
 ## 4. Phase 0：安全与路线固化
@@ -561,22 +561,26 @@ cargo test -p sigil-tui approval timeline
 当前实现状态：
 
 1. release binary archive 脚本已落地：`scripts/build-release-archive.sh`。
-2. `cargo install` 文档（已落地为 `docs/en/installation.md` 和 `docs/zh-CN/installation.md`，主推安装 `sigil` 一个入口）。
-3. `sigil --version` 输出 package version、git commit、target 和 profile。
-4. `sigil doctor` 与 TUI `/doctor` 已落地：
+2. Homebrew tap formula 生成已落地：`scripts/render-homebrew-formula.sh` 输出 `sigil-ai.rb`。
+3. npm scoped wrapper 与 platform package tarball 生成已落地：`scripts/prepare-npm-packages.sh`。
+4. `cargo install` 文档（已落地为 `docs/en/installation.md` 和 `docs/zh-CN/installation.md`，首发使用 Git tag 安装并保持 `sigil` 一个 binary 入口）。
+5. `sigil --version` 输出 package version、git commit、target 和 profile。
+6. `sigil doctor` 与 TUI `/doctor` 已落地：
    - config path
    - provider auth
    - workspace root
    - MCP server status
    - LSP availability
    - terminal capability
-5. release archive 脚本会对 built binary 运行 `--version` 与 `doctor` smoke，并输出 `.sha256`。
+7. release archive 脚本会对 built binary 运行 `--version` 与 `doctor` smoke，并输出 `.sha256`。
 
 后续交付物：
 
 1. 首个真实 tag release 验证。
-2. 可选独立 Homebrew tap 仓库同步。
-3. 自更新策略评估。
+2. npm registry 发布验证。
+3. 独立 Homebrew tap 仓库同步。
+4. crates.io package name 决策。
+5. 自更新策略评估。
 
 验收标准：
 

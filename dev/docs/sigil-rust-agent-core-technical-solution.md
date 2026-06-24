@@ -33,7 +33,7 @@
 
 - 第一阶段不做桌面壳
 - 第一阶段不做 codegraph 或更重的代码智能子系统
-- 第一阶段不做 npm、Homebrew、自更新这类分发包装层；只保留源码安装和本地 release archive 脚本用于分发验证
+- 第一阶段核心 runtime 不依赖 npm、Homebrew 或自更新；首发分发包装层只作为 release 工程存在，复用 `sigil` binary、GitHub release archives、Homebrew tap formula 和 npm wrapper，不改变 TUI-first 产品入口
 - 不把 Anthropic/Gemini/DeepSeek/OpenAI-compatible 的私有 request 或 stream 语义上移进 kernel
 - 在单会话内核跑稳之前，不做复杂的多 agent 编排
 - 第一阶段不继续扩张用户可见命令面，不把 provider 专项能力直接暴露成产品主心智
@@ -215,7 +215,7 @@ sigil/
 - `sigil-runtime`：收口跨入口共享的 provider factory、tool registry 和 run options，避免 TUI / CLI 各自硬编码装配链。它不是新的领域层，kernel 仍然不知道 runtime 存在。
 - `sigil-http`：HTTP/SSE adapter crate。当前承载 server config DTO、bearer auth validator、`PublicRunEvent` SSE serialization、per-run event sequence helper、in-memory session/run registry、run start/cancel 与 approval decision routing；后续只做 HTTP routing 与 server wiring，不依赖 `sigil-tui`，不复制 agent loop。
 - `sigil`：提供 `sigil` binary。无子命令时直接启动 TUI；`run`、`doctor`、`serve` HTTP/SSE adapter preflight 和隐藏 provider 调试命令保留为显式子命令，不承担最终产品心智；`serve` 当前只验证 localhost/token defaults 并输出 routing pending 状态，不启动 HTTP listener；诊断事实由 `sigil-runtime` 提供，避免 CLI 与 TUI 后续各写一套判断。
-- `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke；`.github/workflows/release.yml` 在 tag 发布时构建多平台 archive、生成 provenance attestation、渲染 Homebrew formula asset 并创建 GitHub release。独立 tap 同步、自更新和更完整包管理器分发仍是后续 packaging 工作。
+- `scripts/build-release-archive.sh`：提供本地 release archive 构建与 built binary smoke；`scripts/render-homebrew-formula.sh` 生成 `sigil-ai.rb` tap formula；`scripts/prepare-npm-packages.sh` 从 release archives 生成 scoped npm wrapper 和 platform package tarballs；`.github/workflows/release.yml` 在 tag 发布时构建多平台 archive、生成 provenance attestation、渲染 Homebrew formula asset、准备 npm tarballs 并创建 GitHub release。独立 tap 同步、npm registry 发布、crates.io package name 决策和自更新仍是 release-management 工作。
 - `sigil-tui`：第一用户入口的 TUI 实现。`app.rs`、`runner.rs`、`ui.rs` 是 facade；状态流、worker 协议和 renderer 分别下沉到 `app/*`、`runner/*`、`ui/*`；TUI `/doctor` 复用 runtime 诊断事实；普通模块测试在 `src/tests/*_tests.rs`，状态流测试在 `app/tests/*_tests.rs`，runner 测试在 `runner/tests/*_tests.rs`，renderer 测试在 `ui/tests/*_tests.rs`。
 
 这个拆分仍然比“教科书式 Clean Architecture”更少：crate 边界只承载产品级职责，crate 内模块才承载局部复杂度。memory、permission、config、session 继续留在 `sigil-kernel` 内，因为它们共同定义通用执行语义；TUI 的输入、modal、session、approval、timeline、worker bridge 等状态流则留在 `sigil-tui` 内，因为它们属于第一用户表面的交互模型。

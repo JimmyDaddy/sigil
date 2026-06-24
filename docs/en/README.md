@@ -61,13 +61,21 @@ Sigil is built around a few user-facing ideas:
 
 ## Current Distribution Status
 
-Today, Sigil is best installed from a repository checkout:
+The first release is prepared for npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives:
+
+```bash
+npm install -g @jimmydaddy/sigil
+brew install JimmyDaddy/sigil/sigil-ai
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+```
+
+Local checkout installs remain useful for development:
 
 ```bash
 cargo install --path crates/sigil --locked
 ```
 
-Release archives can be built and validated locally, and tagged releases can publish archives. Package-manager distribution and self-update are future packaging work.
+Self-update remains future packaging work.
 
 ## Configuration At A Glance
 

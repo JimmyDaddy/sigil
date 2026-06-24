@@ -13,17 +13,31 @@ Sigil 是一个 TUI-first 的 Rust coding agent，用来在真实仓库里协助
 
 [网站](https://jimmydaddy.github.io/sigil/) · [文档](docs/zh-CN/README.md) · [快速上手](docs/zh-CN/quickstart.md) · [视觉导览](docs/zh-CN/visual-tour.md) · [Provider 指南](docs/zh-CN/providers.md)
 
-当前 Sigil 最适合从 checkout 安装。包管理器分发和自更新仍属于后续 packaging 工作。
+Sigil 的首个 release 已准备面向 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 分发。自更新仍属于后续 packaging 工作。
 
 ## 快速开始
 
 前置要求：
 
 - 一个现代终端模拟器。
-- 与本仓库兼容的 Rust toolchain。
+- 一种安装器：npm、Homebrew，或与本仓库兼容的 Rust toolchain。
 - 一个模型 provider 凭据。首次启动时可以通过 Quick Setup 填写。
 
-安装 Sigil：
+使用首发包管理器路径之一安装 Sigil：
+
+```bash
+npm install -g @jimmydaddy/sigil
+```
+
+```bash
+brew install JimmyDaddy/sigil/sigil-ai
+```
+
+```bash
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+```
+
+本地开发时，可以从 checkout 安装：
 
 ```bash
 git clone https://github.com/JimmyDaddy/sigil.git

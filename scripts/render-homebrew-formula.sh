@@ -4,14 +4,15 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/render-homebrew-formula.sh --version <version> --url <url> --sha256 <sha256> [--output <path>]
-  scripts/render-homebrew-formula.sh --version <version> --arm-url <url> --arm-sha256 <sha256> --intel-url <url> --intel-sha256 <sha256> [--output <path>]
+  scripts/render-homebrew-formula.sh --version <version> --url <url> --sha256 <sha256> [--formula-name <name>] [--output <path>]
+  scripts/render-homebrew-formula.sh --version <version> --arm-url <url> --arm-sha256 <sha256> --intel-url <url> --intel-sha256 <sha256> [--formula-name <name>] [--output <path>]
 
 Render a Homebrew formula for a prebuilt Sigil release archive.
 USAGE
 }
 
 version=""
+formula_name="sigil-ai"
 url=""
 sha256=""
 arm_url=""
@@ -24,6 +25,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)
       version="${2-}"
+      shift 2
+      ;;
+    --formula-name)
+      formula_name="${2-}"
       shift 2
       ;;
     --url)
@@ -79,6 +84,10 @@ if [[ -z "${version}" || "${has_single}" -eq "${has_split}" ]]; then
   usage >&2
   exit 2
 fi
+if [[ -z "${formula_name}" || ! "${formula_name}" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+  echo "invalid formula name: ${formula_name}" >&2
+  exit 2
+fi
 
 if [[ "${has_single}" -eq 1 && ( -z "${url}" || -z "${sha256}" ) ]]; then
   usage >&2
@@ -114,9 +123,24 @@ SOURCE
   )"
 fi
 
+formula_class="$(
+  printf '%s\n' "${formula_name}" |
+    awk -F'[-_]' '{
+      for (i = 1; i <= NF; i++) {
+        if ($i != "") {
+          printf "%s%s", toupper(substr($i, 1, 1)), substr($i, 2)
+        }
+      }
+    }'
+)"
+if [[ -z "${formula_class}" ]]; then
+  echo "unable to derive formula class from ${formula_name}" >&2
+  exit 2
+fi
+
 formula="$(
   cat <<FORMULA
-class Sigil < Formula
+class ${formula_class} < Formula
   desc "TUI-first Rust AI coding agent"
   homepage "https://github.com/JimmyDaddy/sigil"
   license "MIT"

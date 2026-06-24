@@ -61,13 +61,21 @@ Sigil 围绕几个用户可感知的概念工作：
 
 ## 当前分发状态
 
-目前 Sigil 最适合从仓库 checkout 安装：
+首个 release 已准备面向 npm、Homebrew tap、Cargo git-tag 安装和 GitHub release archive 分发：
+
+```bash
+npm install -g @jimmydaddy/sigil
+brew install JimmyDaddy/sigil/sigil-ai
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+```
+
+从 checkout 安装仍适合本地开发：
 
 ```bash
 cargo install --path crates/sigil --locked
 ```
 
-Release archive 可以在本地构建并验证，tag 发布也可以产出 archive。包管理器分发和自更新仍属于后续 packaging 工作。
+自更新仍属于后续 packaging 工作。
 
 ## 配置速览
 

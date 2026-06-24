@@ -13,17 +13,31 @@ Sigil is a TUI-first Rust coding agent for real repository work. It keeps chat, 
 
 [Website](https://jimmydaddy.github.io/sigil/) · [Docs](docs/en/README.md) · [Quickstart](docs/en/quickstart.md) · [Visual tour](docs/en/visual-tour.md) · [Provider guide](docs/en/providers.md)
 
-Sigil is currently best installed from a checkout. Package-manager distribution and self-update remain future packaging work.
+Sigil's first release is prepared for npm, Homebrew tap, Cargo git-tag installs, and GitHub release archives. Self-update remains future packaging work.
 
 ## Quickstart
 
 Prerequisites:
 
 - A modern terminal emulator.
-- A Rust toolchain compatible with this repository.
+- One installer: npm, Homebrew, or a Rust toolchain compatible with this repository.
 - A model provider credential. Quick Setup can collect it on first launch.
 
-Install Sigil:
+Install Sigil with one of the first-release package paths:
+
+```bash
+npm install -g @jimmydaddy/sigil
+```
+
+```bash
+brew install JimmyDaddy/sigil/sigil-ai
+```
+
+```bash
+cargo install --git https://github.com/JimmyDaddy/sigil --tag v0.1.0 --locked sigil
+```
+
+During local development, install from a checkout:
 
 ```bash
 git clone https://github.com/JimmyDaddy/sigil.git
