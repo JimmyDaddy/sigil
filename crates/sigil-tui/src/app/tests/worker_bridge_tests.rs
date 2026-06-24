@@ -1065,6 +1065,57 @@ fn worker_events_cover_completion_continuation_and_duplicate_assistant_messages(
 }
 
 #[test]
+fn assistant_message_with_tool_call_preserves_tool_phase_and_dedupes_text() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.is_busy = true;
+
+    let progress_text = "check 通过。跑相关 crate 的测试。";
+    app.handle(RunEvent::TextDelta(progress_text.to_owned()))?;
+    app.handle(RunEvent::ToolCallStarted(ToolCall {
+        id: "call-check".to_owned(),
+        name: "bash".to_owned(),
+        args_json: r#"{"command":"cargo check"}"#.to_owned(),
+    }))?;
+    app.handle(RunEvent::AssistantMessage(ModelMessage::assistant(
+        Some(progress_text.to_owned()),
+        vec![ToolCall {
+            id: "call-check".to_owned(),
+            name: "bash".to_owned(),
+            args_json: r#"{"command":"cargo check"}"#.to_owned(),
+        }],
+    )))?;
+
+    let matching = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Assistant && entry.text == progress_text)
+        .count();
+    assert_eq!(matching, 1);
+    assert_eq!(app.run_phase(), RunPhase::Tool("bash".to_owned()));
+    let summary = app
+        .live_activity_summary()
+        .expect("expected live tool activity");
+    assert_eq!(summary.label, "tool");
+    assert_eq!(summary.detail, "running bash");
+
+    app.handle(RunEvent::Control(ControlEntry::ToolExecution(Box::new(
+        ToolExecutionEntry {
+            call_id: "call-test".to_owned(),
+            tool_name: "cargo test".to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta::default(),
+            error: None,
+            model_content_hash: None,
+        },
+    ))))?;
+    assert_eq!(app.run_phase(), RunPhase::Tool("cargo test".to_owned()));
+    Ok(())
+}
+
+#[test]
 fn agent_thread_event_updates_only_focused_child_transcript() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     let thread_id = sigil_kernel::AgentThreadId::new("agent_chat_live")?;

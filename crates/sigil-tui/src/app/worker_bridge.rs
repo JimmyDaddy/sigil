@@ -18,7 +18,8 @@ use crate::provider_status::BalanceSnapshot;
 use crate::provider_status::resolve_provider_api_key;
 use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 use sigil_kernel::{
-    ControlEntry, EventHandler, RunEvent, ToolCall, ToolDiffBudget, ToolPreviewSnapshot, ToolResult,
+    ControlEntry, EventHandler, RunEvent, ToolCall, ToolDiffBudget, ToolExecutionStatus,
+    ToolPreviewSnapshot, ToolResult,
 };
 
 impl AppState {
@@ -1349,6 +1350,15 @@ impl EventHandler for AppState {
                     );
                     self.append_current_session_control(ControlEntry::TerminalTask(task));
                 }
+                ControlEntry::ToolExecution(execution) => {
+                    if matches!(execution.status, ToolExecutionStatus::Started) {
+                        self.run_phase = RunPhase::Tool(execution.tool_name.clone());
+                        self.push_phase_marker(format!("tool|{}", execution.tool_name));
+                    }
+                    let control = ControlEntry::ToolExecution(execution);
+                    self.push_event("control", format!("{control:?}"));
+                    self.append_current_session_control(control);
+                }
                 ControlEntry::AgentThreadStarted(entry) => {
                     let control = ControlEntry::AgentThreadStarted(entry.clone());
                     if matches!(
@@ -1390,21 +1400,17 @@ impl EventHandler for AppState {
                 self.push_event("continuation", state.state_kind);
             }
             RunEvent::AssistantMessage(message) => {
-                self.run_phase = RunPhase::Streaming;
-                self.push_phase_marker("streaming".to_owned());
+                if let Some(tool_name) = message.tool_calls.first().map(|call| call.name.clone()) {
+                    self.run_phase = RunPhase::Tool(tool_name.clone());
+                    self.push_phase_marker(format!("tool|{tool_name}"));
+                } else {
+                    self.run_phase = RunPhase::Streaming;
+                    self.push_phase_marker("streaming".to_owned());
+                }
                 self.finish_streaming_assistant_entry();
                 self.finish_streaming_reasoning_entry();
-                if let Some(content) = message.content
-                    && !content.is_empty()
-                {
-                    let last_is_same = self
-                        .timeline
-                        .last()
-                        .map(|entry| entry.role == TimelineRole::Assistant && entry.text == content)
-                        .unwrap_or(false);
-                    if !last_is_same {
-                        self.push_timeline(TimelineRole::Assistant, content);
-                    }
+                if let Some(content) = message.content {
+                    self.push_assistant_message_once(content);
                 }
             }
             RunEvent::Notice(note) => {
