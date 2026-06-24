@@ -322,6 +322,7 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
     colors.insert("surface_panel".to_owned(), "#111213".to_owned());
     colors.insert("surface_input".to_owned(), "#212223".to_owned());
     colors.insert("surface_user_message".to_owned(), "#515253".to_owned());
+    colors.insert("surface_selection".to_owned(), "#414243".to_owned());
     colors.insert("text_primary".to_owned(), "#F0F1F2".to_owned());
     colors.insert("markdown_code_fg".to_owned(), "#D0D1D2".to_owned());
     colors.insert("markdown_code_bg".to_owned(), "#313233".to_owned());
@@ -373,7 +374,7 @@ fn render_main_screen_custom_theme_reaches_timeline_tool_card_and_composer() -> 
     );
     assert_eq!(
         cell_bg_at_text(&terminal, "tool-code", "tool-code"),
-        Color::Rgb(49, 50, 51)
+        Color::Rgb(65, 66, 67)
     );
     assert_eq!(
         cell_fg_at_text(&terminal, "tool-code", "tool-code"),
