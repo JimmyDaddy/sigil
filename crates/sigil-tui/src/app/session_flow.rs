@@ -570,6 +570,9 @@ impl AppState {
             self.rerender_timeline_entry(index);
             return;
         }
+        if delta.trim().is_empty() {
+            return;
+        }
         self.push_phase_marker(format!("thinking|{}", self.model_name));
         self.push_timeline(TimelineRole::Thinking, delta.to_owned());
     }
@@ -706,6 +709,9 @@ fn push_restored_reasoning_timeline_entry(
         .filter(|entry| entry.role == TimelineRole::Thinking)
     {
         entry.text.push_str(delta);
+        return;
+    }
+    if delta.trim().is_empty() {
         return;
     }
     timeline.push(crate::timeline::TimelineEntry {

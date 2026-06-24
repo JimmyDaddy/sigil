@@ -163,7 +163,26 @@ impl AppState {
         self.streaming_assistant_index = self.timeline.len().checked_sub(1);
     }
 
+    pub(super) fn push_assistant_message_once(&mut self, content: String) {
+        if content.is_empty() || self.assistant_message_seen_since_last_user(&content) {
+            return;
+        }
+        self.push_timeline(TimelineRole::Assistant, content);
+    }
+
+    fn assistant_message_seen_since_last_user(&self, content: &str) -> bool {
+        self.timeline
+            .iter()
+            .rev()
+            .take_while(|entry| entry.role != TimelineRole::User)
+            .any(|entry| entry.role == TimelineRole::Assistant && entry.text == content)
+    }
+
     pub(super) fn append_reasoning_delta(&mut self, delta: &str) {
+        if delta.is_empty() || (self.streaming_reasoning_index.is_none() && delta.trim().is_empty())
+        {
+            return;
+        }
         self.finish_streaming_assistant_entry();
         if let Some(index) = self.streaming_reasoning_index
             && let Some(entry) = self.timeline.get_mut(index)

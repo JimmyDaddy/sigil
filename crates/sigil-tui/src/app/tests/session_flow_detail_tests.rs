@@ -1554,3 +1554,18 @@ fn restore_session_view_skips_empty_assistant_and_tool_result_content() {
             .any(|entry| entry.role == TimelineRole::Tool)
     );
 }
+
+#[test]
+fn push_restored_reasoning_timeline_entry_ignores_whitespace_only_delta() {
+    let mut timeline: Vec<crate::timeline::TimelineEntry> = Vec::new();
+    push_restored_reasoning_timeline_entry(&mut timeline, "\n  ");
+    assert!(timeline.is_empty());
+
+    push_restored_reasoning_timeline_entry(&mut timeline, "");
+    assert!(timeline.is_empty());
+
+    push_restored_reasoning_timeline_entry(&mut timeline, "Real thinking");
+    assert_eq!(timeline.len(), 1);
+    assert_eq!(timeline[0].role, TimelineRole::Thinking);
+    assert_eq!(timeline[0].text, "Real thinking");
+}

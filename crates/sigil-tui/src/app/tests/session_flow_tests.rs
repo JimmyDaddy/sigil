@@ -239,6 +239,10 @@ fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
         SessionLogEntry::User(ModelMessage::user("analyze")),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "reasoning_delta".to_owned(),
+            data: json!({"delta": "\n  "}),
+        }),
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "reasoning_delta".to_owned(),
             data: json!({"delta": "step 1\n"}),
         }),
         SessionLogEntry::Control(ControlEntry::Note {
@@ -255,6 +259,13 @@ fn restored_reasoning_notes_render_thinking_block() -> Result<()> {
     })?;
 
     let rendered = plain_transcript(&app, 20);
+    let thinking_entries = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Thinking)
+        .collect::<Vec<_>>();
+    assert_eq!(thinking_entries.len(), 1);
+    assert_eq!(thinking_entries[0].text, "step 1\nstep 2");
     assert!(rendered.contains("thought"));
     assert!(!rendered.contains("thinking"));
     assert!(rendered.contains("step 1"));

@@ -199,6 +199,33 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
 }
 
 #[test]
+fn empty_reasoning_delta_does_not_create_empty_thinking_block() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::ReasoningDelta(String::new()))?;
+    app.handle(RunEvent::ReasoningDelta("\n  \t".to_owned()))?;
+
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Thinking)
+    );
+
+    app.handle(RunEvent::ReasoningDelta("Still".to_owned()))?;
+    app.handle(RunEvent::ReasoningDelta(" ".to_owned()))?;
+    app.handle(RunEvent::ReasoningDelta("running".to_owned()))?;
+
+    let thinking = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Thinking)
+        .collect::<Vec<_>>();
+    assert_eq!(thinking.len(), 1);
+    assert_eq!(thinking[0].text, "Still running");
+    Ok(())
+}
+
+#[test]
 fn ctrl_t_toggles_thinking_block_expansion() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -2103,4 +2130,59 @@ fn transcript_lines_on_empty_timeline_still_renders_placeholder_lines() {
             .iter()
             .any(|span| !span.content.as_ref().trim().is_empty())
     }));
+}
+
+#[test]
+fn push_assistant_message_once_deduplicates_and_ignores_empty() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    // Empty content should not push.
+    app.push_assistant_message_once(String::new());
+    assert!(!app
+        .timeline
+        .iter()
+        .any(|entry| entry.role == TimelineRole::Assistant));
+
+    // First non-empty push creates an entry.
+    app.push_assistant_message_once("hello".to_owned());
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        1
+    );
+
+    // Duplicate content since last user message should be suppressed.
+    app.push_assistant_message_once("hello".to_owned());
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        1
+    );
+
+    // Different content pushes a new entry.
+    app.push_assistant_message_once("world".to_owned());
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        2
+    );
+
+    // After a user message interjection, duplicate of previous assistant is allowed.
+    app.push_timeline(TimelineRole::User, "interjection".to_owned());
+    app.push_assistant_message_once("hello".to_owned());
+    assert_eq!(
+        app.timeline
+            .iter()
+            .filter(|entry| entry.role == TimelineRole::Assistant)
+            .count(),
+        3
+    );
+
+    Ok(())
 }
