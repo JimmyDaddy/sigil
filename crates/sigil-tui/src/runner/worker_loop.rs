@@ -7,17 +7,23 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentDelegationRequirement, AgentProfileId, AgentRole, AgentRunInput, AgentRunOptions,
-    AgentRunResult, AgentThreadId, AgentThreadStatus, ControlEntry, ModelMessage,
-    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry,
-    ProviderCapabilities, RootConfig, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest,
+    Agent, AgentDelegationRequirement, AgentInvocationMode, AgentProfileId,
+    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRunInput,
+    AgentRunOptions, AgentRunResult, AgentThreadId, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, AgentToolDelegate, ControlEntry, ConversationInputEditedEntry,
+    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
+    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
+    ConversationQueueProjection, JsonlSessionStore, ModelMessage, PlanApprovalExpiry,
+    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, ProviderCapabilities,
+    ReasoningEffort, RootConfig, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest,
     Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection,
     TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
     TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
     ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
     ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, default_user_config_dir,
-    plan_text_hash, plan_workspace_paths,
+    plan_text_hash, plan_workspace_paths, saturating_elapsed,
 };
 
 use crate::{
@@ -31,7 +37,9 @@ use super::{
     elicitation_bridge::{ChannelMcpElicitationHandler, McpElicitationAuditBuffer},
     event_bridge::ChannelEventHandler,
     mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
-    protocol::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage},
+    protocol::{
+        CompactionTrigger, McpActivationStatus, QueueMoveDirection, WorkerCommand, WorkerMessage,
+    },
     session_flow::{auto_compact_session, load_session, session_compacted_message},
 };
 
@@ -60,7 +68,10 @@ pub(super) fn run_worker_loop<P>(
         &root_config.agent.model,
         &current_session_log_path,
     ) {
-        Ok(session) => Some(session),
+        Ok(mut session) => {
+            mark_stale_dispatching_conversation_queue_items(&mut session, &message_tx);
+            Some(session)
+        }
         Err(error) => {
             let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
             return;
@@ -75,6 +86,8 @@ pub(super) fn run_worker_loop<P>(
     let mut next_run_id = 1_u64;
     let mut discarded_run_ids = BTreeSet::new();
     let mut pending_mcp_refreshes = BTreeSet::new();
+    let mut pending_agent_result_continuations =
+        pending_agent_result_continuations_from_session(current_session.as_ref());
     let session_entries = current_session
         .as_ref()
         .map(Session::entries)
@@ -170,7 +183,19 @@ pub(super) fn run_worker_loop<P>(
             }
             elicitation_handler.set_audit_buffer(None);
             active_run = None;
-            current_session = Some(task_result.session);
+            current_session = match load_session(
+                task_result.session.provider_name(),
+                task_result.session.model_name(),
+                &current_session_log_path,
+            ) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "session reload skipped after run: {error:#}"
+                    )));
+                    Some(task_result.session)
+                }
+            };
             let auto_compaction = match current_session.as_mut() {
                 Some(session) => {
                     let effective_config = effective_compaction_config(
@@ -194,7 +219,27 @@ pub(super) fn run_worker_loop<P>(
                 RunTaskPayload::Chat {
                     result: Ok(run_result),
                     plan_mode,
+                    queue_id,
+                    agent_result_continuation_thread_ids,
                 } => {
+                    if let Some(queue_id) = queue_id {
+                        append_queue_status_and_notify(
+                            &mut current_session,
+                            &message_tx,
+                            queue_id,
+                            ConversationInputStatus::Delivered,
+                            None,
+                        );
+                    }
+                    if !agent_result_continuation_thread_ids.is_empty() {
+                        append_agent_result_continuation_status_and_notify(
+                            &mut current_session,
+                            &message_tx,
+                            &agent_result_continuation_thread_ids,
+                            AgentResultContinuationStatus::Completed,
+                            Some("parent continuation completed"),
+                        );
+                    }
                     let entries = current_session
                         .as_ref()
                         .map(|session| session.entries().to_vec())
@@ -227,9 +272,32 @@ pub(super) fn run_worker_loop<P>(
                     });
                 }
                 RunTaskPayload::Chat {
-                    result: Err(error), ..
+                    result: Err(error),
+                    queue_id,
+                    agent_result_continuation_thread_ids,
+                    ..
+                } => {
+                    if let Some(queue_id) = queue_id {
+                        append_queue_failure_and_pause_and_notify(
+                            &current_session_log_path,
+                            &mut current_session,
+                            &message_tx,
+                            queue_id,
+                            error.clone(),
+                        );
+                    }
+                    if !agent_result_continuation_thread_ids.is_empty() {
+                        append_agent_result_continuation_status_and_notify(
+                            &mut current_session,
+                            &message_tx,
+                            &agent_result_continuation_thread_ids,
+                            AgentResultContinuationStatus::Failed,
+                            Some(error.as_str()),
+                        );
+                    }
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
                 }
-                | RunTaskPayload::Agent {
+                RunTaskPayload::Agent {
                     result: Err(error), ..
                 } => {
                     let _ = message_tx.send(WorkerMessage::RunFailed(error));
@@ -276,11 +344,47 @@ pub(super) fn run_worker_loop<P>(
                 &message_tx,
             );
             if !completed_agent_threads.is_empty() {
+                let new_continuation_threads = agent_result_continuation_new_thread_ids(
+                    current_session.as_ref(),
+                    &completed_agent_threads,
+                );
+                if !new_continuation_threads.is_empty()
+                    && let Err(error) = append_agent_result_continuation_status_entries(
+                        &current_session_log_path,
+                        &mut current_session,
+                        &new_continuation_threads,
+                        AgentResultContinuationStatus::Pending,
+                        Some("child agent result ready"),
+                    )
+                {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    continue;
+                }
+                let (blocking, non_blocking) = partition_agent_result_continuations(
+                    current_session.as_ref(),
+                    completed_agent_threads,
+                );
+                extend_agent_thread_ids_unique(
+                    &mut pending_agent_result_continuations,
+                    non_blocking,
+                );
+                let queued_input_ready = current_session
+                    .as_ref()
+                    .and_then(|session| session.conversation_queue_projection().next_dispatchable)
+                    .is_some();
+                let mut continuation_threads = blocking;
+                if !queued_input_ready {
+                    continuation_threads.append(&mut pending_agent_result_continuations);
+                }
+                if continuation_threads.is_empty() {
+                    continue;
+                }
                 active_run = start_agent_result_continuation_run(
                     &runtime,
                     Arc::clone(&agent),
                     &agent_supervisor,
                     &root_config,
+                    &current_session_log_path,
                     agent.tool_registry(),
                     &options,
                     &background_agent_runs,
@@ -289,7 +393,7 @@ pub(super) fn run_worker_loop<P>(
                     &message_tx,
                     Arc::clone(&elicitation_handler),
                     &mut next_run_id,
-                    completed_agent_threads,
+                    continuation_threads,
                 );
                 if active_run.is_some() {
                     continue;
@@ -297,7 +401,173 @@ pub(super) fn run_worker_loop<P>(
             }
         }
 
+        if active_run.is_none() {
+            let queued_input_ready = current_session
+                .as_ref()
+                .and_then(|session| session.conversation_queue_projection().next_dispatchable)
+                .is_some();
+            if !queued_input_ready && !pending_agent_result_continuations.is_empty() {
+                let continuation_threads = std::mem::take(&mut pending_agent_result_continuations);
+                active_run = start_agent_result_continuation_run(
+                    &runtime,
+                    Arc::clone(&agent),
+                    &agent_supervisor,
+                    &root_config,
+                    &current_session_log_path,
+                    agent.tool_registry(),
+                    &options,
+                    &background_agent_runs,
+                    &mut current_session,
+                    &task_result_tx,
+                    &message_tx,
+                    Arc::clone(&elicitation_handler),
+                    &mut next_run_id,
+                    continuation_threads,
+                );
+                if active_run.is_some() {
+                    continue;
+                }
+            }
+        }
+
+        if active_run.is_none()
+            && let Some(queued) =
+                mark_next_conversation_queue_item_dispatching(&mut current_session, &message_tx)
+        {
+            active_run = start_queued_conversation_run(
+                &runtime,
+                Arc::clone(&agent),
+                &agent_supervisor,
+                &root_config,
+                agent.tool_registry(),
+                &options,
+                &background_agent_runs,
+                &mut current_session,
+                &task_result_tx,
+                &message_tx,
+                Arc::clone(&elicitation_handler),
+                &mut next_run_id,
+                queued,
+            );
+            if active_run.is_some() {
+                continue;
+            }
+        }
+
         match command_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(WorkerCommand::QueueConversationInput {
+                prompt,
+                kind,
+                target,
+                reasoning_effort,
+            }) => match queue_conversation_input(
+                &current_session_log_path,
+                &mut current_session,
+                prompt,
+                kind,
+                target,
+                reasoning_effort,
+            ) {
+                Ok(entries) => {
+                    send_conversation_queue_update(&message_tx, &entries);
+                }
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                }
+            },
+            Ok(WorkerCommand::CancelQueuedConversationInput { queue_id }) => {
+                match cancel_queued_conversation_input(
+                    &current_session_log_path,
+                    &mut current_session,
+                    queue_id,
+                ) {
+                    Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::EditQueuedConversationInput {
+                queue_id,
+                prompt,
+                reasoning_effort,
+            }) => match edit_queued_conversation_input(
+                &current_session_log_path,
+                &mut current_session,
+                queue_id,
+                prompt,
+                reasoning_effort,
+            ) {
+                Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                }
+            },
+            Ok(WorkerCommand::MoveQueuedConversationInput {
+                queue_id,
+                direction,
+            }) => match move_queued_conversation_input(
+                &current_session_log_path,
+                &mut current_session,
+                queue_id,
+                direction,
+            ) {
+                Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                }
+            },
+            Ok(WorkerCommand::PromoteQueuedConversationInput { queue_id }) => {
+                match promote_queued_conversation_input(
+                    &current_session_log_path,
+                    &mut current_session,
+                    queue_id,
+                ) {
+                    Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::SendQueuedConversationInputNow { queue_id }) => {
+                match promote_queued_conversation_input(
+                    &current_session_log_path,
+                    &mut current_session,
+                    queue_id,
+                ) {
+                    Ok(entries) => {
+                        send_conversation_queue_update(&message_tx, &entries);
+                        if let Some(run) = active_run.take() {
+                            cancel_active_run(
+                                run,
+                                &root_config,
+                                &current_session_log_path,
+                                &mut current_session,
+                                &message_tx,
+                                &elicitation_handler,
+                                &agent_supervisor,
+                                &mut discarded_run_ids,
+                                "run interrupted for queued input",
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::SetConversationQueuePaused { paused }) => {
+                match set_conversation_queue_paused(
+                    &current_session_log_path,
+                    &mut current_session,
+                    paused,
+                ) {
+                    Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
             Ok(
                 command @ (WorkerCommand::SubmitPrompt { .. }
                 | WorkerCommand::SubmitPlanPrompt { .. }),
@@ -314,9 +584,24 @@ pub(super) fn run_worker_loop<P>(
                     _ => unreachable!("matched submit prompt commands above"),
                 };
                 if active_run.is_some() {
-                    let _ = message_tx.send(WorkerMessage::RunFailed(
-                        "agent is already running".to_owned(),
-                    ));
+                    let kind = if plan_mode {
+                        ConversationInputKind::PlanPrompt
+                    } else {
+                        ConversationInputKind::Chat
+                    };
+                    match queue_conversation_input(
+                        &current_session_log_path,
+                        &mut current_session,
+                        prompt,
+                        kind,
+                        ConversationInputTarget::MainThread,
+                        reasoning_effort,
+                    ) {
+                        Ok(entries) => send_conversation_queue_update(&message_tx, &entries),
+                        Err(error) => {
+                            let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                        }
+                    }
                     continue;
                 }
 
@@ -417,7 +702,12 @@ pub(super) fn run_worker_loop<P>(
                     let _ = task_result_tx.send(RunTaskResult {
                         run_id,
                         session: run_session,
-                        payload: RunTaskPayload::Chat { result, plan_mode },
+                        payload: RunTaskPayload::Chat {
+                            result,
+                            plan_mode,
+                            queue_id: None,
+                            agent_result_continuation_thread_ids: Vec::new(),
+                        },
                     });
                 });
 
@@ -625,6 +915,8 @@ pub(super) fn run_worker_loop<P>(
                         payload: RunTaskPayload::Chat {
                             result,
                             plan_mode: false,
+                            queue_id: None,
+                            agent_result_continuation_thread_ids: Vec::new(),
                         },
                     });
                 });
@@ -949,65 +1241,17 @@ pub(super) fn run_worker_loop<P>(
             }
             Ok(WorkerCommand::CancelRun) => {
                 if let Some(active_run) = active_run.take() {
-                    elicitation_handler.set_audit_buffer(None);
-                    discarded_run_ids.insert(active_run.run_id);
-                    let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
-                    let agent_cancel_impact = agent_supervisor.cancel_foreground_run();
-                    active_run.handle.abort();
-                    match load_session(
-                        &root_config.agent.provider,
-                        &root_config.agent.model,
+                    cancel_active_run(
+                        active_run,
+                        &root_config,
                         &current_session_log_path,
-                    ) {
-                        Ok(session) => {
-                            let mut session = session;
-                            if let Err(error) = append_mcp_elicitation_audits(
-                                &mut session,
-                                &active_run.elicitation_audit_buffer,
-                            ) {
-                                let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                                current_session = Some(session);
-                                continue;
-                            }
-                            let mut cancel_handler = ChannelEventHandler::new(message_tx.clone());
-                            if let Err(error) =
-                                sigil_runtime::AgentSupervisor::append_foreground_cancel_audit(
-                                    &mut session,
-                                    &mut cancel_handler,
-                                    agent_cancel_impact,
-                                    "run cancelled from TUI",
-                                )
-                            {
-                                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
-                                    "failed to append cancelled agent state: {error:#}"
-                                )));
-                                current_session = Some(session);
-                                continue;
-                            }
-                            if let Err(error) = append_cancelled_task_state(&mut session) {
-                                let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                                current_session = Some(session);
-                                continue;
-                            }
-                            let entries = session.entries().to_vec();
-                            current_session = Some(session);
-                            let _ = message_tx.send(WorkerMessage::RunCancelled {
-                                session_log_path: current_session_log_path.clone(),
-                                provider_name: current_session
-                                    .as_ref()
-                                    .map(|session| session.provider_name().to_owned())
-                                    .unwrap_or_else(|| root_config.agent.provider.clone()),
-                                model_name: current_session
-                                    .as_ref()
-                                    .map(|session| session.model_name().to_owned())
-                                    .unwrap_or_else(|| root_config.agent.model.clone()),
-                                entries,
-                            });
-                        }
-                        Err(error) => {
-                            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
-                        }
-                    }
+                        &mut current_session,
+                        &message_tx,
+                        &elicitation_handler,
+                        &agent_supervisor,
+                        &mut discarded_run_ids,
+                        "run cancelled from TUI",
+                    );
                 } else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "no active run to cancel".to_owned(),
@@ -1087,6 +1331,38 @@ pub(super) fn run_worker_loop<P>(
                     Ok((thread_id, entries)) => {
                         let _ = message_tx
                             .send(WorkerMessage::AgentThreadClosed { thread_id, entries });
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::MessageAgent { thread_id, prompt }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before messaging agent".to_owned(),
+                    ));
+                    continue;
+                }
+                match message_agent_thread(
+                    &runtime,
+                    &background_agent_runs,
+                    &agent_supervisor,
+                    &root_config,
+                    agent.tool_registry(),
+                    &options,
+                    &mut current_session,
+                    thread_id,
+                    prompt,
+                ) {
+                    Ok((mut result, controls)) => {
+                        for control in controls {
+                            let _ = message_tx
+                                .send(WorkerMessage::Event(Box::new(RunEvent::Control(control))));
+                        }
+                        result.control_entries.clear();
+                        let _ = message_tx
+                            .send(WorkerMessage::Event(Box::new(RunEvent::ToolResult(result))));
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::Notice(error));
@@ -1313,7 +1589,8 @@ pub(super) fn run_worker_loop<P>(
                     &root_config.agent.model,
                     &session_log_path,
                 ) {
-                    Ok(session) => {
+                    Ok(mut session) => {
+                        mark_stale_dispatching_conversation_queue_items(&mut session, &message_tx);
                         let entries = session.entries().to_vec();
                         current_session_log_path = session_log_path.clone();
                         let provider_name = session.provider_name().to_owned();
@@ -1344,7 +1621,8 @@ pub(super) fn run_worker_loop<P>(
                     &root_config.agent.model,
                     &session_log_path,
                 ) {
-                    Ok(session) => {
+                    Ok(mut session) => {
+                        mark_stale_dispatching_conversation_queue_items(&mut session, &message_tx);
                         let entries = session.entries().to_vec();
                         current_session_log_path = session_log_path.clone();
                         let provider_name = session.provider_name().to_owned();
@@ -1401,6 +1679,22 @@ impl sigil_runtime::AgentToolBackgroundEventSink for WorkerAgentEventSink {
             event: Box::new(event),
         });
     }
+
+    fn handle_agent_status(
+        &self,
+        thread_id: &AgentThreadId,
+        status: AgentThreadStatus,
+        reason: Option<String>,
+    ) {
+        let _ = self.sender.send(WorkerMessage::AgentThreadStatusLive {
+            entry: AgentThreadStatusChangedEntry {
+                thread_id: thread_id.clone(),
+                status,
+                reason,
+                updated_at_ms: Some(unix_time_ms()),
+            },
+        });
+    }
 }
 
 pub(super) struct WorkerLoopMcpHandlers {
@@ -1414,6 +1708,76 @@ struct ActiveRun {
     handle: tokio::task::JoinHandle<()>,
     approval_tx: mpsc::Sender<ApprovalSignal>,
     elicitation_audit_buffer: McpElicitationAuditBuffer,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cancel_active_run(
+    active_run: ActiveRun,
+    root_config: &RootConfig,
+    current_session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    elicitation_handler: &Arc<ChannelMcpElicitationHandler>,
+    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    discarded_run_ids: &mut BTreeSet<u64>,
+    reason: &str,
+) {
+    elicitation_handler.set_audit_buffer(None);
+    discarded_run_ids.insert(active_run.run_id);
+    let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
+    let agent_cancel_impact = agent_supervisor.cancel_foreground_run();
+    active_run.handle.abort();
+    match load_session(
+        &root_config.agent.provider,
+        &root_config.agent.model,
+        current_session_log_path,
+    ) {
+        Ok(session) => {
+            let mut session = session;
+            if let Err(error) =
+                append_mcp_elicitation_audits(&mut session, &active_run.elicitation_audit_buffer)
+            {
+                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                *current_session = Some(session);
+                return;
+            }
+            let mut cancel_handler = ChannelEventHandler::new(message_tx.clone());
+            if let Err(error) = sigil_runtime::AgentSupervisor::append_foreground_cancel_audit(
+                &mut session,
+                &mut cancel_handler,
+                agent_cancel_impact,
+                reason,
+            ) {
+                let _ = message_tx.send(WorkerMessage::RunFailed(format!(
+                    "failed to append cancelled agent state: {error:#}"
+                )));
+                *current_session = Some(session);
+                return;
+            }
+            if let Err(error) = append_cancelled_task_state(&mut session) {
+                let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                *current_session = Some(session);
+                return;
+            }
+            let entries = session.entries().to_vec();
+            *current_session = Some(session);
+            let _ = message_tx.send(WorkerMessage::RunCancelled {
+                session_log_path: current_session_log_path.to_path_buf(),
+                provider_name: current_session
+                    .as_ref()
+                    .map(|session| session.provider_name().to_owned())
+                    .unwrap_or_else(|| root_config.agent.provider.clone()),
+                model_name: current_session
+                    .as_ref()
+                    .map(|session| session.model_name().to_owned())
+                    .unwrap_or_else(|| root_config.agent.model.clone()),
+                entries,
+            });
+        }
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+        }
+    }
 }
 
 struct TaskRunSpawn {
@@ -2142,6 +2506,8 @@ enum RunTaskPayload {
     Chat {
         result: std::result::Result<AgentRunResult, String>,
         plan_mode: bool,
+        queue_id: Option<ConversationInputQueueId>,
+        agent_result_continuation_thread_ids: Vec<AgentThreadId>,
     },
     Agent {
         profile_id: String,
@@ -2151,6 +2517,492 @@ enum RunTaskPayload {
         task_id: String,
         result: std::result::Result<TaskRunStatus, String>,
     },
+}
+
+fn queue_conversation_input(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    prompt: String,
+    kind: ConversationInputKind,
+    target: ConversationInputTarget,
+    reasoning_effort: ReasoningEffort,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    let entries = current_session
+        .as_ref()
+        .map(|session| session.entries().to_vec())
+        .unwrap_or_else(|| JsonlSessionStore::read_entries(session_log_path).unwrap_or_default());
+    let entry = ConversationInputQueuedEntry {
+        queue_id: next_conversation_queue_id(&entries)?,
+        target,
+        kind,
+        prompt_hash: conversation_prompt_hash(&prompt),
+        prompt,
+        reasoning_effort: Some(reasoning_effort),
+        created_at_ms: Some(unix_time_ms()),
+    };
+    let control = ControlEntry::ConversationInputQueued(entry);
+    if let Some(session) = current_session.as_mut() {
+        session
+            .append_control(control)
+            .map_err(|error| format!("failed to append queued conversation input: {error:#}"))?;
+        Ok(session.entries().to_vec())
+    } else {
+        let store = JsonlSessionStore::new(session_log_path.to_path_buf())
+            .map_err(|error| format!("failed to open session store for queued input: {error:#}"))?;
+        store
+            .append(&SessionLogEntry::Control(control))
+            .map_err(|error| format!("failed to persist queued conversation input: {error:#}"))?;
+        JsonlSessionStore::read_entries(session_log_path)
+            .map_err(|error| format!("failed to reload queued conversation input: {error:#}"))
+    }
+}
+
+fn cancel_queued_conversation_input(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    queue_id: ConversationInputQueueId,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    ensure_queued_conversation_item_is_mutable(session_log_path, current_session, &queue_id)?;
+    append_conversation_queue_control_entries(
+        session_log_path,
+        current_session,
+        vec![ControlEntry::ConversationInputStatusChanged(
+            ConversationInputStatusEntry {
+                queue_id,
+                status: ConversationInputStatus::Cancelled,
+                reason: Some("cancelled by user".to_owned()),
+                updated_at_ms: Some(unix_time_ms()),
+            },
+        )],
+    )
+}
+
+fn edit_queued_conversation_input(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    queue_id: ConversationInputQueueId,
+    prompt: String,
+    reasoning_effort: ReasoningEffort,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    if prompt.trim().is_empty() {
+        return Err("queued input prompt cannot be empty".to_owned());
+    }
+    ensure_queued_conversation_item_is_mutable(session_log_path, current_session, &queue_id)?;
+    append_conversation_queue_control_entries(
+        session_log_path,
+        current_session,
+        vec![ControlEntry::ConversationInputEdited(
+            ConversationInputEditedEntry {
+                queue_id,
+                prompt_hash: conversation_prompt_hash(&prompt),
+                prompt,
+                reasoning_effort: Some(reasoning_effort),
+                updated_at_ms: Some(unix_time_ms()),
+            },
+        )],
+    )
+}
+
+fn move_queued_conversation_input(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    queue_id: ConversationInputQueueId,
+    direction: QueueMoveDirection,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    let entries = read_conversation_queue_entries(session_log_path, current_session)?;
+    let projection = ConversationQueueProjection::from_entries(&entries);
+    ensure_projection_item_is_mutable(&projection, &queue_id)?;
+    let Some(index) = projection
+        .items
+        .iter()
+        .position(|item| item.queued.queue_id == queue_id)
+    else {
+        return Err(format!("queued input {} not found", queue_id.as_str()));
+    };
+    let after_queue_id = match direction {
+        QueueMoveDirection::Up if index == 0 => return Ok(entries),
+        QueueMoveDirection::Up if index == 1 => None,
+        QueueMoveDirection::Up => Some(projection.items[index - 2].queued.queue_id.clone()),
+        QueueMoveDirection::Down if index + 1 >= projection.items.len() => return Ok(entries),
+        QueueMoveDirection::Down => Some(projection.items[index + 1].queued.queue_id.clone()),
+    };
+    append_conversation_queue_control_entries(
+        session_log_path,
+        current_session,
+        vec![ControlEntry::ConversationInputReordered(
+            ConversationInputReorderedEntry {
+                queue_id,
+                after_queue_id,
+                updated_at_ms: Some(unix_time_ms()),
+            },
+        )],
+    )
+}
+
+fn promote_queued_conversation_input(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    queue_id: ConversationInputQueueId,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    let entries = read_conversation_queue_entries(session_log_path, current_session)?;
+    let projection = ConversationQueueProjection::from_entries(&entries);
+    ensure_projection_item_is_mutable(&projection, &queue_id)?;
+    let mut controls = Vec::new();
+    if projection.paused {
+        controls.push(ControlEntry::ConversationInputQueueControl(
+            ConversationInputQueueControlEntry {
+                action: ConversationInputQueueControlAction::Resume,
+                reason: Some("next turn".to_owned()),
+                updated_at_ms: Some(unix_time_ms()),
+            },
+        ));
+    }
+    controls.push(ControlEntry::ConversationInputReordered(
+        ConversationInputReorderedEntry {
+            queue_id,
+            after_queue_id: None,
+            updated_at_ms: Some(unix_time_ms()),
+        },
+    ));
+    append_conversation_queue_control_entries(session_log_path, current_session, controls)
+}
+
+fn set_conversation_queue_paused(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    paused: bool,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    append_conversation_queue_control_entries(
+        session_log_path,
+        current_session,
+        vec![ControlEntry::ConversationInputQueueControl(
+            ConversationInputQueueControlEntry {
+                action: if paused {
+                    ConversationInputQueueControlAction::Pause
+                } else {
+                    ConversationInputQueueControlAction::Resume
+                },
+                reason: Some("user control".to_owned()),
+                updated_at_ms: Some(unix_time_ms()),
+            },
+        )],
+    )
+}
+
+fn ensure_queued_conversation_item_is_mutable(
+    session_log_path: &Path,
+    current_session: &Option<Session>,
+    queue_id: &ConversationInputQueueId,
+) -> std::result::Result<(), String> {
+    let entries = read_conversation_queue_entries(session_log_path, current_session)?;
+    let projection = ConversationQueueProjection::from_entries(&entries);
+    ensure_projection_item_is_mutable(&projection, queue_id)
+}
+
+fn ensure_projection_item_is_mutable(
+    projection: &ConversationQueueProjection,
+    queue_id: &ConversationInputQueueId,
+) -> std::result::Result<(), String> {
+    let Some(item) = projection
+        .items
+        .iter()
+        .find(|item| item.queued.queue_id == *queue_id)
+    else {
+        return Err(format!("queued input {} not found", queue_id.as_str()));
+    };
+    if item.status != ConversationInputStatus::Queued {
+        return Err(format!(
+            "queued input {} is already {}",
+            queue_id.as_str(),
+            queue_status_label(item.status)
+        ));
+    }
+    Ok(())
+}
+
+fn append_conversation_queue_control_entries(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    controls: Vec<ControlEntry>,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    append_session_control_entries(
+        session_log_path,
+        current_session,
+        controls,
+        "conversation queue",
+    )
+}
+
+fn append_session_control_entries(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    controls: Vec<ControlEntry>,
+    context: &str,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    if let Some(session) = current_session.as_mut() {
+        for control in controls {
+            session
+                .append_control(control)
+                .map_err(|error| format!("failed to append {context} control: {error:#}"))?;
+        }
+        return Ok(session.entries().to_vec());
+    }
+
+    let store = JsonlSessionStore::new(session_log_path.to_path_buf())
+        .map_err(|error| format!("failed to open session store for {context}: {error:#}"))?;
+    for control in controls {
+        store
+            .append(&SessionLogEntry::Control(control))
+            .map_err(|error| format!("failed to persist {context} control: {error:#}"))?;
+    }
+    JsonlSessionStore::read_entries(session_log_path)
+        .map_err(|error| format!("failed to reload {context} controls: {error:#}"))
+}
+
+fn append_agent_result_continuation_status_entries(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    thread_ids: &[AgentThreadId],
+    status: AgentResultContinuationStatus,
+    reason: Option<&str>,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    let controls = thread_ids
+        .iter()
+        .cloned()
+        .map(|thread_id| {
+            ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+                thread_id,
+                status,
+                reason: reason.map(str::to_owned),
+                updated_at_ms: Some(unix_time_ms()),
+            })
+        })
+        .collect::<Vec<_>>();
+    append_session_control_entries(
+        session_log_path,
+        current_session,
+        controls,
+        "agent result continuation",
+    )
+}
+
+fn append_agent_result_continuation_status_and_notify(
+    current_session: &mut Option<Session>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    thread_ids: &[AgentThreadId],
+    status: AgentResultContinuationStatus,
+    reason: Option<&str>,
+) {
+    let Some(session) = current_session.as_mut() else {
+        let _ = message_tx.send(WorkerMessage::Notice(
+            "agent result continuation status skipped: session state unavailable".to_owned(),
+        ));
+        return;
+    };
+    for thread_id in thread_ids {
+        let entry = AgentResultContinuationEntry {
+            thread_id: thread_id.clone(),
+            status,
+            reason: reason.map(str::to_owned),
+            updated_at_ms: Some(unix_time_ms()),
+        };
+        if let Err(error) = session.append_control(ControlEntry::AgentResultContinuation(entry)) {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "agent result continuation status append failed: {error:#}"
+            )));
+            return;
+        }
+    }
+}
+
+fn read_conversation_queue_entries(
+    session_log_path: &Path,
+    current_session: &Option<Session>,
+) -> std::result::Result<Vec<SessionLogEntry>, String> {
+    if let Some(session) = current_session.as_ref() {
+        return Ok(session.entries().to_vec());
+    }
+    JsonlSessionStore::read_entries(session_log_path)
+        .map_err(|error| format!("failed to read conversation queue state: {error:#}"))
+}
+
+fn next_conversation_queue_id(
+    entries: &[SessionLogEntry],
+) -> std::result::Result<ConversationInputQueueId, String> {
+    let existing = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued)) => {
+                Some(queued.queue_id.as_str())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for index in 1..=existing.len().saturating_add(1024) {
+        let candidate = format!("queue_{index}");
+        if !existing.contains(candidate.as_str()) {
+            return ConversationInputQueueId::new(candidate)
+                .map_err(|error| format!("failed to allocate queue id: {error:#}"));
+        }
+    }
+    Err("failed to allocate queue id".to_owned())
+}
+
+fn conversation_prompt_hash(prompt: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prompt.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn queue_status_label(status: ConversationInputStatus) -> &'static str {
+    match status {
+        ConversationInputStatus::Queued => "queued",
+        ConversationInputStatus::Dispatching => "dispatching",
+        ConversationInputStatus::Delivered => "delivered",
+        ConversationInputStatus::Rejected => "rejected",
+        ConversationInputStatus::Cancelled => "cancelled",
+        ConversationInputStatus::Stale => "stale",
+        ConversationInputStatus::Unknown => "unknown",
+    }
+}
+
+fn send_conversation_queue_update(
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    entries: &[SessionLogEntry],
+) {
+    let projection = sigil_kernel::ConversationQueueProjection::from_entries(entries);
+    let _ = message_tx.send(WorkerMessage::ConversationQueueUpdated {
+        items: projection.items,
+        paused: projection.paused,
+        entries: entries.to_vec(),
+    });
+}
+
+fn mark_stale_dispatching_conversation_queue_items(
+    session: &mut Session,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+) {
+    let dispatching_queue_ids = session
+        .conversation_queue_projection()
+        .items
+        .into_iter()
+        .filter(|item| item.status == ConversationInputStatus::Dispatching)
+        .map(|item| item.queued.queue_id)
+        .collect::<Vec<_>>();
+    if dispatching_queue_ids.is_empty() {
+        return;
+    }
+
+    let mut changed = false;
+    for queue_id in dispatching_queue_ids {
+        let status = ConversationInputStatusEntry {
+            queue_id,
+            status: ConversationInputStatus::Stale,
+            reason: Some("stale after session restore without active run".to_owned()),
+            updated_at_ms: Some(unix_time_ms()),
+        };
+        if let Err(error) =
+            session.append_control(ControlEntry::ConversationInputStatusChanged(status))
+        {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "conversation queue restore skipped: {error:#}"
+            )));
+            break;
+        }
+        changed = true;
+    }
+
+    if changed {
+        send_conversation_queue_update(message_tx, session.entries());
+    }
+}
+
+fn append_queue_status_and_notify(
+    current_session: &mut Option<Session>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    queue_id: ConversationInputQueueId,
+    status: ConversationInputStatus,
+    reason: Option<String>,
+) {
+    let Some(session) = current_session.as_mut() else {
+        let _ = message_tx.send(WorkerMessage::Notice(
+            "conversation queue status skipped: session state unavailable".to_owned(),
+        ));
+        return;
+    };
+    let entry = ConversationInputStatusEntry {
+        queue_id,
+        status,
+        reason,
+        updated_at_ms: Some(unix_time_ms()),
+    };
+    if let Err(error) = session.append_control(ControlEntry::ConversationInputStatusChanged(entry))
+    {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "conversation queue status append failed: {error:#}"
+        )));
+        return;
+    }
+    send_conversation_queue_update(message_tx, session.entries());
+}
+
+fn append_queue_failure_and_pause_and_notify(
+    session_log_path: &Path,
+    current_session: &mut Option<Session>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    queue_id: ConversationInputQueueId,
+    reason: String,
+) {
+    let controls = vec![
+        ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+            queue_id,
+            status: ConversationInputStatus::Rejected,
+            reason: Some(reason),
+            updated_at_ms: Some(unix_time_ms()),
+        }),
+        ControlEntry::ConversationInputQueueControl(ConversationInputQueueControlEntry {
+            action: ConversationInputQueueControlAction::Pause,
+            reason: Some("queued run failed".to_owned()),
+            updated_at_ms: Some(unix_time_ms()),
+        }),
+    ];
+    match append_conversation_queue_control_entries(session_log_path, current_session, controls) {
+        Ok(entries) => send_conversation_queue_update(message_tx, &entries),
+        Err(error) => {
+            let _ = message_tx.send(WorkerMessage::Notice(format!(
+                "conversation queue failure handling skipped: {error}"
+            )));
+        }
+    }
+}
+
+fn mark_next_conversation_queue_item_dispatching(
+    current_session: &mut Option<Session>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+) -> Option<ConversationInputQueuedEntry> {
+    let session = current_session.as_mut()?;
+    let projection = session.conversation_queue_projection();
+    let queue_id = projection.next_dispatchable?;
+    let queued = projection
+        .items
+        .iter()
+        .find(|item| item.queued.queue_id == queue_id)
+        .map(|item| item.queued.clone())?;
+    let status = ConversationInputStatusEntry {
+        queue_id,
+        status: ConversationInputStatus::Dispatching,
+        reason: Some("dispatching".to_owned()),
+        updated_at_ms: Some(unix_time_ms()),
+    };
+    if let Err(error) = session.append_control(ControlEntry::ConversationInputStatusChanged(status))
+    {
+        let _ = message_tx.send(WorkerMessage::Notice(format!(
+            "conversation queue dispatch skipped: {error:#}"
+        )));
+        return None;
+    }
+    send_conversation_queue_update(message_tx, session.entries());
+    Some(queued)
 }
 
 fn manual_agent_invocation_result(
@@ -2260,12 +3112,72 @@ fn collect_finished_background_agent_runs(
     }
 }
 
+pub(super) fn partition_agent_result_continuations(
+    session: Option<&Session>,
+    thread_ids: Vec<AgentThreadId>,
+) -> (Vec<AgentThreadId>, Vec<AgentThreadId>) {
+    let projection = session.map(Session::agent_thread_state_projection);
+    let mut blocking = Vec::new();
+    let mut non_blocking = Vec::new();
+    for thread_id in thread_ids {
+        let non_blocking_background = projection
+            .as_ref()
+            .and_then(|projection| projection.threads.get(&thread_id))
+            .and_then(|thread| thread.invocation_mode)
+            .is_some_and(|mode| mode == AgentInvocationMode::Background);
+        if non_blocking_background {
+            non_blocking.push(thread_id);
+        } else {
+            blocking.push(thread_id);
+        }
+    }
+    (blocking, non_blocking)
+}
+
+pub(super) fn pending_agent_result_continuations_from_session(
+    session: Option<&Session>,
+) -> Vec<AgentThreadId> {
+    session
+        .map(Session::agent_result_continuation_projection)
+        .map(|projection| projection.pending_thread_ids)
+        .unwrap_or_default()
+}
+
+fn agent_result_continuation_new_thread_ids(
+    session: Option<&Session>,
+    thread_ids: &[AgentThreadId],
+) -> Vec<AgentThreadId> {
+    let projection = session.map(Session::agent_result_continuation_projection);
+    thread_ids
+        .iter()
+        .filter(|thread_id| {
+            projection
+                .as_ref()
+                .and_then(|projection| projection.statuses.get(*thread_id))
+                .is_none()
+        })
+        .cloned()
+        .collect()
+}
+
+fn extend_agent_thread_ids_unique(
+    target: &mut Vec<AgentThreadId>,
+    thread_ids: impl IntoIterator<Item = AgentThreadId>,
+) {
+    for thread_id in thread_ids {
+        if !target.contains(&thread_id) {
+            target.push(thread_id);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn start_agent_result_continuation_run<P>(
     runtime: &tokio::runtime::Runtime,
     agent: Arc<Agent<P>>,
     agent_supervisor: &sigil_runtime::AgentSupervisor,
     root_config: &RootConfig,
+    session_log_path: &Path,
     base_registry: &ToolRegistry,
     options: &AgentRunOptions,
     background_runs: &sigil_runtime::AgentToolBackgroundRuns,
@@ -2279,6 +3191,16 @@ fn start_agent_result_continuation_run<P>(
 where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
+    if let Err(error) = append_agent_result_continuation_status_entries(
+        session_log_path,
+        current_session,
+        &completed_thread_ids,
+        AgentResultContinuationStatus::Started,
+        Some("parent continuation started"),
+    ) {
+        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+        return None;
+    }
     let Some(run_session) = current_session.take() else {
         let _ = message_tx.send(WorkerMessage::RunFailed(
             "session state is unavailable for agent result continuation".to_owned(),
@@ -2339,6 +3261,8 @@ where
             payload: RunTaskPayload::Chat {
                 result,
                 plan_mode: false,
+                queue_id: None,
+                agent_result_continuation_thread_ids: completed_thread_ids,
             },
         });
     });
@@ -2364,6 +3288,164 @@ fn agent_result_continuation_prompt(thread_ids: &[AgentThreadId]) -> String {
          bounded summary is insufficient. Do not copy the child transcript directly into the \
          parent conversation; summarize only the child result needed for the final answer."
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_queued_conversation_run<P>(
+    runtime: &tokio::runtime::Runtime,
+    agent: Arc<Agent<P>>,
+    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    root_config: &RootConfig,
+    base_registry: &ToolRegistry,
+    options: &AgentRunOptions,
+    background_runs: &sigil_runtime::AgentToolBackgroundRuns,
+    current_session: &mut Option<Session>,
+    task_result_tx: &mpsc::Sender<RunTaskResult>,
+    message_tx: &mpsc::Sender<WorkerMessage>,
+    elicitation_handler: Arc<ChannelMcpElicitationHandler>,
+    next_run_id: &mut u64,
+    queued: ConversationInputQueuedEntry,
+) -> Option<ActiveRun>
+where
+    P: sigil_kernel::Provider + Send + Sync + 'static,
+{
+    if queued.target != ConversationInputTarget::MainThread {
+        append_queue_status_and_notify(
+            current_session,
+            message_tx,
+            queued.queue_id,
+            ConversationInputStatus::Rejected,
+            Some("queued target is not dispatchable by the main conversation worker".to_owned()),
+        );
+        return None;
+    }
+    let plan_mode = match queued.kind {
+        ConversationInputKind::Chat => false,
+        ConversationInputKind::PlanPrompt => true,
+        _ => {
+            append_queue_status_and_notify(
+                current_session,
+                message_tx,
+                queued.queue_id,
+                ConversationInputStatus::Rejected,
+                Some(
+                    "queued input kind is not supported by the main conversation worker".to_owned(),
+                ),
+            );
+            return None;
+        }
+    };
+
+    let Some(run_session) = current_session.take() else {
+        let _ = message_tx.send(WorkerMessage::RunFailed(
+            "session state is unavailable for queued input".to_owned(),
+        ));
+        return None;
+    };
+
+    let ConversationInputQueuedEntry {
+        queue_id,
+        prompt,
+        reasoning_effort,
+        ..
+    } = queued;
+    let _ = message_tx.send(WorkerMessage::ConversationQueueDispatchStarted {
+        queue_id: queue_id.clone(),
+        prompt: prompt.clone(),
+    });
+    let background_ready_context = queued_background_ready_transient_context(Some(&run_session));
+
+    let mut handler = ChannelEventHandler::new(message_tx.clone());
+    let (approval_tx, approval_rx) = mpsc::channel();
+    let elicitation_audit_buffer: McpElicitationAuditBuffer =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    elicitation_handler.set_audit_buffer(Some(Arc::clone(&elicitation_audit_buffer)));
+    let run_elicitation_audit_buffer = Arc::clone(&elicitation_audit_buffer);
+    let mut options = options.clone();
+    if let Some(reasoning_effort) = reasoning_effort {
+        options.reasoning_effort = Some(reasoning_effort);
+    }
+    let delegation_requirement = agent_delegation_requirement_for_prompt(&prompt);
+    agent_supervisor.reset_turn_budget();
+    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
+        agent_supervisor.clone(),
+        root_config.clone(),
+        base_registry.clone(),
+    )
+    .with_background_runs(background_runs.clone());
+    let plan_tools = plan_mode.then(|| {
+        sigil_runtime::build_plan_prompt_tool_registry(base_registry, root_config).into_registry()
+    });
+    let task_result_tx = task_result_tx.clone();
+    let run_id = *next_run_id;
+    *next_run_id = (*next_run_id).saturating_add(1);
+
+    let handle = runtime.spawn(async move {
+        let mut run_session = run_session;
+        let result = {
+            let mut approval_handler = ChannelApprovalHandler::new(approval_rx);
+            let mut input = if plan_mode {
+                let mut transient_context = plan_mode_transient_context(prompt);
+                transient_context.extend(background_ready_context);
+                AgentRunInput::without_persisted_user_message(transient_context)
+            } else if background_ready_context.is_empty() {
+                AgentRunInput::user(prompt)
+            } else {
+                AgentRunInput::transient(prompt, background_ready_context)
+            };
+            if let Some(requirement) = delegation_requirement {
+                input = input.with_agent_delegation_requirement(requirement);
+            }
+            if let Some(tools) = plan_tools {
+                agent
+                    .run_with_approval_input_tool_registry_and_agent_delegate(
+                        &mut run_session,
+                        input,
+                        options,
+                        tools,
+                        &mut handler,
+                        &mut approval_handler,
+                        &mut agent_delegate,
+                    )
+                    .await
+            } else {
+                agent
+                    .run_with_approval_input_and_agent_delegate(
+                        &mut run_session,
+                        input,
+                        options,
+                        &mut handler,
+                        &mut approval_handler,
+                        &mut agent_delegate,
+                    )
+                    .await
+            }
+            .map(|output| output.result)
+            .map_err(|error| format!("{error:#}"))
+        };
+        let result =
+            match append_mcp_elicitation_audits(&mut run_session, &run_elicitation_audit_buffer) {
+                Ok(()) => result,
+                Err(error) => Err(error),
+            };
+        let _ = task_result_tx.send(RunTaskResult {
+            run_id,
+            session: run_session,
+            payload: RunTaskPayload::Chat {
+                result,
+                plan_mode,
+                queue_id: Some(queue_id),
+                agent_result_continuation_thread_ids: Vec::new(),
+            },
+        });
+    });
+
+    Some(ActiveRun {
+        run_id,
+        handle,
+        approval_tx,
+        elicitation_audit_buffer,
+    })
 }
 
 struct ActiveProviderStatusTask {
@@ -2609,6 +3691,65 @@ pub(super) fn close_agent_thread(
     Ok((closed_thread_id.unwrap_or(thread_id), entries))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn message_agent_thread(
+    runtime: &tokio::runtime::Runtime,
+    background_runs: &sigil_runtime::AgentToolBackgroundRuns,
+    agent_supervisor: &sigil_runtime::AgentSupervisor,
+    root_config: &RootConfig,
+    base_registry: &ToolRegistry,
+    options: &AgentRunOptions,
+    current_session: &mut Option<Session>,
+    thread_id: AgentThreadId,
+    prompt: String,
+) -> std::result::Result<(ToolResult, Vec<ControlEntry>), String> {
+    let Some(session) = current_session.as_mut() else {
+        return Err("session state is unavailable before agent message".to_owned());
+    };
+    let call = ToolCall {
+        id: format!("tui-message-agent-{}", thread_id.as_str()),
+        name: sigil_runtime::MESSAGE_AGENT_TOOL_NAME.to_owned(),
+        args_json: serde_json::json!({
+            "thread_id": thread_id.as_str(),
+            "prompt": prompt,
+        })
+        .to_string(),
+    };
+    let mut handler = NoopEventHandler;
+    let mut approval = sigil_kernel::AutoApproveHandler;
+    let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
+        agent_supervisor.clone(),
+        root_config.clone(),
+        base_registry.clone(),
+    )
+    .with_background_runs(background_runs.clone());
+    let mut result = runtime
+        .block_on(agent_delegate.handle_agent_tool_call(
+            session,
+            &call,
+            options,
+            &mut handler,
+            &mut approval,
+        ))
+        .map_err(|error| format!("agent message failed: {error:#}"))?
+        .ok_or_else(|| "message_agent was not handled by runtime".to_owned())?;
+    let controls = std::mem::take(&mut result.control_entries);
+    for control in controls.iter().cloned() {
+        session
+            .append_control(control)
+            .map_err(|error| format!("failed to append agent message state: {error:#}"))?;
+    }
+    Ok((result, controls))
+}
+
+struct NoopEventHandler;
+
+impl sigil_kernel::EventHandler for NoopEventHandler {
+    fn handle(&mut self, _event: RunEvent) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 pub(super) struct PlanApprovalRequest {
     pub(super) plan_text: String,
     pub(super) permission: PlanApprovalPermission,
@@ -2754,7 +3895,7 @@ fn tool_result_model_content_hash(result: &ToolResult) -> String {
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    u64::try_from(saturating_elapsed(started).as_millis()).unwrap_or(u64::MAX)
 }
 
 pub(super) fn append_cancelled_task_state(
@@ -2836,6 +3977,36 @@ fn plan_mode_transient_context(prompt: String) -> Vec<ModelMessage> {
         ),
         ModelMessage::user(prompt),
     ]
+}
+
+pub(super) fn queued_background_ready_transient_context(
+    session: Option<&Session>,
+) -> Vec<ModelMessage> {
+    const MAX_READY_THREAD_IDS: usize = 5;
+    let Some(session) = session else {
+        return Vec::new();
+    };
+    let mut thread_ids = session
+        .agent_result_continuation_projection()
+        .pending_thread_ids
+        .into_iter()
+        .map(|thread_id| thread_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    if thread_ids.is_empty() {
+        return Vec::new();
+    }
+    let hidden_count = thread_ids.len().saturating_sub(MAX_READY_THREAD_IDS);
+    thread_ids.truncate(MAX_READY_THREAD_IDS);
+    let hidden_suffix = if hidden_count == 0 {
+        String::new()
+    } else {
+        format!(" and {hidden_count} more")
+    };
+    vec![ModelMessage::system(format!(
+        "Background agent result ready notice: child agent results are available for {}{}. This notice is transient and does not preempt the queued user input. Continue the queued user request first; call wait_agent/read_agent_result only if those background results are relevant.",
+        thread_ids.join(", "),
+        hidden_suffix
+    ))]
 }
 
 pub(super) fn agent_delegation_requirement_for_prompt(

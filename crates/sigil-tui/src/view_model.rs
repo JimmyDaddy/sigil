@@ -3,9 +3,9 @@ use std::{env, path::Path};
 use ratatui::text::Line;
 
 use crate::{
-    app::{AppState, PaneFocus},
+    app::{AppState, ComposerQueueAction, PaneFocus},
     commands::{global_control_hints, tool_card_control_hints},
-    timeline::{RunPhase, SidebarAgentRow},
+    timeline::{ComposerQueueRow, RunPhase, SidebarAgentRow},
     ui::StatusKind,
 };
 
@@ -162,6 +162,14 @@ pub(crate) struct FooterViewModel {
     pub context_label: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct QueueActionButtonViewModel {
+    pub label: String,
+    pub detail: String,
+    pub selected: bool,
+    pub destructive: bool,
+}
+
 impl FooterViewModel {
     fn from_app(app: &AppState) -> Self {
         Self {
@@ -190,10 +198,12 @@ fn footer_hints(app: &AppState) -> String {
         return format!("{agent} · Y allow · N deny · V diff");
     }
     if app.is_busy && matches!(app.run_phase(), RunPhase::Agent(_)) {
-        return format!("{agent} · Ctrl-B background · Esc interrupt · Ctrl-T details");
+        return format!(
+            "{agent} · Enter queue next turn · Ctrl-B background · Esc interrupt · Ctrl-T details"
+        );
     }
     if app.is_busy {
-        return format!("{agent} · Esc interrupt · Ctrl-T details");
+        return format!("{agent} · Enter queue next turn · Esc interrupt · Ctrl-T details");
     }
     if app.active_pane == PaneFocus::Composer && app.has_slash_selector() {
         if app.has_agent_mention_selector() {
@@ -201,8 +211,11 @@ fn footer_hints(app: &AppState) -> String {
         }
         return format!("{agent} · ↑↓ choose · Tab accept · Enter run · Esc close");
     }
+    if app.is_composer_queue_panel_focused() {
+        return format!("{agent} · Queue ↑↓ item · Tab action · Enter run · Esc input");
+    }
     if app.is_composer_agent_panel_focused() {
-        return format!("{agent} · Up/Down choose agent · Enter switch · Esc input");
+        return format!("{agent} · ↑↓ agent · Enter switch · C close · M message · Esc input");
     }
     format!("{agent} · Enter send · Shift-Enter newline · Alt-A agent · / commands")
 }
@@ -210,6 +223,10 @@ fn footer_hints(app: &AppState) -> String {
 #[derive(Debug, Clone)]
 pub(crate) struct LivePanelViewModel {
     pub phase: RunPhase,
+    pub queue_rows: Vec<ComposerQueueRow>,
+    pub queue_paused: bool,
+    pub queue_panel_focused: bool,
+    pub queue_action_buttons: Vec<QueueActionButtonViewModel>,
     pub progress: Option<LiveProgressViewModel>,
     pub plan_approval: Option<PlanApprovalViewModel>,
     pub task_strip: Option<TaskStripViewModel>,
@@ -220,6 +237,10 @@ impl LivePanelViewModel {
     pub(crate) fn from_app(app: &AppState, transcript_rows: usize) -> Self {
         Self {
             phase: app.live_panel_phase(),
+            queue_rows: app.composer_queue_rows(),
+            queue_paused: app.composer_queue_paused(),
+            queue_panel_focused: app.is_composer_queue_panel_focused(),
+            queue_action_buttons: queue_action_buttons(app.selected_composer_queue_action()),
             progress: app
                 .live_activity_summary()
                 .map(|summary| LiveProgressViewModel::from_parts(&summary.label, &summary.detail)),
@@ -232,6 +253,18 @@ impl LivePanelViewModel {
             transcript_lines: app.transcript_lines(transcript_rows),
         }
     }
+}
+
+fn queue_action_buttons(selected: ComposerQueueAction) -> Vec<QueueActionButtonViewModel> {
+    ComposerQueueAction::ORDER
+        .iter()
+        .map(|action| QueueActionButtonViewModel {
+            label: action.label().to_owned(),
+            detail: action.detail().to_owned(),
+            selected: *action == selected,
+            destructive: action.is_destructive(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

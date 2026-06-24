@@ -1,4 +1,7 @@
-use ratatui::{style::Style, text::Line};
+use ratatui::{
+    style::Style,
+    text::{Line, Span},
+};
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
@@ -14,6 +17,19 @@ fn rendered_plain_lines(lines: &[Line<'static>]) -> Vec<String> {
                 .join("")
         })
         .collect()
+}
+
+#[test]
+fn strip_timeline_content_indent_spans_handles_empty_and_non_indent_lines() {
+    assert!(strip_timeline_content_indent_spans(Vec::new()).is_empty());
+
+    let spans = strip_timeline_content_indent_spans(vec![Span::raw("body")]);
+    assert_eq!(spans.len(), 1);
+    assert_eq!(spans[0].content.as_ref(), "body");
+
+    let stripped = strip_timeline_content_indent_spans(vec![Span::raw("  "), Span::raw("body")]);
+    assert_eq!(stripped.len(), 1);
+    assert_eq!(stripped[0].content.as_ref(), "body");
 }
 
 fn render_timeline_entry_lines(entry: &TimelineEntry) -> Vec<Line<'static>> {
@@ -543,6 +559,14 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
 
     let lines = render_timeline_entry_lines(&entry);
 
+    let default_palette = TimelineRenderOptions::default().theme.palette;
+    assert_eq!(lines[0].spans[0].content.as_ref(), "●");
+    assert_eq!(
+        lines[0].spans[0].style.fg,
+        Some(default_palette.status_thinking)
+    );
+    assert_eq!(lines[1].spans[0].content.as_ref(), "└ ");
+    assert_eq!(lines[1].spans[0].style.fg, lines[0].spans[0].style.fg);
     assert!(
         lines[0]
             .spans
@@ -657,11 +681,46 @@ fn render_timeline_entry_lines_show_thinking_trace_block() {
         .iter()
         .find(|span| span.content.as_ref().contains("thought"))
         .expect("expected hovered thinking header span");
+    assert_eq!(
+        hovered[0].spans[0].style.fg,
+        Some(default_palette.accent_warning)
+    );
     assert!(
         header_span
             .style
             .add_modifier
             .contains(Modifier::UNDERLINED)
+    );
+}
+
+#[test]
+fn thinking_trace_marker_and_branch_use_configured_theme_palette() {
+    let theme = theme::Theme::builtin(sigil_kernel::ThemeId::SolarizedLight);
+    let palette = theme.palette.clone();
+    let entry = TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: "step 1\nstep 2".to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines_with_options(
+        &entry,
+        &TimelineRenderOptions {
+            theme,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+
+    assert_eq!(lines[0].spans[0].content.as_ref(), "●");
+    assert_eq!(lines[0].spans[0].style.fg, Some(palette.status_thinking));
+    assert_eq!(lines[1].spans[0].content.as_ref(), "└ ");
+    assert_eq!(lines[1].spans[0].style.fg, Some(palette.status_thinking));
+    assert!(
+        lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .any(|span| span.content.as_ref().contains("step 1")
+                && span.style.fg == Some(palette.text_secondary))
     );
 }
 

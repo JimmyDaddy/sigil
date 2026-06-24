@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -18,7 +18,7 @@ use sigil_kernel::{
     JsonlSessionStore, ModelMessage, Provider, RootConfig, RunEvent, Session, SessionLogEntry,
     SessionRef, TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval, ToolCall,
     ToolCategory, ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, saturating_elapsed,
 };
 
 use crate::{
@@ -41,6 +41,7 @@ const DEFAULT_RESULT_PAGE_LIMIT: usize = 4_000;
 const MAX_RESULT_PAGE_LIMIT: usize = 12_000;
 const WAIT_AGENT_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const WAIT_AGENT_MIN_REPOLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Registers the model-visible agent tool surface into a runtime tool registry.
 ///
@@ -131,6 +132,7 @@ pub struct AgentToolRuntime {
     base_registry: ToolRegistry,
     provider_factory: Arc<dyn AgentToolProviderFactory>,
     background_runs: AgentToolBackgroundRuns,
+    pending_waits: BTreeMap<AgentThreadId, Instant>,
 }
 
 /// Shared owner for detached chat-agent runs that can outlive one parent model turn.
@@ -143,6 +145,14 @@ pub struct AgentToolBackgroundRuns {
 /// Receives live events emitted by detached child-agent runs.
 pub trait AgentToolBackgroundEventSink: Send + Sync {
     fn handle_agent_event(&self, thread_id: &AgentThreadId, event: RunEvent);
+
+    fn handle_agent_status(
+        &self,
+        _thread_id: &AgentThreadId,
+        _status: AgentThreadStatus,
+        _reason: Option<String>,
+    ) {
+    }
 }
 
 /// Result of a user-directed foreground agent invocation.
@@ -293,6 +303,7 @@ impl AgentToolRuntime {
             base_registry,
             provider_factory: Arc::new(DefaultAgentToolProviderFactory),
             background_runs: AgentToolBackgroundRuns::default(),
+            pending_waits: BTreeMap::new(),
         }
     }
 
@@ -309,6 +320,7 @@ impl AgentToolRuntime {
             base_registry,
             provider_factory,
             background_runs: AgentToolBackgroundRuns::default(),
+            pending_waits: BTreeMap::new(),
         }
     }
 
@@ -505,12 +517,7 @@ impl AgentToolRuntime {
         let resolved_profile = match self.resolve_spawn_profile(&parsed.profile_id) {
             Ok(profile) => profile,
             Err(error) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::PermissionDenied,
-                    format!("{error:#}"),
-                );
+                return agent_spawn_denied_tool_result(call, format!("{error:#}"));
             }
         };
         let profile_tool_scope = resolved_profile.profile.tool_scope.clone();
@@ -607,12 +614,7 @@ impl AgentToolRuntime {
         ) {
             Ok(thread) => thread,
             Err(error) => {
-                return ToolResult::error(
-                    call.id.clone(),
-                    call.name.clone(),
-                    ToolErrorKind::PermissionDenied,
-                    format!("{error:#}"),
-                );
+                return agent_spawn_denied_tool_result(call, format!("{error:#}"));
             }
         };
 
@@ -806,14 +808,14 @@ impl AgentToolRuntime {
                 "agent budget warning after child completion: {warning}"
             )));
         }
-        let result = session
-            .agent_thread_state_projection()
-            .threads
-            .get(&child_thread.thread_id)
-            .and_then(|thread| thread.result.clone());
+        let projection = session.agent_thread_state_projection();
+        let thread = projection.threads.get(&child_thread.thread_id);
+        let display_name = thread.and_then(|thread| thread.display_name.as_deref());
+        let result = thread.and_then(|thread| thread.result.clone());
         agent_result_tool_result(
             call,
             &child_thread.thread_id,
+            display_name,
             result.as_ref(),
             DEFAULT_RESULT_SUMMARY_LIMIT,
         )
@@ -892,16 +894,32 @@ impl AgentToolRuntime {
                 }
                 let projection = session.agent_thread_state_projection();
                 if let Some(thread) = projection.threads.get(&thread_id) {
-                    return agent_status_tool_result(call, thread);
+                    return agent_backgrounded_tool_result(call, thread);
                 }
                 return ToolResult::ok(
                     call.id.clone(),
                     call.name.clone(),
-                    format!("agent thread {} is running", thread_id.as_str()),
+                    serde_json::to_string(&json!({
+                        "thread_id": thread_id.as_str(),
+                        "status": "running",
+                        "terminal": false,
+                        "result_available": false,
+                        "backgrounded": true,
+                        "reason": "agent moved to background",
+                        "retry_after_ms": 5_000_u64,
+                        "next_action": "continue independent parent work; use wait_agent later when a result is needed",
+                        "do_not_describe_as_finished": true
+                    }))
+                    .unwrap_or_else(|error| {
+                        format!("failed to serialize backgrounded agent status: {error}")
+                    }),
                     ToolResultMeta {
                         details: json!({
                             "thread_id": thread_id.as_str(),
                             "status": "running",
+                            "terminal": false,
+                            "result_available": false,
+                            "backgrounded": true,
                             "retry_after_ms": 5_000_u64,
                         }),
                         ..ToolResultMeta::default()
@@ -969,14 +987,14 @@ impl AgentToolRuntime {
                         "agent budget warning after child completion: {warning}"
                     )));
                 }
-                let result = session
-                    .agent_thread_state_projection()
-                    .threads
-                    .get(&thread_id)
-                    .and_then(|thread| thread.result.clone());
+                let projection = session.agent_thread_state_projection();
+                let thread = projection.threads.get(&thread_id);
+                let display_name = thread.and_then(|thread| thread.display_name.as_deref());
+                let result = thread.and_then(|thread| thread.result.clone());
                 return agent_result_tool_result(
                     call,
                     &thread_id,
+                    display_name,
                     result.as_ref(),
                     DEFAULT_RESULT_SUMMARY_LIMIT,
                 );
@@ -1171,8 +1189,32 @@ impl AgentToolRuntime {
                 );
             }
         };
+        if let Some(background) = self.background_runs.remove_if_finished(&thread_id)
+            && let Err(error) = self
+                .record_finished_background_run(session, handler, background)
+                .await
+        {
+            return ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::Internal,
+                error.to_string(),
+            );
+        }
         if self.background_runs.contains(&thread_id) {
-            let deadline = Instant::now() + WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT;
+            if let Some(retry_after) = self.wait_throttle_remaining(&thread_id) {
+                let projection = session.agent_thread_state_projection();
+                let Some(thread) = projection.threads.get(&thread_id) else {
+                    return ToolResult::error(
+                        call.id.clone(),
+                        call.name.clone(),
+                        ToolErrorKind::NotFound,
+                        format!("agent thread {} was not found", thread_id.as_str()),
+                    );
+                };
+                return agent_wait_throttled_tool_result(call, thread, retry_after);
+            }
+            let wait_started = Instant::now();
             loop {
                 if let Some(background) = self.background_runs.remove_if_finished(&thread_id) {
                     if let Err(error) = self
@@ -1188,7 +1230,9 @@ impl AgentToolRuntime {
                     }
                     break;
                 }
-                if !self.background_runs.is_running(&thread_id) || Instant::now() >= deadline {
+                if !self.background_runs.is_running(&thread_id)
+                    || saturating_elapsed(wait_started) >= WAIT_AGENT_BACKGROUND_WAIT_TIMEOUT
+                {
                     break;
                 }
                 tokio::time::sleep(WAIT_AGENT_BACKGROUND_POLL_INTERVAL).await;
@@ -1215,7 +1259,26 @@ impl AgentToolRuntime {
                 format!("agent thread {} was not found", thread_id.as_str()),
             );
         };
+        if thread.status.is_terminal() {
+            self.pending_waits.remove(&thread_id);
+        } else {
+            if let Some(retry_after) = self.wait_throttle_remaining(&thread_id) {
+                return agent_wait_throttled_tool_result(call, thread, retry_after);
+            }
+            self.record_pending_wait(&thread_id);
+        }
         agent_status_tool_result(call, thread)
+    }
+
+    fn wait_throttle_remaining(&self, thread_id: &AgentThreadId) -> Option<Duration> {
+        let last_wait = self.pending_waits.get(thread_id)?;
+        let elapsed = saturating_elapsed(*last_wait);
+        (elapsed < WAIT_AGENT_MIN_REPOLL_INTERVAL)
+            .then_some(WAIT_AGENT_MIN_REPOLL_INTERVAL - elapsed)
+    }
+
+    fn record_pending_wait(&mut self, thread_id: &AgentThreadId) {
+        self.pending_waits.insert(thread_id.clone(), Instant::now());
     }
 
     async fn record_finished_background_run(
@@ -1422,12 +1485,30 @@ impl AgentToolRuntime {
             Ok(()) => ToolResult::ok(
                 call.id.clone(),
                 call.name.clone(),
-                format!("message queued for agent thread {}", thread_id.as_str()),
+                serde_json::to_string(&json!({
+                    "thread_id": thread_id.as_str(),
+                    "route_id": route_id.as_str(),
+                    "status": "resolved",
+                    "delivery": "delivered_to_mailbox",
+                    "delivered_to_mailbox": true,
+                    "safe_point": "after_current_turn",
+                    "will_apply_after_current_turn": true,
+                    "interrupt_requested": false,
+                    "interrupts_in_flight_provider_stream": false,
+                    "next_action": "call wait_agent to collect terminal results; the child applies this message at its next safe point"
+                }))
+                .unwrap_or_else(|error| format!("failed to serialize agent message route: {error}")),
                 ToolResultMeta {
                     details: json!({
                         "thread_id": thread_id.as_str(),
                         "route_id": route_id.as_str(),
-                        "status": "resolved"
+                        "status": "resolved",
+                        "delivery": "delivered_to_mailbox",
+                        "delivered_to_mailbox": true,
+                        "safe_point": "after_current_turn",
+                        "will_apply_after_current_turn": true,
+                        "interrupt_requested": false,
+                        "interrupts_in_flight_provider_stream": false
                     }),
                     ..ToolResultMeta::default()
                 },
@@ -1448,7 +1529,7 @@ impl AgentToolRuntime {
                 call.name.clone(),
                 ToolErrorKind::Unsupported,
                 format!(
-                    "agent thread {} cannot accept live messages: {}",
+                    "agent thread {} cannot accept safe-point messages: {}",
                     thread_id.as_str(),
                     reason
                 ),
@@ -1613,10 +1694,11 @@ impl Tool for AgentTool {
             AgentToolKind::Spawn if self.safe_model_spawn(args)? => {
                 Some(sigil_kernel::ApprovalMode::Allow)
             }
-            AgentToolKind::Spawn | AgentToolKind::Message | AgentToolKind::Close => {
-                Some(sigil_kernel::ApprovalMode::Ask)
-            }
+            AgentToolKind::Spawn => Some(sigil_kernel::ApprovalMode::Ask),
             AgentToolKind::Wait | AgentToolKind::ReadResult => {
+                Some(sigil_kernel::ApprovalMode::Allow)
+            }
+            AgentToolKind::Message | AgentToolKind::Close => {
                 Some(sigil_kernel::ApprovalMode::Allow)
             }
         })
@@ -1678,7 +1760,7 @@ impl AgentTool {
                 self.surface.profile_index_description
             ),
             AgentToolKind::Wait => {
-                "Wait briefly for an agent thread status update and return lightweight status plus result references only. This tool may block for a short bounded interval before returning running, so do not call it in a tight polling loop. Does not return child result text; use read_agent_result when the user explicitly needs result details."
+                "Wait briefly for an agent thread status update and return lightweight status plus result references only. This tool may block for a short bounded interval before returning running; repeated pending waits for the same thread are throttled/coalesced and should not be retried until retry_after_ms. Does not return child result text; use read_agent_result when the user explicitly needs result details."
                     .to_owned()
             }
             AgentToolKind::ReadResult => {
@@ -1686,7 +1768,7 @@ impl AgentTool {
                     .to_owned()
             }
             AgentToolKind::Message => {
-                "Send follow-up instructions to an active background child agent mailbox. Use only for steering an already spawned agent thread; wait_agent is still required to collect terminal results."
+                "Queue follow-up instructions into an active background child agent mailbox. The result reports delivered_to_mailbox plus will_apply_after_current_turn; delivery happens at the child agent's next safe point and does not interrupt an in-flight provider stream or tool execution. wait_agent is still required to collect terminal results."
                     .to_owned()
             }
             AgentToolKind::Close => {
@@ -1985,11 +2067,11 @@ async fn run_background_chat_agent(
     event_sink: Option<Arc<dyn AgentToolBackgroundEventSink>>,
 ) -> Result<BackgroundChatAgentResult> {
     let mut handler = BackgroundChatChildEventHandler {
-        thread_id,
-        sink: event_sink,
+        thread_id: thread_id.clone(),
+        sink: event_sink.clone(),
     };
     let mut approval_handler = BackgroundApprovalHandler;
-    let mut latest_output = child_agent
+    let mut latest_output = match child_agent
         .run_with_approval_input(
             &mut child_session,
             initial_input,
@@ -1997,7 +2079,19 @@ async fn run_background_chat_agent(
             &mut handler,
             &mut approval_handler,
         )
-        .await?;
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            emit_background_agent_status(
+                event_sink.as_ref(),
+                &thread_id,
+                AgentThreadStatus::Failed,
+                Some(format!("{error:#}")),
+            );
+            return Err(error);
+        }
+    };
 
     loop {
         let mut prompts = Vec::new();
@@ -2015,7 +2109,7 @@ async fn run_background_chat_agent(
             "Parent agent sent follow-up instructions while this child agent was active.\n\n{}",
             prompts.join("\n\n")
         );
-        latest_output = child_agent
+        latest_output = match child_agent
             .run_with_approval_input(
                 &mut child_session,
                 sigil_kernel::AgentRunInput::user(followup_prompt),
@@ -2023,7 +2117,19 @@ async fn run_background_chat_agent(
                 &mut handler,
                 &mut approval_handler,
             )
-            .await?;
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                emit_background_agent_status(
+                    event_sink.as_ref(),
+                    &thread_id,
+                    AgentThreadStatus::Failed,
+                    Some(format!("{error:#}")),
+                );
+                return Err(error);
+            }
+        };
     }
 
     let final_answer_ref = agent_final_answer_ref(&child_session_ref, &latest_output.result);
@@ -2031,6 +2137,12 @@ async fn run_background_chat_agent(
     let outcome = latest_output.outcome;
     let usage = usage_summary_from_stats(child_session.stats());
     let status = child_status_from_outcome(&final_text, &outcome);
+    emit_background_agent_status(
+        event_sink.as_ref(),
+        &thread_id,
+        agent_status_from_task_child_status(status),
+        None,
+    );
     Ok(BackgroundChatAgentResult {
         final_text,
         outcome,
@@ -2051,6 +2163,28 @@ impl EventHandler for BackgroundChatChildEventHandler {
             sink.handle_agent_event(&self.thread_id, event);
         }
         Ok(())
+    }
+}
+
+fn emit_background_agent_status(
+    sink: Option<&Arc<dyn AgentToolBackgroundEventSink>>,
+    thread_id: &AgentThreadId,
+    status: AgentThreadStatus,
+    reason: Option<String>,
+) {
+    if let Some(sink) = sink {
+        sink.handle_agent_status(thread_id, status, reason);
+    }
+}
+
+fn agent_status_from_task_child_status(status: TaskChildSessionStatus) -> AgentThreadStatus {
+    match status {
+        TaskChildSessionStatus::Started => AgentThreadStatus::Started,
+        TaskChildSessionStatus::Completed => AgentThreadStatus::Completed,
+        TaskChildSessionStatus::Failed => AgentThreadStatus::Failed,
+        TaskChildSessionStatus::Cancelled => AgentThreadStatus::Cancelled,
+        TaskChildSessionStatus::Interrupted => AgentThreadStatus::Interrupted,
+        TaskChildSessionStatus::Unavailable => AgentThreadStatus::Unavailable,
     }
 }
 
@@ -2392,10 +2526,13 @@ fn slice_result_page(full_text: &str, request: ResultPageRequest) -> ResultPage 
 fn agent_result_tool_result(
     call: &ToolCall,
     thread_id: &AgentThreadId,
+    display_name: Option<&str>,
     result: Option<&sigil_kernel::AgentThreadResult>,
     max_summary_chars: usize,
 ) -> ToolResult {
     let Some(result) = result else {
+        let retry_after_ms = 5_000_u64;
+        let next_poll_after_unix_ms = unix_time_ms().saturating_add(retry_after_ms);
         return ToolResult::ok(
             call.id.clone(),
             call.name.clone(),
@@ -2403,8 +2540,11 @@ fn agent_result_tool_result(
             ToolResultMeta {
                 details: json!({
                     "thread_id": thread_id.as_str(),
+                    "display_name": display_name,
                     "status": "running",
-                    "retry_after_ms": 5_000_u64,
+                    "retry_after_ms": retry_after_ms,
+                    "next_poll_after_ms": retry_after_ms,
+                    "next_poll_after_unix_ms": next_poll_after_unix_ms,
                 }),
                 ..ToolResultMeta::default()
             },
@@ -2422,6 +2562,7 @@ fn agent_result_tool_result(
     });
     let payload = json!({
         "thread_id": result.thread_id.as_str(),
+        "display_name": display_name,
         "status": terminal_status_label(result.status),
         "session_ref": result.session_ref.as_path().display().to_string(),
         "summary": summary,
@@ -2453,6 +2594,7 @@ fn agent_result_tool_result(
             limit_bytes: Some(max_summary_chars as u64),
             details: json!({
                 "thread_id": result.thread_id.as_str(),
+                "display_name": display_name,
                 "status": terminal_status_label(result.status),
                 "output_hash": result.output_hash,
                 "has_final_answer_ref": result.final_answer_ref.is_some(),
@@ -2466,13 +2608,19 @@ fn agent_result_tool_result(
 
 fn agent_status_tool_result(call: &ToolCall, thread: &AgentThreadProjection) -> ToolResult {
     let result = thread.result.as_ref();
+    let retry_after_ms = (!thread.status.is_terminal()).then_some(5_000_u64);
+    let next_poll_after_unix_ms = retry_after_ms.map(|retry| unix_time_ms().saturating_add(retry));
     let payload = json!({
         "thread_id": thread.thread_id.as_str(),
+        "display_name": thread.display_name.as_deref(),
         "status": thread_status_label(thread.status),
         "terminal": thread.status.is_terminal(),
         "reason": &thread.reason,
         "result_available": result.is_some(),
-        "retry_after_ms": (!thread.status.is_terminal()).then_some(5_000_u64),
+        "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
+        "retry_after_ms": retry_after_ms,
+        "next_poll_after_ms": retry_after_ms,
+        "next_poll_after_unix_ms": next_poll_after_unix_ms,
         "next_action": if thread.status.is_terminal() {
             "use result_ref/read_args when more detail is needed"
         } else {
@@ -2510,9 +2658,99 @@ fn agent_status_tool_result(call: &ToolCall, thread: &AgentThreadProjection) -> 
         ToolResultMeta {
             details: json!({
                 "thread_id": thread.thread_id.as_str(),
+                "display_name": thread.display_name.as_deref(),
                 "status": thread_status_label(thread.status),
                 "result_available": result.is_some(),
-                "retry_after_ms": (!thread.status.is_terminal()).then_some(5_000_u64),
+                "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
+                "retry_after_ms": retry_after_ms,
+                "next_poll_after_ms": retry_after_ms,
+                "next_poll_after_unix_ms": next_poll_after_unix_ms,
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
+}
+
+fn agent_backgrounded_tool_result(call: &ToolCall, thread: &AgentThreadProjection) -> ToolResult {
+    let retry_after_ms = 5_000_u64;
+    let next_poll_after_unix_ms = unix_time_ms().saturating_add(retry_after_ms);
+    let payload = json!({
+        "thread_id": thread.thread_id.as_str(),
+        "display_name": thread.display_name.as_deref(),
+        "status": thread_status_label(thread.status),
+        "terminal": false,
+        "reason": &thread.reason,
+        "result_available": false,
+        "backgrounded": true,
+        "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
+        "retry_after_ms": retry_after_ms,
+        "next_poll_after_ms": retry_after_ms,
+        "next_poll_after_unix_ms": next_poll_after_unix_ms,
+        "next_action": "continue independent parent work; use wait_agent later when a result is needed",
+        "do_not_describe_as_finished": true
+    });
+    ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        serde_json::to_string(&payload)
+            .unwrap_or_else(|error| format!("failed to serialize agent status: {error}")),
+        ToolResultMeta {
+            details: json!({
+                "thread_id": thread.thread_id.as_str(),
+                "display_name": thread.display_name.as_deref(),
+                "status": thread_status_label(thread.status),
+                "terminal": false,
+                "result_available": false,
+                "backgrounded": true,
+                "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
+                "retry_after_ms": retry_after_ms,
+                "next_poll_after_ms": retry_after_ms,
+                "next_poll_after_unix_ms": next_poll_after_unix_ms,
+            }),
+            ..ToolResultMeta::default()
+        },
+    )
+}
+
+fn agent_wait_throttled_tool_result(
+    call: &ToolCall,
+    thread: &AgentThreadProjection,
+    retry_after: Duration,
+) -> ToolResult {
+    let retry_after_ms = retry_after.as_millis().max(1) as u64;
+    let next_poll_after_unix_ms = unix_time_ms().saturating_add(retry_after_ms);
+    let payload = json!({
+        "thread_id": thread.thread_id.as_str(),
+        "display_name": thread.display_name.as_deref(),
+        "status": thread_status_label(thread.status),
+        "terminal": thread.status.is_terminal(),
+        "reason": &thread.reason,
+        "result_available": thread.result.is_some(),
+        "retry_after_ms": retry_after_ms,
+        "next_poll_after_ms": retry_after_ms,
+        "next_poll_after_unix_ms": next_poll_after_unix_ms,
+        "coalesced": true,
+        "polling_throttled": true,
+        "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
+        "next_action": "wait_agent was called too soon for the same running thread; continue independent parent work and retry after retry_after_ms"
+    });
+    ToolResult::ok(
+        call.id.clone(),
+        call.name.clone(),
+        serde_json::to_string(&payload)
+            .unwrap_or_else(|error| format!("failed to serialize agent status: {error}")),
+        ToolResultMeta {
+            details: json!({
+                "thread_id": thread.thread_id.as_str(),
+                "display_name": thread.display_name.as_deref(),
+                "status": thread_status_label(thread.status),
+                "result_available": thread.result.is_some(),
+                "retry_after_ms": retry_after_ms,
+                "next_poll_after_ms": retry_after_ms,
+                "next_poll_after_unix_ms": next_poll_after_unix_ms,
+                "coalesced": true,
+                "polling_throttled": true,
+                "coalescing_key": format!("wait_agent:{}", thread.thread_id.as_str()),
             }),
             ..ToolResultMeta::default()
         },
@@ -2591,6 +2829,63 @@ fn agent_result_page_tool_result(
             "failed to serialize transient agent result page: {error}"
         ))
     ))])
+}
+
+fn agent_spawn_denied_tool_result(call: &ToolCall, reason: String) -> ToolResult {
+    let Some(details) = agent_budget_denied_details(&reason) else {
+        return ToolResult::error(
+            call.id.clone(),
+            call.name.clone(),
+            ToolErrorKind::PermissionDenied,
+            reason,
+        );
+    };
+    let content = serde_json::to_string(&details)
+        .unwrap_or_else(|error| format!("failed to serialize agent budget denial: {error}"));
+    let mut result = ToolResult::error(
+        call.id.clone(),
+        call.name.clone(),
+        ToolErrorKind::PermissionDenied,
+        reason,
+    )
+    .with_error_details(false, details.clone());
+    result.content = content;
+    result.metadata.details = details;
+    result
+}
+
+fn agent_budget_denied_details(reason: &str) -> Option<Value> {
+    if !reason.contains("agent budget denied") && !reason.contains("agent budget exceeded") {
+        return None;
+    }
+    Some(json!({
+        "reason": reason,
+        "requires_user_decision": true,
+        "retryable_after_slot_available": true,
+        "do_not_self_complete_delegated_scope": true,
+        "config_paths": agent_budget_denied_config_paths(reason),
+        "next_action": "report the delegated agent could not be started; ask whether to retry after a slot is available or change the task budget instead of completing that delegated scope in the parent"
+    }))
+}
+
+fn agent_budget_denied_config_paths(reason: &str) -> Vec<&'static str> {
+    let mut paths = Vec::new();
+    if reason.contains("[task].max_background_threads") {
+        paths.push("[task].max_background_threads");
+    }
+    if reason.contains("[task].max_parallel_readonly") {
+        paths.push("[task].max_parallel_readonly");
+    }
+    if reason.contains("fan-out budget") || reason.contains("max_spawn_fanout_per_turn") {
+        paths.push("[task].max_spawn_fanout_per_turn");
+    }
+    if reason.contains("token budget") || reason.contains("max_agent_tokens_per_task") {
+        paths.push("[task].max_agent_tokens_per_task");
+    }
+    if paths.is_empty() {
+        paths.push("[task]");
+    }
+    paths
 }
 
 fn bounded_summary(summary: &str, max_chars: usize) -> String {
@@ -2675,6 +2970,13 @@ fn hash_text(value: &str) -> String {
 
 fn short_digest(hash: &str) -> &str {
     hash.get(..12).unwrap_or(hash)
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]

@@ -1906,6 +1906,139 @@ fn child_agent_view_live_activity_overrides_parent_busy_phase() -> Result<()> {
 }
 
 #[test]
+fn terminal_child_agent_view_does_not_render_working_progress() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_chat_terminal")?;
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("profile_snapshot_terminal")?;
+    let session_ref = sigil_kernel::SessionRef::new_relative("children/agent_chat_terminal.jsonl")?;
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            sigil_kernel::AgentProfileCapturedEntry {
+                snapshot: sigil_kernel::AgentProfileSnapshot {
+                    snapshot_id: snapshot_id.clone(),
+                    profile_id: profile_id.clone(),
+                    source: sigil_kernel::AgentProfileSource::System,
+                    source_hash: "sha256:source".to_owned(),
+                    profile_hash: "sha256:profile".to_owned(),
+                    resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                    resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                    resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    resolved_skill_hashes: Vec::new(),
+                    trust_state: sigil_kernel::AgentTrustState::Trusted,
+                },
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: session_ref.clone(),
+                profile_id,
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: snapshot_id.clone(),
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
+                        "/tmp/workspace".to_owned(),
+                    )?,
+                    effective_tool_scope_hash: "sha256:tools".to_owned(),
+                    effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                    effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    provider_capability_hash: "sha256:provider".to_owned(),
+                    model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+                    budget_policy_hash: "sha256:budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: "inspect kernel".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Foreground,
+                invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+                display_name: Some("kernel explorer".to_owned()),
+                created_at_ms: Some(42),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadResultRecorded(
+            sigil_kernel::AgentThreadResultRecordedEntry {
+                result: sigil_kernel::AgentThreadResult {
+                    thread_id: thread_id.clone(),
+                    session_ref,
+                    status: sigil_kernel::AgentThreadTerminalStatus::Completed,
+                    summary: "done".to_owned(),
+                    summary_truncated: false,
+                    original_summary_chars: None,
+                    artifacts: Vec::new(),
+                    changed_paths: Vec::new(),
+                    risks: Vec::new(),
+                    followups: Vec::new(),
+                    usage: None,
+                    output_hash: "sha256:done".to_owned(),
+                    final_answer_ref: None,
+                },
+            },
+        )),
+    ]);
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: "agent_chat_terminal".to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative(
+            "children/agent_chat_terminal.jsonl",
+        )?,
+    };
+    app.is_busy = false;
+
+    assert!(app.live_activity_summary().is_none());
+
+    app.is_busy = true;
+    app.run_phase = RunPhase::Streaming;
+    let summary = app
+        .live_activity_summary()
+        .expect("parent activity should still be visible");
+    assert_eq!(summary.label, "streaming");
+    assert_eq!(summary.detail, "writing the reply");
+    Ok(())
+}
+
+#[test]
+fn terminal_legacy_child_view_does_not_render_working_progress() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let mut entries = app.current_session_entries.clone();
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskChildSession(
+        sigil_kernel::TaskChildSessionEntry {
+            task_id: sigil_kernel::TaskId::new("task_1")?,
+            plan_version: 1,
+            step_id: sigil_kernel::TaskStepId::new("step_1")?,
+            child_task_id: sigil_kernel::TaskId::new("child_1")?,
+            child_session_ref: sigil_kernel::SessionRef::new_relative(
+                "children/task_1/step_1-child_1.jsonl",
+            )?,
+            role: sigil_kernel::AgentRole::SubagentRead,
+            status: sigil_kernel::TaskChildSessionStatus::Completed,
+            summary_hash: None,
+        },
+    )));
+    entries.push(SessionLogEntry::Control(ControlEntry::AgentThreadClosed(
+        sigil_kernel::AgentThreadClosedEntry {
+            thread_id: sigil_kernel::AgentThreadId::new("legacy_task_1_v1_step_1_child_1")?,
+            reason: Some("hidden from sidebar".to_owned()),
+        },
+    )));
+    app.sync_current_session_state(entries);
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: "child_1".to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative(
+            "children/task_1/step_1-child_1.jsonl",
+        )?,
+    };
+
+    assert!(app.live_activity_summary().is_none());
+    Ok(())
+}
+
+#[test]
 fn child_agent_view_live_activity_falls_back_to_legacy_child_entry() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent_for_transcript_tests(&mut app)?;

@@ -118,6 +118,7 @@ impl AppState {
             "/agent" => Some(self.agent_slash_entries(arg)),
             "/effort" => Some(self.effort_selector_entries(arg)),
             "/model" => Some(self.model_selector_entries(arg)),
+            "/queue" => Some(self.queue_slash_entries(arg)),
             "/resume" => Some(self.resume_selector_entries(arg)),
             _ => None,
         }

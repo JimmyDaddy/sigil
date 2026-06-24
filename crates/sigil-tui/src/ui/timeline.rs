@@ -283,8 +283,9 @@ fn render_thinking_entry_lines(
     let accent = if hovered {
         palette.accent_warning
     } else {
-        palette.accent_idle
+        palette.status_thinking
     };
+    let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
     let header_modifier = if hovered {
         Modifier::ITALIC | Modifier::BOLD | Modifier::UNDERLINED
     } else {
@@ -299,6 +300,8 @@ fn render_thinking_entry_lines(
     let hidden_lines = total_lines.saturating_sub(preview_count);
     let has_hidden_content = thinking_has_collapsed_content(&entry.text);
     let mut lines = vec![Line::from(vec![
+        Span::styled("●", marker_style),
+        Span::raw(" "),
         Span::styled(
             if active { "thinking" } else { "thought" },
             Style::default().fg(accent).add_modifier(header_modifier),
@@ -321,15 +324,15 @@ fn render_thinking_entry_lines(
         return lines;
     }
     if !expanded {
-        lines.extend(render_markdown_timeline_lines_with_palette(
+        let mut body = render_markdown_timeline_lines_with_palette(
             accent,
             body_style,
             &preview_lines.join("\n"),
             MarkdownRenderOptions::timeline(max_content_width).with_syntax_theme(syntax_theme),
             palette,
-        ));
+        );
         if hidden_lines > 0 {
-            lines.push(timeline_content_line(
+            body.push(timeline_content_line(
                 accent,
                 vec![Span::styled(
                     format!("… {hidden_lines} more lines hidden"),
@@ -339,16 +342,58 @@ fn render_thinking_entry_lines(
                 )],
             ));
         }
+        lines.extend(frame_thinking_body_lines(body, marker_style, palette));
         return lines;
     }
-    lines.extend(render_markdown_timeline_lines_with_palette(
+    let body = render_markdown_timeline_lines_with_palette(
         accent,
         body_style,
         &entry.text,
         MarkdownRenderOptions::timeline(max_content_width).with_syntax_theme(syntax_theme),
         palette,
-    ));
+    );
+    lines.extend(frame_thinking_body_lines(body, marker_style, palette));
     lines
+}
+
+fn frame_thinking_body_lines(
+    lines: Vec<Line<'static>>,
+    marker_style: Style,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| thinking_body_frame_line(line, index == 0, marker_style, palette))
+        .collect()
+}
+
+fn thinking_body_frame_line(
+    line: Line<'static>,
+    first_body_line: bool,
+    marker_style: Style,
+    palette: &ThemePalette,
+) -> Line<'static> {
+    let marker = if first_body_line { "└ " } else { "  " };
+    let marker_style = if first_body_line {
+        marker_style
+    } else {
+        Style::default().fg(palette.text_muted)
+    };
+    let mut spans = vec![Span::styled(marker, marker_style)];
+    spans.extend(strip_timeline_content_indent_spans(line.spans));
+    Line::from(spans)
+}
+
+fn strip_timeline_content_indent_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    let mut iter = spans.into_iter();
+    let Some(first) = iter.next() else {
+        return Vec::new();
+    };
+    if first.content.as_ref() == "  " {
+        return iter.collect();
+    }
+    std::iter::once(first).chain(iter).collect()
 }
 
 fn render_phase_entry_lines(entry: &TimelineEntry, palette: &ThemePalette) -> Vec<Line<'static>> {

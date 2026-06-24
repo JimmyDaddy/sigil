@@ -6,7 +6,7 @@ use sigil_kernel::{
     AgentRunOptions, ApprovalMode, ControlEntry, PermissionPolicy, RunEvent, Session,
     ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolCall, ToolErrorKind,
     ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolResultStatus, ToolSubject, ToolSubjectAudit,
+    ToolResultStatus, ToolSubject, ToolSubjectAudit, saturating_elapsed,
 };
 use tokio::runtime::Runtime;
 use uuid::Uuid;
@@ -470,8 +470,7 @@ pub(super) fn attach_diagnostics_context(result: &mut ToolResult, paths: &[Strin
 }
 
 pub(super) fn duration_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
+    saturating_elapsed(started_at)
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)

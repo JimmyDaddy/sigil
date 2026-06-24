@@ -1,0 +1,4 @@
+interface:
+  display_name: "Technical Solution Executor"
+  short_description: "Split, execute, review technical plans"
+  default_prompt: "Use $technical-solution-executor to split and implement the provided technical solution, then review the result."

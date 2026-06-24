@@ -29,6 +29,7 @@ use crate::{
         task_plan_update_result_content, task_plan_update_tool_spec,
     },
     terminal_task::TerminalTaskEntry,
+    time::saturating_elapsed,
     tool::{
         ToolCategory, ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
         ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec,
@@ -1150,7 +1151,7 @@ fn direct_task_tool_guidance_result(
     let content = if task_plan_update_available {
         "direct task/subagent tool calls are not supported in the planner; delegate work by calling task_plan_update with an accepted plan and step roles subagent_read or subagent_write"
     } else {
-        "direct task/subagent tool calls are legacy aliases; use the model-visible agent tools spawn_agent, wait_agent, read_agent_result, and close_agent when the user explicitly asks for delegation; message_agent is reserved until active child-agent mailbox support is enabled"
+        "direct task/subagent tool calls are legacy aliases; use the model-visible agent tools spawn_agent, wait_agent, read_agent_result, message_agent, and close_agent when the user explicitly asks for delegation; message_agent only sends follow-up instructions to an active background child-agent mailbox at the next safe point"
     };
     Some(ToolResult::ok(
         call.id.clone(),
@@ -1638,8 +1639,7 @@ fn stable_text_hash(value: &str) -> String {
 }
 
 fn duration_ms(started_at: Instant) -> u64 {
-    started_at
-        .elapsed()
+    saturating_elapsed(started_at)
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)

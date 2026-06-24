@@ -557,7 +557,7 @@ async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> 
                 "terminal_start",
                 json!({
                     "task_id": "terminal-pty-tool",
-                    "command": "read line; printf 'got:%s\\n' \"$line\"",
+                    "command": "trap '' WINCH; IFS= read -r line; printf 'got:%s\\n' \"$line\"",
                     "shell": shell,
                     "pty": true,
                     "rows": 12,

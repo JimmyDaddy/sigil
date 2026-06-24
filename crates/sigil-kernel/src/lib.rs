@@ -3,6 +3,7 @@ pub mod agent_thread;
 pub mod approval;
 pub mod changeset;
 pub mod config;
+pub mod conversation_queue;
 pub mod event;
 pub mod memory;
 pub mod permission;
@@ -15,6 +16,7 @@ pub mod skill;
 pub mod task;
 pub mod task_orchestrator;
 pub mod terminal_task;
+pub mod time;
 pub mod tool;
 
 pub use agent::{
@@ -27,7 +29,8 @@ pub use agent_thread::{
     AgentMergeSafePointEntry, AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry,
     AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection,
     AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
-    AgentProfileTrustProjection, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
+    AgentProfileTrustProjection, AgentResultContinuationEntry, AgentResultContinuationProjection,
+    AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
     AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection, AgentRunAttemptStartedEntry,
     AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
     AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
@@ -50,6 +53,12 @@ pub use config::{
     SkillConfig, SyntaxThemeId, TaskConfig, TaskMode, ThemeColorOverrides, ThemeId,
     ToolAllowlistConfig, WorkspaceConfig, default_user_config_dir, default_user_config_path,
     preferred_config_path, resolve_workspace_root,
+};
+pub use conversation_queue::{
+    ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
+    ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
+    ConversationInputTarget, ConversationQueueItemProjection, ConversationQueueProjection,
 };
 pub use event::{
     EventHandler, NoopEventHandler, PUBLIC_RUN_EVENT_SCHEMA_VERSION, PublicAssistantMessage,
@@ -105,6 +114,7 @@ pub use terminal_task::{
     TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection,
     TerminalTaskStatus, TerminalTaskSummary,
 };
+pub use time::saturating_elapsed;
 pub use tool::{
     ScopedToolRegistry, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats,
     ToolEgressAudit, ToolError, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile,

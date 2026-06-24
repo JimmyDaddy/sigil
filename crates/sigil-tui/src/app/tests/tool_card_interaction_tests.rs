@@ -226,25 +226,40 @@ fn appending_tool_card_moves_focus_marker_to_latest_card() {
 }"#,
     );
 
-    let rendered = app
-        .transcript_lines(40)
-        .into_iter()
-        .map(|line| {
-            line.spans
-                .into_iter()
-                .map(|span| span.content.into_owned())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    let focus_lines = rendered
+    let selection_bg = crate::ui::theme::default_palette().surface_selection;
+    let rendered = app.transcript_lines(40);
+    let line_text = |line: &ratatui::text::Line<'static>| {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    let selected_lines = rendered
         .iter()
-        .filter(|line| line.contains("●"))
+        .filter(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.style.bg == Some(selection_bg))
+        })
+        .map(line_text)
         .collect::<Vec<_>>();
 
-    assert_eq!(focus_lines.len(), 1);
-    assert!(focus_lines[0].contains("Wrote second.txt"));
-    assert!(!focus_lines[0].contains("Wrote first.txt"));
-    assert!(!rendered.iter().any(|line| line.contains("path=second.txt")));
+    assert!(
+        selected_lines
+            .iter()
+            .any(|line| line.contains("Wrote second.txt"))
+    );
+    assert!(
+        !selected_lines
+            .iter()
+            .any(|line| line.contains("Wrote first.txt"))
+    );
+    assert!(
+        !rendered
+            .iter()
+            .map(line_text)
+            .any(|line| line.contains("path=second.txt"))
+    );
 }
 
 #[test]

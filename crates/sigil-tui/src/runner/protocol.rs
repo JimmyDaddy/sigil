@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
 use sigil_kernel::{
-    AgentRunResult, AgentThreadId, CompactionRecord, PlanApprovalPermission, PlanApprovedEntry,
-    ReasoningEffort, RunEvent, SessionLogEntry, TaskRunStatus, TerminalTaskEntry,
+    AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionRecord,
+    ConversationInputKind, ConversationInputQueueId, ConversationInputTarget,
+    ConversationQueueItemProjection, PlanApprovalPermission, PlanApprovedEntry, ReasoningEffort,
+    RunEvent, SessionLogEntry, TaskRunStatus, TerminalTaskEntry,
 };
 use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::{
@@ -15,11 +17,44 @@ use crate::provider_status::BalanceSnapshot;
 
 pub(crate) type McpElicitationResponseTx = oneshot::Sender<McpElicitationResponse>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueMoveDirection {
+    Up,
+    Down,
+}
+
 #[derive(Debug)]
 pub enum WorkerCommand {
     SubmitPrompt {
         prompt: String,
         reasoning_effort: ReasoningEffort,
+    },
+    QueueConversationInput {
+        prompt: String,
+        kind: ConversationInputKind,
+        target: ConversationInputTarget,
+        reasoning_effort: ReasoningEffort,
+    },
+    CancelQueuedConversationInput {
+        queue_id: ConversationInputQueueId,
+    },
+    EditQueuedConversationInput {
+        queue_id: ConversationInputQueueId,
+        prompt: String,
+        reasoning_effort: ReasoningEffort,
+    },
+    MoveQueuedConversationInput {
+        queue_id: ConversationInputQueueId,
+        direction: QueueMoveDirection,
+    },
+    PromoteQueuedConversationInput {
+        queue_id: ConversationInputQueueId,
+    },
+    SendQueuedConversationInputNow {
+        queue_id: ConversationInputQueueId,
+    },
+    SetConversationQueuePaused {
+        paused: bool,
     },
     SubmitPlanPrompt {
         prompt: String,
@@ -69,6 +104,10 @@ pub enum WorkerCommand {
         thread_id: AgentThreadId,
         reason: Option<String>,
     },
+    MessageAgent {
+        thread_id: AgentThreadId,
+        prompt: String,
+    },
     CompactNow,
     CheckChangedFilesDiagnostics,
     RefreshProviderBalance {
@@ -111,9 +150,21 @@ pub enum WorkerMessage {
     AgentResultContinuationStarted {
         thread_ids: Vec<AgentThreadId>,
     },
+    ConversationQueueUpdated {
+        items: Vec<ConversationQueueItemProjection>,
+        paused: bool,
+        entries: Vec<SessionLogEntry>,
+    },
+    ConversationQueueDispatchStarted {
+        queue_id: ConversationInputQueueId,
+        prompt: String,
+    },
     AgentThreadEvent {
         thread_id: AgentThreadId,
         event: Box<RunEvent>,
+    },
+    AgentThreadStatusLive {
+        entry: AgentThreadStatusChangedEntry,
     },
     AgentRunFinished {
         profile_id: String,

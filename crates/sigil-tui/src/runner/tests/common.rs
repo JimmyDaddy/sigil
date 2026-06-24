@@ -4,7 +4,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -65,8 +65,12 @@ impl TestWorker {
     }
 
     pub(super) fn recv(&self) -> Result<WorkerMessage> {
+        self.recv_with_timeout(Duration::from_secs(3))
+    }
+
+    pub(super) fn recv_with_timeout(&self, timeout: Duration) -> Result<WorkerMessage> {
         self.message_rx
-            .recv_timeout(Duration::from_secs(3))
+            .recv_timeout(timeout)
             .map_err(|error| anyhow!("timed out waiting for worker message: {error}"))
     }
 
@@ -74,8 +78,24 @@ impl TestWorker {
     where
         F: Fn(&WorkerMessage) -> bool,
     {
+        self.recv_until_with_timeout(Duration::from_secs(3), predicate)
+    }
+
+    pub(super) fn recv_until_with_timeout<F>(
+        &self,
+        timeout: Duration,
+        predicate: F,
+    ) -> Result<WorkerMessage>
+    where
+        F: Fn(&WorkerMessage) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
         loop {
-            let message = self.recv()?;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!("timed out waiting for worker message"));
+            }
+            let message = self.recv_with_timeout(remaining)?;
             if predicate(&message) {
                 return Ok(message);
             }

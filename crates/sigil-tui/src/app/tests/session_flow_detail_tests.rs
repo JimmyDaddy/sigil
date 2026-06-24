@@ -1405,6 +1405,76 @@ fn render_session_control_entries_cover_remaining_labels() {
         "[ctl] plugin repo-review trust=trusted hash=sha256:manifest"
     );
 
+    let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1").expect("valid queue id");
+    let queue_queued = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueued(sigil_kernel::ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            prompt_hash: "sha256:queue".to_owned(),
+            prompt: "queued prompt".to_owned(),
+            reasoning_effort: None,
+            created_at_ms: Some(1),
+        }),
+    ));
+    assert_eq!(
+        queue_queued,
+        "[ctl] queue queue_1 kind=Chat prompt=queued prompt"
+    );
+    let queue_control = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueueControl(
+            sigil_kernel::ConversationInputQueueControlEntry {
+                action: sigil_kernel::ConversationInputQueueControlAction::Pause,
+                reason: None,
+                updated_at_ms: Some(2),
+            },
+        ),
+    ));
+    assert_eq!(queue_control, "[ctl] queue control Pause");
+    let queue_edited = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputEdited(sigil_kernel::ConversationInputEditedEntry {
+            queue_id: queue_id.clone(),
+            prompt_hash: "sha256:edited".to_owned(),
+            prompt: "edited prompt".to_owned(),
+            reasoning_effort: None,
+            updated_at_ms: Some(3),
+        }),
+    ));
+    assert_eq!(
+        queue_edited,
+        "[ctl] queue queue_1 edited prompt=edited prompt"
+    );
+    let queue_reordered = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputReordered(sigil_kernel::ConversationInputReorderedEntry {
+            queue_id: queue_id.clone(),
+            after_queue_id: None,
+            updated_at_ms: Some(4),
+        }),
+    ));
+    assert_eq!(queue_reordered, "[ctl] queue queue_1 moved after front");
+    let queue_status = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputStatusChanged(sigil_kernel::ConversationInputStatusEntry {
+            queue_id,
+            status: sigil_kernel::ConversationInputStatus::Delivered,
+            reason: Some("sent now".to_owned()),
+            updated_at_ms: Some(5),
+        }),
+    ));
+    assert_eq!(queue_status, "[ctl] queue queue_1 status=Delivered");
+
+    let continuation = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(sigil_kernel::AgentResultContinuationEntry {
+            thread_id: sigil_kernel::AgentThreadId::new("agent_chat_1").expect("valid thread id"),
+            status: sigil_kernel::AgentResultContinuationStatus::Pending,
+            reason: Some("waiting".to_owned()),
+            updated_at_ms: Some(6),
+        }),
+    ));
+    assert_eq!(
+        continuation,
+        "[ctl] agent continuation agent_chat_1 status=Pending"
+    );
+
     for decision in [
         McpElicitationDecision::Accepted,
         McpElicitationDecision::Declined,

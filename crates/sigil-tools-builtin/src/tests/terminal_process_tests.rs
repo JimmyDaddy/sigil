@@ -279,7 +279,8 @@ async fn terminal_process_manager_pty_accepts_input_resize_and_writes_combined_a
         .start_pty(
             TerminalStartRequest {
                 task_id: Some(TerminalTaskId::new("terminal-pty")?),
-                command: "read line; printf 'got:%s\\n' \"$line\"".to_owned(),
+                command: "trap '' WINCH; IFS= read -r line; printf 'got:%s\\n' \"$line\""
+                    .to_owned(),
                 cwd: None,
                 shell: Some(shell),
             },

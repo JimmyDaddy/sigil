@@ -84,6 +84,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         completes_with_space: false,
     },
     SlashCommandSpec {
+        canonical: "/queue",
+        aliases: &[],
+        description: "manage queued input",
+        completes_with_space: true,
+    },
+    SlashCommandSpec {
         canonical: "/resume",
         aliases: &[],
         description: "choose a saved session",

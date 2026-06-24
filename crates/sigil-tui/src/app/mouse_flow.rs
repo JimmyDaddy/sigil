@@ -270,7 +270,7 @@ impl AppState {
         self.set_mouse_hover_target(None);
         self.clear_timeline_text_selection();
         self.active_pane = PaneFocus::Composer;
-        self.blur_composer_agent_panel();
+        self.blur_composer_aux_panels();
         match self.handle_mouse_slash_candidate(index)? {
             Some(action) => Ok(crate::mouse::AppMouseOutcome::Action(action)),
             None => Ok(crate::mouse::AppMouseOutcome::Redraw),
@@ -305,7 +305,7 @@ impl AppState {
         self.set_mouse_hover_target(Some(crate::mouse::HitTarget::Composer));
         self.clear_timeline_text_selection();
         self.active_pane = PaneFocus::Composer;
-        self.blur_composer_agent_panel();
+        self.blur_composer_aux_panels();
         self.position_input_cursor_from_mouse(input.column, input.row, layout);
         crate::mouse::AppMouseOutcome::Redraw
     }
@@ -334,7 +334,7 @@ impl AppState {
         self.set_mouse_hover_target(Some(target));
         self.clear_timeline_text_selection();
         self.active_pane = PaneFocus::Activity;
-        self.blur_composer_agent_panel();
+        self.blur_composer_aux_panels();
         if self.activate_agent_view_at_index(index) {
             crate::mouse::AppMouseOutcome::Redraw
         } else {
@@ -350,7 +350,7 @@ impl AppState {
         self.set_mouse_hover_target(Some(target));
         self.clear_timeline_text_selection();
         self.active_pane = PaneFocus::Activity;
-        self.blur_composer_agent_panel();
+        self.blur_composer_aux_panels();
         crate::mouse::AppMouseOutcome::Redraw
     }
 

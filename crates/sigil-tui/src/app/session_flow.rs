@@ -223,6 +223,7 @@ impl AppState {
         self.latest_compaction_record = latest_compaction_record(&entries);
         self.tool_preview_snapshots = restored_tool_preview_snapshot_index(&entries);
         self.current_session_entries = entries;
+        self.refresh_conversation_queue_selection();
         self.refresh_active_agent_view_after_parent_sync();
         self.refresh_usage_sidebar_cache();
     }
@@ -234,6 +235,7 @@ impl AppState {
         self.latest_compaction_record = latest_compaction_record(&self.current_session_entries);
         self.tool_preview_snapshots =
             restored_tool_preview_snapshot_index(&self.current_session_entries);
+        self.refresh_conversation_queue_selection();
         self.refresh_active_agent_view_after_parent_sync();
         self.refresh_usage_sidebar_cache();
     }
@@ -1108,6 +1110,11 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 entry.result.thread_id.as_str(),
                 agent_terminal_status_label(entry.result.status)
             ),
+            ControlEntry::AgentResultContinuation(entry) => format!(
+                "[ctl] agent continuation {} status={:?}",
+                entry.thread_id.as_str(),
+                entry.status
+            ),
             ControlEntry::AgentThreadDisplayName(entry) => format!(
                 "[ctl] agent name {} {}",
                 entry.thread_id.as_str(),
@@ -1153,6 +1160,33 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
             ControlEntry::AgentThreadClosed(entry) => {
                 format!("[ctl] agent {} closed", entry.thread_id.as_str())
             }
+            ControlEntry::ConversationInputQueued(entry) => format!(
+                "[ctl] queue {} kind={:?} prompt={}",
+                entry.queue_id.as_str(),
+                entry.kind,
+                truncate_session_view_text(&entry.prompt, 48)
+            ),
+            ControlEntry::ConversationInputQueueControl(entry) => {
+                format!("[ctl] queue control {:?}", entry.action)
+            }
+            ControlEntry::ConversationInputEdited(entry) => format!(
+                "[ctl] queue {} edited prompt={}",
+                entry.queue_id.as_str(),
+                truncate_session_view_text(&entry.prompt, 48)
+            ),
+            ControlEntry::ConversationInputReordered(entry) => format!(
+                "[ctl] queue {} moved after {}",
+                entry.queue_id.as_str(),
+                entry
+                    .after_queue_id
+                    .as_ref()
+                    .map_or("front", sigil_kernel::ConversationInputQueueId::as_str)
+            ),
+            ControlEntry::ConversationInputStatusChanged(entry) => format!(
+                "[ctl] queue {} status={:?}",
+                entry.queue_id.as_str(),
+                entry.status
+            ),
             ControlEntry::Note { kind, .. } => format!("[ctl] note {kind}"),
         },
     }

@@ -1027,6 +1027,9 @@ impl AppState {
         let label = "agent".to_owned();
         let active_label = self.active_agent_label();
         if let Some(thread) = self.active_agent_thread_projection() {
+            if thread.status.is_terminal() {
+                return None;
+            }
             let profile = thread
                 .profile_id
                 .as_ref()
@@ -1043,6 +1046,9 @@ impl AppState {
             });
         }
         let child = self.active_agent_child_entry()?;
+        if task_child_session_is_terminal(child.status) {
+            return None;
+        }
         Some(LiveActivitySummary {
             label,
             detail: format!(
@@ -1053,6 +1059,17 @@ impl AppState {
             ),
         })
     }
+}
+
+fn task_child_session_is_terminal(status: sigil_kernel::TaskChildSessionStatus) -> bool {
+    matches!(
+        status,
+        sigil_kernel::TaskChildSessionStatus::Completed
+            | sigil_kernel::TaskChildSessionStatus::Failed
+            | sigil_kernel::TaskChildSessionStatus::Cancelled
+            | sigil_kernel::TaskChildSessionStatus::Interrupted
+            | sigil_kernel::TaskChildSessionStatus::Unavailable
+    )
 }
 
 fn agent_thread_status_label(status: sigil_kernel::AgentThreadStatus) -> &'static str {

@@ -62,6 +62,7 @@ class StagedCoverageHelpersTests(unittest.TestCase):
             "McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,",
             "notification: McpProgressNotification,",
             "pub type ProviderMap = BTreeMap<String, Value>;",
+            "pub(crate) mod agent_display;",
             "pub use crate::{",
             "impl TaskConfig {",
             "pub fn as_str(self) -> &'static str {",

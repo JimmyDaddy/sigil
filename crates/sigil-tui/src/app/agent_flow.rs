@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    agent_display::{AgentDisplayNameInput, resolve_agent_display_name},
     slash::{ResolvedSlashCommand, SlashSelectorEntry},
     timeline::{
         SidebarAgentRow, TimelineEntry, TimelineRole, agent_status_symbol, compact_agent_detail,
@@ -13,9 +14,9 @@ use crate::{
 };
 use anyhow::Context;
 use sigil_kernel::{
-    AgentRole, AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadProjection,
-    AgentThreadStatus, ControlEntry, SessionLogEntry, TaskChildSessionDisplayNameEntry,
-    TaskChildSessionEntry, TaskRunProjection, normalize_task_agent_display_name,
+    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadProjection, AgentThreadStatus,
+    ControlEntry, SessionLogEntry, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskRunProjection, normalize_task_agent_display_name,
 };
 
 use super::{
@@ -76,6 +77,7 @@ impl AppState {
             return 0;
         }
         1 + rows.len().min(COMPOSER_AGENT_VISIBLE_ROWS) as u16
+            + u16::from(self.composer_agent_panel_focused)
     }
 
     pub(crate) fn is_composer_agent_panel_focused(&self) -> bool {
@@ -178,7 +180,10 @@ impl AppState {
     }
 
     pub(super) fn agent_selector_allows_popup(&self, arg: &str) -> bool {
-        !agent_rename_is_entering_display_name(arg)
+        !(agent_rename_is_entering_display_name(arg)
+            || agent_close_prefix(arg)
+            || agent_cancel_prefix(arg)
+            || agent_message_prefix(arg))
     }
 
     fn agent_rename_slash_entries(&self, query: &str) -> Vec<SlashSelectorEntry> {
@@ -249,9 +254,10 @@ impl AppState {
             return Ok(None);
         }
         if agent_message_prefix(value) {
-            self.last_notice = Some(
-                "agent messaging will be enabled with message_agent in the next phase".to_owned(),
-            );
+            if let Some(args) = agent_message_args(value) {
+                return self.message_agent_from_command(args);
+            }
+            self.last_notice = Some("usage: /agent message <agent|current> <prompt>".to_owned());
             return Ok(None);
         }
         match value.to_ascii_lowercase().as_str() {
@@ -293,6 +299,26 @@ impl AppState {
         Ok(Some(AppAction::CloseAgent {
             thread_id,
             reason: Some("closed from TUI /agent".to_owned()),
+        }))
+    }
+
+    fn message_agent_from_command(
+        &mut self,
+        args: AgentMessageArgs<'_>,
+    ) -> anyhow::Result<Option<AppAction>> {
+        let Some(view) = self.agent_view_for_action_target(args.target) else {
+            self.last_notice = Some(format!("agent not found: {}", args.target));
+            return Ok(None);
+        };
+        let Some(thread_id) = self.agent_thread_id_for_view(&view) else {
+            self.last_notice = Some(format!("agent message unavailable: {}", args.target));
+            return Ok(None);
+        };
+        self.last_notice = Some(format!("agent message requested: {}", thread_id.as_str()));
+        self.push_event("agent:message-requested", thread_id.as_str());
+        Ok(Some(AppAction::MessageAgent {
+            thread_id,
+            prompt: args.prompt.to_owned(),
         }))
     }
 
@@ -367,6 +393,36 @@ impl AppState {
                     .unwrap_or_else(|| "no agent selected".to_owned()),
             );
         }
+    }
+
+    pub(super) fn close_selected_agent_from_panel(&mut self) -> anyhow::Result<Option<AppAction>> {
+        let Some(target) = self.selected_agent_command_value() else {
+            self.last_notice = Some("no agent selected".to_owned());
+            return Ok(None);
+        };
+        if target == "main" {
+            self.last_notice = Some("agent close unavailable for main".to_owned());
+            return Ok(None);
+        }
+        self.close_agent_from_command(&target)
+    }
+
+    pub(super) fn begin_message_selected_agent_from_panel(&mut self) -> bool {
+        let Some(target) = self.selected_agent_command_value() else {
+            self.last_notice = Some("no agent selected".to_owned());
+            return false;
+        };
+        if target == "main" {
+            self.last_notice = Some("agent message unavailable for main".to_owned());
+            return false;
+        }
+        self.set_input_and_cursor(format!("/agent message {target} "));
+        self.blur_composer_agent_panel();
+        self.blur_composer_queue_panel();
+        self.reset_slash_selector();
+        self.reset_input_history_navigation();
+        self.last_notice = Some(format!("compose agent message: {target}"));
+        true
     }
 
     pub(super) fn refresh_active_agent_view_after_parent_sync(&mut self) {
@@ -661,6 +717,12 @@ impl AppState {
         }
     }
 
+    fn selected_agent_command_value(&self) -> Option<String> {
+        self.agent_sidebar_items()
+            .get(self.sidebar_agent_selected)
+            .and_then(agent_command_value)
+    }
+
     pub(super) fn reload_active_agent_child_transcript(&mut self) -> bool {
         let AgentView::Child {
             child_session_ref, ..
@@ -884,6 +946,11 @@ struct AgentRenameArgs<'a> {
     display_name: &'a str,
 }
 
+struct AgentMessageArgs<'a> {
+    target: &'a str,
+    prompt: &'a str,
+}
+
 fn selectable_agent_indexes(items: &[AgentSidebarItem]) -> Vec<usize> {
     items
         .iter()
@@ -923,13 +990,11 @@ fn agent_sidebar_item_from_thread(
     ordinal: usize,
 ) -> AgentSidebarItem {
     let legacy_child = latest_task.and_then(|task| legacy_child_for_thread(task, thread));
-    let label = thread.display_name.clone().unwrap_or_else(|| {
-        if let (Some(task), Some(child)) = (latest_task, legacy_child.as_ref()) {
-            task_child_agent_display_name(task, child, ordinal)
-        } else {
-            fallback_agent_thread_display_name(thread, ordinal)
-        }
-    });
+    let label = if let (Some(task), Some(child)) = (latest_task, legacy_child.as_ref()) {
+        task_child_agent_display_name(task, child, ordinal)
+    } else {
+        agent_thread_display_name(thread, ordinal)
+    };
     let detail = if let Some(child) = legacy_child.as_ref() {
         format!(
             "{} · {} · v{}:{}",
@@ -976,18 +1041,18 @@ fn legacy_child_for_thread<'a>(
         .find(|child| &child.child_session_ref == session_ref)
 }
 
-fn fallback_agent_thread_display_name(thread: &AgentThreadProjection, ordinal: usize) -> String {
-    if !thread.objective.trim().is_empty()
-        && let Ok(display_name) = normalize_task_agent_display_name(&thread.objective)
-    {
-        return display_name;
-    }
-    thread
-        .profile_id
-        .as_ref()
-        .map(|profile_id| profile_id.as_str().replace(['_', '-'], " "))
-        .filter(|label| !label.trim().is_empty())
-        .unwrap_or_else(|| format!("agent {ordinal}"))
+fn agent_thread_display_name(thread: &AgentThreadProjection, ordinal: usize) -> String {
+    resolve_agent_display_name(AgentDisplayNameInput {
+        display_name: thread.display_name.as_deref(),
+        objective: Some(&thread.objective),
+        profile_id: thread
+            .profile_id
+            .as_ref()
+            .map(|profile_id| profile_id.as_str()),
+        ordinal: Some(ordinal),
+        ..AgentDisplayNameInput::default()
+    })
+    .label
 }
 
 fn agent_thread_profile_label(thread: &AgentThreadProjection) -> String {
@@ -1055,6 +1120,21 @@ fn agent_rename_args(value: &str) -> Option<AgentRenameArgs<'_>> {
     })
 }
 
+fn agent_message_args(value: &str) -> Option<AgentMessageArgs<'_>> {
+    let value = value.trim_start();
+    let rest = value
+        .strip_prefix("message")
+        .or_else(|| value.strip_prefix("steer"))
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))?
+        .trim_start();
+    let (target, prompt) = rest.split_once(char::is_whitespace)?;
+    let prompt = prompt.trim();
+    if target.is_empty() || prompt.is_empty() {
+        return None;
+    }
+    Some(AgentMessageArgs { target, prompt })
+}
+
 fn agent_rename_prefix(value: &str) -> bool {
     let value = value.trim_start();
     value
@@ -1118,8 +1198,15 @@ fn task_child_agent_display_name(
     child: &TaskChildSessionEntry,
     ordinal: usize,
 ) -> String {
-    if let Some(display_name) = task.display_name_for_child_session(child) {
-        return display_name.to_owned();
+    let explicit = task.display_name_for_child_session(child);
+    if explicit.is_some() {
+        return resolve_agent_display_name(AgentDisplayNameInput {
+            display_name: explicit,
+            role: Some(child.role),
+            ordinal: Some(ordinal),
+            ..AgentDisplayNameInput::default()
+        })
+        .label;
     }
     if let Some(display_name) = task.plans.get(&child.plan_version).and_then(|plan| {
         plan.steps
@@ -1130,16 +1217,13 @@ fn task_child_agent_display_name(
     {
         return display_name;
     }
-    fallback_agent_display_name(child.role, ordinal)
-}
-
-fn fallback_agent_display_name(role: AgentRole, ordinal: usize) -> String {
-    match role {
-        AgentRole::SubagentRead => format!("read {ordinal}"),
-        AgentRole::SubagentWrite => format!("write {ordinal}"),
-        AgentRole::Planner => format!("plan {ordinal}"),
-        AgentRole::Executor => format!("agent {ordinal}"),
-    }
+    resolve_agent_display_name(AgentDisplayNameInput {
+        display_name: explicit,
+        role: Some(child.role),
+        ordinal: Some(ordinal),
+        ..AgentDisplayNameInput::default()
+    })
+    .label
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

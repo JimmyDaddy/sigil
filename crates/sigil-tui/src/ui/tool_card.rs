@@ -4,8 +4,12 @@ use ratatui::{
 };
 use serde_json::Value;
 use sigil_kernel::SyntaxThemeId;
+use unicode_width::UnicodeWidthStr;
 
-use crate::app::TimelineEntry;
+use crate::{
+    agent_display::{AgentDisplayNameInput, resolve_agent_display_name},
+    app::TimelineEntry,
+};
 
 use super::{
     TimelineRenderOptions,
@@ -62,14 +66,15 @@ pub(crate) fn render_tool_entry_lines(
         .hovered_tool_activity_key
         .as_deref()
         .is_some_and(|hovered| hovered == activity.key.as_str());
+    let activity_marker_style =
+        tool_card_activity_marker_style(display.status.kind, hovered, palette);
     let default_expanded = activity.defaults_expanded;
     let expanded = options.expand_tool_previews
         || options.expanded_tool_activity_keys.contains(&activity.key)
         || (default_expanded && !options.collapsed_tool_activity_keys.contains(&activity.key));
     let mut lines = vec![tool_card_header_line(
         &display,
-        selected,
-        hovered,
+        activity_marker_style,
         expanded,
         options.max_content_width,
         palette,
@@ -104,7 +109,13 @@ pub(crate) fn render_tool_entry_lines(
             ));
         }
     }
-    lines
+    tool_card_frame_lines(
+        lines,
+        selected,
+        options.max_content_width,
+        activity_marker_style,
+        palette,
+    )
 }
 
 fn tool_has_preview(summary: &ToolCardRender) -> bool {
@@ -171,24 +182,12 @@ fn collapsed_tool_hidden_rows(
 
 fn tool_card_header_line(
     display: &ToolCardDisplay,
-    selected: bool,
-    hovered: bool,
+    marker_style: Style,
     expanded: bool,
     max_content_width: usize,
     palette: &ThemePalette,
 ) -> Line<'static> {
-    let accent = if hovered {
-        palette.accent_warning
-    } else {
-        palette.accent_danger
-    };
-    let mut spans = vec![
-        Span::styled(
-            "▎",
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-    ];
+    let mut spans = vec![Span::styled("●", marker_style), Span::raw(" ")];
     spans.extend(tool_title_spans_with_palette(
         &display.title,
         tool_title_width(display, max_content_width),
@@ -213,15 +212,6 @@ fn tool_card_header_line(
             },
         ));
     }
-    if selected {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
-            "●",
-            Style::default()
-                .fg(palette.accent_info)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
     if expanded {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(
@@ -230,6 +220,138 @@ fn tool_card_header_line(
         ));
     }
     Line::from(spans)
+}
+
+fn tool_card_frame_lines(
+    lines: Vec<Line<'static>>,
+    selected: bool,
+    max_content_width: usize,
+    marker_style: Style,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    ToolCardFrame {
+        selected,
+        max_content_width,
+        marker_style,
+        palette,
+    }
+    .render(lines)
+}
+
+struct ToolCardFrame<'a> {
+    selected: bool,
+    max_content_width: usize,
+    marker_style: Style,
+    palette: &'a ThemePalette,
+}
+
+impl ToolCardFrame<'_> {
+    fn render(&self, lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+        let card_width = if self.max_content_width == 0 {
+            160
+        } else {
+            self.max_content_width
+        };
+        lines
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                let line = if index == 0 {
+                    line
+                } else {
+                    tool_card_body_frame_line(line, index == 1, self.marker_style, self.palette)
+                };
+                if self.selected {
+                    tool_card_selected_line(line, card_width, self.palette)
+                } else {
+                    line
+                }
+            })
+            .collect()
+    }
+}
+
+fn tool_card_body_frame_line(
+    line: Line<'static>,
+    first_body_line: bool,
+    marker_style: Style,
+    palette: &ThemePalette,
+) -> Line<'static> {
+    let marker = if first_body_line { "└ " } else { "  " };
+    let branch_style = if first_body_line {
+        marker_style
+    } else {
+        Style::default().fg(palette.text_muted)
+    };
+    let mut spans = vec![Span::styled(marker, branch_style)];
+    spans.extend(strip_timeline_content_indent(line.spans));
+    Line::from(spans)
+}
+
+fn tool_card_activity_marker_style(
+    status: StatusKind,
+    hovered: bool,
+    palette: &ThemePalette,
+) -> Style {
+    if hovered {
+        Style::default()
+            .fg(palette.accent_warning)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        StatusIndicator::static_kind(status).style_with_palette(palette)
+    }
+}
+
+fn strip_timeline_content_indent(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    let mut iter = spans.into_iter();
+    let Some(first) = iter.next() else {
+        return Vec::new();
+    };
+    let mut stripped = Vec::new();
+    let first_text = first.content.as_ref();
+    if first_text == "  " {
+        // Drop the generic timeline indent; the tool-card frame supplies it.
+    } else if let Some(rest) = first_text.strip_prefix("  ") {
+        if !rest.is_empty() {
+            stripped.push(Span::styled(rest.to_owned(), first.style));
+        }
+    } else {
+        stripped.push(first);
+    }
+    stripped.extend(iter);
+    stripped
+}
+
+fn tool_card_selected_line(
+    line: Line<'static>,
+    card_width: usize,
+    palette: &ThemePalette,
+) -> Line<'static> {
+    let bg = palette.surface_selection;
+    let mut spans = line
+        .spans
+        .into_iter()
+        .map(|span| {
+            let mut style = span.style;
+            style.bg = Some(bg);
+            Span::styled(span.content, style)
+        })
+        .collect::<Vec<_>>();
+    let width = spans_display_width(&spans);
+    if card_width > width {
+        spans.push(Span::styled(
+            " ".repeat(card_width - width),
+            Style::default().bg(bg),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn spans_display_width(spans: &[Span<'static>]) -> usize {
+    spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
 }
 
 fn tool_title_width(display: &ToolCardDisplay, max_content_width: usize) -> usize {
@@ -1342,6 +1464,9 @@ fn agent_tool_display_summary(summary: &ToolCardRender) -> Option<String> {
 fn agent_tool_title(summary: &ToolCardRender) -> ToolCardTitle {
     let thread = agent_thread_label(summary);
     if tool_name_matches(&summary.tool_name, "spawn_agent") {
+        if thread == "agent" {
+            return ToolCardTitle::new("Started", "agent", None);
+        }
         return ToolCardTitle::new("Started", "agent", Some(thread));
     }
     if tool_name_matches(&summary.tool_name, "wait_agent") {
@@ -1413,11 +1538,23 @@ fn agent_result_read_tool(summary: &ToolCardRender) -> Option<String> {
 }
 
 fn agent_thread_label(summary: &ToolCardRender) -> String {
-    agent_payload_string(summary, "thread_id")
-        .or_else(|| call_argument(summary, "thread_id"))
-        .or_else(|| call_argument(summary, "profile_id"))
-        .map(|value| truncate_inline_text(&value, 48))
-        .unwrap_or_else(|| "agent".to_owned())
+    let display_name = agent_payload_string(summary, "display_name");
+    let objective = agent_payload_string(summary, "objective");
+    let profile_id = agent_payload_string(summary, "profile_id")
+        .or_else(|| call_argument(summary, "profile_id"));
+    let thread_id =
+        agent_payload_string(summary, "thread_id").or_else(|| call_argument(summary, "thread_id"));
+    truncate_inline_text(
+        &resolve_agent_display_name(AgentDisplayNameInput {
+            display_name: display_name.as_deref(),
+            objective: objective.as_deref(),
+            profile_id: profile_id.as_deref(),
+            thread_id: thread_id.as_deref(),
+            ..AgentDisplayNameInput::default()
+        })
+        .label,
+        48,
+    )
 }
 
 fn agent_payload_value(summary: &ToolCardRender) -> Option<&Value> {

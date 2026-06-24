@@ -74,6 +74,7 @@ pub fn render(frame: &mut Frame, app: &AppState) {
 
     if app.active_pane == PaneFocus::Composer
         && !app.has_modal()
+        && !app.is_composer_queue_panel_focused()
         && !app.is_composer_agent_panel_focused()
     {
         let (cursor_col, _) = view_model.composer.cursor_position;

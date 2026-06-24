@@ -3750,7 +3750,9 @@ async fn agent_guides_direct_task_tool_calls_without_hard_error() -> Result<()> 
                     && content.contains("spawn_agent")
                     && content.contains("wait_agent")
                     && content.contains("close_agent")
-                    && content.contains("message_agent is reserved")
+                    && content.contains("message_agent")
+                    && content.contains("active background child-agent mailbox")
+                    && content.contains("next safe point")
                     && !content.contains("/plan <objective>")
             })
     }));

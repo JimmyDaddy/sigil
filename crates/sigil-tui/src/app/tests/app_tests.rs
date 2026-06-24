@@ -37,10 +37,17 @@ fn top_level_plan_agent_and_task_key_paths_cover_edge_states() -> Result<()> {
     app.is_busy = true;
     app.input = "@review inspect".to_owned();
     let action = app.submit_input()?;
-    assert!(action.is_none());
+    assert!(matches!(
+        action,
+        Some(AppAction::QueueConversationInput {
+            prompt,
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+        }) if prompt == "@review inspect"
+    ));
     assert_eq!(
         app.timeline.last().map(|entry| entry.text.as_str()),
-        Some("busy; submit later")
+        Some("queued for next turn")
     );
 
     app.input = "/task implement".to_owned();
@@ -243,11 +250,13 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
     app.active_agent_view = super::super::AgentView::Main;
     app.activate_agent_from_command("rename current Main Agent")?;
     assert_eq!(app.last_notice(), Some("agent not found: current"));
-    app.activate_agent_from_command("steer current keep going")?;
+    app.activate_agent_from_command("message")?;
     assert_eq!(
         app.last_notice(),
-        Some("agent messaging will be enabled with message_agent in the next phase")
+        Some("usage: /agent message <agent|current> <prompt>")
     );
+    app.activate_agent_from_command("steer current keep going")?;
+    assert_eq!(app.last_notice(), Some("agent not found: current"));
 
     app.sync_current_session_state(vec![SessionLogEntry::Control(ControlEntry::TaskRun(
         sigil_kernel::TaskRunEntry {
@@ -299,6 +308,8 @@ fn agent_rename_filters_and_persists_display_name() -> Result<()> {
     );
     assert!(app.agent_slash_entries("rename no-match").is_empty());
     assert!(!app.agent_selector_allows_popup("rename child_1 Repo Audit"));
+    assert!(!app.agent_selector_allows_popup("close current"));
+    assert!(!app.agent_selector_allows_popup("message child_1 retry with more detail"));
     app.activate_agent_from_command("read 1")?;
     assert_eq!(app.active_agent_label(), "read 1");
 
@@ -702,10 +713,17 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     }));
 
     app.input = "/agent message current continue".to_owned();
-    assert!(app.submit_input()?.is_none());
+    let action = app.submit_input()?;
+    assert!(matches!(
+        action,
+        Some(AppAction::MessageAgent {
+            ref thread_id,
+            ref prompt,
+        }) if thread_id.as_str() == "thread_1" && prompt == "continue"
+    ));
     assert_eq!(
         app.last_notice.as_deref(),
-        Some("agent messaging will be enabled with message_agent in the next phase")
+        Some("agent message requested: thread_1")
     );
 
     app.input = "/agent cancel current".to_owned();
@@ -725,11 +743,13 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     }));
 
     app.input = "/agent close current".to_owned();
+    app.composer_agent_panel_focused = true;
     assert!(app.submit_input()?.is_none());
     assert_eq!(
         app.last_notice.as_deref(),
         Some("agent close unavailable until terminal: thread_1")
     );
+    assert!(app.composer_agent_panel_focused);
     assert_eq!(app.active_agent_label(), "Kernel Mapper");
     assert!(
         app.agent_sidebar_rows()
@@ -749,6 +769,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     app.sync_current_session_state(terminal_entries.clone());
 
     app.input = "/agent close current".to_owned();
+    app.composer_agent_panel_focused = true;
     let action = app.submit_input()?;
     assert!(matches!(
         action,
@@ -761,6 +782,7 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
         app.last_notice.as_deref(),
         Some("agent close requested: thread_1")
     );
+    assert!(app.composer_agent_panel_focused);
     assert_eq!(app.active_agent_label(), "Kernel Mapper");
     let persisted = JsonlSessionStore::read_entries(&app.session_log_path)?;
     assert!(!persisted.iter().any(|entry| {

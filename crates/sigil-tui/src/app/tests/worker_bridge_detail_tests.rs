@@ -1,6 +1,6 @@
 use super::*;
 use serde_json::json;
-use sigil_kernel::ToolResultMeta;
+use sigil_kernel::{ToolErrorKind, ToolResultMeta};
 
 #[test]
 fn mcp_activation_event_detail_formats_scope_and_errors() {
@@ -139,4 +139,79 @@ fn code_diagnostics_helpers_cover_clean_results_and_paths() {
         code_diagnostics_sidebar_line("degraded tool error"),
         "diagnostics: degraded tool error"
     );
+}
+
+#[test]
+fn wait_agent_pending_key_helpers_cover_pending_and_terminal_boundaries() {
+    assert!(wait_agent_pending_key_from_tool_block("{not json").is_none());
+    assert!(
+        wait_agent_pending_key_from_tool_block(
+            &json!({
+                "tool_name": "read_file",
+                "status": "ok",
+                "preview_value": {"retry_after_ms": 100}
+            })
+            .to_string()
+        )
+        .is_none()
+    );
+    assert!(
+        wait_agent_pending_key_from_tool_block(
+            &json!({
+                "tool_name": "wait_agent",
+                "status": "failed",
+                "preview_value": {"retry_after_ms": 100}
+            })
+            .to_string()
+        )
+        .is_none()
+    );
+    assert!(
+        wait_agent_pending_key_from_tool_block(
+            &json!({
+                "tool_name": "wait_agent",
+                "status": "ok",
+                "preview_value": {
+                    "terminal": true,
+                    "retry_after_ms": 100,
+                    "thread_id": "agent_chat_done"
+                }
+            })
+            .to_string()
+        )
+        .is_none()
+    );
+    assert_eq!(
+        wait_agent_pending_key_from_tool_block(
+            &json!({
+                "tool_name": "wait_agent",
+                "status": "ok",
+                "preview_value": {
+                    "retry_after_ms": 100,
+                    "thread_id": "agent_chat_pending"
+                }
+            })
+            .to_string()
+        )
+        .as_deref(),
+        Some("wait_agent:agent_chat_pending")
+    );
+
+    let pending_result = ToolResult::ok("call-wait", "wait_agent", "", ToolResultMeta::default());
+    assert!(!should_replace_last_wait_agent_pending(
+        &[],
+        &pending_result,
+        &json!({
+            "tool_name": "wait_agent",
+            "status": "ok",
+            "preview_value": {
+                "retry_after_ms": 100,
+                "coalescing_key": "wait_agent:agent_chat_pending"
+            }
+        })
+        .to_string()
+    ));
+
+    let errored = ToolResult::error("call-wait", "wait_agent", ToolErrorKind::Protocol, "failed");
+    assert!(wait_agent_pending_key_from_result(&errored, "{}").is_none());
 }

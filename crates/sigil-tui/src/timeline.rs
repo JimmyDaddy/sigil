@@ -121,6 +121,14 @@ impl SidebarAgentRow {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ComposerQueueRow {
+    pub label: String,
+    pub detail: String,
+    pub status: StatusKind,
+    pub selected: bool,
+}
+
 pub(crate) fn agent_status_symbol(detail: &str) -> &'static str {
     status_symbol(agent_status_kind(detail))
 }

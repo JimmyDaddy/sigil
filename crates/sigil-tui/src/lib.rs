@@ -3,6 +3,7 @@
     allow(dead_code, unused_imports)
 )]
 
+pub(crate) mod agent_display;
 pub mod app;
 pub mod appearance_diagnostics;
 pub(crate) mod approval;

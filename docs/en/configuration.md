@@ -201,11 +201,10 @@ default_mode = "chat"
 max_plan_steps = 12
 max_replans = 2
 max_child_sessions = 8
-allow_parallel_readonly_subagents = false
-max_parallel_readonly = 1
+max_parallel_readonly = 3
 max_parallel_write = 1
-max_background_threads = 1
-max_spawn_fanout_per_turn = 8
+max_background_threads = 2
+max_spawn_fanout_per_turn = 4
 max_agent_tokens_per_task = 200000
 allow_write_subagents = true
 
@@ -228,7 +227,7 @@ Planned tasks are started from the TUI with `/task <task>`. `/plan` is reserved 
 
 Role-specific provider/model settings inherit `[agent]` when omitted. Planner and subagent-read default to read-only file/search/code-intelligence tools. Executor can see the full runtime registry. Subagent-write can see the full runtime registry only when `allow_write_subagents = true`; otherwise it falls back to the read-only scope. Mutating tools still go through the normal approval policy.
 
-Agent fan-out limits live in `[task]`: use `max_parallel_readonly = 1` to serialize read-only child agents, raise `max_background_threads` to allow more background agents, and keep `max_spawn_fanout_per_turn` no higher than the intended per-turn spawn fan-out.
+Agent fan-out limits live in `[task]`: the default permits up to 3 parallel read-only child agents and up to 2 background agents; set `max_parallel_readonly = 1` only when you want to serialize read-only child agents. Keep `max_spawn_fanout_per_turn` no higher than the intended per-turn spawn fan-out. The old `allow_parallel_readonly_subagents` field is retained only for compatibility; current budgeting follows `max_parallel_readonly`.
 
 Each role can override visible tools:
 

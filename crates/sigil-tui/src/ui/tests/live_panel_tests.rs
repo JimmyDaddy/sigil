@@ -9,9 +9,11 @@ use sigil_kernel::{
 
 use crate::{
     app::AppState,
+    timeline::ComposerQueueRow,
+    ui::StatusKind,
     view_model::{
-        LivePanelViewModel, LiveProgressViewModel, PlanApprovalViewModel, TaskStripRowViewModel,
-        TaskStripViewModel,
+        LivePanelViewModel, LiveProgressViewModel, PlanApprovalViewModel,
+        QueueActionButtonViewModel, TaskStripRowViewModel, TaskStripViewModel,
     },
 };
 
@@ -74,6 +76,20 @@ fn render_live_progress_lines_shows_current_phase() -> anyhow::Result<()> {
 }
 
 #[test]
+fn status_band_line_pads_tail_with_band_background() {
+    let theme = Theme::default();
+    let bg = theme.palette.surface_panel_alt;
+    let line = status_band_line(Line::from(vec![Span::raw("Queue")]), 12, bg);
+
+    assert_eq!(line_display_width(&line.spans), 12);
+    assert_eq!(line.style.bg, Some(bg));
+    assert_eq!(line.spans[0].style.bg, Some(bg));
+    let tail = line.spans.last().expect("expected padded tail span");
+    assert_eq!(tail.content.as_ref(), "       ");
+    assert_eq!(tail.style.bg, Some(bg));
+}
+
+#[test]
 fn phase_accent_uses_blue_for_agent_phase() {
     assert_eq!(
         phase_accent(&crate::timeline::RunPhase::Agent("explore".to_owned())),
@@ -85,6 +101,10 @@ fn phase_accent_uses_blue_for_agent_phase() {
 fn render_live_panel_keeps_wrapped_tail_visible() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
+        queue_rows: Vec::new(),
+        queue_paused: false,
+        queue_panel_focused: false,
+        queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: None,
         task_strip: None,
@@ -112,6 +132,10 @@ fn render_live_panel_keeps_wrapped_tail_visible() -> anyhow::Result<()> {
 fn render_live_panel_keeps_bottom_padding_clear() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
+        queue_rows: Vec::new(),
+        queue_paused: false,
+        queue_panel_focused: false,
+        queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: None,
         task_strip: None,
@@ -135,6 +159,10 @@ fn render_live_panel_keeps_bottom_padding_clear() -> anyhow::Result<()> {
 fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Thinking,
+        queue_rows: Vec::new(),
+        queue_paused: false,
+        queue_panel_focused: false,
+        queue_action_buttons: Vec::new(),
         progress: Some(LiveProgressViewModel {
             title: "Thinking".to_owned(),
             detail: "reasoning with deepseek-v4-pro".to_owned(),
@@ -182,9 +210,135 @@ fn render_live_panel_merges_task_strip_into_status_band() -> anyhow::Result<()> 
 }
 
 #[test]
+fn render_live_panel_shows_queue_strip_actions_above_status() -> anyhow::Result<()> {
+    let view_model = LivePanelViewModel {
+        phase: crate::timeline::RunPhase::Idle,
+        queue_rows: vec![ComposerQueueRow {
+            label: "queued prompt".to_owned(),
+            detail: "queued · chat".to_owned(),
+            status: StatusKind::Pending,
+            selected: true,
+        }],
+        queue_paused: false,
+        queue_panel_focused: true,
+        queue_action_buttons: vec![
+            QueueActionButtonViewModel {
+                label: "Send now".to_owned(),
+                detail: "interrupt current turn".to_owned(),
+                selected: true,
+                destructive: false,
+            },
+            QueueActionButtonViewModel {
+                label: "Keep next".to_owned(),
+                detail: "run after current turn".to_owned(),
+                selected: false,
+                destructive: false,
+            },
+            QueueActionButtonViewModel {
+                label: "Edit".to_owned(),
+                detail: "edit queued input".to_owned(),
+                selected: false,
+                destructive: false,
+            },
+            QueueActionButtonViewModel {
+                label: "Delete".to_owned(),
+                detail: "remove queued input".to_owned(),
+                selected: false,
+                destructive: true,
+            },
+        ],
+        progress: Some(LiveProgressViewModel {
+            title: "Thinking".to_owned(),
+            detail: "reasoning with deepseek-v4-pro".to_owned(),
+        }),
+        plan_approval: None,
+        task_strip: None,
+        transcript_lines: vec![Line::from("visible tail")],
+    };
+    let backend = TestBackend::new(104, 8);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Queue"));
+    assert!(rendered.contains("queued prompt"));
+    assert!(rendered.contains("Send now"));
+    assert!(rendered.contains("Keep next"));
+    assert!(rendered.contains("Edit"));
+    assert!(rendered.contains("Delete"));
+    assert!(rendered.contains("Thinking..."));
+    assert!(!rendered.contains("S now"));
+    assert!(!rendered.contains("D delete"));
+    assert!(!rendered.contains("E edit"));
+    Ok(())
+}
+
+#[test]
+fn render_live_panel_queue_strip_covers_paused_and_unfocused_rows() -> anyhow::Result<()> {
+    let view_model = LivePanelViewModel {
+        phase: crate::timeline::RunPhase::Idle,
+        queue_rows: vec![
+            ComposerQueueRow {
+                label: "first queued prompt".to_owned(),
+                detail: "paused · chat".to_owned(),
+                status: StatusKind::Pending,
+                selected: false,
+            },
+            ComposerQueueRow {
+                label: "second queued prompt".to_owned(),
+                detail: "queued · chat".to_owned(),
+                status: StatusKind::Running,
+                selected: true,
+            },
+        ],
+        queue_paused: true,
+        queue_panel_focused: false,
+        queue_action_buttons: vec![QueueActionButtonViewModel {
+            label: "Send now".to_owned(),
+            detail: "interrupt current turn".to_owned(),
+            selected: false,
+            destructive: false,
+        }],
+        progress: None,
+        plan_approval: None,
+        task_strip: None,
+        transcript_lines: vec![Line::from("visible tail")],
+    };
+    let backend = TestBackend::new(96, 8);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_live_panel(frame, frame.area(), &view_model))?;
+
+    let rendered = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(rendered.contains("Queue paused"));
+    assert!(rendered.contains("/queue focus"));
+    assert!(rendered.contains("first queued prompt"));
+    assert!(rendered.contains("second queued prompt"));
+    assert!(rendered.contains("Send now"));
+    Ok(())
+}
+
+#[test]
 fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Idle,
+        queue_rows: Vec::new(),
+        queue_paused: false,
+        queue_panel_focused: false,
+        queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: Some(PlanApprovalViewModel {
             hash: "sha256:abc123".to_owned(),
@@ -219,6 +373,10 @@ fn render_live_panel_shows_plan_approval_surface() -> anyhow::Result<()> {
 fn render_live_panel_keeps_long_task_label_expanded() -> anyhow::Result<()> {
     let view_model = LivePanelViewModel {
         phase: crate::timeline::RunPhase::Thinking,
+        queue_rows: Vec::new(),
+        queue_paused: false,
+        queue_panel_focused: false,
+        queue_action_buttons: Vec::new(),
         progress: None,
         plan_approval: None,
         task_strip: Some(TaskStripViewModel {

@@ -48,19 +48,20 @@ impl AgentBudgetPolicy {
     pub fn from_root_config(root_config: &sigil_kernel::RootConfig) -> Self {
         let task = &root_config.task;
         let max_threads = task.max_child_sessions.max(1);
-        let default_ro = match task.allow_parallel_readonly_subagents {
-            true => max_threads,
-            false => 1,
-        };
+        let default_ro = max_threads.clamp(1, 3);
         let max_parallel_readonly = task.max_parallel_readonly.unwrap_or(default_ro);
-        let max_spawn_fanout_per_turn = task.max_spawn_fanout_per_turn.unwrap_or(max_threads);
+        let max_spawn_fanout_per_turn = task
+            .max_spawn_fanout_per_turn
+            .unwrap_or(max_threads.clamp(1, 4));
         let max_agent_tokens_per_task = task.max_agent_tokens_per_task.unwrap_or(200_000);
         Self {
             max_threads,
             max_depth: 1,
             max_parallel_readonly,
             max_parallel_write: task.max_parallel_write.unwrap_or(1),
-            max_background_threads: task.max_background_threads.unwrap_or(1),
+            max_background_threads: task
+                .max_background_threads
+                .unwrap_or(max_threads.clamp(1, 2)),
             max_spawn_fanout_per_turn,
             max_agent_tokens_per_task,
         }
@@ -238,7 +239,7 @@ impl AgentSupervisor {
             .count();
         if background_count >= self.budget.max_background_threads {
             return Err(format!(
-                "background agent budget exceeded: max_background_threads={}",
+                "background agent budget exceeded: [task].max_background_threads={}",
                 self.budget.max_background_threads
             ));
         }
@@ -377,7 +378,7 @@ impl AgentSupervisor {
                 ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
                     thread_id,
                     status: AgentThreadStatus::Failed,
-                    reason: Some(reason),
+                    reason: Some(reason.clone()),
                     updated_at_ms: None,
                 }),
             )?;
@@ -402,11 +403,11 @@ impl AgentSupervisor {
                 ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
                     thread_id,
                     status: AgentThreadStatus::Failed,
-                    reason: Some(reason),
+                    reason: Some(reason.clone()),
                     updated_at_ms: None,
                 }),
             )?;
-            bail!("agent budget denied child session");
+            bail!("agent budget denied child session: {reason}");
         }
 
         append_control(
@@ -550,7 +551,7 @@ impl AgentSupervisor {
                 ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
                     thread_id,
                     status: AgentThreadStatus::Failed,
-                    reason: Some(reason),
+                    reason: Some(reason.clone()),
                     updated_at_ms: None,
                 }),
             )?;
@@ -583,11 +584,11 @@ impl AgentSupervisor {
                 ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
                     thread_id,
                     status: AgentThreadStatus::Failed,
-                    reason: Some(reason),
+                    reason: Some(reason.clone()),
                     updated_at_ms: None,
                 }),
             )?;
-            bail!("agent budget denied child session");
+            bail!("agent budget denied child session: {reason}");
         }
 
         append_control(
@@ -826,7 +827,7 @@ impl AgentSupervisor {
             && background_count >= self.budget.max_background_threads
         {
             return Err(format!(
-                "background agent budget exceeded: max_background_threads={}",
+                "background agent budget exceeded: [task].max_background_threads={}",
                 self.budget.max_background_threads
             ));
         }
@@ -836,9 +837,9 @@ impl AgentSupervisor {
             .filter(|thread| thread.role == AgentRole::SubagentRead)
             .count();
         if role == AgentRole::SubagentRead && readonly_count >= self.budget.max_parallel_readonly {
+            let max = self.budget.max_parallel_readonly;
             return Err(format!(
-                "readonly agent budget exceeded: max_parallel_readonly={}",
-                self.budget.max_parallel_readonly
+                "readonly agent budget exceeded: [task].max_parallel_readonly={max}"
             ));
         }
         let write_count = state
@@ -847,9 +848,9 @@ impl AgentSupervisor {
             .filter(|thread| thread.role == AgentRole::SubagentWrite)
             .count();
         if role == AgentRole::SubagentWrite && write_count >= self.budget.max_parallel_write {
+            let max = self.budget.max_parallel_write;
             return Err(format!(
-                "write agent budget exceeded: max_parallel_write={}",
-                self.budget.max_parallel_write
+                "write agent budget exceeded: [task].max_parallel_write={max}"
             ));
         }
         state.spawn_fanout_this_turn += 1;

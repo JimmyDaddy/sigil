@@ -10,22 +10,24 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::AppState,
+    timeline::ComposerQueueRow,
     view_model::{
-        LivePanelViewModel, LiveProgressViewModel, PlanApprovalViewModel, TaskStripRowViewModel,
-        TaskStripViewModel,
+        LivePanelViewModel, LiveProgressViewModel, PlanApprovalViewModel,
+        QueueActionButtonViewModel, TaskStripRowViewModel, TaskStripViewModel,
     },
 };
 
 use super::{
     geometry::inset_rect,
     status_indicator::{StatusIndicator, StatusKind},
-    text::truncate_display_width,
+    text::{pad_display_width, truncate_display_width},
     theme::Theme,
 };
 
 pub(crate) const LIVE_PANEL_BOTTOM_PADDING: u16 = 1;
 pub(crate) const LIVE_PROGRESS_ROWS: u16 = 2;
 const LIVE_PLAN_APPROVAL_ROWS: u16 = 2;
+const LIVE_QUEUE_ROW_LIMIT: usize = 4;
 const LIVE_TASK_ROW_LIMIT: usize = 4;
 
 #[cfg(test)]
@@ -127,13 +129,15 @@ pub(crate) fn live_status_rows_for_app(app: &AppState) -> u16 {
         .map(|view| live_task_strip_rows(view.rows.len()))
         .unwrap_or(0);
     live_status_rows_with_separator(
-        progress_rows
+        app.queue_strip_rows()
+            .saturating_add(progress_rows)
             .saturating_add(plan_rows)
             .saturating_add(task_rows),
     )
 }
 
 pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
+    let queue_rows = live_queue_strip_rows(view_model.queue_rows.len());
     let progress_rows = if view_model.progress.is_some() {
         LIVE_PROGRESS_ROWS
     } else {
@@ -150,7 +154,8 @@ pub(crate) fn live_status_rows(view_model: &LivePanelViewModel) -> u16 {
         .map(|view| live_task_strip_rows(view.rows.len()))
         .unwrap_or(0);
     live_status_rows_with_separator(
-        progress_rows
+        queue_rows
+            .saturating_add(progress_rows)
             .saturating_add(plan_rows)
             .saturating_add(task_rows),
     )
@@ -168,6 +173,13 @@ fn live_task_strip_rows(row_count: usize) -> u16 {
         return 0;
     }
     1 + row_count.min(LIVE_TASK_ROW_LIMIT) as u16
+}
+
+fn live_queue_strip_rows(row_count: usize) -> u16 {
+    if row_count == 0 {
+        return 0;
+    }
+    2 + row_count.min(LIVE_QUEUE_ROW_LIMIT) as u16
 }
 
 fn render_live_status_band(
@@ -196,6 +208,13 @@ fn render_live_status_band(
     }
 
     let mut lines = Vec::new();
+    if !view_model.queue_rows.is_empty() {
+        lines.extend(render_queue_strip_lines(
+            view_model,
+            area.width as usize,
+            theme,
+        ));
+    }
     if let Some(progress) = &view_model.progress {
         lines.extend(render_live_progress_lines_with_theme(
             progress, accent, theme,
@@ -218,6 +237,7 @@ fn render_live_status_band(
     let lines = lines
         .into_iter()
         .take(content_area.height as usize)
+        .map(|line| status_band_line(line, content_area.width as usize, band_bg))
         .collect::<Vec<_>>();
 
     frame.render_widget(
@@ -226,6 +246,39 @@ fn render_live_status_band(
             .wrap(Wrap { trim: false }),
         content_area,
     );
+}
+
+fn status_band_line(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
+    let mut spans = line
+        .spans
+        .into_iter()
+        .map(|span| {
+            let mut style = span.style;
+            if style.bg.is_none() {
+                style.bg = Some(bg);
+            }
+            Span::styled(span.content, style)
+        })
+        .collect::<Vec<_>>();
+    let line_width = line_display_width(&spans);
+    if width > line_width {
+        spans.push(Span::styled(
+            " ".repeat(width - line_width),
+            Style::default().bg(bg),
+        ));
+    }
+    Line {
+        spans,
+        style: line.style.patch(Style::default().bg(bg)),
+        alignment: line.alignment,
+    }
+}
+
+fn line_display_width(spans: &[Span<'static>]) -> usize {
+    spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
 }
 
 fn render_status_separator(frame: &mut Frame, area: Rect, bg: Color, edge: Color) {
@@ -258,6 +311,160 @@ fn render_status_left_rail(frame: &mut Frame, area: Rect, accent: Color, bg: Col
             area.height.saturating_sub(1),
         ),
     );
+}
+
+fn render_queue_strip_lines(
+    view_model: &LivePanelViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    if view_model.queue_rows.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::with_capacity(2 + view_model.queue_rows.len().min(LIVE_QUEUE_ROW_LIMIT));
+    lines.push(render_queue_header(view_model, width, theme));
+    for row in view_model.queue_rows.iter().take(LIVE_QUEUE_ROW_LIMIT) {
+        lines.push(render_queue_row(
+            row,
+            width,
+            view_model.queue_panel_focused,
+            theme,
+        ));
+    }
+    lines.push(render_queue_actions(
+        &view_model.queue_action_buttons,
+        width,
+        view_model.queue_panel_focused,
+        theme,
+    ));
+    lines
+}
+
+fn render_queue_header(
+    view_model: &LivePanelViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let palette = &theme.palette;
+    let bg = palette.surface_panel_alt;
+    let title = if view_model.queue_paused {
+        "Queue paused"
+    } else {
+        "Queue"
+    };
+    let detail = if view_model.queue_panel_focused {
+        "Up/Down item · Tab action · Enter run"
+    } else {
+        "/queue focus · /queue now"
+    };
+    Line::from(vec![
+        Span::styled(
+            title,
+            Style::default()
+                .fg(if view_model.queue_paused {
+                    palette.status_warning
+                } else {
+                    palette.accent_info
+                })
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            truncate_display_width(&format!("  {detail}"), width.saturating_sub(title.len())),
+            Style::default().fg(palette.text_secondary).bg(bg),
+        ),
+    ])
+}
+
+fn render_queue_row(
+    row: &ComposerQueueRow,
+    width: usize,
+    panel_focused: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    const QUEUE_LABEL_WIDTH: usize = 28;
+
+    let palette = &theme.palette;
+    let bg = palette.surface_panel_alt;
+    let selected = panel_focused && row.selected;
+    let row_bg = if selected { palette.selection_bg } else { bg };
+    let fg = if selected {
+        palette.selection_fg
+    } else {
+        palette.text_primary
+    };
+    let marker = if selected { "▸" } else { " " };
+    let status = StatusIndicator::animated(row.status);
+    let label = truncate_display_width(&row.label, QUEUE_LABEL_WIDTH);
+    let label = format!("{label:<QUEUE_LABEL_WIDTH$}");
+    let reserved = 2 + QUEUE_LABEL_WIDTH + 3;
+    let detail = truncate_display_width(&row.detail, width.saturating_sub(reserved));
+    if selected {
+        let content = truncate_display_width(
+            &format!("{marker} {label} {} {detail}", status.symbol()),
+            width,
+        );
+        return Line::from(vec![Span::styled(
+            pad_display_width(&content, width),
+            Style::default().fg(fg).bg(row_bg),
+        )]);
+    }
+    Line::from(vec![
+        Span::styled(marker, Style::default().fg(palette.accent_info).bg(bg)),
+        Span::styled(" ", Style::default().bg(bg)),
+        Span::styled(label, Style::default().fg(fg).bg(row_bg)),
+        Span::styled(" ", Style::default().bg(bg)),
+        status.span_with_palette(palette),
+        Span::styled(" ", Style::default().bg(bg)),
+        Span::styled(detail, Style::default().fg(palette.text_secondary).bg(bg)),
+    ])
+}
+
+fn render_queue_actions(
+    buttons: &[QueueActionButtonViewModel],
+    width: usize,
+    panel_focused: bool,
+    theme: &Theme,
+) -> Line<'static> {
+    let palette = &theme.palette;
+    let bg = palette.surface_panel_alt;
+    let mut spans = vec![Span::styled(
+        "Actions ",
+        Style::default()
+            .fg(palette.text_muted)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for button in buttons {
+        spans.push(Span::styled(" ", Style::default().bg(bg)));
+        let style = if panel_focused && button.selected {
+            Style::default()
+                .fg(palette.selection_fg)
+                .bg(palette.selection_bg)
+                .add_modifier(Modifier::BOLD)
+        } else if button.destructive {
+            Style::default().fg(palette.status_error).bg(bg)
+        } else {
+            Style::default().fg(palette.text_primary).bg(bg)
+        };
+        spans.push(Span::styled(format!(" {} ", button.label), style));
+    }
+    let selected_detail = buttons
+        .iter()
+        .find(|button| button.selected)
+        .map(|button| button.detail.as_str())
+        .unwrap_or("");
+    if !selected_detail.is_empty() {
+        spans.push(Span::styled(
+            "  ·  ",
+            Style::default().fg(palette.text_muted).bg(bg),
+        ));
+        spans.push(Span::styled(
+            truncate_display_width(selected_detail, width.saturating_sub(32)),
+            Style::default().fg(palette.text_secondary).bg(bg),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn render_plan_approval_lines(

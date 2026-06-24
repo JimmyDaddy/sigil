@@ -40,6 +40,8 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
+| `/queue` | Focus queued input |
+| `/queue next|now|edit|delete [item]` | Manage queued input; `now` interrupts the current run before dispatch |
 | `/plan` / `/plan <prompt>` | Enter plan mode or run one read-only planning prompt |
 | `/task <task>` | Create a durable plan and execute the task step by step |
 | `/task continue` | Continue the latest planned task without extra guidance |
@@ -50,7 +52,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 
 Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 
-`/model`, `/effort`, `/resume`, and `/agent` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
+`/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
 
 ## CLI Commands
 

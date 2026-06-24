@@ -3,6 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 
 use anyhow::{Context, Result, bail};
@@ -14,13 +15,19 @@ use crate::{
     agent_thread::{
         AgentApprovalRouteEntry, AgentElicitationRouteEntry, AgentMergeSafePointEntry,
         AgentProfileCapturedEntry, AgentProfilePolicyEntry, AgentProfilePolicyProjection,
-        AgentProfileTrustEntry, AgentProfileTrustProjection, AgentRouteClosedEntry,
-        AgentRunAttemptStartedEntry, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
-        AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry,
-        AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
-        AgentThreadStatusChangedEntry, closed_agent_routes, interrupted_agent_attempts,
+        AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
+        AgentResultContinuationProjection, AgentRouteClosedEntry, AgentRunAttemptStartedEntry,
+        AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
+        AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry, AgentThreadResultRecordedEntry,
+        AgentThreadStartedEntry, AgentThreadStateProjection, AgentThreadStatusChangedEntry,
+        closed_agent_routes, interrupted_agent_attempts,
     },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
+    conversation_queue::{
+        ConversationInputEditedEntry, ConversationInputQueueControlEntry,
+        ConversationInputQueuedEntry, ConversationInputReorderedEntry,
+        ConversationInputStatusEntry, ConversationQueueProjection,
+    },
     memory::{apply_memory_report, materialize_memory},
     permission::ApprovalMode,
     plan::{PlanApprovalProjection, PlanApprovedEntry},
@@ -41,6 +48,8 @@ use crate::{
         ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
     },
 };
+
+static SESSION_LOG_IO_LOCK: Mutex<()> = Mutex::new(());
 
 /// Append-only session log entry stored in the durable JSONL session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +169,8 @@ pub enum ControlEntry {
     AgentThreadMessageRouted(AgentThreadMessageRoutedEntry),
     #[serde(alias = "AgentThreadResultRecorded")]
     AgentThreadResultRecorded(AgentThreadResultRecordedEntry),
+    #[serde(alias = "AgentResultContinuation")]
+    AgentResultContinuation(AgentResultContinuationEntry),
     #[serde(alias = "AgentThreadDisplayName")]
     AgentThreadDisplayName(AgentThreadDisplayNameEntry),
     #[serde(alias = "AgentApprovalRoute")]
@@ -178,6 +189,16 @@ pub enum ControlEntry {
     AgentMergeSafePoint(AgentMergeSafePointEntry),
     #[serde(alias = "AgentThreadClosed")]
     AgentThreadClosed(AgentThreadClosedEntry),
+    #[serde(alias = "ConversationInputQueued")]
+    ConversationInputQueued(ConversationInputQueuedEntry),
+    #[serde(alias = "ConversationInputQueueControl")]
+    ConversationInputQueueControl(ConversationInputQueueControlEntry),
+    #[serde(alias = "ConversationInputEdited")]
+    ConversationInputEdited(ConversationInputEditedEntry),
+    #[serde(alias = "ConversationInputReordered")]
+    ConversationInputReordered(ConversationInputReorderedEntry),
+    #[serde(alias = "ConversationInputStatusChanged")]
+    ConversationInputStatusChanged(ConversationInputStatusEntry),
     #[serde(alias = "Note")]
     Note {
         kind: String,
@@ -349,13 +370,18 @@ impl JsonlSessionStore {
 
     /// Appends a single serialized session entry to the durable JSONL file.
     pub fn append(&self, entry: &SessionLogEntry) -> Result<()> {
-        let line = serde_json::to_string(entry).context("failed to serialize session entry")?;
+        let _guard = SESSION_LOG_IO_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
+        let mut line = serde_json::to_string(entry).context("failed to serialize session entry")?;
+        line.push('\n');
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
-        writeln!(file, "{line}").context("failed to append session entry")
+        file.write_all(line.as_bytes())
+            .context("failed to append session entry")
     }
 
     pub fn path(&self) -> &Path {
@@ -369,6 +395,9 @@ impl JsonlSessionStore {
             return Ok(Vec::new());
         }
 
+        let _guard = SESSION_LOG_IO_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
         let file =
             fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
         let reader = BufReader::new(file);
@@ -590,6 +619,14 @@ impl Session {
     /// Returns a durable terminal task projection reconstructed from append-only control entries.
     pub fn terminal_task_projection(&self) -> TerminalTaskProjection {
         TerminalTaskProjection::from_entries(&self.entries)
+    }
+
+    pub fn conversation_queue_projection(&self) -> ConversationQueueProjection {
+        ConversationQueueProjection::from_entries(&self.entries)
+    }
+
+    pub fn agent_result_continuation_projection(&self) -> AgentResultContinuationProjection {
+        AgentResultContinuationProjection::from_entries(&self.entries)
     }
 
     /// Builds one provider request from stable system memory, projected session history, and tools.

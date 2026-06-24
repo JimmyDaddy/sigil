@@ -2,7 +2,9 @@ use std::{fs, time::Duration};
 
 use anyhow::Result;
 use sigil_kernel::{
-    Agent, AgentRole, ControlEntry, McpServerConfig, McpServerStartup, ProviderChunk,
+    Agent, AgentRole, ControlEntry, ConversationInputKind, ConversationInputQueueId,
+    ConversationInputQueuedEntry, ConversationInputStatus, ConversationInputStatusEntry,
+    ConversationInputTarget, JsonlSessionStore, McpServerConfig, McpServerStartup, ProviderChunk,
     ReasoningEffort, RunEvent, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
     SkillTrustState, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolRegistry, ToolResultStatus,
 };
@@ -10,10 +12,13 @@ use tempfile::tempdir;
 
 use super::{
     super::{
-        McpActivationStatus, WorkerCommand, WorkerMessage, spawn_agent_worker,
+        McpActivationStatus, QueueMoveDirection, WorkerCommand, WorkerMessage, spawn_agent_worker,
         worker_loop::skill_child_agent_role,
     },
-    common::{PlannedProvider, StreamPlan, WriteTool, spawn_test_worker, test_root_config},
+    common::{
+        PlannedProvider, StreamPlan, WriteTool, spawn_test_worker, test_root_config,
+        wait_for_session_entry,
+    },
 };
 
 fn write_workspace_skill(workspace_root: &std::path::Path, id: &str, body: &str) -> Result<()> {
@@ -122,7 +127,7 @@ fn submit_prompt_emits_started_event_and_finished_messages() -> Result<()> {
         ProviderChunk::Done,
     ])]);
     let agent = Agent::new(provider, ToolRegistry::new());
-    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 
     worker.send(WorkerCommand::SubmitPrompt {
         prompt: "hello".to_owned(),
@@ -193,7 +198,7 @@ fn submit_plan_prompt_uses_readonly_registry_and_does_not_execute_write_tool() -
     registry.register(std::sync::Arc::new(WriteTool));
     let agent = Agent::new(provider, registry);
     let note_path = workspace_root.join("note.txt");
-    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 
     worker.send(WorkerCommand::SubmitPlanPrompt {
         prompt: "inspect first".to_owned(),
@@ -692,14 +697,14 @@ fn spawn_agent_worker_reports_provider_build_failure() -> Result<()> {
 }
 
 #[test]
-fn submit_prompt_rejects_second_run_while_agent_is_active() -> Result<()> {
+fn submit_prompt_queues_second_run_while_agent_is_active() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-busy.jsonl");
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
     let agent = Agent::new(provider, ToolRegistry::new());
-    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 
     worker.send(WorkerCommand::SubmitPrompt {
         prompt: "first".to_owned(),
@@ -711,12 +716,461 @@ fn submit_prompt_rejects_second_run_while_agent_is_active() -> Result<()> {
         prompt: "second".to_owned(),
         reasoning_effort: ReasoningEffort::Max,
     })?;
-    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    let update = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::ConversationQueueUpdated { .. })
+    })?;
 
     assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error) if error == "agent is already running"
+        update,
+        WorkerMessage::ConversationQueueUpdated { ref items, .. }
+            if items.len() == 1
+                && items[0].queued.prompt == "second"
+                && items[0].queued.kind == ConversationInputKind::Chat
+                && items[0].status == ConversationInputStatus::Queued
     ));
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued))
+            if queued.prompt == "second"
+    )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn submit_plan_prompt_queues_while_agent_is_active() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-plan-busy.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "first".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+
+    worker.send(WorkerCommand::SubmitPlanPrompt {
+        prompt: "plan second".to_owned(),
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    let update = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::ConversationQueueUpdated { .. })
+    })?;
+
+    assert!(matches!(
+        update,
+        WorkerMessage::ConversationQueueUpdated { ref items, .. }
+            if items.len() == 1
+                && items[0].queued.prompt == "plan second"
+                && items[0].queued.kind == ConversationInputKind::PlanPrompt
+                && items[0].status == ConversationInputStatus::Queued
+    ));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn queue_conversation_input_persists_while_agent_is_active() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-queue.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Pending]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "first".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+
+    worker.send(WorkerCommand::QueueConversationInput {
+        prompt: "queued while running".to_owned(),
+        kind: ConversationInputKind::Chat,
+        target: ConversationInputTarget::MainThread,
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    wait_for_session_entry(&session_log_path, |entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued))
+                if queued.prompt == "queued while running"
+        )
+    })?;
+    let entries = sigil_kernel::JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued))
+            if queued.prompt == "queued while running"
+    )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn queue_control_commands_persist_and_update_projection() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-queue-controls.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(Vec::new());
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SetConversationQueuePaused { paused: true })?;
+    let _ = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { paused: true, .. }
+        )
+    })?;
+
+    worker.send(WorkerCommand::QueueConversationInput {
+        prompt: "first queued".to_owned(),
+        kind: ConversationInputKind::Chat,
+        target: ConversationInputTarget::MainThread,
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    let _ = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. } if items.len() == 1)
+    })?;
+    worker.send(WorkerCommand::QueueConversationInput {
+        prompt: "second queued".to_owned(),
+        kind: ConversationInputKind::Chat,
+        target: ConversationInputTarget::MainThread,
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    let _ = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. } if items.len() == 2)
+    })?;
+
+    worker.send(WorkerCommand::SetConversationQueuePaused { paused: true })?;
+    let paused_update = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { paused: true, .. }
+        )
+    })?;
+    assert!(matches!(
+        paused_update,
+        WorkerMessage::ConversationQueueUpdated { paused: true, .. }
+    ));
+
+    let queue_2 = sigil_kernel::ConversationInputQueueId::new("queue_2")?;
+    worker.send(WorkerCommand::EditQueuedConversationInput {
+        queue_id: queue_2.clone(),
+        prompt: "second edited".to_owned(),
+        reasoning_effort: ReasoningEffort::Low,
+    })?;
+    let edit_update = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { items, .. }
+                if items.iter().any(|item| item.queued.prompt == "second edited")
+        )
+    })?;
+    assert!(matches!(
+        edit_update,
+        WorkerMessage::ConversationQueueUpdated { ref items, .. }
+            if items[1].queued.queue_id.as_str() == "queue_2"
+                && items[1].queued.prompt == "second edited"
+    ));
+
+    worker.send(WorkerCommand::MoveQueuedConversationInput {
+        queue_id: queue_2.clone(),
+        direction: QueueMoveDirection::Up,
+    })?;
+    let move_update = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { items, .. }
+                if items.first().is_some_and(|item| item.queued.queue_id.as_str() == "queue_2")
+        )
+    })?;
+    assert!(matches!(
+        move_update,
+        WorkerMessage::ConversationQueueUpdated { ref items, .. }
+            if items[0].queued.prompt == "second edited"
+    ));
+
+    let queue_1 = sigil_kernel::ConversationInputQueueId::new("queue_1")?;
+    worker.send(WorkerCommand::PromoteQueuedConversationInput {
+        queue_id: queue_1.clone(),
+    })?;
+    let promote_update = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { items, paused: false, .. }
+                if items.first().is_some_and(|item| item.queued.queue_id.as_str() == "queue_1")
+        )
+    })?;
+    assert!(matches!(
+        promote_update,
+        WorkerMessage::ConversationQueueUpdated { ref items, paused: false, .. }
+            if items[0].queued.prompt == "first queued"
+    ));
+
+    worker.send(WorkerCommand::CancelQueuedConversationInput { queue_id: queue_2 })?;
+    let cancel_update = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { items, .. }
+                if items.len() == 1
+                    && items[0].queued.queue_id.as_str() == "queue_1"
+        )
+    })?;
+    assert!(matches!(
+        cancel_update,
+        WorkerMessage::ConversationQueueUpdated { ref items, .. }
+            if items.len() == 1 && items[0].queued.prompt == "first queued"
+    ));
+
+    let entries = sigil_kernel::JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputQueueControl(control))
+            if control.action == sigil_kernel::ConversationInputQueueControlAction::Pause
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputEdited(edited))
+            if edited.queue_id.as_str() == "queue_2" && edited.prompt == "second edited"
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputReordered(reordered))
+            if reordered.queue_id.as_str() == "queue_1" && reordered.after_queue_id.is_none()
+    )));
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+            if status.queue_id.as_str() == "queue_2"
+                && status.status == sigil_kernel::ConversationInputStatus::Cancelled
+    )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn failed_queued_run_pauses_queue() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-queue-failure.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![StreamPlan::Fail("queued failure")]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::QueueConversationInput {
+        prompt: "queued will fail".to_owned(),
+        kind: ConversationInputKind::Chat,
+        target: ConversationInputTarget::MainThread,
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    let _ = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. } if items.len() == 1)
+    })?;
+    let _ = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
+                if prompt == "queued will fail"
+        )
+    })?;
+
+    let paused_update = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { entries, paused: true, .. }
+                if entries.iter().any(|entry| matches!(
+                    entry,
+                    SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+                        if status.status == ConversationInputStatus::Rejected
+                ))
+        )
+    })?;
+    assert!(matches!(
+        paused_update,
+        WorkerMessage::ConversationQueueUpdated { ref entries, paused: true, .. }
+            if entries.iter().any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+                    if status.queue_id.as_str() == "queue_1"
+                        && status.status == ConversationInputStatus::Rejected
+            ))
+    ));
+    let failure = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    assert!(matches!(failure, WorkerMessage::RunFailed(ref error) if error == "queued failure"));
+
+    let entries = sigil_kernel::JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputQueueControl(control))
+            if control.action == sigil_kernel::ConversationInputQueueControlAction::Pause
+                && control.reason.as_deref() == Some("queued run failed")
+    )));
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn send_queued_input_now_interrupts_active_run_and_dispatches_selected_item() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-queue-send-now.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(vec![
+        StreamPlan::Pending,
+        StreamPlan::Chunks(vec![
+            ProviderChunk::TextDelta("urgent done".to_owned()),
+            ProviderChunk::Done,
+        ]),
+    ]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "current run".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+
+    worker.send(WorkerCommand::QueueConversationInput {
+        prompt: "urgent queued prompt".to_owned(),
+        kind: ConversationInputKind::Chat,
+        target: ConversationInputTarget::MainThread,
+        reasoning_effort: ReasoningEffort::High,
+    })?;
+    let _ = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::ConversationQueueUpdated { items, .. } if items.len() == 1)
+    })?;
+
+    worker.send(WorkerCommand::SendQueuedConversationInputNow {
+        queue_id: ConversationInputQueueId::new("queue_1")?,
+    })?;
+
+    let first = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::RunCancelled { .. })
+            || matches!(
+                message,
+                WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
+                    if prompt == "urgent queued prompt"
+            )
+    })?;
+    let saw_cancel_first = matches!(first, WorkerMessage::RunCancelled { .. });
+    let second = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        if saw_cancel_first {
+            matches!(
+                message,
+                WorkerMessage::ConversationQueueDispatchStarted { prompt, .. }
+                    if prompt == "urgent queued prompt"
+            )
+        } else {
+            matches!(message, WorkerMessage::RunCancelled { .. })
+        }
+    })?;
+    assert!(
+        (saw_cancel_first
+            && matches!(
+                second,
+                WorkerMessage::ConversationQueueDispatchStarted { .. }
+            ))
+            || (!saw_cancel_first && matches!(second, WorkerMessage::RunCancelled { .. }))
+    );
+
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+            if status.queue_id.as_str() == "queue_1"
+                && status.status == ConversationInputStatus::Dispatching
+    )));
+
+    let _ = worker.recv_until_with_timeout(Duration::from_secs(10), |message| {
+        matches!(message, WorkerMessage::RunFinished { .. })
+    })?;
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn restored_dispatching_queue_item_is_marked_stale() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-queue-restore.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let store = sigil_kernel::JsonlSessionStore::new(&session_log_path)?;
+    store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "planned".to_owned(),
+        model_name: "planned-model".to_owned(),
+    }))?;
+    let queue_id = ConversationInputQueueId::new("queue_1")?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueued(ConversationInputQueuedEntry {
+            queue_id: queue_id.clone(),
+            target: ConversationInputTarget::MainThread,
+            kind: ConversationInputKind::Chat,
+            prompt_hash: "hash".to_owned(),
+            prompt: "stale after restore".to_owned(),
+            reasoning_effort: Some(ReasoningEffort::High),
+            created_at_ms: Some(1),
+        }),
+    ))?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+            queue_id: queue_id.clone(),
+            status: ConversationInputStatus::Dispatching,
+            reason: Some("dispatching".to_owned()),
+            updated_at_ms: Some(2),
+        }),
+    ))?;
+
+    let provider = PlannedProvider::new(Vec::new());
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
+
+    let update = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::ConversationQueueUpdated { items, .. } if items.is_empty()
+        )
+    })?;
+    assert!(matches!(
+        update,
+        WorkerMessage::ConversationQueueUpdated { ref items, .. } if items.is_empty()
+    ));
+
+    let entries = sigil_kernel::JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::ConversationInputStatusChanged(status))
+            if status.queue_id == queue_id
+                && status.status == ConversationInputStatus::Stale
+                && status
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("session restore"))
+    )));
 
     worker.shutdown()?;
     Ok(())

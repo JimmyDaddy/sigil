@@ -270,6 +270,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::AgentThreadStatusChanged(_) => "agent_thread_status_changed",
         ControlEntry::AgentThreadMessageRouted(_) => "agent_thread_message_routed",
         ControlEntry::AgentThreadResultRecorded(_) => "agent_thread_result_recorded",
+        ControlEntry::AgentResultContinuation(_) => "agent_result_continuation",
         ControlEntry::AgentThreadDisplayName(_) => "agent_thread_display_name",
         ControlEntry::AgentApprovalRoute(_) => "agent_approval_route",
         ControlEntry::AgentElicitationRoute(_) => "agent_elicitation_route",
@@ -279,6 +280,11 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::AgentRouteClosed(_) => "agent_route_closed",
         ControlEntry::AgentMergeSafePoint(_) => "agent_merge_safe_point",
         ControlEntry::AgentThreadClosed(_) => "agent_thread_closed",
+        ControlEntry::ConversationInputQueued(_) => "conversation_input_queued",
+        ControlEntry::ConversationInputQueueControl(_) => "conversation_input_queue_control",
+        ControlEntry::ConversationInputEdited(_) => "conversation_input_edited",
+        ControlEntry::ConversationInputReordered(_) => "conversation_input_reordered",
+        ControlEntry::ConversationInputStatusChanged(_) => "conversation_input_status_changed",
         ControlEntry::Note { .. } => "note",
     }
 }

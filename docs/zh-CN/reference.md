@@ -40,6 +40,8 @@
 | `/resume` | 选择并恢复历史 session |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
 | `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
+| `/queue` | 聚焦 queued input |
+| `/queue next|now|edit|delete [item]` | 管理 queued input；`now` 会先 interrupt 当前 run 再 dispatch |
 | `/plan` / `/plan <prompt>` | 进入 plan mode，或运行一次只读 planning prompt |
 | `/task <task>` | 创建 durable plan，并分步骤执行任务 |
 | `/task continue` | 不带额外 guidance 继续最新 planned task |
@@ -50,7 +52,7 @@
 
 Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。
 
-`/model`、`/effort`、`/resume` 和 `/agent` 会展示候选项。使用 `Up/Down` 选择，`Tab` 接受，`Enter` 执行。`/agent rename` 会在输入新名字前展示 child agent 候选项。
+`/model`、`/effort`、`/resume`、`/agent` 和 `/queue` 会展示候选项。使用 `Up/Down` 选择，`Tab` 接受，`Enter` 执行。`/agent rename` 会在输入新名字前展示 child agent 候选项。
 
 ## CLI Commands
 

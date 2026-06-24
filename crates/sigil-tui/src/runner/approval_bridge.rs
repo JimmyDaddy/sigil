@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use sigil_kernel::{ApprovalHandler, ToolApproval, ToolCall, ToolSpec};
+use sigil_kernel::{ApprovalHandler, ToolApproval, ToolCall, ToolSpec, saturating_elapsed};
 
 const DEFAULT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
@@ -42,7 +42,7 @@ impl ApprovalHandler for ChannelApprovalHandler {
     fn approve_tool_call(&mut self, call: &ToolCall, _spec: &ToolSpec) -> Result<ToolApproval> {
         let started = Instant::now();
         loop {
-            let Some(remaining) = self.timeout.checked_sub(started.elapsed()) else {
+            let Some(remaining) = self.timeout.checked_sub(saturating_elapsed(started)) else {
                 return Ok(timeout_denial(self.timeout));
             };
             match self.decision_rx.recv_timeout(remaining) {

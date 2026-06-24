@@ -9,6 +9,7 @@ mod agent_flow;
 mod approval_flow;
 mod command_dispatch;
 mod config_flow;
+mod conversation_queue_flow;
 mod diagnostics_flow;
 mod formatting;
 mod input_flow;
@@ -29,8 +30,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Line;
 use sigil_kernel::{
     AgentThreadId, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
-    MemoryConfig, PlanApprovalPermission, ReasoningEffort, RootConfig, SecretRedactor, Session,
-    SessionLogEntry, SessionStats, ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
+    ConversationInputKind, ConversationInputQueueId, ConversationInputTarget, MemoryConfig,
+    PlanApprovalPermission, ReasoningEffort, RootConfig, SecretRedactor, Session, SessionLogEntry,
+    SessionStats, ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
 };
 use uuid::Uuid;
 
@@ -51,7 +53,7 @@ use crate::context_window::{
 };
 pub use crate::input::PaneFocus;
 use crate::provider_status::BalanceSnapshot;
-use crate::runner::WorkerCommand;
+use crate::runner::{QueueMoveDirection, WorkerCommand};
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
 pub(crate) use crate::setup::{SetupField, SetupState};
 use crate::slash::ResolvedSlashCommand;
@@ -80,6 +82,54 @@ enum AgentView {
         child_task_id: String,
         child_session_ref: sigil_kernel::SessionRef,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComposerQueueAction {
+    SendNow,
+    KeepNext,
+    Edit,
+    Delete,
+}
+
+impl ComposerQueueAction {
+    pub(crate) const ORDER: [Self; 4] = [Self::SendNow, Self::KeepNext, Self::Edit, Self::Delete];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::SendNow => "Send now",
+            Self::KeepNext => "Keep next",
+            Self::Edit => "Edit",
+            Self::Delete => "Delete",
+        }
+    }
+
+    pub(crate) fn detail(self) -> &'static str {
+        match self {
+            Self::SendNow => "interrupt current turn",
+            Self::KeepNext => "run after current turn",
+            Self::Edit => "edit queued input",
+            Self::Delete => "remove queued input",
+        }
+    }
+
+    pub(crate) fn is_destructive(self) -> bool {
+        matches!(self, Self::Delete)
+    }
+
+    fn next(self, forward: bool) -> Self {
+        let current = Self::ORDER
+            .iter()
+            .position(|action| *action == self)
+            .unwrap_or(0);
+        let len = Self::ORDER.len();
+        let next = if forward {
+            (current + 1) % len
+        } else {
+            current.checked_sub(1).unwrap_or(len - 1)
+        };
+        Self::ORDER[next]
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +293,10 @@ pub struct AppState {
     sidebar_selected_card: SidebarCard,
     sidebar_agent_selected: usize,
     composer_agent_panel_focused: bool,
+    composer_queue_panel_focused: bool,
+    composer_queue_selected: usize,
+    composer_queue_action_selected: ComposerQueueAction,
+    queue_edit_target: Option<ConversationInputQueueId>,
     active_agent_view: AgentView,
     active_agent_child_transcript: Option<ActiveAgentChildTranscript>,
     balance_snapshot: BalanceSnapshot,
@@ -269,6 +323,31 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub enum AppAction {
     SubmitPrompt(String),
+    QueueConversationInput {
+        prompt: String,
+        kind: ConversationInputKind,
+        target: ConversationInputTarget,
+    },
+    CancelQueuedConversationInput {
+        queue_id: ConversationInputQueueId,
+    },
+    EditQueuedConversationInput {
+        queue_id: ConversationInputQueueId,
+        prompt: String,
+    },
+    MoveQueuedConversationInput {
+        queue_id: ConversationInputQueueId,
+        direction: QueueMoveDirection,
+    },
+    PromoteQueuedConversationInput {
+        queue_id: ConversationInputQueueId,
+    },
+    SendQueuedConversationInputNow {
+        queue_id: ConversationInputQueueId,
+    },
+    SetConversationQueuePaused {
+        paused: bool,
+    },
     SubmitPlanPrompt(String),
     ApprovePlan {
         plan_text: String,
@@ -310,6 +389,10 @@ pub enum AppAction {
     CloseAgent {
         thread_id: AgentThreadId,
         reason: Option<String>,
+    },
+    MessageAgent {
+        thread_id: AgentThreadId,
+        prompt: String,
     },
     CopyToClipboard {
         text: String,
@@ -437,6 +520,10 @@ impl AppState {
             sidebar_selected_card: SidebarCard::Permission,
             sidebar_agent_selected: 0,
             composer_agent_panel_focused: false,
+            composer_queue_panel_focused: false,
+            composer_queue_selected: 0,
+            composer_queue_action_selected: ComposerQueueAction::SendNow,
+            queue_edit_target: None,
             active_agent_view: AgentView::Main,
             active_agent_child_transcript: None,
             balance_snapshot: BalanceSnapshot {
@@ -563,6 +650,10 @@ impl AppState {
             sidebar_selected_card: SidebarCard::Permission,
             sidebar_agent_selected: 0,
             composer_agent_panel_focused: false,
+            composer_queue_panel_focused: false,
+            composer_queue_selected: 0,
+            composer_queue_action_selected: ComposerQueueAction::SendNow,
+            queue_edit_target: None,
             active_agent_view: AgentView::Main,
             active_agent_child_transcript: None,
             balance_snapshot: BalanceSnapshot {
@@ -1012,13 +1103,73 @@ impl AppState {
             {
                 self.move_slash_selector(false);
             }
+            KeyCode::Tab if self.composer_queue_panel_focused => {
+                self.cycle_composer_queue_action(true);
+            }
+            KeyCode::BackTab if self.composer_queue_panel_focused => {
+                self.cycle_composer_queue_action(false);
+            }
+            KeyCode::Right if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+                self.cycle_composer_queue_action(true);
+            }
+            KeyCode::Left if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+                self.cycle_composer_queue_action(false);
+            }
             KeyCode::Tab => {}
             KeyCode::BackTab if self.pending_approval.is_none() => {
                 return self.toggle_runtime_permission_mode();
             }
+            KeyCode::Up
+                if self.composer_queue_panel_focused
+                    && has_alt_without_control(key)
+                    && self.selected_composer_queue_is_first() =>
+            {
+                return Ok(self.move_selected_queue_item(QueueMoveDirection::Up));
+            }
+            KeyCode::Down
+                if self.composer_queue_panel_focused
+                    && has_alt_without_control(key)
+                    && self.selected_composer_queue_is_last() =>
+            {
+                return Ok(self.move_selected_queue_item(QueueMoveDirection::Down));
+            }
+            KeyCode::Up if self.composer_queue_panel_focused && has_alt_without_control(key) => {
+                return Ok(self.move_selected_queue_item(QueueMoveDirection::Up));
+            }
+            KeyCode::Down if self.composer_queue_panel_focused && has_alt_without_control(key) => {
+                return Ok(self.move_selected_queue_item(QueueMoveDirection::Down));
+            }
+            KeyCode::Up if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+                if self.selected_composer_queue_is_first() {
+                    self.blur_composer_queue_panel();
+                } else {
+                    self.move_composer_queue_selection(false);
+                }
+            }
+            KeyCode::Down if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+                if self.selected_composer_queue_is_last() && self.focus_composer_agent_panel() {
+                    self.blur_composer_queue_panel();
+                } else {
+                    self.move_composer_queue_selection(true);
+                }
+            }
+            KeyCode::Esc if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+                self.blur_composer_queue_panel();
+            }
+            KeyCode::Enter if self.composer_queue_panel_focused && key.modifiers.is_empty() => {
+                return Ok(self.execute_selected_queue_action());
+            }
+            KeyCode::Backspace | KeyCode::Delete
+                if self.composer_queue_panel_focused && key.modifiers.is_empty() =>
+            {
+                return Ok(self.cancel_selected_queue_item());
+            }
+            KeyCode::Char(_) if self.composer_queue_panel_focused && key.modifiers.is_empty() => {}
             KeyCode::Up if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
                 if self.selected_composer_agent_is_first() {
-                    self.blur_composer_agent_panel();
+                    if !self.focus_composer_queue_panel() {
+                        self.blur_composer_agent_panel();
+                    }
                 } else {
                     self.move_composer_agent_selection(false);
                 }
@@ -1028,6 +1179,16 @@ impl AppState {
             }
             KeyCode::Esc if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
                 self.blur_composer_agent_panel();
+            }
+            KeyCode::Char('c') | KeyCode::Char('C')
+                if self.composer_agent_panel_focused && key.modifiers.is_empty() =>
+            {
+                return self.close_selected_agent_from_panel();
+            }
+            KeyCode::Char('m') | KeyCode::Char('M')
+                if self.composer_agent_panel_focused && key.modifiers.is_empty() =>
+            {
+                self.begin_message_selected_agent_from_panel();
             }
             KeyCode::Enter if self.composer_agent_panel_focused && key.modifiers.is_empty() => {
                 self.activate_selected_agent_view();
@@ -1063,7 +1224,10 @@ impl AppState {
             }
             KeyCode::Down if self.active_pane == PaneFocus::Composer => {
                 if self.input_cursor_visual_row() == self.input_last_visual_row() {
-                    if self.input_history_index.is_some() || !self.focus_composer_agent_panel() {
+                    if self.input_history_index.is_some()
+                        || (!self.focus_composer_queue_panel()
+                            && !self.focus_composer_agent_panel())
+                    {
                         self.navigate_input_history(false);
                     }
                 } else {
@@ -1094,13 +1258,20 @@ impl AppState {
                 if self.input.is_empty() && self.handle_ui_command(UiCommand::ClearToolCardFocus) {
                     return Ok(None);
                 }
+                if self.cancel_queue_edit() {
+                    self.clear_input_preserving_draft();
+                    self.reset_input_history_navigation();
+                    self.reset_slash_selector();
+                    self.active_pane = PaneFocus::Composer;
+                    return Ok(None);
+                }
                 if self.input.is_empty() && self.composer_mode == ComposerMode::Plan {
                     self.composer_mode = ComposerMode::Build;
                     self.last_notice = Some("build mode".to_owned());
                     self.push_event("mode", "build");
                     return Ok(None);
                 }
-                self.blur_composer_agent_panel();
+                self.blur_composer_aux_panels();
                 self.clear_input_preserving_draft();
                 self.reset_input_history_navigation();
                 self.reset_slash_selector();
@@ -1122,7 +1293,7 @@ impl AppState {
             }
             KeyCode::Backspace => {
                 self.active_pane = PaneFocus::Composer;
-                self.blur_composer_agent_panel();
+                self.blur_composer_aux_panels();
                 self.remove_input_character_before_cursor();
                 self.reset_input_history_navigation();
                 self.reset_slash_selector();
@@ -1142,14 +1313,14 @@ impl AppState {
             }
             _ if self.active_pane == PaneFocus::Composer && is_composer_newline_key(key) => {
                 self.active_pane = PaneFocus::Composer;
-                self.blur_composer_agent_panel();
+                self.blur_composer_aux_panels();
                 self.insert_input_character('\n');
                 self.reset_input_history_navigation();
                 self.reset_slash_selector();
             }
             _ if is_composer_submit_key(key) => {
                 self.active_pane = PaneFocus::Composer;
-                self.blur_composer_agent_panel();
+                self.blur_composer_aux_panels();
                 if self.should_accept_slash_selector_on_enter() {
                     self.accept_slash_selector();
                     return Ok(None);
@@ -1158,7 +1329,7 @@ impl AppState {
             }
             KeyCode::Char(character) if is_composer_text_key(key) => {
                 self.active_pane = PaneFocus::Composer;
-                self.blur_composer_agent_panel();
+                self.blur_composer_aux_panels();
                 let normalized = if normalize_command_prefix_character(character).is_some()
                     && self.input.trim().is_empty()
                 {
@@ -1290,6 +1461,10 @@ impl AppState {
         self.record_input_history(prompt.clone());
         self.reset_input_history_navigation();
 
+        if self.queue_edit_target.is_some() {
+            return Ok(self.finish_queue_edit_submission(prompt));
+        }
+
         if prompt.starts_with('/') {
             let Some(command) = self.resolve_slash_command(&prompt) else {
                 self.push_timeline(TimelineRole::Notice, "unknown slash command");
@@ -1303,9 +1478,18 @@ impl AppState {
 
         if prompt.trim_start().starts_with('@') {
             if self.is_busy {
-                self.push_timeline(TimelineRole::Notice, "busy; submit later");
-                self.push_event("notice", "agent mention ignored while busy");
-                return Ok(None);
+                self.input.clear();
+                self.input_cursor = 0;
+                self.input_paste_spans.clear();
+                self.reset_slash_selector();
+                self.push_timeline(TimelineRole::Notice, "queued for next turn");
+                self.push_event("queue", format!("queued busy input {prompt}"));
+                self.last_notice = Some("queued for next turn".to_owned());
+                return Ok(Some(AppAction::QueueConversationInput {
+                    prompt,
+                    kind: ConversationInputKind::Chat,
+                    target: ConversationInputTarget::MainThread,
+                }));
             }
             let (profile_id, agent_prompt) = match self.resolve_agent_mention_invocation(&prompt) {
                 Ok(invocation) => invocation,
@@ -1325,9 +1509,18 @@ impl AppState {
         }
 
         if self.is_busy {
-            self.push_timeline(TimelineRole::Notice, "busy; submit later");
-            self.push_event("notice", "submit ignored while busy");
-            return Ok(None);
+            self.input.clear();
+            self.input_cursor = 0;
+            self.input_paste_spans.clear();
+            self.reset_slash_selector();
+            self.push_timeline(TimelineRole::Notice, "queued for next turn");
+            self.push_event("queue", format!("queued busy input {prompt}"));
+            self.last_notice = Some("queued for next turn".to_owned());
+            return Ok(Some(AppAction::QueueConversationInput {
+                prompt,
+                kind: ConversationInputKind::Chat,
+                target: ConversationInputTarget::MainThread,
+            }));
         }
 
         self.clear_pending_plan_approval();
@@ -1411,6 +1604,7 @@ impl AppState {
             "/agent" => self.activate_agent_from_command(&command.arg),
             "/effort" => self.set_runtime_reasoning_effort_from_command(&command.arg),
             "/model" => self.set_runtime_model_from_command(&command.arg),
+            "/queue" => self.execute_queue_slash_command(&command.arg),
             "/new" => {
                 if self.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; start new session later");

@@ -5,15 +5,16 @@ use crate::{
     AgentInvocationPolicy, AgentInvocationSource, AgentMergeSafePointEntry, AgentProfile,
     AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
     AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
-    AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultPolicy, AgentRouteClosedEntry,
-    AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry,
-    AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
-    AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultRecordedEntry,
-    AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, ControlEntry, JsonlSessionStore,
-    ModelMessage, Session, SessionLogEntry, SessionRef, TaskChildSessionDisplayNameEntry,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskStepId, WorkspaceRootSnapshot,
+    AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
+    AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
+    AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
+    AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
+    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadResult,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
+    ControlEntry, JsonlSessionStore, ModelMessage, Session, SessionLogEntry, SessionRef,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskStepId, WorkspaceRootSnapshot,
 };
 
 fn profile_id(value: &str) -> Result<AgentProfileId> {
@@ -690,6 +691,44 @@ fn agent_thread_result_statuses_project_to_terminal_thread_statuses() -> Result<
 }
 
 #[test]
+fn terminal_agent_result_is_not_overridden_by_missing_profile_snapshot() -> Result<()> {
+    let started = sample_started_entry()?;
+    let result = AgentThreadResult {
+        thread_id: started.thread_id.clone(),
+        session_ref: started.thread_session_ref.clone(),
+        status: AgentThreadTerminalStatus::Completed,
+        summary: "completed before restore validation".to_owned(),
+        summary_truncated: false,
+        original_summary_chars: None,
+        artifacts: Vec::new(),
+        changed_paths: Vec::new(),
+        risks: Vec::new(),
+        followups: Vec::new(),
+        usage: None,
+        output_hash: "sha256:completed".to_owned(),
+        final_answer_ref: None,
+    };
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(started)),
+        SessionLogEntry::Control(ControlEntry::AgentThreadResultRecorded(
+            AgentThreadResultRecordedEntry { result },
+        )),
+    ];
+
+    let projection = crate::AgentThreadStateProjection::from_entries(&entries);
+    let thread = projection.latest_thread().expect("latest thread");
+
+    assert_eq!(thread.status, AgentThreadStatus::Completed);
+    assert_eq!(
+        thread.result.as_ref().map(|result| result.summary.as_str()),
+        Some("completed before restore validation")
+    );
+    assert!(!thread.profile_snapshot_missing);
+    assert!(thread.reason.is_none());
+    Ok(())
+}
+
+#[test]
 fn agent_result_without_started_entry_stays_unresolved() -> Result<()> {
     let entries = vec![SessionLogEntry::Control(
         ControlEntry::AgentThreadResultRecorded(AgentThreadResultRecordedEntry {
@@ -721,6 +760,63 @@ fn agent_result_without_started_entry_stays_unresolved() -> Result<()> {
         Some("agent thread start entry missing")
     );
     assert!(thread.result.is_some());
+    Ok(())
+}
+
+#[test]
+fn agent_result_continuation_projection_restores_unresolved_threads() -> Result<()> {
+    let thread_a = thread_id("thread_a")?;
+    let thread_b = thread_id("thread_b")?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentResultContinuation(
+            AgentResultContinuationEntry {
+                thread_id: thread_a.clone(),
+                status: AgentResultContinuationStatus::Pending,
+                reason: Some("ready".to_owned()),
+                updated_at_ms: Some(1),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentResultContinuation(
+            AgentResultContinuationEntry {
+                thread_id: thread_b.clone(),
+                status: AgentResultContinuationStatus::Started,
+                reason: Some("started before restore".to_owned()),
+                updated_at_ms: Some(2),
+            },
+        )),
+    ];
+
+    let projection = crate::AgentResultContinuationProjection::from_entries(&entries);
+
+    assert_eq!(projection.pending_thread_ids, vec![thread_a, thread_b]);
+    Ok(())
+}
+
+#[test]
+fn agent_result_continuation_projection_drops_completed_threads() -> Result<()> {
+    let thread = thread_id("thread_done")?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentResultContinuation(
+            AgentResultContinuationEntry {
+                thread_id: thread.clone(),
+                status: AgentResultContinuationStatus::Pending,
+                reason: None,
+                updated_at_ms: Some(1),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentResultContinuation(
+            AgentResultContinuationEntry {
+                thread_id: thread,
+                status: AgentResultContinuationStatus::Completed,
+                reason: None,
+                updated_at_ms: Some(2),
+            },
+        )),
+    ];
+
+    let projection = crate::AgentResultContinuationProjection::from_entries(&entries);
+
+    assert!(projection.pending_thread_ids.is_empty());
     Ok(())
 }
 

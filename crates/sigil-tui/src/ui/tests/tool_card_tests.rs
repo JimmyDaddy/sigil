@@ -268,6 +268,18 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
             "result_ref": null
         }
     }));
+    let named_wait_result = parsed_summary(json!({
+        "tool_name": "wait_agent",
+        "status": "ok",
+        "preview_kind": "json",
+        "preview_value": {
+            "thread_id": "agent_chat_raw_id",
+            "display_name": "kernel explorer",
+            "status": "running",
+            "terminal": false,
+            "result_available": false
+        }
+    }));
     let spawn_result = parsed_summary(json!({
         "tool_name": "spawn_agent",
         "status": "ok",
@@ -348,6 +360,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
 
     let read_display = build_tool_card_display(&read_result);
     let wait_display = build_tool_card_display(&wait_result);
+    let named_wait_display = build_tool_card_display(&named_wait_result);
     let spawn_display = build_tool_card_display(&spawn_result);
     let wait_ready_display = build_tool_card_display(&wait_ready);
     let message_display = build_tool_card_display(&message_result);
@@ -379,6 +392,11 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
     assert!(wait_text.contains("running · thread_1"));
     assert!(wait_text.contains("action Ctrl-B background"));
 
+    assert_eq!(
+        named_wait_display.title.plain(),
+        "Checked agent kernel explorer"
+    );
+
     assert_eq!(spawn_display.title.plain(), "Started agent thread_2");
     assert_eq!(spawn_display.status.label, "DONE");
     assert_eq!(
@@ -401,7 +419,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
     assert_eq!(close_display.status.label, "CLOSED");
     assert_eq!(
         agent_tool_title(&fallback_result).plain(),
-        "Called agent profile-thread"
+        "Called agent profile thread"
     );
     assert_eq!(
         fallback_display.title.plain(),
@@ -580,6 +598,98 @@ fn tool_card_render_entry_lines_respect_selection_and_hidden_preview_state() {
 }
 
 #[test]
+fn tool_card_frame_keeps_header_meta_and_body_in_one_block() {
+    let palette = test_palette();
+    let entry = TimelineEntry {
+        role: TimelineRole::Tool,
+        text: json!({
+            "call_id": "call-frame",
+            "tool_name": "read_file",
+            "status": "ok",
+            "preview_kind": "markdown",
+            "summary": "first 2/4 lines · 42 B",
+            "preview_lines": ["# Title", "body"],
+            "hidden_lines": 2,
+            "metadata": {
+                "details": {
+                    "call": {"summary": "path=README.md"}
+                }
+            }
+        })
+        .to_string(),
+    };
+    let options = TimelineRenderOptions {
+        selected_tool_activity_key: Some("call:call-frame".to_owned()),
+        max_content_width: 72,
+        ..TimelineRenderOptions::default()
+    };
+
+    let lines = render_tool_entry_lines(&entry, &options, 0);
+    let text = plain_text(&lines);
+
+    assert_eq!(lines[0].spans[0].content.as_ref(), "●");
+    assert_eq!(lines[1].spans[0].content.as_ref(), "└ ");
+    assert_eq!(lines[1].spans[0].style.fg, lines[0].spans[0].style.fg);
+    assert!(lines.iter().skip(2).all(|line| {
+        line.spans
+            .first()
+            .is_some_and(|span| span.content.as_ref() == "  ")
+    }));
+    assert!(lines.iter().all(|line| {
+        line.spans
+            .first()
+            .is_some_and(|span| span.style.bg == Some(palette.surface_selection))
+    }));
+    assert!(text.contains("Read README.md"));
+    assert!(text.contains("first 2/4 lines · 42 B"));
+    assert!(text.contains("document excerpt"));
+    assert!(text.contains("2 more lines hidden"));
+}
+
+#[test]
+fn tool_card_agent_title_omits_duplicate_generic_agent_label() {
+    let denied_spawn = parsed_summary(json!({
+        "tool_name": "spawn_agent",
+        "status": "error",
+        "error_kind": "permission_denied",
+        "preview_kind": "json",
+        "preview_value": {
+            "status": "denied",
+            "reason": "agent budget denied child session"
+        }
+    }));
+
+    let display = build_tool_card_display(&denied_spawn);
+    let lines = render_tool_entry_lines(
+        &TimelineEntry {
+            role: TimelineRole::Tool,
+            text: json!({
+                "tool_name": "spawn_agent",
+                "status": "error",
+                "error_kind": "permission_denied",
+                "preview_kind": "json",
+                "preview_value": {
+                    "status": "denied",
+                    "reason": "agent budget denied child session"
+                }
+            })
+            .to_string(),
+        },
+        &TimelineRenderOptions {
+            max_content_width: 72,
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+    let text = plain_text(&lines);
+
+    assert_eq!(display.title.plain(), "Started agent");
+    assert_eq!(lines[1].spans[0].style.fg, lines[0].spans[0].style.fg);
+    assert!(!text.contains("Started agent agent"));
+    assert!(text.contains("agent budget denied child session"));
+}
+
+#[test]
 fn tool_card_render_entry_lines_styles_hovered_header() {
     let entry = TimelineEntry {
         role: TimelineRole::Tool,
@@ -603,7 +713,7 @@ fn tool_card_render_entry_lines_styles_hovered_header() {
     let lines = render_tool_entry_lines(&entry, &options, 0);
 
     assert_eq!(lines[0].spans[0].style.fg, Some(accent_gold()));
-    assert!(!plain_text(&lines).contains("●"));
+    assert_eq!(lines[0].spans[0].content.as_ref(), "●");
 }
 
 #[test]

@@ -97,7 +97,7 @@ def is_trivially_non_executable_added_line(line: str) -> bool:
         return True
     if re.fullmatch(r"[\)\]\}]+(?:\?;|;|,)?", stripped):
         return True
-    if stripped.startswith(("mod ", "pub mod ", "type ", "pub type ")):
+    if re.match(r"^(?:pub(?:\([^)]+\))?\s+)?(?:mod|type)\s+", stripped):
         return True
     if RUST_USE_DECL_RE.match(stripped):
         return True

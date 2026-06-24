@@ -562,6 +562,8 @@ pub struct TaskConfig {
     pub max_replans: usize,
     #[serde(default = "default_max_child_sessions")]
     pub max_child_sessions: usize,
+    /// Deprecated compatibility flag. Current readonly fan-out is controlled by
+    /// `max_parallel_readonly`.
     #[serde(default)]
     pub allow_parallel_readonly_subagents: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

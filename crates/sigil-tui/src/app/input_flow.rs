@@ -108,7 +108,7 @@ impl AppState {
         }
 
         self.active_pane = PaneFocus::Composer;
-        self.blur_composer_agent_panel();
+        self.blur_composer_aux_panels();
         self.insert_paste_text(&pasted);
         self.reset_input_history_navigation();
         self.reset_slash_selector();

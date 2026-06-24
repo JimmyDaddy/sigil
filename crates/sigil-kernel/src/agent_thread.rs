@@ -826,6 +826,67 @@ pub struct AgentThreadResultRecordedEntry {
     pub result: AgentThreadResult,
 }
 
+/// Durable parent-continuation state after a child agent result becomes available.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentResultContinuationStatus {
+    Pending,
+    Started,
+    Completed,
+    Failed,
+    Cancelled,
+    #[serde(other)]
+    Unknown,
+}
+
+impl AgentResultContinuationStatus {
+    #[must_use]
+    pub fn is_unresolved(self) -> bool {
+        matches!(self, Self::Pending | Self::Started)
+    }
+}
+
+/// Append-only status transition for parent continuation over a child result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentResultContinuationEntry {
+    pub thread_id: AgentThreadId,
+    pub status: AgentResultContinuationStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Projected durable parent-continuation state by child thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentResultContinuationProjection {
+    pub statuses: BTreeMap<AgentThreadId, AgentResultContinuationStatus>,
+    pub pending_thread_ids: Vec<AgentThreadId>,
+}
+
+impl AgentResultContinuationProjection {
+    #[must_use]
+    pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
+        let mut statuses = BTreeMap::new();
+        for entry in entries {
+            let SessionLogEntry::Control(ControlEntry::AgentResultContinuation(entry)) = entry
+            else {
+                continue;
+            };
+            statuses.insert(entry.thread_id.clone(), entry.status);
+        }
+        let pending_thread_ids = statuses
+            .iter()
+            .filter_map(|(thread_id, status)| status.is_unresolved().then_some(thread_id.clone()))
+            .collect();
+        Self {
+            statuses,
+            pending_thread_ids,
+        }
+    }
+}
+
 /// Append-only presentation-only display name override.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -1180,6 +1241,9 @@ impl AgentThreadStateProjection {
     fn finalize_replay(&mut self) {
         for thread in self.threads.values_mut() {
             if thread.legacy_task || thread.unresolved {
+                continue;
+            }
+            if thread.status.is_terminal() {
                 continue;
             }
             let Some(profile_snapshot_id) = &thread.profile_snapshot_id else {

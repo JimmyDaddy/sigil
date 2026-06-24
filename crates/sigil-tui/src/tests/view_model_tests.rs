@@ -573,6 +573,33 @@ fn footer_hints_track_plan_agent_mention_and_agent_panel_states() -> anyhow::Res
     let panel_view = UiViewModel::from_app(&panel_app);
     assert!(panel_view.composer.agent_panel_focused);
     assert!(panel_view.footer.hints.contains("Enter switch"));
+
+    let mut queue_app = AppState::from_root_config(Path::new("/tmp/sigil.toml"), &test_config());
+    let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1")?;
+    let queued = sigil_kernel::ConversationInputQueuedEntry {
+        queue_id: queue_id.clone(),
+        target: sigil_kernel::ConversationInputTarget::MainThread,
+        kind: sigil_kernel::ConversationInputKind::Chat,
+        prompt_hash: "sha256:queue".to_owned(),
+        prompt: "queued prompt".to_owned(),
+        reasoning_effort: None,
+        created_at_ms: Some(1),
+    };
+    queue_app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
+        items: vec![sigil_kernel::ConversationQueueItemProjection {
+            queued: queued.clone(),
+            status: sigil_kernel::ConversationInputStatus::Queued,
+            reason: None,
+        }],
+        paused: false,
+        entries: vec![SessionLogEntry::Control(
+            ControlEntry::ConversationInputQueued(queued),
+        )],
+    })?;
+    queue_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let queue_view = UiViewModel::from_app(&queue_app);
+    assert!(queue_view.footer.hints.contains("Queue"));
+    assert!(queue_view.footer.hints.contains("Tab action"));
     Ok(())
 }
 
@@ -713,7 +740,7 @@ fn footer_view_model_tracks_busy_without_pending_approval() -> anyhow::Result<()
     );
     assert_eq!(
         view_model.footer.hints,
-        "agent: main · Esc interrupt · Ctrl-T details"
+        "agent: main · Enter queue next turn · Esc interrupt · Ctrl-T details"
     );
     assert_eq!(view_model.composer.phase, RunPhase::Thinking);
     assert_eq!(view_model.composer.reasoning_effort_label, "max");

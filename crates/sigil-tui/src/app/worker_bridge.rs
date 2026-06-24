@@ -74,7 +74,13 @@ impl AppState {
                 };
                 self.replace_or_push_live_child_entry(TimelineRole::Assistant, content)
             }
-            RunEvent::Notice(notice) => self.push_live_child_entry(TimelineRole::Notice, notice),
+            RunEvent::Notice(notice) => {
+                if notice_is_timeline_worthy(&notice) {
+                    self.push_live_child_entry(TimelineRole::Notice, notice)
+                } else {
+                    false
+                }
+            }
             RunEvent::ToolApprovalRequested { call, .. } => self.push_live_child_entry(
                 TimelineRole::Notice,
                 format!("Approve {} in child agent", call.name),
@@ -119,7 +125,17 @@ impl AppState {
     }
 
     fn push_live_child_entry(&mut self, role: TimelineRole, text: String) -> bool {
-        self.replace_or_push_live_child_entry(role, text)
+        let Some(transcript) = self.active_agent_child_transcript.as_mut() else {
+            return false;
+        };
+        transcript.load_error = None;
+        transcript
+            .timeline_entries
+            .push(TimelineEntry { role, text });
+        transcript.total_timeline_entries = transcript
+            .total_timeline_entries
+            .max(transcript.timeline_entries.len());
+        true
     }
 
     fn replace_or_push_live_child_entry(&mut self, role: TimelineRole, text: String) -> bool {
@@ -273,10 +289,6 @@ impl AppState {
                 self.mcp_progress = None;
                 self.last_notice = Some(format!("waiting for agent @{profile_id}"));
                 self.push_phase_marker(format!("agent|{profile_id}"));
-                self.push_timeline(
-                    TimelineRole::Notice,
-                    format!("agent @{profile_id} started; waiting for result"),
-                );
                 self.push_event("agent:start", prompt);
             }
             WorkerMessage::AgentResultContinuationStarted { thread_ids } => {
@@ -290,14 +302,48 @@ impl AppState {
                     .map(sigil_kernel::AgentThreadId::as_str)
                     .collect::<Vec<_>>()
                     .join(", ");
-                self.push_timeline(
-                    TimelineRole::Notice,
-                    format!("agent result ready; resuming main for {threads}"),
-                );
                 self.push_event("agent:resume", threads);
+            }
+            WorkerMessage::ConversationQueueUpdated {
+                items,
+                paused,
+                entries,
+            } => {
+                self.sync_current_session_state(entries);
+                let summary = if let Some(next) = items.first() {
+                    format!(
+                        "{} {} · next {}",
+                        if paused { "queue paused" } else { "queued" },
+                        items.len(),
+                        summarize_queued_prompt(&next.queued.prompt)
+                    )
+                } else {
+                    "queue empty".to_owned()
+                };
+                self.last_notice = Some(summary.clone());
+                self.push_event("queue:update", summary);
+            }
+            WorkerMessage::ConversationQueueDispatchStarted { queue_id, prompt } => {
+                self.is_busy = true;
+                self.run_phase = RunPhase::Thinking;
+                self.mcp_progress = None;
+                self.last_notice = Some("running queued input".to_owned());
+                self.push_phase_marker(format!("queued|{}", self.model_name));
+                self.push_timeline(TimelineRole::User, prompt.clone());
+                self.push_event(
+                    "queue:dispatch",
+                    format!("{} {}", queue_id.as_str(), prompt),
+                );
             }
             WorkerMessage::AgentThreadEvent { thread_id, event } => {
                 self.handle_agent_thread_event(&thread_id, *event);
+            }
+            WorkerMessage::AgentThreadStatusLive { entry } => {
+                self.push_event(
+                    "agent:live-status",
+                    format!("{} {:?}", entry.thread_id.as_str(), entry.status),
+                );
+                self.append_current_session_control(ControlEntry::AgentThreadStatusChanged(entry));
             }
             WorkerMessage::AgentRunFinished {
                 profile_id,
@@ -318,7 +364,7 @@ impl AppState {
                 self.schedule_balance_refresh();
                 let notice = format!("agent @{profile_id} finished");
                 self.last_notice = Some(notice.clone());
-                self.push_timeline(TimelineRole::Notice, notice);
+                self.push_event("notice", notice);
                 let final_text = result.final_text.trim();
                 if !final_text.is_empty()
                     && !self.timeline.last().is_some_and(|entry| {
@@ -584,7 +630,9 @@ impl AppState {
             }
             WorkerMessage::Notice(message) => {
                 self.last_notice = Some(message.clone());
-                self.push_timeline(TimelineRole::Notice, message.clone());
+                if notice_is_timeline_worthy(&message) {
+                    self.push_timeline(TimelineRole::Notice, message.clone());
+                }
                 self.push_event("worker", message);
             }
             WorkerMessage::McpActivationStatus {
@@ -694,6 +742,42 @@ impl AppState {
                 prompt,
                 reasoning_effort: self.reasoning_effort.clone(),
             },
+            AppAction::QueueConversationInput {
+                prompt,
+                kind,
+                target,
+            } => WorkerCommand::QueueConversationInput {
+                prompt,
+                kind,
+                target,
+                reasoning_effort: self.reasoning_effort.clone(),
+            },
+            AppAction::CancelQueuedConversationInput { queue_id } => {
+                WorkerCommand::CancelQueuedConversationInput { queue_id }
+            }
+            AppAction::EditQueuedConversationInput { queue_id, prompt } => {
+                WorkerCommand::EditQueuedConversationInput {
+                    queue_id,
+                    prompt,
+                    reasoning_effort: self.reasoning_effort.clone(),
+                }
+            }
+            AppAction::MoveQueuedConversationInput {
+                queue_id,
+                direction,
+            } => WorkerCommand::MoveQueuedConversationInput {
+                queue_id,
+                direction,
+            },
+            AppAction::PromoteQueuedConversationInput { queue_id } => {
+                WorkerCommand::PromoteQueuedConversationInput { queue_id }
+            }
+            AppAction::SendQueuedConversationInputNow { queue_id } => {
+                WorkerCommand::SendQueuedConversationInputNow { queue_id }
+            }
+            AppAction::SetConversationQueuePaused { paused } => {
+                WorkerCommand::SetConversationQueuePaused { paused }
+            }
             AppAction::SubmitPlanPrompt(prompt) => WorkerCommand::SubmitPlanPrompt {
                 prompt,
                 reasoning_effort: self.reasoning_effort.clone(),
@@ -750,6 +834,9 @@ impl AppState {
             }
             AppAction::CloseAgent { thread_id, reason } => {
                 WorkerCommand::CloseAgent { thread_id, reason }
+            }
+            AppAction::MessageAgent { thread_id, prompt } => {
+                WorkerCommand::MessageAgent { thread_id, prompt }
             }
             AppAction::CompactNow => WorkerCommand::CompactNow,
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
@@ -1202,10 +1289,15 @@ impl EventHandler for AppState {
                 self.apply_code_intelligence_tool_status(&result);
                 self.apply_mcp_activation_tool_status(&result);
                 let preview = self.tool_preview_snapshots.get(&result.call_id);
-                self.push_timeline(
-                    TimelineRole::Tool,
-                    format_tool_result_block_redacted(&result, preview, &self.secret_redactor),
-                );
+                let rendered =
+                    format_tool_result_block_redacted(&result, preview, &self.secret_redactor);
+                if should_replace_last_wait_agent_pending(&self.timeline, &result, &rendered) {
+                    if let Some(entry) = self.timeline.last_mut() {
+                        entry.text = rendered;
+                    }
+                } else {
+                    self.push_timeline(TimelineRole::Tool, rendered);
+                }
                 self.push_event("tool:result", format!("{} {}", result.tool_name, status));
             }
             RunEvent::Usage(usage) => {
@@ -1317,7 +1409,9 @@ impl EventHandler for AppState {
             }
             RunEvent::Notice(note) => {
                 self.last_notice = Some(note.clone());
-                self.push_timeline(TimelineRole::Notice, note.clone());
+                if notice_is_timeline_worthy(&note) {
+                    self.push_timeline(TimelineRole::Notice, note.clone());
+                }
                 self.push_event("notice", note);
             }
         }
@@ -1341,6 +1435,82 @@ fn agent_tool_name(name: &str) -> bool {
     )
 }
 
+fn should_replace_last_wait_agent_pending(
+    timeline: &[TimelineEntry],
+    result: &ToolResult,
+    rendered: &str,
+) -> bool {
+    let Some(current_key) = wait_agent_pending_key_from_result(result, rendered) else {
+        return false;
+    };
+    let Some(previous) = timeline.last() else {
+        return false;
+    };
+    previous.role == TimelineRole::Tool
+        && wait_agent_pending_key_from_tool_block(&previous.text)
+            .is_some_and(|previous_key| previous_key == current_key)
+}
+
+fn wait_agent_pending_key_from_result(result: &ToolResult, rendered: &str) -> Option<String> {
+    if result.tool_name != "wait_agent" || result.is_error() {
+        return None;
+    }
+    wait_agent_pending_key_from_tool_block(rendered)
+}
+
+fn wait_agent_pending_key_from_tool_block(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    if value.get("tool_name")?.as_str()? != "wait_agent" {
+        return None;
+    }
+    if value.get("status").and_then(serde_json::Value::as_str) != Some("ok") {
+        return None;
+    }
+    let preview = value.get("preview_value")?;
+    if preview
+        .get("terminal")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    preview.get("retry_after_ms")?;
+    preview
+        .get("coalescing_key")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            preview
+                .get("thread_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|thread_id| format!("wait_agent:{thread_id}"))
+        })
+}
+
+fn notice_is_timeline_worthy(note: &str) -> bool {
+    let normalized = note.to_ascii_lowercase();
+    [
+        "failed",
+        "failure",
+        "error",
+        "denied",
+        "timeout",
+        "timed out",
+        "deadline",
+        "exceeded",
+        "unavailable",
+        "invalid",
+        "cancelled",
+        "canceled",
+        "interrupted",
+        "panic",
+        "rejected",
+        "budget",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
 fn spawn_agent_profile_id(call: &ToolCall) -> Option<String> {
     if call.name != "spawn_agent" {
         return None;
@@ -1351,6 +1521,15 @@ fn spawn_agent_profile_id(call: &ToolCall) -> Option<String> {
         .as_str()
         .filter(|profile_id| !profile_id.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn summarize_queued_prompt(prompt: &str) -> String {
+    let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= 48 {
+        normalized
+    } else {
+        format!("{}...", normalized.chars().take(45).collect::<String>())
+    }
 }
 
 #[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]

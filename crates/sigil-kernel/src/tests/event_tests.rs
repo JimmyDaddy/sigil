@@ -4,28 +4,32 @@ use crate::{
     AgentApprovalRouteEntry, AgentElicitationRouteEntry, AgentInvocationMode,
     AgentInvocationSource, AgentMergeSafePointEntry, AgentProfileCapturedEntry, AgentProfileId,
     AgentProfilePolicyEntry, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
-    AgentProfileTrustEntry, AgentRole, AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus,
-    AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
-    AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
-    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadResult,
-    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, ApprovalMode,
-    BackgroundTaskHandle, ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus,
-    ChangeSetRisk, CompactionRecord, ControlEntry, McpElicitationDecision, McpElicitationEntry,
-    MemoryLoadReport, MemorySnapshot, ModelMessage, PUBLIC_RUN_EVENT_SCHEMA_VERSION,
-    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry,
-    PluginCapability, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry,
-    PrefixSnapshot, ProviderContinuationState, PublicControlEvent, PublicRunEvent,
-    PublicRunEventKind, ResponseHandle, RunEvent, SessionRef, SkillDescriptor, SkillIndexSnapshot,
-    SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, TaskChildSessionDisplayNameEntry,
-    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolCall, ToolCategory, ToolEgressEntry,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats,
-    WorkspaceRootSnapshot,
+    AgentProfileTrustEntry, AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
+    AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
+    AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
+    AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
+    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultRecordedEntry,
+    AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    AgentThreadTerminalStatus, AgentTrustState, ApprovalMode, BackgroundTaskHandle, ChangeSet,
+    ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CompactionRecord,
+    ControlEntry, ConversationInputEditedEntry, ConversationInputKind,
+    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
+    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
+    McpElicitationDecision, McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
+    PUBLIC_RUN_EVENT_SCHEMA_VERSION, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
+    PlanApprovedEntry, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
+    PluginTrustEntry, PrefixSnapshot, ProviderContinuationState, PublicControlEvent,
+    PublicRunEvent, PublicRunEventKind, ReasoningEffort, ResponseHandle, RunEvent, SessionRef,
+    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
+    SkillTrustState, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus,
+    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus,
+    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolCall, ToolCategory, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceRootSnapshot,
 };
 
 #[test]
@@ -612,6 +616,15 @@ fn public_control_event_kinds_cover_control_entry_variants() {
             "agent_thread_result_recorded",
         ),
         (
+            ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+                thread_id: agent_thread_id(),
+                status: AgentResultContinuationStatus::Pending,
+                reason: Some("child result ready".to_owned()),
+                updated_at_ms: Some(44),
+            }),
+            "agent_result_continuation",
+        ),
+        (
             ControlEntry::AgentThreadDisplayName(AgentThreadDisplayNameEntry {
                 thread_id: agent_thread_id(),
                 display_name: "kernel map".to_owned(),
@@ -687,6 +700,53 @@ fn public_control_event_kinds_cover_control_entry_variants() {
                 reason: Some("archived".to_owned()),
             }),
             "agent_thread_closed",
+        ),
+        (
+            ControlEntry::ConversationInputQueued(ConversationInputQueuedEntry {
+                queue_id: conversation_queue_id(),
+                target: ConversationInputTarget::MainThread,
+                kind: ConversationInputKind::Chat,
+                prompt_hash: "sha256:queued".to_owned(),
+                prompt: "follow up".to_owned(),
+                reasoning_effort: Some(ReasoningEffort::Max),
+                created_at_ms: Some(45),
+            }),
+            "conversation_input_queued",
+        ),
+        (
+            ControlEntry::ConversationInputQueueControl(ConversationInputQueueControlEntry {
+                action: ConversationInputQueueControlAction::Pause,
+                reason: Some("user paused".to_owned()),
+                updated_at_ms: Some(46),
+            }),
+            "conversation_input_queue_control",
+        ),
+        (
+            ControlEntry::ConversationInputEdited(ConversationInputEditedEntry {
+                queue_id: conversation_queue_id(),
+                prompt_hash: "sha256:edited".to_owned(),
+                prompt: "edited follow up".to_owned(),
+                reasoning_effort: None,
+                updated_at_ms: Some(47),
+            }),
+            "conversation_input_edited",
+        ),
+        (
+            ControlEntry::ConversationInputReordered(ConversationInputReorderedEntry {
+                queue_id: conversation_queue_id(),
+                after_queue_id: None,
+                updated_at_ms: Some(48),
+            }),
+            "conversation_input_reordered",
+        ),
+        (
+            ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+                queue_id: conversation_queue_id(),
+                status: ConversationInputStatus::Delivered,
+                reason: Some("sent now".to_owned()),
+                updated_at_ms: Some(49),
+            }),
+            "conversation_input_status_changed",
         ),
         (
             ControlEntry::Note {
@@ -839,6 +899,10 @@ fn agent_attempt_id() -> AgentRunAttemptId {
 
 fn agent_route_id() -> AgentRouteId {
     AgentRouteId::new("agent-route-1").expect("valid route id")
+}
+
+fn conversation_queue_id() -> ConversationInputQueueId {
+    ConversationInputQueueId::new("queue_1").expect("valid queue id")
 }
 
 fn agent_profile_snapshot() -> AgentProfileSnapshot {

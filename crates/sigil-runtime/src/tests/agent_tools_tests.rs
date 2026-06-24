@@ -568,7 +568,7 @@ fn spawn_agent_tool_schema_uses_stable_profile_id() -> Result<()> {
 }
 
 #[test]
-fn spawn_agent_permission_defaults_allow_safe_trusted_readonly_profiles() -> Result<()> {
+fn agent_tool_permission_defaults_allow_safe_coordination_tools() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
@@ -592,15 +592,23 @@ fn spawn_agent_permission_defaults_allow_safe_trusted_readonly_profiles() -> Res
         Some(sigil_kernel::ApprovalMode::Allow)
     );
 
-    let close = ToolCall {
-        id: "call-close-agent".to_owned(),
-        name: CLOSE_AGENT_TOOL_NAME.to_owned(),
-        args_json: json!({ "thread_id": "agent_chat_example" }).to_string(),
-    };
-    assert_eq!(
-        registry.permission_default_mode(&ctx, &close)?,
-        Some(sigil_kernel::ApprovalMode::Ask)
-    );
+    for name in [
+        WAIT_AGENT_TOOL_NAME,
+        READ_AGENT_RESULT_TOOL_NAME,
+        MESSAGE_AGENT_TOOL_NAME,
+        CLOSE_AGENT_TOOL_NAME,
+    ] {
+        let call = ToolCall {
+            id: format!("call-{name}"),
+            name: name.to_owned(),
+            args_json: json!({ "thread_id": "agent_chat_example" }).to_string(),
+        };
+        assert_eq!(
+            registry.permission_default_mode(&ctx, &call)?,
+            Some(sigil_kernel::ApprovalMode::Allow),
+            "{name} should default to allow"
+        );
+    }
     Ok(())
 }
 
@@ -863,6 +871,7 @@ async fn ordinary_chat_explicit_subagent_prompt_spawns_child() -> Result<()> {
     let projection = session.agent_thread_state_projection();
     let thread = projection.latest_thread().expect("child agent projected");
     assert_eq!(thread.status, AgentThreadStatus::Completed);
+    assert_eq!(thread.display_name.as_deref(), Some("runtime review"));
     assert!(
         thread
             .result
@@ -872,10 +881,10 @@ async fn ordinary_chat_explicit_subagent_prompt_spawns_child() -> Result<()> {
     assert!(session.messages().iter().any(|message| {
         matches!(message.role, MessageRole::Tool)
             && message.tool_call_id.as_deref() == Some("call-spawn-1")
-            && message
-                .content
-                .as_deref()
-                .is_some_and(|content| content.contains("child summary only"))
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains("child summary only")
+                    && content.contains(r#""display_name":"runtime review""#)
+            })
     }));
     Ok(())
 }
@@ -1021,7 +1030,7 @@ async fn message_agent_records_rejected_message_route_for_terminal_thread() -> R
         .expect("message_agent handled by runtime delegate");
 
     assert!(result.is_error());
-    assert!(result.content.contains("cannot accept live messages"));
+    assert!(result.content.contains("cannot accept safe-point messages"));
     let routed = result
         .control_entries
         .iter()
@@ -1112,6 +1121,18 @@ async fn message_agent_queues_followup_for_background_mailbox() -> Result<()> {
         .await?
         .expect("message handled");
     assert!(!message.is_error());
+    let payload: serde_json::Value = serde_json::from_str(&message.content)?;
+    assert_eq!(payload["delivery"], "delivered_to_mailbox");
+    assert_eq!(payload["delivered_to_mailbox"], true);
+    assert_eq!(payload["safe_point"], "after_current_turn");
+    assert_eq!(payload["will_apply_after_current_turn"], true);
+    assert_eq!(payload["interrupt_requested"], false);
+    assert_eq!(payload["interrupts_in_flight_provider_stream"], false);
+    assert!(
+        payload["next_action"]
+            .as_str()
+            .is_some_and(|action| action.contains("wait_agent"))
+    );
     let routed = message
         .control_entries
         .iter()
@@ -1216,6 +1237,12 @@ async fn spawn_agent_background_mode_starts_running_thread() -> Result<()> {
     assert!(result.content.contains("running"));
     let payload: serde_json::Value = serde_json::from_str(&result.content)?;
     assert_eq!(payload["retry_after_ms"], 5_000);
+    assert_eq!(payload["next_poll_after_ms"], 5_000);
+    assert!(
+        payload["next_poll_after_unix_ms"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
+    );
     assert!(
         payload["next_action"]
             .as_str()
@@ -1286,6 +1313,14 @@ async fn join_before_final_agent_can_be_moved_to_background() -> Result<()> {
 
     assert!(!spawn.is_error());
     assert_eq!(spawn.metadata.details["status"], "running");
+    let payload: serde_json::Value = serde_json::from_str(&spawn.content)?;
+    assert_eq!(payload["terminal"], false);
+    assert_eq!(payload["result_available"], false);
+    assert_eq!(payload["backgrounded"], true);
+    assert_eq!(payload["do_not_describe_as_finished"], true);
+    assert!(payload["next_action"].as_str().is_some_and(|action| {
+        action.contains("continue independent parent work") && action.contains("wait_agent")
+    }));
     let projection = session.agent_thread_state_projection();
     let thread = projection
         .threads
@@ -1598,6 +1633,131 @@ async fn wait_agent_waits_briefly_for_running_background_result() -> Result<()> 
     assert_eq!(
         thread.result.as_ref().map(|result| result.summary.as_str()),
         Some("initial background done")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn wait_agent_throttles_repeated_pending_status_for_same_thread() -> Result<()> {
+    let config = root_config();
+    let mut registry = ToolRegistry::new();
+    register_agent_tools(&mut registry, &config)?;
+    let supervisor = supervisor(&config)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, config, registry);
+    let mut session = Session::new("parent", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval = AutoApproveHandler;
+    let thread_id = sigil_kernel::AgentThreadId::new("agent_chat_pending")?;
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore")?;
+
+    session.append_control(ControlEntry::AgentProfileCaptured(
+        sigil_kernel::AgentProfileCapturedEntry {
+            snapshot: sigil_kernel::AgentProfileSnapshot {
+                snapshot_id: snapshot_id.clone(),
+                profile_id: profile_id.clone(),
+                source: sigil_kernel::AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "tools".to_owned(),
+                resolved_permission_policy_hash: "permissions".to_owned(),
+                resolved_mcp_scope_hash: "mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: sigil_kernel::AgentTrustState::Trusted,
+            },
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStarted(
+        sigil_kernel::AgentThreadStartedEntry {
+            thread_id: thread_id.clone(),
+            parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            thread_session_ref: sigil_kernel::SessionRef::new_relative(
+                "children/agents/agent_chat_pending.jsonl",
+            )?,
+            profile_id,
+            profile_snapshot_id: snapshot_id.clone(),
+            run_context: sigil_kernel::AgentRunContextSnapshot {
+                profile_snapshot_id: snapshot_id,
+                provider: "deepseek".to_owned(),
+                model: "deepseek-v4-pro".to_owned(),
+                reasoning_effort: None,
+                workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(".")?,
+                effective_tool_scope_hash: "tools".to_owned(),
+                effective_permission_policy_hash: "permissions".to_owned(),
+                effective_mcp_scope_hash: "mcp".to_owned(),
+                provider_capability_hash: "provider".to_owned(),
+                model_visible_agent_index_hash: Some("agents".to_owned()),
+                budget_policy_hash: "budget".to_owned(),
+                provider_background_handle_ref: None,
+            },
+            objective: "inspect".to_owned(),
+            prompt_hash: "sha256:prompt".to_owned(),
+            invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+            invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+            display_name: Some("pending".to_owned()),
+            created_at_ms: Some(1),
+        },
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStatusChanged(
+        sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: AgentThreadStatus::Running,
+            reason: Some("still running".to_owned()),
+            updated_at_ms: Some(2),
+        },
+    ))?;
+
+    let wait_call = |id: &str| ToolCall {
+        id: id.to_owned(),
+        name: WAIT_AGENT_TOOL_NAME.to_owned(),
+        args_json: json!({ "thread_id": thread_id.as_str() }).to_string(),
+    };
+    let first = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &wait_call("call-wait-first"),
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("first wait handled");
+    let second = runtime
+        .handle_agent_tool_call(
+            &mut session,
+            &wait_call("call-wait-second"),
+            &run_options(std::env::temp_dir()),
+            &mut handler,
+            &mut approval,
+        )
+        .await?
+        .expect("second wait handled");
+
+    let first_payload: serde_json::Value = serde_json::from_str(&first.content)?;
+    let second_payload: serde_json::Value = serde_json::from_str(&second.content)?;
+    assert_eq!(first_payload["status"], "running");
+    assert_eq!(first_payload["coalesced"], serde_json::Value::Null);
+    assert_eq!(second_payload["status"], "running");
+    assert_eq!(second_payload["coalesced"], true);
+    assert_eq!(second_payload["polling_throttled"], true);
+    assert_eq!(
+        second_payload["coalescing_key"],
+        "wait_agent:agent_chat_pending"
+    );
+    assert!(
+        second_payload["retry_after_ms"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
+    );
+    assert_eq!(
+        second_payload["next_poll_after_ms"],
+        second_payload["retry_after_ms"]
+    );
+    assert!(
+        second_payload["next_poll_after_unix_ms"]
+            .as_u64()
+            .is_some_and(|value| value > 0)
     );
     Ok(())
 }
@@ -2213,6 +2373,20 @@ async fn spawn_agent_enforces_max_fanout() -> Result<()> {
         .expect("spawn handled");
 
     assert!(result.is_error());
+    let model_content: serde_json::Value = serde_json::from_str(&result.to_model_content())?;
+    assert_eq!(
+        model_content["error"]["details"]["requires_user_decision"],
+        true
+    );
+    assert_eq!(
+        model_content["error"]["details"]["do_not_self_complete_delegated_scope"],
+        true
+    );
+    assert_eq!(
+        model_content["error"]["details"]["config_paths"][0],
+        "[task].max_spawn_fanout_per_turn"
+    );
+    assert_eq!(result.metadata.details["requires_user_decision"], true);
     let thread_id = chat_agent_thread_id_for_call(
         "call-fanout",
         &sigil_kernel::AgentProfileId::new("explore")?,

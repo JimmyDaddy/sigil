@@ -741,7 +741,7 @@ fn foreground_background_request_reports_budget_and_missing_foreground() -> Resu
     let budget_error = supervisor
         .request_foreground_background()
         .expect_err("background budget should be enforced before searching foreground children");
-    assert!(budget_error.contains("max_background_threads=1"));
+    assert!(budget_error.contains("[task].max_background_threads=1"));
     Ok(())
 }
 
@@ -937,13 +937,13 @@ fn budget_policy_from_config_exposes_parallel_readonly_and_accessors() -> Result
     default_config.task.allow_parallel_readonly_subagents = true;
     let default_budget = AgentBudgetPolicy::from_root_config(&default_config);
     assert_eq!(default_budget.max_threads, 4);
-    assert_eq!(default_budget.max_parallel_readonly, 4);
+    assert_eq!(default_budget.max_parallel_readonly, 3);
     assert_eq!(default_budget.max_spawn_fanout_per_turn, 4);
     assert_eq!(default_budget.max_agent_tokens_per_task, 200_000);
 
     default_config.task.allow_parallel_readonly_subagents = false;
     let serialized_readonly_budget = AgentBudgetPolicy::from_root_config(&default_config);
-    assert_eq!(serialized_readonly_budget.max_parallel_readonly, 1);
+    assert_eq!(serialized_readonly_budget.max_parallel_readonly, 3);
     Ok(())
 }
 
@@ -958,7 +958,7 @@ fn budget_policy_uses_default_limits_when_config_values_are_omitted() {
 
     let default_budget = AgentBudgetPolicy::from_root_config(std::hint::black_box(&config));
 
-    assert_eq!(default_budget.max_parallel_readonly, 4);
+    assert_eq!(default_budget.max_parallel_readonly, 3);
     assert_eq!(default_budget.max_spawn_fanout_per_turn, 4);
     assert_eq!(default_budget.max_agent_tokens_per_task, 200_000);
 
@@ -966,7 +966,7 @@ fn budget_policy_uses_default_limits_when_config_values_are_omitted() {
     let serialized_readonly_budget =
         AgentBudgetPolicy::from_root_config(std::hint::black_box(&config));
 
-    assert_eq!(serialized_readonly_budget.max_parallel_readonly, 1);
+    assert_eq!(serialized_readonly_budget.max_parallel_readonly, 3);
 }
 
 #[test]
@@ -1018,7 +1018,7 @@ fn supervisor_enforces_background_read_budget() -> Result<()> {
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("max_background_threads=0"))
+            .is_some_and(|reason| reason.contains("[task].max_background_threads=0"))
     }));
     Ok(())
 }
@@ -1046,7 +1046,7 @@ fn supervisor_enforces_parallel_readonly_budget() -> Result<()> {
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("max_parallel_readonly=0"))
+            .is_some_and(|reason| reason.contains("[task].max_parallel_readonly=0"))
     }));
     Ok(())
 }
@@ -1078,7 +1078,7 @@ fn supervisor_enforces_parallel_write_budget_for_readonly_scoped_writer() -> Res
         thread
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("max_parallel_write=0"))
+            .is_some_and(|reason| reason.contains("[task].max_parallel_write=0"))
     }));
     Ok(())
 }

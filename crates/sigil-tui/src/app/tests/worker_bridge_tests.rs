@@ -31,6 +31,46 @@ fn normal_input_creates_user_and_running_state() -> Result<()> {
 }
 
 #[test]
+fn run_notice_filters_status_noise_but_keeps_errors() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.handle(RunEvent::Notice("agent agent_chat_1 finished".to_owned()))?;
+    assert_eq!(app.last_notice(), Some("agent agent_chat_1 finished"));
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice)
+    );
+    assert!(
+        app.events
+            .iter()
+            .any(|event| event.label == "notice" && event.detail == "agent agent_chat_1 finished")
+    );
+
+    app.handle(RunEvent::Notice(
+        "permission wait_agent subject=agent:agent_chat_1 mode=allow".to_owned(),
+    ))?;
+    assert_eq!(
+        app.last_notice(),
+        Some("permission wait_agent subject=agent:agent_chat_1 mode=allow")
+    );
+    assert!(!app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice && entry.text.contains("permission wait_agent")
+    }));
+
+    app.handle(RunEvent::Notice(
+        "agent budget warning after child completion: max exceeded".to_owned(),
+    ))?;
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::Notice
+            && entry
+                .text
+                .contains("agent budget warning after child completion")
+    }));
+    Ok(())
+}
+
+#[test]
 fn activate_lazy_mcp_action_maps_to_worker_command() {
     let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
@@ -648,7 +688,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
             .detail,
         "waiting for @review result"
     );
-    assert!(app.timeline.iter().any(|entry| {
+    assert!(!app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Notice
             && entry.text == "agent @review started; waiting for result"
     }));
@@ -663,7 +703,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
     assert!(app.is_busy);
     assert_eq!(app.run_phase(), RunPhase::Thinking);
     assert_eq!(app.last_notice(), Some("agent result ready; resuming main"));
-    assert!(app.timeline.iter().any(|entry| {
+    assert!(!app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Notice
             && entry
                 .text
@@ -687,7 +727,7 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
     assert!(!app.is_busy);
     assert_eq!(app.run_phase(), RunPhase::Idle);
     assert_eq!(app.last_notice(), Some("agent @review finished"));
-    assert!(app.timeline.iter().any(|entry| {
+    assert!(!app.timeline.iter().any(|entry| {
         entry.role == TimelineRole::Notice && entry.text == "agent @review finished"
     }));
     assert!(app.timeline.iter().any(|entry| {
@@ -906,7 +946,7 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
     app.handle_worker_message(WorkerMessage::Notice("worker note".to_owned()))?;
     assert_eq!(app.last_notice(), Some("worker note"));
     assert!(
-        app.timeline
+        !app.timeline
             .iter()
             .any(|entry| entry.role == TimelineRole::Notice && entry.text == "worker note")
     );
@@ -914,6 +954,12 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
         app.events
             .iter()
             .any(|event| event.label == "worker" && event.detail == "worker note")
+    );
+    app.handle_worker_message(WorkerMessage::Notice("worker failed hard".to_owned()))?;
+    assert!(
+        app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "worker failed hard")
     );
 
     app.handle_worker_message(WorkerMessage::SessionSwitched {
@@ -1157,6 +1203,10 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     })?;
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
         thread_id: thread_id.clone(),
+        event: Box::new(RunEvent::Notice("child failed hard".to_owned())),
+    })?;
+    app.handle_worker_message(WorkerMessage::AgentThreadEvent {
+        thread_id: thread_id.clone(),
         event: Box::new(RunEvent::TextDelta("after notice".to_owned())),
     })?;
     app.handle_worker_message(WorkerMessage::AgentThreadEvent {
@@ -1206,11 +1256,16 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
     assert!(entries.contains(&(TimelineRole::Tool, "Started read_file")));
     assert!(entries.contains(&(TimelineRole::Tool, "Completed read_file")));
     assert!(entries.contains(&(TimelineRole::Tool, "file contents")));
-    assert!(entries.contains(&(TimelineRole::Assistant, "final")));
+    assert!(
+        entries
+            .iter()
+            .any(|(role, text)| *role == TimelineRole::Assistant && text.starts_with("final"))
+    );
     assert!(!entries.contains(&(TimelineRole::Assistant, "draft")));
-    assert!(entries.contains(&(TimelineRole::Notice, "after start")));
-    assert!(entries.contains(&(TimelineRole::Notice, "after complete")));
-    assert!(entries.contains(&(TimelineRole::Notice, "child notice")));
+    assert!(!entries.contains(&(TimelineRole::Notice, "after start")));
+    assert!(!entries.contains(&(TimelineRole::Notice, "after complete")));
+    assert!(!entries.contains(&(TimelineRole::Notice, "child notice")));
+    assert!(entries.contains(&(TimelineRole::Notice, "child failed hard")));
     assert!(entries.contains(&(TimelineRole::Notice, "Approve write_file in child agent")));
     assert!(entries.contains(&(TimelineRole::Notice, "Approval denied for call-write")));
     let entry_count = transcript.timeline_entries.len();
@@ -1253,6 +1308,35 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
             .len(),
         entry_count
     );
+    Ok(())
+}
+
+#[test]
+fn worker_queue_status_summarizes_long_prompt() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let long_prompt = "please inspect ".repeat(8);
+
+    app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
+        items: vec![sigil_kernel::ConversationQueueItemProjection {
+            queued: sigil_kernel::ConversationInputQueuedEntry {
+                queue_id: sigil_kernel::ConversationInputQueueId::new("queue_long")?,
+                target: sigil_kernel::ConversationInputTarget::MainThread,
+                kind: sigil_kernel::ConversationInputKind::Chat,
+                prompt_hash: "sha256:long".to_owned(),
+                prompt: long_prompt,
+                reasoning_effort: None,
+                created_at_ms: None,
+            },
+            status: sigil_kernel::ConversationInputStatus::Queued,
+            reason: None,
+        }],
+        paused: false,
+        entries: Vec::new(),
+    })?;
+
+    let notice = app.last_notice().expect("queue notice should be set");
+    assert!(notice.starts_with("queued 1 · next please inspect"));
+    assert!(notice.ends_with("..."));
     Ok(())
 }
 
@@ -1313,6 +1397,23 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
     let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore_1")?;
     let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
     let thread_id = sigil_kernel::AgentThreadId::new("agent_chat_1")?;
+
+    app.handle(RunEvent::Control(ControlEntry::AgentProfileCaptured(
+        sigil_kernel::AgentProfileCapturedEntry {
+            snapshot: sigil_kernel::AgentProfileSnapshot {
+                snapshot_id: snapshot_id.clone(),
+                profile_id: profile_id.clone(),
+                source: sigil_kernel::AgentProfileSource::System,
+                source_hash: "sha256:source".to_owned(),
+                profile_hash: "sha256:profile".to_owned(),
+                resolved_tool_scope_hash: "tools".to_owned(),
+                resolved_permission_policy_hash: "permissions".to_owned(),
+                resolved_mcp_scope_hash: "mcp".to_owned(),
+                resolved_skill_hashes: Vec::new(),
+                trust_state: sigil_kernel::AgentTrustState::Trusted,
+            },
+        },
+    )))?;
 
     app.handle(RunEvent::Control(ControlEntry::AgentThreadStarted(
         sigil_kernel::AgentThreadStartedEntry {
@@ -1377,6 +1478,32 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
             && event.detail.contains(thread_id.as_str())
             && event.detail.contains("Running")
     }));
+    app.handle_worker_message(WorkerMessage::AgentThreadStatusLive {
+        entry: sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: sigil_kernel::AgentThreadStatus::Completed,
+            reason: Some("background finished".to_owned()),
+            updated_at_ms: Some(44),
+        },
+    })?;
+    assert!(app.current_session_entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(status))
+                if status.thread_id == thread_id
+                    && status.status == sigil_kernel::AgentThreadStatus::Completed
+        )
+    }));
+    let rows = app.agent_sidebar_rows();
+    assert!(
+        rows.iter().any(|row| {
+            row.label.contains("kernel")
+                && row.detail.contains("completed")
+                && row.detail.contains("explore")
+                && row.detail.contains("chat")
+        }),
+        "expected completed explore chat row, got {rows:?}"
+    );
 
     app.handle(RunEvent::Control(ControlEntry::AgentThreadStarted(
         sigil_kernel::AgentThreadStartedEntry {
@@ -1419,6 +1546,82 @@ fn chat_agent_thread_start_control_pushes_agent_card_with_background_hint() -> R
 }
 
 #[test]
+fn repeated_pending_wait_agent_results_replace_previous_tool_card() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    let first = ToolResult::ok(
+        "call-wait-1".to_owned(),
+        "wait_agent".to_owned(),
+        serde_json::json!({
+            "thread_id": "agent_chat_1",
+            "status": "running",
+            "terminal": false,
+            "result_available": false,
+            "retry_after_ms": 5000,
+            "coalescing_key": "wait_agent:agent_chat_1",
+            "next_action": "continue independent parent work"
+        })
+        .to_string(),
+        sigil_kernel::ToolResultMeta {
+            details: serde_json::json!({
+                "thread_id": "agent_chat_1",
+                "status": "running",
+                "retry_after_ms": 5000,
+                "coalescing_key": "wait_agent:agent_chat_1"
+            }),
+            ..sigil_kernel::ToolResultMeta::default()
+        },
+    );
+    let second = ToolResult::ok(
+        "call-wait-2".to_owned(),
+        "wait_agent".to_owned(),
+        serde_json::json!({
+            "thread_id": "agent_chat_1",
+            "status": "running",
+            "terminal": false,
+            "result_available": false,
+            "retry_after_ms": 4200,
+            "coalesced": true,
+            "polling_throttled": true,
+            "coalescing_key": "wait_agent:agent_chat_1",
+            "next_action": "wait_agent was called too soon"
+        })
+        .to_string(),
+        sigil_kernel::ToolResultMeta {
+            details: serde_json::json!({
+                "thread_id": "agent_chat_1",
+                "status": "running",
+                "retry_after_ms": 4200,
+                "coalesced": true,
+                "polling_throttled": true,
+                "coalescing_key": "wait_agent:agent_chat_1"
+            }),
+            ..sigil_kernel::ToolResultMeta::default()
+        },
+    );
+
+    app.handle(RunEvent::ToolResult(first))?;
+    app.handle(RunEvent::ToolResult(second))?;
+
+    let wait_cards = app
+        .timeline
+        .iter()
+        .filter(|entry| entry.role == TimelineRole::Tool && entry.text.contains("wait_agent"))
+        .collect::<Vec<_>>();
+    assert_eq!(wait_cards.len(), 1);
+    assert!(wait_cards[0].text.contains("call-wait-2"));
+    assert!(wait_cards[0].text.contains("polling_throttled"));
+    assert!(
+        app.events
+            .iter()
+            .filter(|event| event.label == "tool:result" && event.detail == "wait_agent ok")
+            .count()
+            >= 2
+    );
+    Ok(())
+}
+
+#[test]
 fn ctrl_b_during_agent_wait_requests_background() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::AgentRunStarted {
@@ -1439,12 +1642,126 @@ fn ctrl_b_during_agent_wait_requests_background() -> Result<()> {
 }
 
 #[test]
+fn worker_queue_messages_update_live_rows_and_dispatch_user_prompt() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1").expect("valid queue id");
+    let queued = sigil_kernel::ConversationInputQueuedEntry {
+        queue_id: queue_id.clone(),
+        target: sigil_kernel::ConversationInputTarget::MainThread,
+        kind: sigil_kernel::ConversationInputKind::Chat,
+        prompt_hash: "sha256:queue".to_owned(),
+        prompt: "follow up after current run".to_owned(),
+        reasoning_effort: Some(ReasoningEffort::Max),
+        created_at_ms: Some(1),
+    };
+    let entry = SessionLogEntry::Control(ControlEntry::ConversationInputQueued(queued.clone()));
+
+    app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
+        items: vec![sigil_kernel::ConversationQueueItemProjection {
+            queued,
+            status: sigil_kernel::ConversationInputStatus::Queued,
+            reason: None,
+        }],
+        paused: false,
+        entries: vec![entry],
+    })?;
+
+    assert_eq!(
+        app.last_notice(),
+        Some("queued 1 · next follow up after current run")
+    );
+    assert_eq!(app.composer_queue_rows().len(), 1);
+    assert!(app.events.iter().any(|event| {
+        event.label == "queue:update" && event.detail.contains("next follow up after current run")
+    }));
+
+    app.handle_worker_message(WorkerMessage::ConversationQueueDispatchStarted {
+        queue_id: queue_id.clone(),
+        prompt: "follow up after current run".to_owned(),
+    })?;
+    assert!(app.is_busy);
+    assert_eq!(app.run_phase(), RunPhase::Thinking);
+    assert_eq!(app.last_notice(), Some("running queued input"));
+    assert!(app.timeline.iter().any(|entry| {
+        entry.role == TimelineRole::User && entry.text == "follow up after current run"
+    }));
+    assert!(app.events.iter().any(|event| {
+        event.label == "queue:dispatch" && event.detail.contains(queue_id.as_str())
+    }));
+
+    app.handle_worker_message(WorkerMessage::ConversationQueueUpdated {
+        items: Vec::new(),
+        paused: true,
+        entries: Vec::new(),
+    })?;
+    assert_eq!(app.last_notice(), Some("queue empty"));
+    Ok(())
+}
+
+#[test]
 fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_updates() {
     let app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
 
     assert!(matches!(
         app.into_worker_command(AppAction::SubmitPrompt("draft".to_owned())),
         WorkerCommand::SubmitPrompt { prompt, .. } if prompt == "draft"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::QueueConversationInput {
+            prompt: "queued draft".to_owned(),
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+        }),
+        WorkerCommand::QueueConversationInput {
+            prompt,
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+            ..
+        } if prompt == "queued draft"
+    ));
+    let queue_id = sigil_kernel::ConversationInputQueueId::new("queue_1").expect("valid queue id");
+    assert!(matches!(
+        app.into_worker_command(AppAction::CancelQueuedConversationInput {
+            queue_id: queue_id.clone(),
+        }),
+        WorkerCommand::CancelQueuedConversationInput { queue_id }
+            if queue_id.as_str() == "queue_1"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::EditQueuedConversationInput {
+            queue_id: queue_id.clone(),
+            prompt: "edited draft".to_owned(),
+        }),
+        WorkerCommand::EditQueuedConversationInput { queue_id, prompt, .. }
+            if queue_id.as_str() == "queue_1" && prompt == "edited draft"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::MoveQueuedConversationInput {
+            queue_id: queue_id.clone(),
+            direction: crate::runner::QueueMoveDirection::Up,
+        }),
+        WorkerCommand::MoveQueuedConversationInput {
+            queue_id,
+            direction: crate::runner::QueueMoveDirection::Up,
+        } if queue_id.as_str() == "queue_1"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::PromoteQueuedConversationInput {
+            queue_id: queue_id.clone(),
+        }),
+        WorkerCommand::PromoteQueuedConversationInput { queue_id }
+            if queue_id.as_str() == "queue_1"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::SendQueuedConversationInputNow {
+            queue_id: queue_id.clone(),
+        }),
+        WorkerCommand::SendQueuedConversationInputNow { queue_id }
+            if queue_id.as_str() == "queue_1"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::SetConversationQueuePaused { paused: true }),
+        WorkerCommand::SetConversationQueuePaused { paused: true }
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::InvokeInlineSkill {
@@ -1518,6 +1835,15 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
             thread_id,
             reason: Some(reason),
         } if thread_id.as_str() == "thread-1" && reason == "done"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::MessageAgent {
+            thread_id: sigil_kernel::AgentThreadId::new("thread-1")
+                .expect("test thread id should be valid"),
+            prompt: "keep going".to_owned(),
+        }),
+        WorkerCommand::MessageAgent { thread_id, prompt }
+            if thread_id.as_str() == "thread-1" && prompt == "keep going"
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::CompactNow),

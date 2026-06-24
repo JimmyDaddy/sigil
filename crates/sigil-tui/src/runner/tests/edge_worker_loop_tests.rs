@@ -9,7 +9,8 @@ use std::{
 use anyhow::Result;
 use sigil_kernel::{
     Agent, AgentInvocationMode, AgentInvocationSource, AgentProfileId, AgentProfileSnapshotId,
-    AgentRole, AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus,
+    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
+    AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, ControlEntry, JsonlSessionStore, McpElicitationDecision,
     McpElicitationEntry, PlanApprovalPermission, Provider, ReasoningEffort, RootConfig, Session,
     SessionLogEntry, SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
@@ -30,7 +31,9 @@ use super::{
         worker_loop::{
             PlanApprovalRequest, WorkerLoopMcpHandlers, agent_delegation_requirement_for_prompt,
             append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
-            next_task_id, resolve_continue_task, run_worker_loop,
+            next_task_id, partition_agent_result_continuations,
+            pending_agent_result_continuations_from_session,
+            queued_background_ready_transient_context, resolve_continue_task, run_worker_loop,
         },
     },
     common::{PlannedProvider, StreamPlan, test_root_config},
@@ -94,6 +97,132 @@ fn agent_delegation_requirement_detects_explicit_subagent_prompts() {
     assert!(agent_delegation_requirement_for_prompt("别开子 agent，保持单 agent").is_none());
     assert!(agent_delegation_requirement_for_prompt("answer without sub-agent").is_none());
     assert!(agent_delegation_requirement_for_prompt("please don't use a subagent").is_none());
+}
+
+#[test]
+fn agent_result_continuation_partition_keeps_background_non_blocking() -> Result<()> {
+    let temp = tempdir()?;
+    let mut session = Session::new("planned", "planned-model");
+    let join_thread = AgentThreadId::new("agent_join")?;
+    let background_thread = AgentThreadId::new("agent_background")?;
+    session.append_control(ControlEntry::AgentThreadStarted(
+        test_agent_thread_started_entry(
+            temp.path(),
+            join_thread.clone(),
+            AgentInvocationMode::JoinBeforeFinal,
+        )?,
+    ))?;
+    session.append_control(ControlEntry::AgentThreadStarted(
+        test_agent_thread_started_entry(
+            temp.path(),
+            background_thread.clone(),
+            AgentInvocationMode::Background,
+        )?,
+    ))?;
+
+    let (blocking, non_blocking) = partition_agent_result_continuations(
+        Some(&session),
+        vec![join_thread.clone(), background_thread.clone()],
+    );
+
+    assert_eq!(blocking, vec![join_thread]);
+    assert_eq!(non_blocking, vec![background_thread]);
+    Ok(())
+}
+
+#[test]
+fn pending_agent_result_continuations_restore_started_statuses() -> Result<()> {
+    let mut session = Session::new("planned", "planned-model");
+    let pending = AgentThreadId::new("agent_pending")?;
+    let started = AgentThreadId::new("agent_started")?;
+    let completed = AgentThreadId::new("agent_completed")?;
+    for (thread_id, status) in [
+        (pending.clone(), AgentResultContinuationStatus::Pending),
+        (started.clone(), AgentResultContinuationStatus::Started),
+        (completed, AgentResultContinuationStatus::Completed),
+    ] {
+        session.append_control(ControlEntry::AgentResultContinuation(
+            AgentResultContinuationEntry {
+                thread_id,
+                status,
+                reason: None,
+                updated_at_ms: Some(1),
+            },
+        ))?;
+    }
+
+    let restored = pending_agent_result_continuations_from_session(Some(&session));
+
+    assert_eq!(restored, vec![pending, started]);
+    Ok(())
+}
+
+#[test]
+fn queued_background_ready_notice_is_bounded_transient_context() -> Result<()> {
+    let mut session = Session::new("planned", "planned-model");
+    for index in 1..=6 {
+        session.append_control(ControlEntry::AgentResultContinuation(
+            AgentResultContinuationEntry {
+                thread_id: AgentThreadId::new(format!("agent_ready_{index}"))?,
+                status: AgentResultContinuationStatus::Pending,
+                reason: None,
+                updated_at_ms: Some(index),
+            },
+        ))?;
+    }
+
+    let context = queued_background_ready_transient_context(Some(&session));
+
+    assert_eq!(context.len(), 1);
+    let content = context[0]
+        .content
+        .as_deref()
+        .expect("ready notice should have content");
+    assert!(content.contains("Background agent result ready notice"));
+    assert!(content.contains("agent_ready_1"));
+    assert!(content.contains("agent_ready_5"));
+    assert!(content.contains("and 1 more"));
+    assert!(!content.contains("agent_ready_6"));
+    Ok(())
+}
+
+fn test_agent_thread_started_entry(
+    workspace_root: &std::path::Path,
+    thread_id: AgentThreadId,
+    invocation_mode: AgentInvocationMode,
+) -> Result<AgentThreadStartedEntry> {
+    let snapshot_id = AgentProfileSnapshotId::new(format!("snapshot_{}", thread_id.as_str()))?;
+    Ok(AgentThreadStartedEntry {
+        thread_id: thread_id.clone(),
+        parent_thread_id: None,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        thread_session_ref: SessionRef::new_relative(format!(
+            "children/{}.jsonl",
+            thread_id.as_str()
+        ))?,
+        profile_id: AgentProfileId::new("explore")?,
+        profile_snapshot_id: snapshot_id.clone(),
+        run_context: AgentRunContextSnapshot {
+            profile_snapshot_id: snapshot_id,
+            provider: "planned".to_owned(),
+            model: "planned-model".to_owned(),
+            reasoning_effort: None,
+            workspace_root: WorkspaceRootSnapshot::new(workspace_root.display().to_string())?,
+            effective_tool_scope_hash: String::new(),
+            effective_permission_policy_hash: String::new(),
+            effective_mcp_scope_hash: String::new(),
+            provider_capability_hash: String::new(),
+            model_visible_agent_index_hash: None,
+            budget_policy_hash: String::new(),
+            provider_background_handle_ref: None,
+        },
+        objective: "inspect".to_owned(),
+        prompt_hash: "prompt-hash".to_owned(),
+        invocation_mode,
+        invocation_source: AgentInvocationSource::Chat,
+        display_name: None,
+        created_at_ms: None,
+    })
 }
 
 #[test]

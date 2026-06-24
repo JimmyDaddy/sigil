@@ -46,6 +46,9 @@ The main workflow is typing tasks directly in the composer. Slash commands are r
 | Focus latest activity | `Ctrl-G` |
 | Move between activities | `Alt-J` / `Alt-K` |
 | Cycle visible agent transcript | Composer agent panel (`Down`, `Up/Down`, `Enter`), `Alt-A` / `Shift-Alt-A` |
+| Focus queued input panel | `Down` from the last composer row when queued input is visible |
+| Run selected queued input now | `Enter` on a selected queued input when the action is `now`; this interrupts the current run |
+| Change queued input action | `Tab` while the queue panel is focused |
 | Expand or collapse thinking / activity | `Ctrl-T` |
 
 When the composer is focused, `Up/Down` first handles prompt history or cursor movement inside multiline input. `Shift-Enter`, `Alt-Enter`, and `Ctrl-J` insert a newline. `Ctrl-Z` restores the last non-empty draft cleared with `Esc`; it is a single draft restore, not a general undo stack.
@@ -65,6 +68,8 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/resume` | Select and restore a previous session |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
+| `/queue` | Focus queued input |
+| `/queue next|now|edit|delete [item]` | Keep a queued input for the next turn, run it now, edit it, or cancel it |
 | `/plan` / `/plan <prompt>` | Enter plan mode or run one read-only planning prompt |
 | `/task <task>` | Create a durable plan and execute the task step by step |
 | `/task continue` | Continue the latest planned task without extra guidance |
@@ -73,7 +78,9 @@ For terminal-specific smoke checks and tmux/SSH guidance, see [terminal-compatib
 | `/compact` | Manually compact the provider-visible context for the current session |
 | `/quit` | Quit the TUI |
 
-`/model`, `/effort`, `/resume`, and `/agent` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
+`/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
+
+When Sigil is already running, ordinary chat input and `/plan <prompt>` are queued instead of being dropped or added to provider-visible history. Queue dispatch is FIFO after the active turn finishes. `next` moves an item to the front for the next turn; `now` interrupts the current run before dispatching the selected item.
 
 ## Config Panel
 

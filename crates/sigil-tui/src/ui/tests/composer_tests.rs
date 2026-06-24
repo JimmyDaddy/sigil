@@ -44,6 +44,20 @@ fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
 }
 
 #[test]
+fn agent_panel_line_pads_tail_with_panel_background() {
+    let theme = Theme::default();
+    let bg = theme.palette.surface_agent_panel;
+    let line = agent_panel_line(Line::from(vec![Span::raw("main")]), 10, bg);
+
+    assert_eq!(spans_display_width(&line.spans), 10);
+    assert_eq!(line.style.bg, Some(bg));
+    assert_eq!(line.spans[0].style.bg, Some(bg));
+    let tail = line.spans.last().expect("expected padded tail span");
+    assert_eq!(tail.content.as_ref(), "      ");
+    assert_eq!(tail.style.bg, Some(bg));
+}
+
+#[test]
 fn composer_cursor_origin_scrolls_with_multiline_input() {
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),
@@ -298,6 +312,57 @@ fn render_agent_panel_shows_agent_rows() -> anyhow::Result<()> {
 }
 
 #[test]
+fn render_agent_panel_omits_queue_rows_from_agent_surface() -> anyhow::Result<()> {
+    let view_model = ComposerViewModel {
+        mode_label: "Build · agent: main".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        agent_rows: vec![
+            SidebarAgentRow {
+                label: "main".to_owned(),
+                detail: "idle in current session".to_owned(),
+                selected: false,
+                active: true,
+                muted: false,
+            },
+            SidebarAgentRow {
+                label: "agent explore".to_owned(),
+                detail: "running · explore · chat".to_owned(),
+                selected: false,
+                active: false,
+                muted: false,
+            },
+        ],
+        agent_panel_focused: false,
+        input: String::new(),
+        input_rows: 1,
+        cursor_position: (0, 0),
+    };
+    let backend = TestBackend::new(96, 8);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_agent_panel(frame, frame.area(), &view_model))?;
+
+    let rendered =
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .fold(String::new(), |mut output, cell| {
+                output.push_str(cell.symbol());
+                output
+            });
+    assert!(!rendered.contains("Queue"));
+    assert!(!rendered.contains("queued prompt"));
+    assert!(!rendered.contains("queued · chat"));
+    assert!(rendered.contains("main"));
+    Ok(())
+}
+
+#[test]
 fn render_agent_panel_shows_focused_controls() -> anyhow::Result<()> {
     let view_model = ComposerViewModel {
         mode_label: "Build · agent: main".to_owned(),
@@ -341,9 +406,19 @@ fn render_agent_panel_shows_focused_controls() -> anyhow::Result<()> {
                 output.push_str(cell.symbol());
                 output
             });
-    assert!(!rendered.contains("Up/Down choose"));
-    assert!(!rendered.contains("Enter switch"));
+    assert!(rendered.contains("Actions"));
+    assert!(rendered.contains("Enter switch"));
+    assert!(rendered.contains("C close"));
+    assert!(rendered.contains("M message"));
+    assert!(rendered.contains("Esc input"));
     assert!(rendered.contains("▸ repo audit"));
     assert!(rendered.contains("◉ main"));
+    let theme = Theme::default();
+    let buffer = terminal.backend().buffer();
+    let selected_row_tail = &buffer[(95, 2)];
+    assert_eq!(
+        selected_row_tail.style().bg,
+        Some(theme.palette.selection_bg)
+    );
     Ok(())
 }

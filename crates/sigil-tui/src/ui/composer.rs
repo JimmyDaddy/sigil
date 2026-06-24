@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::view_model::ComposerViewModel;
 
@@ -168,7 +169,8 @@ pub(crate) fn render_agent_panel_with_theme(
     view_model: &ComposerViewModel,
     theme: &Theme,
 ) {
-    if area.width == 0 || area.height == 0 || view_model.agent_rows.len() <= 1 {
+    let has_agents = view_model.agent_rows.len() > 1;
+    if area.width == 0 || area.height == 0 || !has_agents {
         return;
     }
     let palette = &theme.palette;
@@ -185,11 +187,18 @@ pub(crate) fn render_agent_panel_with_theme(
         return;
     }
     let width = content.width as usize;
-    let lines = view_model
+    let mut lines = view_model
         .agent_rows
         .iter()
         .take(content.height as usize)
         .map(|row| render_agent_row(row, width, view_model.agent_panel_focused, theme))
+        .collect::<Vec<_>>();
+    if view_model.agent_panel_focused && lines.len() < content.height as usize {
+        lines.push(render_agent_actions(view_model, width, theme));
+    }
+    let lines = lines
+        .into_iter()
+        .map(|line| agent_panel_line(line, width, agent_bg))
         .collect::<Vec<_>>();
 
     frame.render_widget(
@@ -198,6 +207,39 @@ pub(crate) fn render_agent_panel_with_theme(
             .wrap(Wrap { trim: false }),
         content,
     );
+}
+
+fn agent_panel_line(line: Line<'static>, width: usize, bg: Color) -> Line<'static> {
+    let mut spans = line
+        .spans
+        .into_iter()
+        .map(|span| {
+            let mut style = span.style;
+            if style.bg.is_none() {
+                style.bg = Some(bg);
+            }
+            Span::styled(span.content, style)
+        })
+        .collect::<Vec<_>>();
+    let line_width = spans_display_width(&spans);
+    if width > line_width {
+        spans.push(Span::styled(
+            " ".repeat(width - line_width),
+            Style::default().bg(bg),
+        ));
+    }
+    Line {
+        spans,
+        style: line.style.patch(Style::default().bg(bg)),
+        alignment: line.alignment,
+    }
+}
+
+fn spans_display_width(spans: &[Span<'static>]) -> usize {
+    spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
 }
 
 fn render_agent_row(
@@ -232,11 +274,12 @@ fn render_agent_row(
         Style::default().fg(palette.accent_info).bg(agent_bg)
     };
     if selected {
+        let content = truncate_display_width(
+            &format!("{focus} {label_text} {} {detail_text}", status.symbol()),
+            width,
+        );
         return Line::from(vec![Span::styled(
-            truncate_display_width(
-                &format!("{focus} {label_text} {} {detail_text}", status.symbol()),
-                width,
-            ),
+            pad_display_width(&content, width),
             style,
         )]);
     }
@@ -269,6 +312,32 @@ fn render_agent_row(
                 .bg(agent_bg),
         ),
     ])
+}
+
+fn render_agent_actions(
+    view_model: &ComposerViewModel,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let palette = &theme.palette;
+    let bg = palette.surface_agent_panel;
+    let child_selected = view_model
+        .agent_rows
+        .iter()
+        .find(|row| row.selected)
+        .is_some_and(|row| row.label != "main");
+    let mut text = "Actions  Enter switch".to_owned();
+    if child_selected {
+        text.push_str("  C close  M message");
+    }
+    text.push_str("  Esc input");
+    Line::from(vec![Span::styled(
+        truncate_display_width(&text, width),
+        Style::default()
+            .fg(palette.text_secondary)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+    )])
 }
 
 fn render_composer_gutter(frame: &mut Frame, area: Rect, accent: Color, bg: Color) {

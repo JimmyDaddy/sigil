@@ -1,4 +1,5 @@
 use super::*;
+use crate::{app::ComposerQueueAction, runner::QueueMoveDirection};
 
 fn task_run_entry(status: sigil_kernel::TaskRunStatus) -> Result<SessionLogEntry> {
     Ok(SessionLogEntry::Control(ControlEntry::TaskRun(
@@ -10,6 +11,20 @@ fn task_run_entry(status: sigil_kernel::TaskRunStatus) -> Result<SessionLogEntry
             reason: None,
         },
     )))
+}
+
+fn queued_conversation_input_entry(id: &str, prompt: &str) -> Result<SessionLogEntry> {
+    Ok(SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueued(sigil_kernel::ConversationInputQueuedEntry {
+            queue_id: sigil_kernel::ConversationInputQueueId::new(id)?,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            prompt_hash: format!("sha256:{id}"),
+            prompt: prompt.to_owned(),
+            reasoning_effort: Some(ReasoningEffort::Max),
+            created_at_ms: None,
+        }),
+    ))
 }
 
 fn sync_child_agent(app: &mut AppState) -> Result<()> {
@@ -540,6 +555,423 @@ fn plain_prompt_after_final_task_starts_new_conversation() -> Result<()> {
 }
 
 #[test]
+fn busy_plain_prompt_queues_without_persisting_user_timeline() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.is_busy = true;
+    app.input = "follow up after this finishes".to_owned();
+    app.input_cursor = app.input.chars().count();
+
+    let action = app.submit_input()?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::QueueConversationInput {
+            prompt,
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+        }) if prompt == "follow up after this finishes"
+    ));
+    assert!(app.input.is_empty());
+    assert_eq!(app.last_notice(), Some("queued for next turn"));
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::User
+                && entry.text == "follow up after this finishes")
+    );
+    Ok(())
+}
+
+#[test]
+fn composer_down_focuses_queue_panel_and_enter_runs_visible_queue_action() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        queued_conversation_input_entry("queue_1", "first queued prompt")?,
+        queued_conversation_input_entry("queue_2", "second queued prompt")?,
+    ]);
+
+    let focus_action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+
+    assert!(focus_action.is_none());
+    assert!(app.is_composer_queue_panel_focused());
+    assert!(app.composer_queue_rows()[0].selected);
+
+    let move_action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(move_action.is_none());
+    assert!(app.composer_queue_rows()[1].selected);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        action,
+        Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
+            if queue_id.as_str() == "queue_2"
+    ));
+    assert_eq!(app.last_notice(), Some("queued input sending now"));
+
+    let tab = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
+    assert!(tab.is_none());
+    let keep_next = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(matches!(
+        keep_next,
+        Some(AppAction::PromoteQueuedConversationInput { ref queue_id })
+            if queue_id.as_str() == "queue_2"
+    ));
+    assert_eq!(app.last_notice(), Some("queued input moved to next turn"));
+    Ok(())
+}
+
+#[test]
+fn queue_panel_keyboard_actions_cover_navigation_reorder_and_adjacent_focus() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        queued_conversation_input_entry("queue_1", "first queued prompt")?,
+        queued_conversation_input_entry("queue_2", "second queued prompt")?,
+    ]);
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(app.is_composer_queue_panel_focused());
+    assert_eq!(
+        app.selected_composer_queue_action(),
+        ComposerQueueAction::SendNow
+    );
+
+    app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.selected_composer_queue_action(),
+        ComposerQueueAction::Delete
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.selected_composer_queue_action(),
+        ComposerQueueAction::SendNow
+    );
+    app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.selected_composer_queue_action(),
+        ComposerQueueAction::Delete
+    );
+
+    let move_first_up = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT))?;
+    assert!(matches!(
+        move_first_up,
+        Some(AppAction::MoveQueuedConversationInput {
+            ref queue_id,
+            direction: QueueMoveDirection::Up,
+        }) if queue_id.as_str() == "queue_1"
+    ));
+    let move_first_down = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT))?;
+    assert!(matches!(
+        move_first_down,
+        Some(AppAction::MoveQueuedConversationInput {
+            ref queue_id,
+            direction: QueueMoveDirection::Down,
+        }) if queue_id.as_str() == "queue_1"
+    ));
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    let move_last_down = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT))?;
+    assert!(matches!(
+        move_last_down,
+        Some(AppAction::MoveQueuedConversationInput {
+            ref queue_id,
+            direction: QueueMoveDirection::Down,
+        }) if queue_id.as_str() == "queue_2"
+    ));
+    let move_last_up = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT))?;
+    assert!(matches!(
+        move_last_up,
+        Some(AppAction::MoveQueuedConversationInput {
+            ref queue_id,
+            direction: QueueMoveDirection::Up,
+        }) if queue_id.as_str() == "queue_2"
+    ));
+    app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert!(app.composer_queue_rows()[0].selected);
+    let delete = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
+    assert!(matches!(
+        delete,
+        Some(AppAction::CancelQueuedConversationInput { ref queue_id })
+            if queue_id.as_str() == "queue_1"
+    ));
+    app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+    assert!(!app.is_composer_queue_panel_focused());
+
+    let mut blur_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    blur_app.sync_current_session_state(vec![queued_conversation_input_entry(
+        "queue_1",
+        "first queued prompt",
+    )?]);
+    blur_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    blur_app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert!(!blur_app.is_composer_queue_panel_focused());
+
+    let mut adjacent_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    adjacent_app.sync_current_session_state(vec![queued_conversation_input_entry(
+        "queue_1",
+        "first queued prompt",
+    )?]);
+    sync_child_agent(&mut adjacent_app)?;
+    adjacent_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    adjacent_app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert!(!adjacent_app.is_composer_queue_panel_focused());
+    assert!(adjacent_app.is_composer_agent_panel_focused());
+    Ok(())
+}
+
+#[test]
+fn queue_flow_empty_and_direct_actions_cover_boundaries() -> Result<()> {
+    let mut empty_app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    assert_eq!(empty_app.queue_strip_rows(), 0);
+    empty_app.composer_queue_panel_focused = true;
+    assert!(!empty_app.move_composer_queue_selection(true));
+    assert!(!empty_app.is_composer_queue_panel_focused());
+    assert!(empty_app.execute_queue_slash_command("")?.is_none());
+    assert_eq!(empty_app.last_notice(), Some("queue empty"));
+    assert!(empty_app.execute_queue_slash_command("edit 1")?.is_none());
+    assert_eq!(empty_app.last_notice(), Some("queue item not found"));
+    assert!(!empty_app.begin_edit_selected_queue_item());
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        queued_conversation_input_entry("queue_1", "\nfirst queued prompt")?,
+        queued_conversation_input_entry("queue_2", "second queued prompt")?,
+        queued_conversation_input_entry("queue_3", "third queued prompt")?,
+    ]);
+    assert_eq!(app.queue_strip_rows(), 5);
+    assert!(app.focus_composer_queue_panel());
+    app.composer_queue_selected = 1;
+    assert!(app.move_composer_queue_selection(false));
+    assert_eq!(app.composer_queue_selected, 0);
+
+    app.composer_queue_action_selected = ComposerQueueAction::Edit;
+    assert!(app.execute_selected_queue_action().is_none());
+    assert_eq!(
+        app.queue_edit_target.as_ref().map(|id| id.as_str()),
+        Some("queue_1")
+    );
+    assert_eq!(app.input, "\nfirst queued prompt");
+    assert!(app.cancel_queue_edit());
+
+    app.composer_queue_panel_focused = true;
+    app.composer_queue_action_selected = ComposerQueueAction::Delete;
+    let delete = app.execute_selected_queue_action();
+    assert!(matches!(
+        delete,
+        Some(AppAction::CancelQueuedConversationInput { ref queue_id })
+            if queue_id.as_str() == "queue_1"
+    ));
+
+    app.queue_edit_target = Some(sigil_kernel::ConversationInputQueueId::new("missing")?);
+    app.refresh_conversation_queue_selection();
+    assert!(app.queue_edit_target.is_none());
+    Ok(())
+}
+
+#[test]
+fn queue_slash_commands_map_to_explicit_queue_actions() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        queued_conversation_input_entry("queue_1", "first queued prompt")?,
+        queued_conversation_input_entry("queue_2", "second queued prompt")?,
+    ]);
+
+    app.input = "/queue pause".to_owned();
+    app.input_cursor = app.input.chars().count();
+    let pause = app.submit_input()?;
+    assert!(matches!(
+        pause,
+        Some(AppAction::SetConversationQueuePaused { paused: true })
+    ));
+
+    app.input = "/queue show".to_owned();
+    app.input_cursor = app.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert!(app.is_composer_queue_panel_focused());
+
+    app.input = "/queue next 2".to_owned();
+    app.input_cursor = app.input.chars().count();
+    let next = app.submit_input()?;
+    assert!(matches!(
+        next,
+        Some(AppAction::PromoteQueuedConversationInput { ref queue_id })
+            if queue_id.as_str() == "queue_2"
+    ));
+
+    app.input = "/queue now 2".to_owned();
+    app.input_cursor = app.input.chars().count();
+    let now = app.submit_input()?;
+    assert!(matches!(
+        now,
+        Some(AppAction::SendQueuedConversationInputNow { ref queue_id })
+            if queue_id.as_str() == "queue_2"
+    ));
+
+    app.input = "/queue delete second".to_owned();
+    app.input_cursor = app.input.chars().count();
+    let delete = app.submit_input()?;
+    assert!(matches!(
+        delete,
+        Some(AppAction::CancelQueuedConversationInput { ref queue_id })
+            if queue_id.as_str() == "queue_2"
+    ));
+
+    app.input = "/queue edit 2".to_owned();
+    app.input_cursor = app.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.input, "second queued prompt");
+
+    app.input = "updated queued prompt".to_owned();
+    app.input_cursor = app.input.chars().count();
+    let edit = app.submit_input()?;
+    assert!(matches!(
+        edit,
+        Some(AppAction::EditQueuedConversationInput { ref queue_id, ref prompt })
+            if queue_id.as_str() == "queue_2" && prompt == "updated queued prompt"
+    ));
+
+    app.sync_current_session_state(vec![
+        queued_conversation_input_entry("queue_1", "first queued prompt")?,
+        queued_conversation_input_entry("queue_2", "second queued prompt")?,
+    ]);
+    for command in [
+        "/queue resume",
+        "/queue next",
+        "/queue send 1",
+        "/queue send-now 1",
+    ] {
+        app.input = command.to_owned();
+        app.input_cursor = app.input.chars().count();
+        assert!(app.submit_input()?.is_some());
+    }
+    for command in [
+        "/queue cancel 2",
+        "/queue remove 2",
+        "/queue up 2",
+        "/queue down 2",
+    ] {
+        app.input = command.to_owned();
+        app.input_cursor = app.input.chars().count();
+        assert!(app.submit_input()?.is_some());
+    }
+    app.input = "/queue now missing".to_owned();
+    app.input_cursor = app.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(app.last_notice(), Some("queue item not found"));
+    app.input = "/queue nonsense".to_owned();
+    app.input_cursor = app.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /queue <show|next|now|edit|delete>")
+    );
+    Ok(())
+}
+
+#[test]
+fn queue_edit_escape_cancels_without_submitting() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![queued_conversation_input_entry(
+        "queue_1",
+        "queued prompt",
+    )?]);
+    app.input = "/queue edit 1".to_owned();
+    app.input_cursor = app.input.chars().count();
+    assert!(app.submit_input()?.is_none());
+    assert_eq!(
+        app.queue_edit_target.as_ref().map(|id| id.as_str()),
+        Some("queue_1")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert!(app.queue_edit_target.is_none());
+    assert!(app.input.is_empty());
+    assert_eq!(app.active_pane, PaneFocus::Composer);
+    assert_eq!(app.last_notice(), Some("queue edit cancelled"));
+    Ok(())
+}
+
+#[test]
+fn agent_message_command_reports_unavailable_child_view_without_thread_id() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.active_agent_view = super::super::AgentView::Child {
+        child_task_id: "orphan_child".to_owned(),
+        child_session_ref: sigil_kernel::SessionRef::new_relative("children/orphan.jsonl")?,
+    };
+    app.input = "/agent message current hello".to_owned();
+    app.input_cursor = app.input.chars().count();
+
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("agent message unavailable: current")
+    );
+    Ok(())
+}
+
+#[test]
+fn composer_agent_panel_missing_selection_rejects_message_and_close() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    app.composer_agent_panel_focused = true;
+    app.sidebar_agent_selected = usize::MAX;
+
+    let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+    assert!(close.is_none());
+    assert_eq!(app.last_notice(), Some("no agent selected"));
+
+    let message = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    assert!(message.is_none());
+    assert_eq!(app.last_notice(), Some("no agent selected"));
+    Ok(())
+}
+
+#[test]
+fn agent_message_command_rejects_empty_prompt() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    app.input = "/agent message child_1    ".to_owned();
+    app.input_cursor = app.input.chars().count();
+
+    let action = app.submit_input()?;
+
+    assert!(action.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("usage: /agent message <agent|current> <prompt>")
+    );
+    Ok(())
+}
+
+#[test]
+fn queue_slash_selector_exposes_next_turn_language() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![queued_conversation_input_entry(
+        "queue_1",
+        "first queued prompt",
+    )?]);
+    app.input = "/queue ".to_owned();
+    app.input_cursor = app.input.chars().count();
+
+    let rows = app.slash_selector_rows();
+
+    let labels = rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>();
+    assert_eq!(labels, vec!["show", "next", "now", "edit", "delete"]);
+    assert!(
+        rows.iter()
+            .any(|row| row.1 == "run selected after current turn")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.1 == "interrupt current turn and run selected")
+    );
+    Ok(())
+}
+
+#[test]
 fn plain_prompt_with_unfinished_task_starts_new_chat() -> Result<()> {
     for status in [
         sigil_kernel::TaskRunStatus::Started,
@@ -803,6 +1235,84 @@ fn composer_down_focuses_agent_panel_and_enter_switches_agent() -> Result<()> {
 }
 
 #[test]
+fn composer_agent_panel_message_key_prefills_agent_message_command() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    app.active_pane = PaneFocus::Composer;
+    app.input.clear();
+    app.input_cursor = 0;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.sidebar_agent_selected, 1);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.input, "/agent message child_1 ");
+    assert_eq!(app.input_cursor, app.input.chars().count());
+    assert!(!app.is_composer_agent_panel_focused());
+    assert_eq!(app.last_notice(), Some("compose agent message: child_1"));
+    Ok(())
+}
+
+#[test]
+fn composer_agent_panel_main_row_rejects_close_and_message_actions() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    app.active_pane = PaneFocus::Composer;
+    app.input.clear();
+    app.input_cursor = 0;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    assert_eq!(app.sidebar_agent_selected, 0);
+
+    let close = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+    assert!(close.is_none());
+    assert_eq!(app.last_notice(), Some("agent close unavailable for main"));
+
+    let message = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
+    assert!(message.is_none());
+    assert_eq!(
+        app.last_notice(),
+        Some("agent message unavailable for main")
+    );
+    assert!(app.input.is_empty());
+    assert!(app.is_composer_agent_panel_focused());
+    Ok(())
+}
+
+#[test]
+fn composer_agent_panel_close_key_requests_selected_terminal_agent_close() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent(&mut app)?;
+    app.active_pane = PaneFocus::Composer;
+    app.input.clear();
+    app.input_cursor = 0;
+
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+    app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::CloseAgent {
+            ref thread_id,
+            reason: Some(ref reason),
+            ..
+        }) if thread_id.as_str() == "legacy_task_1_v1_step_1_child_1"
+            && reason == "closed from TUI /agent"
+    ));
+    assert_eq!(
+        app.last_notice(),
+        Some("agent close requested: legacy_task_1_v1_step_1_child_1")
+    );
+    assert!(app.is_composer_agent_panel_focused());
+    Ok(())
+}
+
+#[test]
 fn composer_agent_panel_down_wraps_from_last_agent_to_first() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent(&mut app)?;
@@ -860,17 +1370,24 @@ fn busy_submit_keeps_existing_input_and_emits_notice() -> Result<()> {
 
     let action = app.submit_input()?;
 
-    assert!(action.is_none());
-    assert_eq!(app.input, "queued");
+    assert!(matches!(
+        action,
+        Some(AppAction::QueueConversationInput {
+            prompt,
+            kind: sigil_kernel::ConversationInputKind::Chat,
+            target: sigil_kernel::ConversationInputTarget::MainThread,
+        }) if prompt == "queued"
+    ));
+    assert!(app.input.is_empty());
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "busy; submit later")
+            .any(|entry| entry.role == TimelineRole::Notice && entry.text == "queued for next turn")
     );
     assert!(
         app.events
             .iter()
-            .any(|event| event.label == "notice" && event.detail == "submit ignored while busy")
+            .any(|event| event.label == "queue" && event.detail == "queued busy input queued")
     );
     Ok(())
 }
