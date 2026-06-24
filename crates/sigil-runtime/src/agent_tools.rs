@@ -1272,9 +1272,7 @@ impl AgentToolRuntime {
 
     fn wait_throttle_remaining(&self, thread_id: &AgentThreadId) -> Option<Duration> {
         let last_wait = self.pending_waits.get(thread_id)?;
-        let elapsed = saturating_elapsed(*last_wait);
-        (elapsed < WAIT_AGENT_MIN_REPOLL_INTERVAL)
-            .then_some(WAIT_AGENT_MIN_REPOLL_INTERVAL - elapsed)
+        wait_throttle_remaining_since(*last_wait)
     }
 
     fn record_pending_wait(&mut self, thread_id: &AgentThreadId) {
@@ -1551,6 +1549,12 @@ impl AgentToolRuntime {
     fn close_agent(&self, session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
         close_agent_from_args(session, call, args)
     }
+}
+
+fn wait_throttle_remaining_since(last_wait: Instant) -> Option<Duration> {
+    WAIT_AGENT_MIN_REPOLL_INTERVAL
+        .checked_sub(saturating_elapsed(last_wait))
+        .filter(|remaining| !remaining.is_zero())
 }
 
 fn close_agent_from_args(session: &Session, call: &ToolCall, args: &Value) -> ToolResult {
@@ -2860,7 +2864,6 @@ fn agent_budget_denied_details(reason: &str) -> Option<Value> {
     }
     Some(json!({
         "reason": reason,
-        "requires_user_decision": true,
         "retryable_after_slot_available": true,
         "do_not_self_complete_delegated_scope": true,
         "config_paths": agent_budget_denied_config_paths(reason),

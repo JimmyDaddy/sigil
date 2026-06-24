@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -1762,6 +1762,14 @@ async fn wait_agent_throttles_repeated_pending_status_for_same_thread() -> Resul
     Ok(())
 }
 
+#[test]
+fn wait_agent_throttle_expiry_does_not_panic_after_interval() {
+    let expired_wait =
+        Instant::now() - super::WAIT_AGENT_MIN_REPOLL_INTERVAL - Duration::from_millis(1);
+
+    assert_eq!(super::wait_throttle_remaining_since(expired_wait), None);
+}
+
 #[tokio::test]
 async fn spawn_agent_rejects_model_invisible_profile_before_building_provider() -> Result<()> {
     let config = root_config();
@@ -2374,9 +2382,10 @@ async fn spawn_agent_enforces_max_fanout() -> Result<()> {
 
     assert!(result.is_error());
     let model_content: serde_json::Value = serde_json::from_str(&result.to_model_content())?;
-    assert_eq!(
-        model_content["error"]["details"]["requires_user_decision"],
-        true
+    assert!(
+        model_content["error"]["details"]
+            .get("requires_user_decision")
+            .is_none()
     );
     assert_eq!(
         model_content["error"]["details"]["do_not_self_complete_delegated_scope"],
@@ -2386,7 +2395,13 @@ async fn spawn_agent_enforces_max_fanout() -> Result<()> {
         model_content["error"]["details"]["config_paths"][0],
         "[task].max_spawn_fanout_per_turn"
     );
-    assert_eq!(result.metadata.details["requires_user_decision"], true);
+    assert!(
+        result
+            .metadata
+            .details
+            .get("requires_user_decision")
+            .is_none()
+    );
     let thread_id = chat_agent_thread_id_for_call(
         "call-fanout",
         &sigil_kernel::AgentProfileId::new("explore")?,
