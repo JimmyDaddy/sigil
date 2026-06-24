@@ -2138,10 +2138,11 @@ fn push_assistant_message_once_deduplicates_and_ignores_empty() -> Result<()> {
 
     // Empty content should not push.
     app.push_assistant_message_once(String::new());
-    assert!(!app
-        .timeline
-        .iter()
-        .any(|entry| entry.role == TimelineRole::Assistant));
+    assert!(
+        !app.timeline
+            .iter()
+            .any(|entry| entry.role == TimelineRole::Assistant)
+    );
 
     // First non-empty push creates an entry.
     app.push_assistant_message_once("hello".to_owned());
