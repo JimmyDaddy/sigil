@@ -98,6 +98,7 @@
 - 所有路径操作必须限制在 workspace root 内
 - workspace confinement 必须基于 canonicalized root 和路径组件判断；文件、目录和父目录链上的 symlink 指向 workspace 外时必须标记为 `External` subject
 - workspace 外路径只能通过 `permission.external_directory` 高级权限进入审批或放行，默认关闭时必须返回 `external_directory_required`
+- Sigil 自身和模型可见工具需要临时 scratch 文件时，优先使用 workspace 内 `.sigil/tmp/`；不要把 OS temp 目录（如 `/tmp`、`/private/tmp`、`%TEMP%`）作为默认放行例外
 - 工具失败必须结构化返回，不能 panic
 - provider-visible tool result 必须使用 `ToolResult::to_model_content()` 的 JSON envelope，不要在 session 历史里写裸文本结果
 

@@ -275,6 +275,7 @@ rules = []
 - 未显式覆盖的工具调用默认进入审批。
 - 只读文件和搜索工具默认放行。
 - workspace 外路径默认不可执行；开启 external directory 后仍会按规则进入审批或放行。
+- 临时 scratch 文件应使用 workspace 内 `.sigil/tmp/`。系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍属于 workspace 外路径，默认不会放行。
 - headless `run` 遇到最终 `ask` 不会静默自动执行，而是向模型回灌结构化 `approval_required` 工具错误。
 
 ## Memory

@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::WORKSPACE_TEMP_DIR;
 use crate::{app::ComposerQueueAction, runner::QueueMoveDirection};
 
 fn task_run_entry(status: sigil_kernel::TaskRunStatus) -> Result<SessionLogEntry> {
@@ -76,6 +77,41 @@ fn cjk_input_cursor_visual_position_uses_display_width() {
     app.set_input_and_cursor("你好".to_owned());
 
     assert_eq!(app.input_cursor_visual_position(), (4, 0));
+}
+
+#[test]
+fn bootstrap_creates_workspace_temp_dir() {
+    let temp = tempfile::tempdir().expect("workspace tempdir should create");
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert!(temp.path().join(WORKSPACE_TEMP_DIR).is_dir());
+    assert!(
+        app.events
+            .iter()
+            .any(|event| { event.label == "workspace_tmp" && event.detail == WORKSPACE_TEMP_DIR })
+    );
+}
+
+#[test]
+fn bootstrap_reports_temp_dir_creation_failure() {
+    let temp = tempfile::tempdir().expect("workspace tempdir should create");
+    let mut config = test_config();
+    config.workspace.root = temp.path().display().to_string();
+
+    // Place a regular file where the temp dir would be created.
+    std::fs::create_dir_all(temp.path().join(".sigil")).unwrap();
+    std::fs::write(temp.path().join(WORKSPACE_TEMP_DIR), "block").unwrap();
+
+    let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+
+    assert!(
+        app.events
+            .iter()
+            .any(|event| { event.label == "workspace_tmp" && event.detail.starts_with("failed to create") })
+    );
 }
 
 #[test]

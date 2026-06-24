@@ -356,7 +356,7 @@ pub(super) fn permission_block_reason(
         (
             ToolErrorKind::ExternalDirectoryRequired,
             format!(
-                "external directory access requires permission.external_directory.enabled for {subject_label}"
+                "external directory access requires permission.external_directory.enabled for {subject_label}. For scratch files, use .sigil/tmp/... inside the workspace."
             ),
         )
     } else if decision.mode == ApprovalMode::Ask {

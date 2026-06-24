@@ -473,6 +473,7 @@ fn permission_block_reason_covers_approval_deny_and_external_directory() {
     assert!(deny_reason.contains("src/main.rs"));
     assert_eq!(external_kind, ToolErrorKind::ExternalDirectoryRequired);
     assert!(external_reason.contains("permission.external_directory.enabled"));
+    assert!(external_reason.contains(".sigil/tmp"));
 }
 
 #[test]

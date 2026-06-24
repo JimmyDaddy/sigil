@@ -7,4 +7,6 @@ sigil.toml
 .repo-local-dev
 __pycache__/
 *.pyc
-.sigil
+.sigil/sessions
+.sigil/input-history.jsonl
+.sigil/tmp

@@ -275,6 +275,7 @@ Meaning:
 - Tool calls without an explicit override default to approval.
 - Read-only file and search tools are allowed by default.
 - Paths outside the workspace are disabled by default; if external directories are enabled, they still go through rules and approval.
+- Temporary scratch files should use `.sigil/tmp/` inside the workspace. OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` are still external paths and are not allowed by default.
 - In headless `run`, final `ask` decisions are returned to the model as structured `approval_required` tool errors instead of being executed silently.
 
 ## Memory

@@ -920,7 +920,7 @@ where
                                     (
                                         ToolErrorKind::ExternalDirectoryRequired,
                                         format!(
-                                            "external directory access requires permission.external_directory.enabled for {}",
+                                            "external directory access requires permission.external_directory.enabled for {}. For scratch files, use .sigil/tmp/... inside the workspace.",
                                             if subject_label == "-" {
                                                 call.name.as_str()
                                             } else {

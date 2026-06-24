@@ -74,6 +74,7 @@ pub(crate) use self::runtime_status::{
 use self::session_flow::{current_focus_label, short_session_token};
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
+pub(crate) const WORKSPACE_TEMP_DIR: &str = ".sigil/tmp";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentView {
@@ -743,6 +744,7 @@ impl AppState {
         self.timeline.clear();
         self.tool_activity_cache.clear();
         self.events.clear();
+        self.ensure_workspace_temp_dir();
         self.push_timeline(TimelineRole::System, "sigil ready.");
         self.push_event("session", format!("active {}", self.session_id));
         self.push_event("workspace", self.workspace_root.display().to_string());
@@ -770,6 +772,7 @@ impl AppState {
         self.timeline.clear();
         self.tool_activity_cache.clear();
         self.events.clear();
+        self.ensure_workspace_temp_dir();
         self.push_timeline(TimelineRole::System, "quick setup");
         self.push_timeline(TimelineRole::Notice, "launch dir = workspace");
         if let Some(error) = self
@@ -785,6 +788,17 @@ impl AppState {
         }
         self.push_event("workspace", self.workspace_root.display().to_string());
         self.reset_scroll();
+    }
+
+    fn ensure_workspace_temp_dir(&mut self) {
+        let temp_dir = self.workspace_root.join(WORKSPACE_TEMP_DIR);
+        match std::fs::create_dir_all(&temp_dir) {
+            Ok(()) => self.push_event("workspace_tmp", WORKSPACE_TEMP_DIR),
+            Err(error) => self.push_event(
+                "workspace_tmp",
+                format!("failed to create {}: {error}", temp_dir.display()),
+            ),
+        }
     }
 
     fn reset_for_new_session(&mut self, provider_name: String, model_name: String, notice: String) {

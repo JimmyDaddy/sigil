@@ -86,6 +86,7 @@ Sigil 按以下顺序解析 config：
 | Path | 含义 |
 | --- | --- |
 | `.sigil/sessions/` | workspace 下默认 append-only session logs |
+| `.sigil/tmp/` | Sigil session 期间使用的 workspace-local scratch 文件 |
 | `sigil.toml` | 本地或用户配置 |
 | `SIGIL.md` | 稳定 workspace memory file |
 | `AGENTS.md` | Sigil 可作为 memory 加载的 agent 协作说明 |

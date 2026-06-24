@@ -335,6 +335,7 @@ pub trait Tool: Send + Sync {
 - `egress_audit` 用于工具域内安全出境审计摘要，返回值会进入 durable control state；实现必须先脱敏并限制大小，不能包含原始 secret、文件内容或大 payload
 - `execute` 必须接收 provider 侧的 `call_id` 并原样写回 `ToolResult.call_id`，保证 tool call / result 配对可恢复
 - 文件类内置工具必须对 workspace root 做 canonicalize，并用路径组件判断 confinement；绝对路径、`..`、目标 symlink 或父目录 symlink 指向 workspace 外时必须生成 `External` subject，再由 `permission.external_directory` gate 决定 deny / ask / allow
+- 临时 scratch 文件使用 workspace 内 `.sigil/tmp/`。系统 temp 目录不作为内置例外：`/tmp`、macOS `/private/tmp`、Windows `%TEMP%` 等仍属于 workspace 外路径，必须走 `permission.external_directory`。
 
 ### 6.3 Tool Registry
 

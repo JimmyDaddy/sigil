@@ -107,6 +107,7 @@ const HARD_GLOB_LIMIT: usize = 1000;
 const DEFAULT_GREP_LIMIT: usize = 100;
 const HARD_GREP_LIMIT: usize = 1000;
 const CHANGESET_ARTIFACT_ROOT: &str = ".sigil/changesets";
+const WORKSPACE_TEMP_ROOT: &str = ".sigil/tmp";
 const CHANGESET_PREVIEW_DIFF_FILE: &str = "preview.diff";
 const CHANGESET_REVERSE_DIFF_FILE: &str = "reverse.diff";
 const DEFAULT_CHANGESET_SUMMARY_LIMIT_BYTES: usize = 16 * 1024;
@@ -447,7 +448,9 @@ impl Tool for WriteFileTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write_file".to_owned(),
-            description: "Write UTF-8 content to a workspace file.".to_owned(),
+            description: format!(
+                "Write UTF-8 content to a workspace file. Use {WORKSPACE_TEMP_ROOT}/ for temporary scratch files; OS temp directories are outside the workspace and require permission.external_directory."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1060,7 +1063,9 @@ impl Tool for BashTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "bash".to_owned(),
-            description: "Run a shell command from the workspace root.".to_owned(),
+            description: format!(
+                "Run a shell command from the workspace root. Use {WORKSPACE_TEMP_ROOT}/ for temporary shell files; OS temp directories are outside the workspace and require permission.external_directory."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1171,9 +1176,9 @@ impl Tool for TerminalStartTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "terminal_start".to_owned(),
-            description:
-                "Start a background terminal task from the workspace, optionally with PTY support."
-                    .to_owned(),
+            description: format!(
+                "Start a background terminal task from the workspace, optionally with PTY support. Use {WORKSPACE_TEMP_ROOT}/ for temporary shell files; OS temp directories are outside the workspace and require permission.external_directory."
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {

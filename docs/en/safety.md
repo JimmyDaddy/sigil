@@ -99,7 +99,7 @@ default_mode = "ask"
 rules = []
 ```
 
-Only enable it for narrow, intentional use cases. Keep `default_mode = "ask"` unless the external path is low risk and stable.
+Only enable it for narrow, intentional use cases. Keep `default_mode = "ask"` unless the external path is low risk and stable. Temporary scratch files should use `.sigil/tmp/` inside the workspace; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` still require external-directory access.
 
 ## Shell Commands
 

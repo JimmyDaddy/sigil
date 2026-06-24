@@ -3278,10 +3278,10 @@ async fn agent_returns_external_directory_required_when_disabled() -> Result<()>
     }));
     assert!(session.messages().iter().any(|message| {
         matches!(message.role, MessageRole::Tool)
-            && message
-                .content
-                .as_deref()
-                .is_some_and(|content| content.contains(r#""kind":"external_directory_required""#))
+            && message.content.as_deref().is_some_and(|content| {
+                content.contains(r#""kind":"external_directory_required""#)
+                    && content.contains(".sigil/tmp")
+            })
     }));
     Ok(())
 }

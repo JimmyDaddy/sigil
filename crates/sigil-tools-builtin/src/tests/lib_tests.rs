@@ -16,6 +16,21 @@ use super::{
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+#[test]
+fn temporary_file_guidance_is_model_visible() {
+    for spec in [
+        WriteFileTool.spec(),
+        BashTool.spec(),
+        super::TerminalStartTool {
+            managers: Default::default(),
+        }
+        .spec(),
+    ] {
+        assert!(spec.description.contains(".sigil/tmp"));
+        assert!(spec.description.contains("permission.external_directory"));
+    }
+}
+
 #[tokio::test]
 async fn read_and_edit_file_tool_work() -> Result<()> {
     let temp = tempfile::tempdir()?;

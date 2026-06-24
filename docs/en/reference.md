@@ -86,6 +86,7 @@ Common per-user paths:
 | Path | Meaning |
 | --- | --- |
 | `.sigil/sessions/` | Default append-only session logs under the workspace |
+| `.sigil/tmp/` | Workspace-local scratch files created during a Sigil session |
 | `sigil.toml` | Local or user config |
 | `SIGIL.md` | Stable workspace memory file |
 | `AGENTS.md` | Agent collaboration instructions that Sigil can load as memory |
