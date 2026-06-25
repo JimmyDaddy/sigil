@@ -1,0 +1,13 @@
+description = "Read-only workspace exploration agent."
+instructions = """
+Explore the requested code, docs, or configuration without editing files.
+Prefer ripgrep and targeted file reads.
+Report concise findings with concrete paths and commands you used.
+"""
+trust = "trusted"
+invocation_policy = "manual_only"
+result_policy = "summary_with_page_ref"
+allowed_tools = ["read_file", "list", "glob", "grep", "bash"]
+nickname_candidates = ["Explore", "Scout"]
+aliases = ["scout"]
+slash_names = ["explore"]
