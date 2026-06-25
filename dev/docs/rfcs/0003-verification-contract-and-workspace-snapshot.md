@@ -9,7 +9,7 @@
 - Roadmap: [Sigil Capability Roadmap v1.0 / Frozen](../sigil-capability-roadmap.md)
 - Architecture snapshot: [Sigil Rust Agent 核心技术方案](../sigil-rust-agent-core-technical-solution.md)
 - Depends on: [RFC-0001 Durable Event Stream and Event Taxonomy](0001-durable-event-stream-and-event-taxonomy.md)
-- Future dependency: RFC-0002 Crash-consistent Mutation Protocol
+- Depends on: [RFC-0002 Crash-consistent Mutation Protocol](0002-crash-consistent-mutation-protocol.md)
 
 ## 1. Summary
 
@@ -22,6 +22,7 @@
 3. `Passed` 必须绑定当前验证范围的 `WorkspaceSnapshotId`。
 4. 未信任 workspace 只能发现候选检查，不能自动执行仓库脚本或配置。
 5. 任何 verification scope 内的 mutation 都会使旧 verification stale。
+6. RFC-0002 的 mutation events 是本 RFC 判定 stale、restore 和 merge 后重新验证的硬依赖。
 
 ## 2. Goals
 
@@ -80,6 +81,9 @@ Rules:
 - `Passed` requires an applicable verification receipt.
 - `Skipped` requires explicit user or policy evidence.
 - `Stale` must reference the mutation event that invalidated prior evidence.
+- Terminal `RunStatus` values are `Completed`, `Blocked`, `Failed`, `Cancelled` and `Interrupted`.
+- New runs or task steps must reduce `Pending` to `Passed`, `Failed`, `Missing`, `Inconclusive`, `Stale`, `Skipped` or `NotApplicable` before entering a terminal run state.
+- `NotEvaluated` is allowed for active initial state and legacy/historical projection. It should not be the final verdict for a new terminal run.
 
 Visible derived states:
 
@@ -88,9 +92,10 @@ Completed + Passed        -> Verified
 Completed + Missing       -> CompletedUnverified
 Completed + Stale         -> CompletedUnverified
 Completed + Skipped       -> CompletedUnverified
+Completed + Inconclusive -> CompletedUnverified
 Completed + NotApplicable -> Completed
 Failed + Failed           -> FailedVerification
-Blocked + Pending         -> NeedsUser
+Blocked + Missing/Stale/Inconclusive -> NeedsUser
 ```
 
 TUI should preserve both badges, for example:
@@ -106,6 +111,9 @@ Verification: Stale
 struct VerificationPolicy {
     required_checks: Vec<CheckSpec>,
     completion_criteria: CompletionCriteria,
+    verification_scope: VerificationScope,
+    sandbox_profile: SandboxProfileRequirement,
+    workspace_trust_requirement: WorkspaceTrustRequirement,
     allow_unverified_completion: bool,
     timeout: Option<Duration>,
 }
@@ -117,9 +125,15 @@ Policy merge rules:
 required_checks = parent union child
 allow_unverified_completion = parent && child
 timeout = min(parent, child)
+completion_criteria = stricter(parent, child)
+verification_scope = child must cover parent-required scope
+sandbox_profile = stricter(parent, child)
+workspace_trust_requirement = stricter(parent, child)
 ```
 
 Child scope may tighten parent policy. It may not relax required checks or enable unverified completion if the parent disallows it.
+
+If two policy fields cannot be compared safely, the reducer must fail closed as `Missing` or `NeedsUser`.
 
 ## 6. Check Discovery
 
@@ -139,6 +153,26 @@ Workspace trust gate:
 - Execution from untrusted workspace requires explicit approval or a sandbox profile satisfying the policy.
 - Context Engine fallback must still respect workspace trust. Untrusted `SIGIL.md`, `AGENTS.md`, README and source comments are repository data, not trusted instructions.
 
+Discovery output is split into two concepts:
+
+```rust
+struct CandidateCheck {
+    source: CheckDiscoverySource,
+    command: CheckCommand,
+    source_event_id: EventId,
+    workspace_trust_snapshot_id: WorkspaceTrustSnapshotId,
+}
+
+struct TrustedCheckSpec {
+    check_spec: CheckSpec,
+    promoted_by: CheckPromotion,
+    approval_event_id: Option<EventId>,
+    sandbox_decision_id: Option<EventId>,
+}
+```
+
+Untrusted repo-local sources can only produce `CandidateCheck`. They become `TrustedCheckSpec` only through user/global policy promotion, explicit approval or a sandbox decision satisfying policy.
+
 ## 7. Verification Scope and Snapshot
 
 Verification checks bind to a content snapshot, not to wall-clock time.
@@ -154,9 +188,13 @@ struct VerificationScope {
 struct VerificationBinding {
     workspace_id: WorkspaceId,
     workspace_snapshot_id: WorkspaceSnapshotId,
+    verification_scope_hash: String,
     check_spec_hash: String,
     environment_fingerprint: String,
     sandbox_profile_hash: String,
+    workspace_trust_snapshot_id: WorkspaceTrustSnapshotId,
+    approval_event_id: Option<EventId>,
+    sandbox_decision_id: Option<EventId>,
 }
 ```
 
@@ -172,8 +210,30 @@ Rules:
 - `WorkspaceRevision` is scoped to one workspace, worktree or snapshot stream.
 - `WorkspaceRevision` is not a global order across sessions or worktrees.
 - Verification validity should use content-bound `WorkspaceSnapshotId`.
+- A receipt is applicable only if `verification_scope_hash` covers the current policy scope.
 - A check that modifies files in verification scope produces mutation evidence, not final passed evidence.
 - After a writing check such as formatter, fixer, snapshot update or codegen, Sigil must re-run a non-writing check before `Passed`.
+
+V1 snapshot manifest follows RFC-0002:
+
+```rust
+struct WorkspaceSnapshotManifestV1 {
+    workspace_id: WorkspaceId,
+    scope_hash: String,
+    entries: Vec<WorkspaceSnapshotEntry>,
+}
+
+struct WorkspaceSnapshotEntry {
+    normalized_path: PathBuf,
+    file_type: FileType,
+    content_hash: Option<String>,
+    mode: Option<u32>,
+    symlink_target: Option<PathBuf>,
+    state: SnapshotEntryState,
+}
+```
+
+If snapshot construction cannot cover the verification scope, the workspace becomes `UnknownDirty` instead of producing a clean `WorkspaceSnapshotId`.
 
 ## 8. Evidence Model
 
@@ -182,13 +242,26 @@ Evidence is derived from durable events. It is not a second mutable truth source
 Relevant events:
 
 ```text
-WriteRecorded
+MutationPrepared
+MutationCommitted
+MutationReconciled
+WriteCommitted
+WorkspaceMutationDetected
+CheckpointRestored
 CommandFinished
 CheckFinished
+CheckSpecRecorded
 DiagnosticRecorded
 TodoChanged
+VerificationRecorded
+VerificationPolicyChanged
+EnvironmentFingerprintRecorded
 ReadinessEvaluated
-WorkspaceMutationDetected
+WorkspaceTrustDecision
+SandboxDecisionRecorded
+ChildVerificationReceiptLinked
+ChildChangesetMerged
+AgentMergeApplied
 ```
 
 Receipt minimum fields:
@@ -196,9 +269,14 @@ Receipt minimum fields:
 ```rust
 struct EvidenceReceipt {
     receipt_id: ReceiptId,
+    source_session_id: SessionId,
+    source_event_id: EventId,
+    source_event_type: String,
     scope: EvidenceScope,
     producer_tool_call: Option<ToolCallId>,
     workspace_revision: Option<WorkspaceRevision>,
+    workspace_snapshot_id: Option<WorkspaceSnapshotId>,
+    policy_hash: Option<String>,
     changeset_id: Option<ChangesetId>,
     status: ReceiptStatus,
     artifact_refs: Vec<ArtifactId>,
@@ -238,6 +316,38 @@ Rules:
 - Restore is a new workspace mutation and invalidates prior verification.
 - Child worktree verification does not transfer to parent after merge; parent must run required checks again.
 
+Stale reasons:
+
+```rust
+enum VerificationStaleReason {
+    WorkspaceChanged(EventId),
+    CheckSpecChanged(EventId),
+    PolicyChanged(EventId),
+    EnvironmentChanged(EventId),
+    SandboxChanged(EventId),
+    TrustChanged(EventId),
+    UnknownDirty(EventId),
+}
+```
+
+Invalidating event mapping:
+
+- `WorkspaceChanged` references `MutationCommitted`, `MutationReconciled`, `WriteCommitted`, `WorkspaceMutationDetected`, `CheckpointRestored`, `ChildChangesetMerged` or `AgentMergeApplied`.
+- `CheckSpecChanged` references `CheckSpecRecorded` or `VerificationPolicyChanged`.
+- `PolicyChanged` references `VerificationPolicyChanged`.
+- `EnvironmentChanged` references `EnvironmentFingerprintRecorded`.
+- `SandboxChanged` references `SandboxDecisionRecorded`.
+- `TrustChanged` references `WorkspaceTrustDecision`.
+- `UnknownDirty` references `WorkspaceMutationDetected` or the recovery event that produced unknown dirty.
+
+Restore and merge events:
+
+- Resuming a session is not a workspace mutation.
+- `LogTailRecovered` is not a workspace mutation by itself.
+- `CheckpointRestored` is a workspace mutation.
+- `ChildChangesetMerged` or `AgentMergeApplied` creates a new parent workspace snapshot.
+- Every stale reason references the invalidating event id and, when available, from/to workspace snapshot ids.
+
 ## 10. Readiness Reducer
 
 Inputs:
@@ -250,6 +360,7 @@ Inputs:
 - write and mutation evidence
 - check evidence
 - approval denial, cancellation, interruption and max-turn events
+- trust, sandbox, environment and policy changes
 
 Output:
 
@@ -288,6 +399,24 @@ Child agent rules:
 - Child write output must produce changeset or mutation evidence.
 - Child `Passed` only applies to the child workspace snapshot.
 - Merge into parent creates a new parent workspace snapshot and requires parent checks.
+
+Parent-side durable link:
+
+```rust
+struct ChildVerificationReceiptLinked {
+    parent_session_id: SessionId,
+    child_session_id: SessionId,
+    child_receipt_id: ReceiptId,
+    child_event_id: EventId,
+    child_workspace_id: WorkspaceId,
+    child_workspace_snapshot_id: WorkspaceSnapshotId,
+    policy_hash: String,
+    changeset_id: Option<ChangesetId>,
+    merge_event_id: Option<EventId>,
+}
+```
+
+Parent reducers use receipt links or imported receipts. They must not parse child summary text to infer verification.
 
 ## 12. TUI and Protocol Surface
 
@@ -334,21 +463,32 @@ Required deterministic tests:
 - code write without check maps to `Missing`
 - successful check after write maps to `Passed`
 - write after successful check maps to `Stale`
+- terminal run never persists `Pending`
+- new terminal run never persists `NotEvaluated`
+- receipt scope must cover current policy scope
+- child receipt with only local stream sequence is rejected without source session/event id
 - formatter modifies source and cannot produce final `Passed`
 - user skips check with policy support maps to `Skipped`
 - required check failure maps to `Failed`
 - untrusted workspace discovers but does not auto-run Makefile/script checks
+- untrusted check execution requires approval event or sandbox decision id
 - unknown shell mutation maps to `UnknownDirty` and stale verification
+- check spec change makes old receipt stale
+- policy change makes old receipt stale
+- environment change makes old receipt stale
+- sandbox profile change makes old receipt stale
+- workspace trust change makes old receipt stale
 - restore invalidates previous passed verification
 - child worktree passed evidence does not transfer after parent merge
+- child receipt link survives parent session restore
 - final text cannot force `Passed`
 - `/task` step with recovered tool error is not silently verified
 - cancellation preserves independent verification verdict
 - policy inheritance cannot relax parent required checks
+- completion criteria, scope, sandbox and trust requirements cannot be relaxed by child policy
 
 ## 15. Open Questions
 
-- Exact `WorkspaceSnapshotId` hash algorithm.
 - Exact default exclude list for build/cache/generated roots.
 - How much of CI check discovery should run before workspace trust.
 - Whether `Inconclusive` should be used for unknown dirty with no prior evidence or only for ambiguous check outputs.

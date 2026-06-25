@@ -9,6 +9,8 @@
 - Roadmap: [Sigil Capability Roadmap v1.0 / Frozen](../sigil-capability-roadmap.md)
 - Architecture snapshot: [Sigil Rust Agent 核心技术方案](../sigil-rust-agent-core-technical-solution.md)
 - Source baseline: `main` around `d44b2f82a4c6fff330c3b30e878d176dbfe2dc5d`
+- Sibling RFC: [RFC-0002 Crash-consistent Mutation Protocol](0002-crash-consistent-mutation-protocol.md)
+- Sibling RFC: [RFC-0003 Verification Contract and Workspace Snapshot](0003-verification-contract-and-workspace-snapshot.md)
 
 ## 1. Summary
 
@@ -22,6 +24,7 @@
 4. 同一个 session stream 内使用严格递增的 `stream_sequence`。
 5. Durable event、live runtime event 和 protocol event 分层；流式 token、reasoning delta 和瞬时进度不进入 durable JSONL。
 6. Kernel 内部 reducer 消费强类型 `DomainEvent`，不直接消费任意字符串和 JSON。
+7. `DomainEvent` 是 `StoredEvent` 成功解码后的强类型形态；durable taxonomy 与 reducer input 必须保持同一事件集合。
 
 ## 2. Goals
 
@@ -46,12 +49,40 @@ Sigil 必须区分三类事件。
 
 ```rust
 enum DurableDomainEvent {
+    UserMessageRecorded(UserMessageRecorded),
+    AssistantMessageRecorded(AssistantMessageRecorded),
+    ToolResultRecorded(ToolResultRecorded),
+    RunStatusChanged(RunStatusChanged),
+    RunFinalized(RunFinalized),
     ToolExecutionStarted(ToolExecutionStarted),
     ToolExecutionFinished(ToolExecutionFinished),
     ApprovalResolved(ApprovalResolved),
+    MutationPrepared(MutationPrepared),
+    MutationCommitted(MutationCommitted),
+    MutationReconciled(MutationReconciled),
+    MutationBatchStarted(MutationBatchStarted),
+    MutationBatchFinished(MutationBatchFinished),
     WriteCommitted(WriteCommitted),
+    WorkspaceMutationDetected(WorkspaceMutationDetected),
+    CheckpointRestored(CheckpointRestored),
+    CommandFinished(CommandFinished),
+    CheckFinished(CheckFinished),
+    CheckSpecRecorded(CheckSpecRecorded),
+    DiagnosticRecorded(DiagnosticRecorded),
+    TodoChanged(TodoChanged),
     VerificationRecorded(VerificationRecorded),
+    VerificationPolicyChanged(VerificationPolicyChanged),
+    EnvironmentFingerprintRecorded(EnvironmentFingerprintRecorded),
+    ReadinessEvaluated(ReadinessEvaluated),
     TaskStatusChanged(TaskStatusChanged),
+    ChildVerificationReceiptLinked(ChildVerificationReceiptLinked),
+    ChildChangesetMerged(ChildChangesetMerged),
+    AgentMergeApplied(AgentMergeApplied),
+    WorkspaceTrustDecision(WorkspaceTrustDecision),
+    ContextSourceCaptured(ContextSourceCaptured),
+    EgressDecisionRecorded(EgressDecisionRecorded),
+    ExtensionTrustDecision(ExtensionTrustDecision),
+    SandboxDecisionRecorded(SandboxDecisionRecorded),
     LogTailRecovered(LogTailRecovered),
     Legacy(LegacyEvent),
 }
@@ -75,6 +106,22 @@ Rules:
 - Live runtime events are process-local and not required for recovery.
 - Protocol events are client-facing views derived from durable or live events.
 - Protocol transient events are not guaranteed to replay after reconnect.
+- `DomainEvent` is the strong decoded form of `DurableDomainEvent`. Reducers and projections consume this strong form, not raw `event_type` strings.
+
+Initial mapping from current surfaces:
+
+| Current surface | Durable event | Live runtime event | Protocol event |
+| --- | --- | --- | --- |
+| Completed user message | `UserMessageRecorded` | none | durable view |
+| Completed assistant message | `AssistantMessageRecorded` | none | durable view |
+| Reasoning or text delta | none | `ReasoningDelta` / `TextDelta` | transient view |
+| Tool call started | `ToolExecutionStarted` | optional `ToolProgress` | durable view plus optional transient progress |
+| Tool call finished or failed | `ToolExecutionFinished` and optionally `CommandFinished` / `CheckFinished` | none | durable view |
+| Provider-visible tool result message | `ToolResultRecorded` | none | durable view |
+| Approval decision | `ApprovalResolved` | none | durable view |
+| Run cancelled, interrupted, max-turn stopped or finalized | `RunStatusChanged` / `RunFinalized` | none | durable view |
+| Readiness calculation | `ReadinessEvaluated` | none | durable view |
+| Trust, egress, sandbox or context source decision | matching trust / egress / sandbox / context event | none | durable view |
 
 ## 5. Stored Event Envelope
 
@@ -85,6 +132,7 @@ struct StoredEvent {
     schema_version: u16,
     event_type: String,
     event_version: u16,
+    event_class: EventClass,
     event_id: EventId,
     session_id: SessionId,
     stream_sequence: u64,
@@ -95,12 +143,18 @@ struct StoredEvent {
     record_checksum: String,
     payload: serde_json::Value,
 }
+
+enum EventClass {
+    Critical,
+    NonCritical,
+}
 ```
 
 Field rules:
 
 - `schema_version` versions the envelope.
 - `event_version` versions the payload for `event_type`.
+- `event_class` allows older readers to distinguish unknown non-critical events from unknown events that must fail closed.
 - `(session_id, stream_sequence)` is unique.
 - `stream_sequence` is scoped to one session stream only.
 - Cross-session ordering must use `event_id`, `correlation_id`, `causation_id`, `occurred_at` and `parent_session_id`.
@@ -114,10 +168,12 @@ Field rules:
 Canonical input:
 
 ```text
-canonical_json(
+record_checksum = "sha256:jcs-v1:" + hex(SHA256(
+  canonical_json(
   schema_version,
   event_type,
   event_version,
+  event_class,
   event_id,
   session_id,
   stream_sequence,
@@ -126,16 +182,17 @@ canonical_json(
   causation_id,
   parent_session_id,
   payload
-)
+)))
 ```
 
 Rules:
 
-- Canonical serialization must be deterministic.
+- Canonical serialization uses JSON Canonicalization Scheme style ordering for object keys, UTF-8 bytes, deterministic string escaping and normalized number representation.
 - JSON key order must not affect the computed checksum.
 - Checksum mismatch is not the same error as JSON parse failure.
 - A checksum mismatch means the event cannot be trusted for projection.
 - `record_checksum` is not tamper-proof and must not be described as a security signature.
+- Checksum is verified against the persisted wire form before payload upcasting.
 
 Limits:
 
@@ -166,12 +223,22 @@ Rules:
 Legacy mapping:
 
 ```text
-legacy stream_sequence = original physical line number
-legacy event_id = UUIDv5(session_id, line_number + raw_line_hash)
+legacy session_id = UUIDv5(SigilLegacySessionNamespace, legacy_prefix_hash)
+legacy_prefix_hash = SHA256(ordered raw legacy record lines before the first v2 line)
+legacy stream_sequence = effective JSONL record ordinal
+legacy event_id = UUIDv5(legacy_session_id, record_ordinal + raw_line_hash)
 legacy occurred_at = None, unless the legacy record already has a trustworthy timestamp
 ```
 
 The same legacy session must produce the same legacy event ids on every rebuild.
+
+Rules:
+
+- Empty lines do not consume a legacy `stream_sequence`.
+- Invalid middle lines are not skipped; they fail load.
+- New v2 append after legacy records uses `max(valid_event.stream_sequence) + 1`.
+- If a legacy-only stream is later appended with v2 events, existing legacy event ids remain stable because the `legacy_prefix_hash` only covers the legacy prefix before the first v2 line.
+- If no stable legacy prefix can be derived, the reader must fail closed rather than generate random event ids.
 
 ## 8. Upcasters and Unknown Events
 
@@ -183,8 +250,9 @@ v1 -> v2 -> v3
 
 Unknown event rules:
 
-- Unknown non-critical events are preserved and skipped by projections that do not understand them.
-- Unknown events that affect permission, approval, write mutation, verification or recovery fail closed.
+- Unknown events with `event_class = NonCritical` are preserved and skipped by projections that do not understand them.
+- Unknown events with `event_class = Critical` fail closed.
+- Unknown events without a parseable or trusted `event_class` fail closed.
 - Unknown events are never silently discarded.
 
 Critical event classes:
@@ -208,6 +276,9 @@ Rules:
 - Cross-process writers require an OS file lock or must fail.
 - Append policy must define when to flush and when to `sync_all`.
 - Recovery-critical events use the strongest sync policy.
+- A read-only loader may read without appending reconciliation events.
+- A writer-mode loader must hold the OS file lock across tail validation, max sequence calculation and all load-time reconciliation appends.
+- Load-time reconciliation events must have deterministic ids or idempotency keys so repeated writer-mode opens do not duplicate recovery records.
 
 Initial sync classes:
 
@@ -216,6 +287,28 @@ NormalEvent       append + flush
 RecoveryCritical  append + flush + sync file
 TailRecovery      backup + sync backup + truncate + sync file + append recovery + sync file
 ```
+
+Initial event-to-sync mapping:
+
+| Event type | Sync class |
+| --- | --- |
+| `UserMessageRecorded` / `AssistantMessageRecorded` | `NormalEvent` |
+| `ToolResultRecorded` | `RecoveryCritical` |
+| `ToolExecutionStarted` / `ToolExecutionFinished` | `RecoveryCritical` |
+| `ApprovalResolved` | `RecoveryCritical` |
+| `MutationPrepared` / `MutationCommitted` / `MutationReconciled` | `RecoveryCritical` |
+| `MutationBatchStarted` / `MutationBatchFinished` | `RecoveryCritical` |
+| `WriteCommitted` / `WorkspaceMutationDetected` / `CheckpointRestored` | `RecoveryCritical` |
+| `CommandFinished` / `CheckFinished` / `CheckSpecRecorded` | `RecoveryCritical` |
+| `DiagnosticRecorded` / `TodoChanged` | `RecoveryCritical` |
+| `VerificationRecorded` / `VerificationPolicyChanged` / `EnvironmentFingerprintRecorded` / `ReadinessEvaluated` | `RecoveryCritical` |
+| `TaskStatusChanged` / `RunStatusChanged` / `RunFinalized` | `RecoveryCritical` |
+| `ChildVerificationReceiptLinked` / `ChildChangesetMerged` / `AgentMergeApplied` | `RecoveryCritical` |
+| `WorkspaceTrustDecision` / `EgressDecisionRecorded` / `ExtensionTrustDecision` / `SandboxDecisionRecorded` | `RecoveryCritical` |
+| `ContextSourceCaptured` | `NormalEvent`, unless it grants trust or secret/egress access |
+| `LogTailRecovered` | `TailRecovery` |
+
+`Legacy` is an upcast view over existing legacy log records. A v2 writer must not append new `Legacy` events, so it has no new append sync class.
 
 ## 10. Tail Recovery
 
@@ -231,10 +324,12 @@ Recovery flow:
 acquire exclusive lock
 create corrupt copy in RecoveryQuarantineStore
 sync corrupt copy
+write and sync TailRecoveryIntent manifest
 truncate original to last complete event
 sync original file
 append LogTailRecovered
 sync original file
+mark TailRecoveryIntent completed
 ```
 
 `LogTailRecovered` records:
@@ -251,19 +346,14 @@ struct LogTailRecovered {
 
 `RecoveryQuarantineStore` is minimal and only stores damaged log copies plus metadata. General artifact storage is out of scope for RFC-0001.
 
+If the process crashes after truncate but before `LogTailRecovered`, the next writer-mode load must find the recovery intent and either append/reconstruct `LogTailRecovered` or fail closed. It must not silently accept a shortened log without a recovery event.
+
 ## 11. Reducer Contract
 
 Reducers consume strong domain events:
 
 ```rust
-enum DomainEvent {
-    ToolExecutionStarted(ToolExecutionStarted),
-    ToolExecutionFinished(ToolExecutionFinished),
-    ApprovalResolved(ApprovalResolved),
-    VerificationRecorded(VerificationRecorded),
-    LogTailRecovered(LogTailRecovered),
-    Legacy(LegacyEvent),
-}
+type DomainEvent = DurableDomainEvent;
 ```
 
 Rules:
@@ -273,6 +363,7 @@ Rules:
 - Reducers must not branch on arbitrary strings and raw JSON.
 - Reducers must be deterministic.
 - Reducers must be side-effect free.
+- Every event in `DurableDomainEvent` must be either consumed by at least one reducer or explicitly ignored by a named reducer with a documented reason.
 
 ## 12. Projection Consumption
 
@@ -283,18 +374,23 @@ struct ProjectionCursor {
     session_id: SessionId,
     projection_schema_version: u16,
     last_applied_stream_sequence: u64,
+    last_applied_event_id: EventId,
+    last_applied_record_checksum: String,
 }
 ```
 
 Apply rules:
 
 ```text
-sequence <= last_applied      ignore
+sequence < last_applied       ignore only if already applied by event id/checksum
+sequence == last_applied      ignore only if event id and checksum match cursor
 sequence == last_applied + 1  apply
 sequence > last_applied + 1   report gap and stop
 ```
 
 Event apply and cursor update must happen in the same database transaction.
+
+If a projection sees the same sequence with a different `event_id` or `record_checksum`, it must fail closed and request rebuild/diagnostics.
 
 ## 13. Protocol Boundary
 
@@ -329,21 +425,32 @@ Required deterministic tests:
 - load v2-only session
 - load mixed legacy + v2 session
 - legacy event ids stable across two rebuilds
+- legacy stream with blank lines uses effective record ordinal without sequence gaps
+- v2 append after legacy starts at `max(valid_event.sequence) + 1`
+- legacy session id remains stable after appending v2 events
 - `stream_sequence` strictly increases within one session
 - cross-session events do not require global sequence
 - checksum mismatch differs from JSON parse failure
+- checksum uses `sha256:jcs-v1:<hex>` canonical form
 - unknown non-critical event is preserved and skipped
 - unknown critical event fails closed
+- unknown event without trusted `event_class` fails closed
 - tail half-line recovery appends `LogTailRecovered`
+- crash after tail truncate but before `LogTailRecovered` is recovered from intent or fails closed
 - middle corruption fails load
-- projection ignores duplicate sequence
+- writer-mode loader holds lock through reconciliation appends
+- OS lock conflict prevents a second writer-mode loader
+- projection ignores duplicate sequence only when event id and checksum also match
+- projection fails on same sequence with different event id or checksum
 - projection reports sequence gap
+- projection cursor ahead of recovered stream fails closed
 - transient event is not written to JSONL
+- durable `Last-Event-ID` replay does not promise transient replay
 - recovery-critical append uses stronger sync path
+- event-to-sync-class mapping covers approval, tool lifecycle, mutation, command/check, diagnostics, todo, verification, sandbox and trust events
 
 ## 16. Open Questions
 
-- Exact canonical JSON implementation.
 - Exact byte and nesting limits for events.
 - Whether `record_checksum` should later become a hash chain for stronger tamper-evidence.
 - Exact file locking backend per platform.
