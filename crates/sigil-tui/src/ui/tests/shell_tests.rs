@@ -311,6 +311,41 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
 }
 
 #[test]
+fn render_config_storage_paths_use_wider_main_panel_on_wide_terminals() -> anyhow::Result<()> {
+    let mut config = test_config();
+    config.workspace.root = "/Users/example/study/turbods".to_owned();
+    config.storage.state_root = sigil_kernel::StorageRoot::Path(
+        "/Users/example/Library/Application Support/sigil/state".to_owned(),
+    );
+    config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path("/Users/example/Library/Caches/sigil".to_owned());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.input = "/config".to_owned();
+    let _ = app.submit_input()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    let backend = TestBackend::new(220, 36);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render(frame, &app))?;
+
+    let rows = rendered_rows(&terminal);
+    let input_history_row = rows
+        .iter()
+        .find(|row| row.contains("Input history"))
+        .expect("input history storage row should render");
+    assert!(
+        input_history_row.contains("input-history.jsonl"),
+        "wide storage row should keep the file name visible: {input_history_row}"
+    );
+    assert!(
+        !input_history_row.contains("..."),
+        "wide storage row should not truncate the resolved path: {input_history_row}"
+    );
+    assert!(rendered_content(&terminal).contains("Details"));
+    Ok(())
+}
+
+#[test]
 fn render_main_screen_uses_configured_theme_surface() -> anyhow::Result<()> {
     let mut config = test_config();
     config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
@@ -999,7 +1034,7 @@ fn render_config_details_panel_uses_focus_row_and_command_tokens() -> anyhow::Re
         .expect("key metadata detail should render");
     let help_row = rows
         .iter()
-        .position(|row| row.contains("i Chat model used for new"))
+        .position(|row| row.contains("i Chat model used"))
         .expect("field help should render as an info row");
     let buffer = terminal.backend().buffer();
     let selected_bg_cells = (0..buffer.area.width)

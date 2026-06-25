@@ -124,8 +124,8 @@ fn centered_config_area_respects_min_max_and_side_margins() {
 
     assert_eq!(narrow.width, 60);
     assert_eq!(narrow.x, 0);
-    assert_eq!(wide.width, 152);
-    assert_eq!(wide.x, 34);
+    assert_eq!(wide.width, 180);
+    assert_eq!(wide.x, 20);
 }
 
 #[test]
@@ -207,7 +207,7 @@ fn centered_config_area_respects_narrow_and_wide_bounds() {
     let narrow = centered_config_area(Rect::new(3, 0, 60, 10));
 
     assert_eq!(wide.width, CONFIG_CONTENT_MAX_WIDTH);
-    assert_eq!(wide.x, 34);
+    assert_eq!(wide.x, 20);
     assert_eq!(narrow.width, 60);
     assert_eq!(narrow.x, 3);
 }
