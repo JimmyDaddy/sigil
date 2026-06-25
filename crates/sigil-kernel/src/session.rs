@@ -1,12 +1,15 @@
 use std::{
     collections::HashMap,
-    fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    fs::{self, File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::Mutex,
+    thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -27,6 +30,10 @@ use crate::{
         ConversationInputEditedEntry, ConversationInputQueueControlEntry,
         ConversationInputQueuedEntry, ConversationInputReorderedEntry,
         ConversationInputStatusEntry, ConversationQueueProjection,
+    },
+    event::{
+        DurableEventType, EventClass, EventSyncClass, LegacyEvent, MAX_EVENT_BYTES, StoredEvent,
+        is_v2_stored_event_value, stable_event_hash, stable_event_uuid,
     },
     memory::{apply_memory_report, materialize_memory},
     permission::{
@@ -52,6 +59,8 @@ use crate::{
 };
 
 static SESSION_LOG_IO_LOCK: Mutex<()> = Mutex::new(());
+const SESSION_LOG_SHARED_LOCK_RETRIES: usize = 50;
+const SESSION_LOG_SHARED_LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Append-only session log entry stored in the durable JSONL session file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +75,32 @@ pub enum SessionLogEntry {
     ToolResult(ModelMessage),
     #[serde(alias = "Control")]
     Control(ControlEntry),
+}
+
+/// One physical record in a mixed legacy/v2 session stream.
+#[derive(Debug, Clone)]
+pub enum SessionStreamRecord {
+    Legacy {
+        event: LegacyEvent,
+        entry: Box<SessionLogEntry>,
+    },
+    Stored(StoredEvent),
+}
+
+impl SessionStreamRecord {
+    pub fn stream_sequence(&self) -> u64 {
+        match self {
+            Self::Legacy { event, .. } => event.stream_sequence,
+            Self::Stored(event) => event.stream_sequence,
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        match self {
+            Self::Legacy { event, .. } => &event.session_id,
+            Self::Stored(event) => &event.session_id,
+        }
+    }
 }
 
 /// Stable compaction metadata persisted in the append-only control plane.
@@ -382,26 +417,58 @@ impl JsonlSessionStore {
 
     /// Appends a single serialized session entry to the durable JSONL file.
     pub fn append(&self, entry: &SessionLogEntry) -> Result<()> {
+        self.append_session_entry_event(entry).map(|_| ())
+    }
+
+    /// Appends one v2 stored event to the durable JSONL file.
+    pub fn append_event(
+        &self,
+        event_type: DurableEventType,
+        event_class: EventClass,
+        payload: serde_json::Value,
+    ) -> Result<StoredEvent> {
         let _guard = SESSION_LOG_IO_LOCK
             .lock()
             .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
-        let mut line = serde_json::to_string(entry).context("failed to serialize session entry")?;
-        line.push('\n');
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .with_context(|| format!("failed to open {}", self.path.display()))?;
-        file.write_all(line.as_bytes())
-            .context("failed to append session entry")
+        let mut file = self.open_locked_file()?;
+        let event = if let Some(state) = append_state_for_fast_append_locked(&mut file, &self.path)?
+        {
+            append_event_with_state_locked(
+                &self.path,
+                &mut file,
+                state,
+                event_type,
+                event_class,
+                payload,
+            )?
+        } else {
+            let mut records = recover_tail_if_needed_locked(&mut file, &self.path)?;
+            append_event_locked(
+                &self.path,
+                &mut file,
+                &mut records,
+                event_type,
+                event_class,
+                payload,
+            )?
+        };
+        Ok(event)
+    }
+
+    /// Appends a provider-visible or control session entry as a v2 stored event.
+    pub fn append_session_entry_event(&self, entry: &SessionLogEntry) -> Result<StoredEvent> {
+        let event_type = session_entry_event_type(entry);
+        let event_class = session_entry_event_class(event_type);
+        let payload = serde_json::json!({ "session_log_entry": entry });
+        self.append_event(event_type, event_class, payload)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Reads all valid JSONL entries from `path`.
-    pub fn read_entries(path: impl AsRef<Path>) -> Result<Vec<SessionLogEntry>> {
+    /// Reads all mixed-format records from `path`.
+    pub fn read_event_records(path: impl AsRef<Path>) -> Result<Vec<SessionStreamRecord>> {
         let path = path.as_ref();
         if !path.exists() {
             return Ok(Vec::new());
@@ -410,28 +477,822 @@ impl JsonlSessionStore {
         let _guard = SESSION_LOG_IO_LOCK
             .lock()
             .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
-        let file =
+        let mut file =
             fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-        let reader = BufReader::new(file);
-        let mut entries = Vec::new();
-        for (index, line) in reader.lines().enumerate() {
-            let line = line.with_context(|| {
-                format!("failed to read line {} from {}", index + 1, path.display())
-            })?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let entry: SessionLogEntry = serde_json::from_str(&line).with_context(|| {
-                format!(
-                    "failed to parse session entry on line {} from {}",
-                    index + 1,
-                    path.display()
-                )
-            })?;
+        lock_shared_with_retry(&file, path)?;
+        read_stream_records_from_file(&mut file, path)
+    }
+
+    /// Reads all mixed-format records in writer mode, performing tail recovery when needed.
+    pub fn read_event_records_writer(&self) -> Result<Vec<SessionStreamRecord>> {
+        let _guard = SESSION_LOG_IO_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
+        let mut file = self.open_locked_file()?;
+        recover_tail_if_needed_locked(&mut file, &self.path)
+    }
+
+    fn load_entries_writer_reconciled(
+        &self,
+        fallback_provider_name: String,
+        fallback_model_name: String,
+    ) -> Result<(Vec<SessionLogEntry>, String, String)> {
+        let _guard = SESSION_LOG_IO_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
+        let mut file = self.open_locked_file()?;
+        let mut records = recover_tail_if_needed_locked(&mut file, &self.path)?;
+        let mut entries = session_entries_from_records(&records)?;
+        let (provider_name, model_name) = session_identity_from_entries(&entries)
+            .unwrap_or((fallback_provider_name, fallback_model_name));
+
+        if !has_session_identity(&entries) {
+            let entry = SessionLogEntry::Control(ControlEntry::SessionIdentity {
+                provider_name: provider_name.clone(),
+                model_name: model_name.clone(),
+            });
+            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
             entries.push(entry);
         }
-        Ok(entries)
+
+        for execution in interrupted_tool_executions(&entries) {
+            let entry = SessionLogEntry::Control(ControlEntry::ToolExecution(Box::new(execution)));
+            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
+            entries.push(entry);
+        }
+
+        for interruption in interrupted_agent_attempts(&entries) {
+            let entry = SessionLogEntry::Control(ControlEntry::AgentRunInterrupted(interruption));
+            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
+            entries.push(entry);
+        }
+
+        for closed_route in closed_agent_routes(&entries) {
+            let entry = SessionLogEntry::Control(ControlEntry::AgentRouteClosed(closed_route));
+            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
+            entries.push(entry);
+        }
+
+        Ok((entries, provider_name, model_name))
     }
+
+    /// Reads all valid JSONL entries from `path`.
+    pub fn read_entries(path: impl AsRef<Path>) -> Result<Vec<SessionLogEntry>> {
+        let path = path.as_ref();
+        let records = Self::read_event_records(path)?;
+        session_entries_from_records(&records)
+    }
+
+    /// Decodes one JSONL record into a session entry when the record carries one.
+    ///
+    /// This accepts both legacy `SessionLogEntry` lines and v2 `StoredEvent` lines. Unknown
+    /// non-critical v2 records are skipped so product surfaces can tail mixed session streams
+    /// without learning each durable event payload shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the line is neither a legacy session entry nor a valid stored event,
+    /// or when a stored event's embedded session entry payload is malformed.
+    pub fn session_entry_from_json_line(line: &str) -> Result<Option<SessionLogEntry>> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(None);
+        }
+        if let Ok(entry) = serde_json::from_str::<SessionLogEntry>(line) {
+            return Ok(Some(entry));
+        }
+        let event = StoredEvent::from_json_str(line)
+            .context("failed to decode stored event from session JSONL line")?;
+        session_entry_from_stored_event(&event)
+    }
+
+    fn open_locked_file(&self) -> Result<File> {
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&self.path)
+            .with_context(|| format!("failed to open {}", self.path.display()))?;
+        lock_exclusive_with_retry(&file, &self.path)?;
+        Ok(file)
+    }
+}
+
+fn session_entries_from_records(records: &[SessionStreamRecord]) -> Result<Vec<SessionLogEntry>> {
+    let mut entries = Vec::new();
+    for record in records {
+        match record {
+            SessionStreamRecord::Legacy { entry, .. } => entries.push(entry.as_ref().clone()),
+            SessionStreamRecord::Stored(event) => {
+                if let Some(entry) = session_entry_from_stored_event(event)? {
+                    entries.push(entry);
+                }
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn has_session_identity(entries: &[SessionLogEntry]) -> bool {
+    entries.iter().any(is_session_identity_entry)
+}
+
+fn is_session_identity_entry(entry: &SessionLogEntry) -> bool {
+    matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+    )
+}
+
+fn read_stream_records_from_file(file: &mut File, path: &Path) -> Result<Vec<SessionStreamRecord>> {
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    read_stream_records_from_str(path, &content)
+}
+
+fn read_stream_records_from_str(path: &Path, content: &str) -> Result<Vec<SessionStreamRecord>> {
+    let raw_records = content
+        .lines()
+        .enumerate()
+        .filter_map(|(line_index, line)| {
+            (!line.trim().is_empty()).then_some((line_index + 1, line.to_owned()))
+        })
+        .collect::<Vec<_>>();
+    if raw_records.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let first_v2 = raw_records
+        .iter()
+        .position(|(_, line)| line_is_v2_stored_event(line).unwrap_or(false));
+    if first_v2.is_some()
+        && raw_records
+            .iter()
+            .skip(first_v2.unwrap_or_default())
+            .any(|(_, line)| !line_is_v2_stored_event(line).unwrap_or(false))
+    {
+        let path = path.display();
+        bail!("legacy session entry appears after v2 stored event in {path}");
+    }
+
+    let legacy_prefix_lines = match first_v2 {
+        Some(index) => &raw_records[..index],
+        None => raw_records.as_slice(),
+    };
+    let legacy_session_id = (!legacy_prefix_lines.is_empty()).then(|| {
+        let mut prefix = String::new();
+        for (_, line) in legacy_prefix_lines {
+            prefix.push_str(line);
+            prefix.push('\n');
+        }
+        stable_event_uuid(
+            "sigil-legacy-session",
+            &stable_event_hash(prefix.as_bytes()),
+        )
+    });
+
+    let mut records = Vec::with_capacity(raw_records.len());
+    let mut expected_session_id = None;
+    for (record_ordinal, (physical_line, line)) in raw_records.iter().enumerate() {
+        let stream_sequence = record_ordinal as u64 + 1;
+        if line_is_v2_stored_event(line)? {
+            let event = StoredEvent::from_json_str(line)
+                .with_context(|| stream_line_context("stored event", *physical_line, path))?;
+            validate_stream_record_identity(
+                *physical_line,
+                stream_sequence,
+                &event.session_id,
+                event.stream_sequence,
+                &mut expected_session_id,
+            )?;
+            records.push(SessionStreamRecord::Stored(event));
+            continue;
+        }
+
+        let session_id = legacy_session_id
+            .as_ref()
+            .expect("legacy session id is derived when legacy records are present");
+        let entry: SessionLogEntry = serde_json::from_str(line)
+            .with_context(|| stream_line_context("session entry", *physical_line, path))?;
+        validate_stream_record_identity(
+            *physical_line,
+            stream_sequence,
+            session_id,
+            stream_sequence,
+            &mut expected_session_id,
+        )?;
+        let raw_line_hash = stable_event_hash(line.as_bytes());
+        let event_id = stable_event_uuid(session_id, &format!("{stream_sequence}:{raw_line_hash}"));
+        let payload = serde_json::to_value(&entry).context("failed to serialize legacy entry")?;
+        let event = LegacyEvent {
+            event_id,
+            session_id: session_id.clone(),
+            stream_sequence,
+            raw_line_hash,
+            payload,
+        };
+        let entry = Box::new(entry);
+        records.push(SessionStreamRecord::Legacy { event, entry });
+    }
+    Ok(records)
+}
+
+fn validate_stream_record_identity(
+    physical_line: usize,
+    expected_sequence: u64,
+    session_id: &str,
+    stream_sequence: u64,
+    expected_session_id: &mut Option<String>,
+) -> Result<()> {
+    if stream_sequence != expected_sequence {
+        let message =
+            stream_sequence_mismatch_message(physical_line, stream_sequence, expected_sequence);
+        return Err(anyhow::anyhow!(message));
+    }
+    match expected_session_id {
+        Some(expected) if expected != session_id => {
+            let message = stream_session_mismatch_message(physical_line, session_id, expected);
+            return Err(anyhow::anyhow!(message));
+        }
+        Some(_) => {}
+        None => *expected_session_id = Some(session_id.to_owned()),
+    }
+    Ok(())
+}
+
+fn stream_sequence_mismatch_message(
+    physical_line: usize,
+    stream_sequence: u64,
+    expected_sequence: u64,
+) -> String {
+    const PREFIX: &str = "stream_sequence does not match expected sequence";
+    format!("{PREFIX} on line {physical_line}: {stream_sequence} vs {expected_sequence}")
+}
+
+fn stream_session_mismatch_message(
+    physical_line: usize,
+    session_id: &str,
+    expected: &str,
+) -> String {
+    const PREFIX: &str = "session_id does not match stream session_id";
+    format!("{PREFIX} on line {physical_line}: {session_id} vs {expected}")
+}
+
+fn stream_line_context(kind: &str, physical_line: usize, path: &Path) -> String {
+    let path = path.display();
+    format!("failed to parse {kind} on line {physical_line} from {path}")
+}
+
+fn line_is_v2_stored_event(line: &str) -> Result<bool> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Ok(false);
+    };
+    Ok(is_v2_stored_event_value(&value))
+}
+
+fn append_stored_event_to_locked_file(file: &mut File, event: &StoredEvent) -> Result<()> {
+    file.seek(SeekFrom::End(0))
+        .context("failed to seek session log before append")?;
+    let line = event.to_json_line()?;
+    file.write_all(line.as_bytes())
+        .context("failed to append stored event")?;
+    file.flush().context("failed to flush stored event")?;
+    if event.sync_class()? != EventSyncClass::NormalEvent {
+        file.sync_all().context("failed to sync stored event")?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct StreamAppendState {
+    session_id: String,
+    next_sequence: u64,
+}
+
+fn append_state_for_fast_append_locked(
+    file: &mut File,
+    path: &Path,
+) -> Result<Option<StreamAppendState>> {
+    if read_tail_recovery_intent(path)?.is_some() {
+        return Ok(None);
+    }
+    let Some(line) = last_non_empty_line(file, path)? else {
+        let session_id = session_id_for_path(path);
+        return Ok(Some(StreamAppendState {
+            session_id,
+            next_sequence: 1,
+        }));
+    };
+    if !line_is_v2_stored_event(&line)? {
+        return Ok(None);
+    }
+    let Ok(event) = StoredEvent::from_json_str(&line) else {
+        return Ok(None);
+    };
+    Ok(Some(StreamAppendState {
+        session_id: event.session_id,
+        next_sequence: event.stream_sequence.saturating_add(1),
+    }))
+}
+
+fn last_non_empty_line(file: &mut File, path: &Path) -> Result<Option<String>> {
+    let mut position = file
+        .seek(SeekFrom::End(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    if position == 0 {
+        return Ok(None);
+    }
+
+    let mut tail = Vec::new();
+    while position > 0 && tail.len() <= MAX_EVENT_BYTES {
+        let read_size = position.min(32 * 1024) as usize;
+        position = position.saturating_sub(read_size as u64);
+        file.seek(SeekFrom::Start(position))
+            .with_context(|| format!("failed to seek {}", path.display()))?;
+        let mut chunk = vec![0; read_size];
+        file.read_exact(&mut chunk)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        chunk.extend(tail);
+        tail = chunk;
+        if let Some(line) = complete_last_non_empty_line(&tail, position == 0)? {
+            return Ok(Some(line));
+        }
+        if position == 0 {
+            return Ok(None);
+        }
+    }
+
+    bail!("last session log record is too large in {}", path.display())
+}
+
+fn complete_last_non_empty_line(bytes: &[u8], at_file_start: bool) -> Result<Option<String>> {
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+    if end == 0 {
+        return Ok(None);
+    }
+    let start = bytes[..end]
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    if start == 0 && !at_file_start {
+        return Ok(None);
+    }
+    let line = std::str::from_utf8(&bytes[start..end])
+        .context("failed to decode last session log record")?
+        .trim_end_matches('\r');
+    Ok((!line.trim().is_empty()).then(|| line.to_owned()))
+}
+
+fn append_event_with_state_locked(
+    path: &Path,
+    file: &mut File,
+    state: StreamAppendState,
+    event_type: DurableEventType,
+    event_class: EventClass,
+    payload: serde_json::Value,
+) -> Result<StoredEvent> {
+    if !event_type.appendable() {
+        bail!("{} cannot be appended as a v2 event", event_type.as_str());
+    }
+    let event_id_seed = event_id_seed(&state.session_id, state.next_sequence, event_type, &payload);
+    let event_id = stable_event_uuid("sigil-event", &event_id_seed);
+    let session_id = state.session_id;
+    let sequence = state.next_sequence;
+    let event = StoredEvent::new(
+        event_type,
+        event_class,
+        event_id,
+        session_id,
+        sequence,
+        payload,
+    )
+    .with_context(|| format!("failed to build stored event for {}", path.display()))?;
+    append_stored_event_to_locked_file(file, &event)?;
+    Ok(event)
+}
+
+fn event_id_seed(
+    session_id: &str,
+    stream_sequence: u64,
+    event_type: DurableEventType,
+    payload: &serde_json::Value,
+) -> String {
+    let event_type = event_type.as_str();
+    let payload_hash = stable_json_hash(payload);
+    format!("{session_id}:{stream_sequence}:{event_type}:{payload_hash}")
+}
+
+fn append_event_locked(
+    path: &Path,
+    file: &mut File,
+    records: &mut Vec<SessionStreamRecord>,
+    event_type: DurableEventType,
+    event_class: EventClass,
+    payload: serde_json::Value,
+) -> Result<StoredEvent> {
+    if !event_type.appendable() {
+        bail!("{} cannot be appended as a v2 event", event_type.as_str());
+    }
+
+    let session_id = stream_session_id(records).unwrap_or_else(|| session_id_for_path(path));
+    let next_sequence = next_stream_sequence(records);
+    let event_id_seed = event_id_seed(&session_id, next_sequence, event_type, &payload);
+    let event_id = stable_event_uuid("sigil-event", &event_id_seed);
+    let kind = event_type;
+    let class = event_class;
+    let sequence = next_sequence;
+    let event = StoredEvent::new(kind, class, event_id, session_id, sequence, payload)?;
+    append_stored_event_to_locked_file(file, &event)?;
+    records.push(SessionStreamRecord::Stored(event.clone()));
+    Ok(event)
+}
+
+fn append_session_entry_event_locked(
+    path: &Path,
+    file: &mut File,
+    records: &mut Vec<SessionStreamRecord>,
+    entry: &SessionLogEntry,
+) -> Result<StoredEvent> {
+    let event_type = session_entry_event_type(entry);
+    let payload = serde_json::json!({ "session_log_entry": entry });
+    let class = session_entry_event_class(event_type);
+    append_event_locked(path, file, records, event_type, class, payload)
+}
+
+fn stream_session_id(records: &[SessionStreamRecord]) -> Option<String> {
+    records.last().map(|record| record.session_id().to_owned())
+}
+
+fn session_id_for_path(path: &Path) -> String {
+    let path_key = path.as_os_str().to_string_lossy();
+    stable_event_uuid("sigil-session-path", &path_key)
+}
+
+fn next_stream_sequence(records: &[SessionStreamRecord]) -> u64 {
+    records
+        .iter()
+        .map(SessionStreamRecord::stream_sequence)
+        .max()
+        .map_or(1, |max_sequence| max_sequence + 1)
+}
+
+fn session_entry_event_type(entry: &SessionLogEntry) -> DurableEventType {
+    match entry {
+        SessionLogEntry::User(_) => DurableEventType::UserMessageRecorded,
+        SessionLogEntry::Assistant(_) => DurableEventType::AssistantMessageRecorded,
+        SessionLogEntry::ToolResult(_) => DurableEventType::ToolResultRecorded,
+        SessionLogEntry::Control(control) => control_entry_event_type(control),
+    }
+}
+
+fn session_entry_event_class(event_type: DurableEventType) -> EventClass {
+    if event_type == DurableEventType::ContextSourceCaptured {
+        return EventClass::NonCritical;
+    }
+    if event_type == DurableEventType::SessionEntryRecorded {
+        return EventClass::NonCritical;
+    }
+    EventClass::Critical
+}
+
+fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
+    match entry {
+        ControlEntry::ToolApproval(approval)
+            if approval.action == ToolApprovalAuditAction::Resolved =>
+        {
+            DurableEventType::ApprovalResolved
+        }
+        ControlEntry::ToolApproval(_) => DurableEventType::SessionEntryRecorded,
+        ControlEntry::ToolExecution(execution) => tool_execution_event_type(execution.status),
+        ControlEntry::ToolEgress(_) => DurableEventType::EgressDecisionRecorded,
+        ControlEntry::PluginTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
+        ControlEntry::AgentProfileTrustDecision(_) => DurableEventType::ExtensionTrustDecision,
+        ControlEntry::TaskRun(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::TaskPlan(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::TaskStep(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::PrefixSnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
+        ControlEntry::MemorySnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
+        ControlEntry::SkillIndexCaptured(_) => DurableEventType::ContextSourceCaptured,
+        ControlEntry::SkillLoaded(_) => DurableEventType::ContextSourceCaptured,
+        ControlEntry::PluginManifestCaptured(_) => DurableEventType::ContextSourceCaptured,
+        ControlEntry::AgentProfileCaptured(_) => DurableEventType::ContextSourceCaptured,
+        _ => DurableEventType::SessionEntryRecorded,
+    }
+}
+
+fn tool_execution_event_type(status: ToolExecutionStatus) -> DurableEventType {
+    if status == ToolExecutionStatus::Started {
+        DurableEventType::ToolExecutionStarted
+    } else {
+        DurableEventType::ToolExecutionFinished
+    }
+}
+
+fn session_entry_from_stored_event(event: &StoredEvent) -> Result<Option<SessionLogEntry>> {
+    if matches!(event.event_kind(), None | Some(DurableEventType::Legacy)) {
+        return Ok(None);
+    }
+    let Some(value) = event.payload.get("session_log_entry") else {
+        return Ok(None);
+    };
+    let entry = serde_json::from_value(value.clone())
+        .context("failed to decode session entry from stored event payload")?;
+    Ok(Some(entry))
+}
+
+fn lock_shared_with_retry(file: &File, path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..=SESSION_LOG_SHARED_LOCK_RETRIES {
+        match file.try_lock_shared() {
+            Ok(()) => return Ok(()),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if attempt < SESSION_LOG_SHARED_LOCK_RETRIES {
+                    thread::sleep(SESSION_LOG_SHARED_LOCK_RETRY_DELAY);
+                    continue;
+                }
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                last_error = Some(error);
+                break;
+            }
+        }
+    }
+    if let Some(error) = last_error {
+        Err(error).with_context(|| format!("failed to lock {}", path.display()))
+    } else {
+        bail!("failed to lock {}", path.display())
+    }
+}
+
+fn lock_exclusive_with_retry(file: &File, path: &Path) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..=SESSION_LOG_SHARED_LOCK_RETRIES {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                last_error = Some(error);
+                if attempt < SESSION_LOG_SHARED_LOCK_RETRIES {
+                    thread::sleep(SESSION_LOG_SHARED_LOCK_RETRY_DELAY);
+                    continue;
+                }
+            }
+            Err(error) => {
+                last_error = Some(error);
+                break;
+            }
+        }
+    }
+    if let Some(error) = last_error {
+        Err(error).with_context(|| format!("failed to lock {}", path.display()))
+    } else {
+        bail!("failed to lock {}", path.display())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct TailRecoveryIntent {
+    original_size: u64,
+    recovered_size: u64,
+    discarded_bytes: u64,
+    quarantine_path: PathBuf,
+    original_hash: String,
+    event_id: String,
+    session_id: String,
+}
+
+fn recover_tail_if_needed_locked(file: &mut File, path: &Path) -> Result<Vec<SessionStreamRecord>> {
+    if let Some(intent) = read_tail_recovery_intent(path)? {
+        match read_stream_records_from_file(file, path) {
+            Ok(records) => {
+                if records.iter().any(|record| {
+                    matches!(
+                        record,
+                        SessionStreamRecord::Stored(event)
+                            if event.event_type == DurableEventType::LogTailRecovered.as_str()
+                                && event.event_id == intent.event_id
+                    )
+                }) {
+                    clear_tail_recovery_intent(path)?;
+                    return Ok(records);
+                }
+            }
+            Err(read_error) => {
+                recover_from_pending_tail_intent(file, path, &intent)
+                    .with_context(|| read_error.to_string())?;
+            }
+        }
+        append_tail_recovery_event_locked(file, path, &intent)?;
+        clear_tail_recovery_intent(path)?;
+        return read_stream_records_from_file(file, path);
+    }
+
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+
+    let Some(corruption) = tail_corruption(path, &content)? else {
+        return read_stream_records_from_str(path, &content);
+    };
+
+    let original_hash = stable_event_hash(content.as_bytes());
+    let recovered_content = &content[..corruption.recovered_size as usize];
+    let recovered_records = read_stream_records_from_str(path, recovered_content)?;
+    let session_id = stream_session_id(&recovered_records).unwrap_or_else(|| {
+        stable_event_uuid("sigil-session-path", &path.as_os_str().to_string_lossy())
+    });
+    let event_id = stable_event_uuid(
+        "sigil-tail-recovery",
+        &format!(
+            "{original_hash}:{}:{}",
+            corruption.recovered_size, corruption.discarded_bytes
+        ),
+    );
+    let quarantine_path = quarantine_tail_copy(path, &content, &original_hash)?;
+    let intent = TailRecoveryIntent {
+        original_size: content.len() as u64,
+        recovered_size: corruption.recovered_size,
+        discarded_bytes: corruption.discarded_bytes,
+        quarantine_path,
+        original_hash,
+        event_id,
+        session_id,
+    };
+    write_tail_recovery_intent(path, &intent)?;
+    file.set_len(intent.recovered_size)
+        .with_context(|| format!("failed to truncate {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync truncated {}", path.display()))?;
+    append_tail_recovery_event_locked(file, path, &intent)?;
+    clear_tail_recovery_intent(path)?;
+    read_stream_records_from_file(file, path)
+}
+
+fn recover_from_pending_tail_intent(
+    file: &mut File,
+    path: &Path,
+    intent: &TailRecoveryIntent,
+) -> Result<()> {
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to seek {}", path.display()))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let current_hash = stable_event_hash(content.as_bytes());
+    if current_hash != intent.original_hash {
+        bail!(
+            "tail recovery intent exists but current log hash does not match recorded original hash"
+        );
+    }
+    if content.len() < intent.recovered_size as usize {
+        bail!("tail recovery intent recovered_size is past current log length");
+    }
+    read_stream_records_from_str(path, &content[..intent.recovered_size as usize])
+        .context("tail recovery intent points to invalid recovered prefix")?;
+    file.set_len(intent.recovered_size)
+        .with_context(|| format!("failed to truncate {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync truncated {}", path.display()))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TailCorruption {
+    recovered_size: u64,
+    discarded_bytes: u64,
+}
+
+fn tail_corruption(path: &Path, content: &str) -> Result<Option<TailCorruption>> {
+    let mut line_start = 0usize;
+    let mut non_empty_lines = Vec::new();
+    for segment in content.split_inclusive('\n') {
+        let line_end = line_start + segment.len();
+        let line = segment.trim_end_matches(['\n', '\r']);
+        if !line.trim().is_empty() {
+            non_empty_lines.push((line_start, line_end, line.to_owned()));
+        }
+        line_start = line_end;
+    }
+    for (index, (start, _end, line)) in non_empty_lines.iter().enumerate() {
+        if record_line_is_valid(line) {
+            continue;
+        }
+        if index + 1 == non_empty_lines.len() {
+            return Ok(Some(TailCorruption {
+                recovered_size: *start as u64,
+                discarded_bytes: (content.len() - *start) as u64,
+            }));
+        }
+        bail!("middle corruption in session log {}", path.display());
+    }
+    Ok(None)
+}
+
+fn record_line_is_valid(line: &str) -> bool {
+    if line_is_v2_stored_event(line).unwrap_or(false) {
+        return StoredEvent::from_json_str(line).is_ok();
+    }
+    serde_json::from_str::<SessionLogEntry>(line).is_ok()
+}
+
+fn append_tail_recovery_event_locked(
+    file: &mut File,
+    _path: &Path,
+    intent: &TailRecoveryIntent,
+) -> Result<()> {
+    let records = read_stream_records_from_file(file, _path)?;
+    let next_sequence = records
+        .iter()
+        .map(SessionStreamRecord::stream_sequence)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let event = StoredEvent::new(
+        DurableEventType::LogTailRecovered,
+        EventClass::Critical,
+        intent.event_id.clone(),
+        intent.session_id.clone(),
+        next_sequence,
+        serde_json::json!({
+            "original_size": intent.original_size,
+            "recovered_size": intent.recovered_size,
+            "discarded_bytes": intent.discarded_bytes,
+            "quarantine_path": intent.quarantine_path,
+            "original_hash": intent.original_hash,
+        }),
+    )?;
+    append_stored_event_to_locked_file(file, &event)
+}
+
+fn quarantine_tail_copy(path: &Path, content: &str, original_hash: &str) -> Result<PathBuf> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = parent.join(".sigil-recovery");
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let short_hash = original_hash
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(16)
+        .collect::<String>();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.jsonl");
+    let quarantine_path = dir.join(format!("{file_name}.corrupt.{short_hash}"));
+    fs::write(&quarantine_path, content)
+        .with_context(|| format!("failed to write {}", quarantine_path.display()))?;
+    let quarantine_file = File::open(&quarantine_path)
+        .with_context(|| format!("failed to open {}", quarantine_path.display()))?;
+    quarantine_file
+        .sync_all()
+        .with_context(|| format!("failed to sync {}", quarantine_path.display()))?;
+    Ok(quarantine_path)
+}
+
+fn tail_recovery_intent_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session.jsonl");
+    path.with_file_name(format!("{file_name}.tail-recovery-intent"))
+}
+
+fn read_tail_recovery_intent(path: &Path) -> Result<Option<TailRecoveryIntent>> {
+    let intent_path = tail_recovery_intent_path(path);
+    if !intent_path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&intent_path)
+        .with_context(|| format!("failed to read {}", intent_path.display()))?;
+    let intent = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", intent_path.display()))?;
+    Ok(Some(intent))
+}
+
+fn write_tail_recovery_intent(path: &Path, intent: &TailRecoveryIntent) -> Result<()> {
+    let intent_path = tail_recovery_intent_path(path);
+    let content = serde_json::to_vec(intent).context("failed to serialize tail recovery intent")?;
+    fs::write(&intent_path, content)
+        .with_context(|| format!("failed to write {}", intent_path.display()))?;
+    let file = File::open(&intent_path)
+        .with_context(|| format!("failed to open {}", intent_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to sync {}", intent_path.display()))
+}
+
+fn clear_tail_recovery_intent(path: &Path) -> Result<()> {
+    let intent_path = tail_recovery_intent_path(path);
+    if intent_path.exists() {
+        fs::remove_file(&intent_path)
+            .with_context(|| format!("failed to remove {}", intent_path.display()))?;
+    }
+    Ok(())
 }
 
 /// In-memory session state backed by an optional append-only JSONL store.
@@ -484,17 +1345,11 @@ impl Session {
         model_name: impl Into<String>,
         store: JsonlSessionStore,
     ) -> Result<Self> {
-        let entries = JsonlSessionStore::read_entries(store.path())?;
         let fallback_provider_name = provider_name.into();
         let fallback_model_name = model_name.into();
-        let (provider_name, model_name) = session_identity_from_entries(&entries)
-            .unwrap_or((fallback_provider_name, fallback_model_name));
-        let mut session = Self::from_entries(provider_name, model_name, entries).with_store(store);
-        session.ensure_identity_entry()?;
-        session.mark_interrupted_tool_executions()?;
-        session.mark_interrupted_agent_attempts()?;
-        session.close_orphan_agent_routes()?;
-        Ok(session)
+        let (entries, provider_name, model_name) =
+            store.load_entries_writer_reconciled(fallback_provider_name, fallback_model_name)?;
+        Ok(Self::from_entries(provider_name, model_name, entries).with_store(store))
     }
 
     /// Appends a single entry to the in-memory log and durable store when present.
@@ -847,27 +1702,6 @@ impl Session {
             provider_name: self.provider_name.clone(),
             model_name: self.model_name.clone(),
         })
-    }
-
-    fn mark_interrupted_tool_executions(&mut self) -> Result<()> {
-        for execution in interrupted_tool_executions(&self.entries) {
-            self.append_control(ControlEntry::ToolExecution(Box::new(execution)))?;
-        }
-        Ok(())
-    }
-
-    fn mark_interrupted_agent_attempts(&mut self) -> Result<()> {
-        for entry in interrupted_agent_attempts(&self.entries) {
-            self.append_control(ControlEntry::AgentRunInterrupted(entry))?;
-        }
-        Ok(())
-    }
-
-    fn close_orphan_agent_routes(&mut self) -> Result<()> {
-        for entry in closed_agent_routes(&self.entries) {
-            self.append_control(ControlEntry::AgentRouteClosed(entry))?;
-        }
-        Ok(())
     }
 
     fn raw_messages(&self) -> Vec<ModelMessage> {

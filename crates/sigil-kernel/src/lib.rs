@@ -61,8 +61,14 @@ pub use conversation_queue::{
     ConversationInputTarget, ConversationQueueItemProjection, ConversationQueueProjection,
 };
 pub use event::{
-    EventHandler, NoopEventHandler, PUBLIC_RUN_EVENT_SCHEMA_VERSION, PublicAssistantMessage,
-    PublicControlEvent, PublicRunEvent, PublicRunEventKind, RunEvent,
+    ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent, DurableEventType,
+    EventClass, EventHandler, EventId, EventSyncClass, LegacyEvent, MAX_EVENT_BYTES,
+    MAX_PAYLOAD_DEPTH, NoopEventHandler, PUBLIC_RUN_EVENT_SCHEMA_VERSION, ProjectionApplyDecision,
+    ProjectionCursor, PublicAssistantMessage, PublicControlEvent, PublicRunEvent,
+    PublicRunEventKind, RECORD_CHECKSUM_PREFIX, ReducerDisposition, RunEvent,
+    STORED_EVENT_SCHEMA_VERSION, SessionId, StoredEvent, StoredEventDecode, decode_stored_event,
+    is_transient_run_event, projection_apply_decision, reducer_disposition, stable_event_hash,
+    stable_event_uuid,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use permission::{
@@ -90,9 +96,10 @@ pub use provider::{
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
     CompactionPreview, CompactionRecord, ControlEntry, JsonlSessionStore, McpElicitationDecision,
-    McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry, ToolExecutionEntry,
-    ToolExecutionStatus, ToolSubjectAudit, latest_compaction_record, session_stats_from_entries,
+    McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry, SessionStreamRecord,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry,
+    ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit, latest_compaction_record,
+    session_stats_from_entries,
 };
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,

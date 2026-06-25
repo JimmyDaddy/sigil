@@ -169,15 +169,17 @@ impl Drop for TerminalCleanupGuard {
 }
 
 #[cfg(not(test))]
+type TuiPanicHook = dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static;
+
+#[cfg(not(test))]
 struct TuiPanicHookGuard {
-    previous: Option<Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>>,
+    previous: Option<Arc<TuiPanicHook>>,
 }
 
 #[cfg(not(test))]
 impl TuiPanicHookGuard {
     fn install() -> Self {
-        let previous =
-            Arc::<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync>::from(panic::take_hook());
+        let previous = Arc::<TuiPanicHook>::from(panic::take_hook());
         let hook_previous = Arc::clone(&previous);
         panic::set_hook(Box::new(move |info| {
             restore_terminal_escape_state();

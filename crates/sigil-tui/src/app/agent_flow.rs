@@ -15,8 +15,8 @@ use crate::{
 use anyhow::Context;
 use sigil_kernel::{
     AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadProjection, AgentThreadStatus,
-    ControlEntry, SessionLogEntry, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskRunProjection, normalize_task_agent_display_name,
+    ControlEntry, JsonlSessionStore, SessionLogEntry, TaskChildSessionDisplayNameEntry,
+    TaskChildSessionEntry, TaskRunProjection, normalize_task_agent_display_name,
 };
 
 use super::{
@@ -884,27 +884,36 @@ fn read_recent_session_entries(
         let _ = lines.pop();
     }
     let start = lines.len().saturating_sub(max_lines);
-    let truncated = truncated_by_seek || start > 0;
+    let mut truncated = truncated_by_seek || start > 0;
     let mut entries = Vec::new();
-    for raw_line in lines.into_iter().skip(start) {
+    for raw_line in lines.into_iter().skip(start).rev() {
+        if entries.len() >= CHILD_AGENT_TRANSCRIPT_ENTRY_LIMIT {
+            truncated = true;
+            break;
+        }
         let line = str::from_utf8(raw_line)
             .with_context(|| format!("failed to decode recent entry from {}", path.display()))?
             .trim_end_matches('\r');
         if line.trim().is_empty() {
             continue;
         }
-        entries.push(serde_json::from_str(line).with_context(|| {
-            format!(
-                "failed to parse recent session entry from {}",
-                path.display()
-            )
-        })?);
+        if let Some(entry) = JsonlSessionStore::session_entry_from_json_line(line)
+            .with_context(|| recent_session_entry_parse_error(path))?
+        {
+            entries.push(entry);
+        }
     }
+    entries.reverse();
     Ok(RecentSessionEntries {
         entries,
         file_signature,
         truncated,
     })
+}
+
+fn recent_session_entry_parse_error(path: &Path) -> String {
+    let path = path.display();
+    format!("failed to parse recent session entry from {path}")
 }
 
 fn read_tail_jsonl_bytes(
@@ -1453,6 +1462,7 @@ mod tests {
         )
         .expect_err("invalid json should fail");
         assert!(error.to_string().contains("parse recent session entry"));
+        assert!(recent_session_entry_parse_error(&invalid_json).contains("invalid-json.jsonl"));
         Ok(())
     }
 

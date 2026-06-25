@@ -7,12 +7,12 @@ use serde_json::json;
 use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfilePolicyEntry, AgentProfileSnapshot,
     AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
-    ApprovalMode, CompactionConfig, CompactionRecord, McpElicitationDecision, McpElicitationEntry,
-    MemoryConfig, PlanApprovalExpiry, PlanApprovalPermission, PluginCapability,
-    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, SkillDescriptor,
-    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolError, ToolErrorKind,
-    ToolResultMeta, WorkspaceConfig,
+    ApprovalMode, CompactionConfig, CompactionRecord, DurableEventType, JsonlSessionStore,
+    McpElicitationDecision, McpElicitationEntry, MemoryConfig, PlanApprovalExpiry,
+    PlanApprovalPermission, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
+    PluginTrustEntry, SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
+    SkillRunMode, SkillSource, SkillTrustState, ToolApprovalAuditAction, ToolApprovalEntry,
+    ToolApprovalUserDecision, ToolError, ToolErrorKind, ToolResultMeta, WorkspaceConfig,
 };
 
 #[test]
@@ -1145,12 +1145,25 @@ fn session_restore_and_projection_helpers_cover_empty_and_invalid_paths() -> Res
             .expect("invalid session path should have a parent"),
     )?;
     std::fs::write(&invalid_path, "not-json\n")?;
-    assert!(!app.restore_session_path_from_disk(
+    assert!(app.restore_session_path_from_disk(
         invalid_path,
         "fallback-provider",
         "fallback-model",
         "restored",
     ));
+    assert!(
+        JsonlSessionStore::read_event_records(
+            temp.path().join(".sigil/sessions/session-invalid.jsonl")
+        )?
+        .iter()
+        .any(|record| {
+            matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_kind() == Some(DurableEventType::LogTailRecovered)
+            )
+        })
+    );
 
     let blocked_parent = temp.path().join("not-a-directory");
     std::fs::write(&blocked_parent, "file parent")?;

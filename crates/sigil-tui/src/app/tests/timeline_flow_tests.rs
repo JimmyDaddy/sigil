@@ -823,7 +823,7 @@ fn parent_scrollback_clamps_stale_parent_cache_while_child_view_is_active() -> R
     app.timeline_render_cache = vec![Line::raw("parent prompt")];
     app.timeline_plain_cache = vec!["parent prompt".to_owned()];
     app.timeline_prefix_hashes = vec![1];
-    app.timeline_render_ranges = vec![0..2];
+    app.timeline_render_ranges = std::iter::once(0..2).collect();
     app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
         path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
         file_signature: super::super::ChildTranscriptFileSignature::empty(),

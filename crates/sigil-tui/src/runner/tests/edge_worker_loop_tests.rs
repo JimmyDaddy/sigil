@@ -12,12 +12,12 @@ use sigil_kernel::{
     AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
     AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, ControlEntry, JsonlSessionStore, McpElicitationDecision,
-    McpElicitationEntry, PlanApprovalPermission, Provider, ReasoningEffort, RootConfig, Session,
-    SessionLogEntry, SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
-    TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
-    TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext, ToolExecutionStatus, ToolRegistry,
-    WorkspaceRootSnapshot,
+    McpElicitationEntry, ModelMessage, PlanApprovalPermission, Provider, ReasoningEffort,
+    RootConfig, Session, SessionLogEntry, SessionRef, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry,
+    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext,
+    ToolExecutionStatus, ToolRegistry, WorkspaceRootSnapshot,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
@@ -1071,16 +1071,27 @@ fn cancel_run_reports_load_error_if_session_log_cannot_be_reloaded() -> Result<(
     })?;
     let _ = worker.recv(Duration::from_secs(3))?;
 
-    fs::write(&session_log_path, "{not-json}")?;
+    fs::write(
+        &session_log_path,
+        format!(
+            "{{not-json}}\n{}\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("valid tail")))?
+        ),
+    )?;
 
     worker.send(WorkerCommand::CancelRun)?;
     let failure = worker.recv(Duration::from_secs(3))?;
 
-    assert!(matches!(
-        failure,
-        WorkerMessage::RunFailed(ref error)
-            if error.contains("expected") || error.contains("failed to")
-    ));
+    assert!(
+        matches!(
+            failure,
+            WorkerMessage::RunFailed(ref error)
+                if error.contains("expected")
+                    || error.contains("failed to")
+                    || error.contains("middle corruption")
+        ),
+        "unexpected cancel failure message: {failure:?}"
+    );
 
     worker.send_shutdown()?;
     worker.join()

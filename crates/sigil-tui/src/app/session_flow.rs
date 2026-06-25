@@ -817,7 +817,7 @@ fn session_history_title_from_log(path: &Path) -> Option<String> {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(entry) = serde_json::from_str::<SessionLogEntry>(&line) else {
+        let Ok(Some(entry)) = JsonlSessionStore::session_entry_from_json_line(&line) else {
             continue;
         };
         if let SessionLogEntry::User(message) = entry

@@ -1,9 +1,9 @@
-use std::fs;
+use std::{fs, thread, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    Agent, ControlEntry, JsonlSessionStore, ModelMessage, ReasoningEffort, SessionLogEntry,
-    ToolRegistry,
+    Agent, ControlEntry, DurableEventType, JsonlSessionStore, ModelMessage, ReasoningEffort,
+    SessionLogEntry, SessionStreamRecord, ToolRegistry,
 };
 use tempfile::tempdir;
 
@@ -96,7 +96,7 @@ fn start_new_session_creates_empty_session_with_current_identity() -> Result<()>
 }
 
 #[test]
-fn invalid_initial_session_log_reports_worker_failure() -> Result<()> {
+fn invalid_initial_session_log_is_tail_recovered() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp
@@ -112,16 +112,16 @@ fn invalid_initial_session_log_reports_worker_failure() -> Result<()> {
     let root_config = test_root_config(&workspace_root, "planned", "planned-model");
     let provider = PlannedProvider::new(vec![]);
     let agent = Agent::new(provider, ToolRegistry::new());
-    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+    let worker = spawn_test_worker(root_config, session_log_path.clone(), agent, workspace_root)?;
 
-    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
-    assert!(matches!(
-        error,
-        WorkerMessage::RunFailed(ref text)
-            if text.contains("expected ident")
-                || text.contains("expected value")
-                || text.contains("key must be a string")
-    ));
+    wait_for_tail_recovered_event(&session_log_path)?;
+    let entries = JsonlSessionStore::read_entries(&session_log_path)?;
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+        )
+    }));
 
     worker.shutdown()?;
     Ok(())
@@ -283,7 +283,7 @@ fn switch_session_reports_load_error_for_missing_session_file() -> Result<()> {
 }
 
 #[test]
-fn switch_session_with_invalid_log_reports_error() -> Result<()> {
+fn switch_session_with_tail_corruption_recovers_and_switches() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();
     let session_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
@@ -300,17 +300,27 @@ fn switch_session_with_invalid_log_reports_error() -> Result<()> {
     let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
 
     worker.send(WorkerCommand::SwitchSession {
-        session_log_path: invalid_log_path,
+        session_log_path: invalid_log_path.clone(),
     })?;
-    let error = worker.recv_until(|message| matches!(message, WorkerMessage::RunFailed(_)))?;
+    let switched =
+        worker.recv_until(|message| matches!(message, WorkerMessage::SessionSwitched { .. }))?;
 
     assert!(matches!(
-        error,
-        WorkerMessage::RunFailed(ref text)
-            if text.contains("expected ident")
-                || text.contains("expected value")
-                || text.contains("key must be a string")
+        switched,
+        WorkerMessage::SessionSwitched {
+            ref session_log_path,
+            ref provider_name,
+            ref model_name,
+            ref entries,
+        } if session_log_path == &invalid_log_path
+            && provider_name == "planned"
+            && model_name == "planned-model"
+            && entries.iter().any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::SessionIdentity { .. })
+            ))
     ));
+    assert!(has_tail_recovered_event(&invalid_log_path)?);
 
     worker.shutdown()?;
     Ok(())
@@ -339,4 +349,29 @@ fn worker_startup_reports_initial_session_load_failures() -> Result<()> {
             if error.contains(&invalid_session_log_path.display().to_string())
     ));
     Ok(())
+}
+
+fn has_tail_recovered_event(path: &std::path::Path) -> Result<bool> {
+    Ok(JsonlSessionStore::read_event_records(path)?
+        .iter()
+        .any(|record| {
+            matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_kind() == Some(DurableEventType::LogTailRecovered)
+            )
+        }))
+}
+
+fn wait_for_tail_recovered_event(path: &std::path::Path) -> Result<()> {
+    for _ in 0..60 {
+        if has_tail_recovered_event(path).unwrap_or(false) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(anyhow!(
+        "timed out waiting for tail recovery event in {}",
+        path.display()
+    ))
 }

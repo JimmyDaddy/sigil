@@ -1258,7 +1258,13 @@ fn restore_session_path_returns_false_for_invalid_log() -> Result<()> {
             .parent()
             .expect("session log path should have a parent"),
     )?;
-    std::fs::write(&invalid_path, "{\"not\":\"a session entry\"}\n")?;
+    std::fs::write(
+        &invalid_path,
+        format!(
+            "{{\"not\":\"a session entry\"}}\n{}\n",
+            serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("valid tail")))?
+        ),
+    )?;
 
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 

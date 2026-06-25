@@ -52,6 +52,7 @@ enum DurableDomainEvent {
     UserMessageRecorded(UserMessageRecorded),
     AssistantMessageRecorded(AssistantMessageRecorded),
     ToolResultRecorded(ToolResultRecorded),
+    SessionEntryRecorded(SessionEntryRecorded),
     RunStatusChanged(RunStatusChanged),
     RunFinalized(RunFinalized),
     ToolExecutionStarted(ToolExecutionStarted),
@@ -106,7 +107,7 @@ Rules:
 - Live runtime events are process-local and not required for recovery.
 - Protocol events are client-facing views derived from durable or live events.
 - Protocol transient events are not guaranteed to replay after reconnect.
-- `DomainEvent` is the strong decoded form of `DurableDomainEvent`. Reducers and projections consume this strong form, not raw `event_type` strings.
+- `DomainEvent` is the reducer-facing decoded event-kind enum with versioned payload. RFC-0001 prevents reducers from dispatching on raw `event_type` strings; later owner RFCs replace generic payloads with event-specific payload structs and upcasters.
 
 Initial mapping from current surfaces:
 
@@ -122,6 +123,7 @@ Initial mapping from current surfaces:
 | Run cancelled, interrupted, max-turn stopped or finalized | `RunStatusChanged` / `RunFinalized` | none | durable view |
 | Readiness calculation | `ReadinessEvaluated` | none | durable view |
 | Trust, egress, sandbox or context source decision | matching trust / egress / sandbox / context event | none | durable view |
+| Existing control entry without a precise RFC-0001 domain mapping | `SessionEntryRecorded` | none | durable compatibility view |
 
 ## 5. Stored Event Envelope
 
@@ -159,7 +161,7 @@ Field rules:
 - `stream_sequence` is scoped to one session stream only.
 - Cross-session ordering must use `event_id`, `correlation_id`, `causation_id`, `occurred_at` and `parent_session_id`.
 - `occurred_at` is optional because legacy records may not have a trustworthy timestamp.
-- `payload` is the persisted wire form; reducer input must be decoded into a strong `DomainEvent`.
+- `payload` is the persisted wire form; reducer input must be decoded into the `DomainEvent` event-kind enum before projection logic runs.
 
 ## 6. Checksum
 
@@ -242,11 +244,13 @@ Rules:
 
 ## 8. Upcasters and Unknown Events
 
-Event payload evolution uses explicit upcasters:
+Event payload evolution uses explicit upcasters once an event owner defines payload-specific structs:
 
 ```text
 v1 -> v2 -> v3
 ```
+
+Until an upcaster exists for a known `event_type`, readers fail closed on unsupported `event_version`.
 
 Unknown event rules:
 
@@ -293,7 +297,7 @@ Initial event-to-sync mapping:
 | Event type | Sync class |
 | --- | --- |
 | `UserMessageRecorded` / `AssistantMessageRecorded` | `NormalEvent` |
-| `ToolResultRecorded` | `RecoveryCritical` |
+| `ToolResultRecorded` / `SessionEntryRecorded` | `RecoveryCritical` |
 | `ToolExecutionStarted` / `ToolExecutionFinished` | `RecoveryCritical` |
 | `ApprovalResolved` | `RecoveryCritical` |
 | `MutationPrepared` / `MutationCommitted` / `MutationReconciled` | `RecoveryCritical` |

@@ -1,13 +1,14 @@
 use serde_json::json;
 
 use crate::{
-    AgentApprovalRouteEntry, AgentElicitationRouteEntry, AgentInvocationMode,
-    AgentInvocationSource, AgentMergeSafePointEntry, AgentProfileCapturedEntry, AgentProfileId,
-    AgentProfilePolicyEntry, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
-    AgentProfileTrustEntry, AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
-    AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
-    AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
-    AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
+    ALL_DURABLE_EVENT_TYPES, AgentApprovalRouteEntry, AgentElicitationRouteEntry,
+    AgentInvocationMode, AgentInvocationSource, AgentMergeSafePointEntry,
+    AgentProfileCapturedEntry, AgentProfileId, AgentProfilePolicyEntry, AgentProfileSnapshot,
+    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
+    AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRouteClosedEntry,
+    AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry,
+    AgentRunContextSnapshot, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
+    AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
     AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultRecordedEntry,
     AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
     AgentThreadTerminalStatus, AgentTrustState, ApprovalMode, BackgroundTaskHandle, ChangeSet,
@@ -16,13 +17,15 @@ use crate::{
     ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
     ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
+    DurableEventType, EventClass, EventSyncClass, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
     McpElicitationDecision, McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
     PUBLIC_RUN_EVENT_SCHEMA_VERSION, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
     PlanApprovedEntry, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
-    PluginTrustEntry, PrefixSnapshot, ProviderContinuationState, PublicControlEvent,
-    PublicRunEvent, PublicRunEventKind, ReasoningEffort, ResponseHandle, RunEvent, SessionRef,
-    SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource,
-    SkillTrustState, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    PluginTrustEntry, PrefixSnapshot, ProjectionApplyDecision, ProjectionCursor,
+    ProviderContinuationState, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
+    ReasoningEffort, ReducerDisposition, ResponseHandle, RunEvent, SessionRef, SkillDescriptor,
+    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
+    StoredEventDecode, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus,
     TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus,
     TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
@@ -30,7 +33,572 @@ use crate::{
     ToolApprovalEntry, ToolCall, ToolCategory, ToolEgressEntry, ToolExecutionEntry,
     ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
     ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceRootSnapshot,
+    decode_stored_event, is_transient_run_event, projection_apply_decision, reducer_disposition,
 };
+
+#[test]
+fn stored_event_checksum_is_canonical_and_roundtrips() {
+    let event = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({
+            "z": "line\nquoted \"text\"",
+            "a": {
+                "unicode": "sigil-λ",
+                "number": 1.0,
+                "items": [true, null, 3]
+            }
+        }),
+    )
+    .expect("stored event should be valid");
+
+    let line = event.to_json_line().expect("stored event should serialize");
+    let parsed = StoredEvent::from_json_str(&line).expect("stored event should parse");
+
+    assert_eq!(parsed.record_checksum, event.record_checksum);
+    assert!(parsed.record_checksum.starts_with("sha256:jcs-v1:"));
+    assert_eq!(parsed, event);
+}
+
+#[test]
+fn stored_event_checksum_normalizes_numeric_integer_forms() {
+    let integer_payload =
+        serde_json::from_str(r#"{"a":{"number":1}}"#).expect("integer json parses");
+    let float_payload = serde_json::from_str(r#"{"a":{"number":1.0}}"#).expect("float json parses");
+
+    let integer_event = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        integer_payload,
+    )
+    .expect("stored event should be valid");
+    let float_event = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        float_payload,
+    )
+    .expect("stored event should be valid");
+
+    assert_eq!(integer_event.record_checksum, float_event.record_checksum);
+    assert!(
+        StoredEvent::from_json_str(&float_event.to_json_line().expect("event serializes")).is_ok()
+    );
+}
+
+#[test]
+fn durable_event_sync_class_identifies_normal_events() {
+    assert_eq!(
+        DurableEventType::UserMessageRecorded
+            .sync_class()
+            .expect("user message is appendable"),
+        EventSyncClass::NormalEvent
+    );
+    assert_eq!(
+        DurableEventType::AssistantMessageRecorded
+            .sync_class()
+            .expect("assistant message is appendable"),
+        EventSyncClass::NormalEvent
+    );
+    assert_eq!(
+        DurableEventType::ContextSourceCaptured
+            .sync_class()
+            .expect("context source is appendable"),
+        EventSyncClass::NormalEvent
+    );
+}
+
+#[test]
+fn stored_event_rejects_checksum_mismatch_and_bad_json_separately() {
+    let mut event = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({"tool": "read_file"}),
+    )
+    .expect("stored event should be valid");
+    event.record_checksum = "sha256:jcs-v1:bad".to_owned();
+    let line = serde_json::to_string(&event).expect("event serializes");
+
+    let checksum_error =
+        StoredEvent::from_json_str(&line).expect_err("checksum mismatch should fail");
+    assert!(checksum_error.to_string().contains("checksum mismatch"));
+
+    let parse_error =
+        StoredEvent::from_json_str("{not-json").expect_err("invalid json should fail");
+    assert!(parse_error.to_string().contains("parse stored event json"));
+}
+
+#[test]
+fn stored_event_unknown_class_rules_fail_closed_when_required() {
+    let unknown = StoredEvent::new_raw(
+        "new_noncritical_event",
+        EventClass::NonCritical,
+        "event-unknown".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({"value": 1}),
+    )
+    .expect("non-critical unknown event should serialize");
+    let decoded = decode_stored_event(unknown).expect("non-critical unknown should decode");
+    assert!(matches!(decoded, StoredEventDecode::UnknownNonCritical(_)));
+
+    let critical = StoredEvent::new_raw(
+        "new_critical_event",
+        EventClass::Critical,
+        "event-critical".to_owned(),
+        "session-1".to_owned(),
+        2,
+        json!({"value": 1}),
+    )
+    .expect("critical unknown event should serialize");
+    let error = decode_stored_event(critical).expect_err("critical unknown should fail");
+    assert!(error.to_string().contains("unknown critical event"));
+
+    let missing_class = json!({
+        "schema_version": 1,
+        "event_type": "new_event",
+        "event_version": 1,
+        "event_id": "event-missing-class",
+        "session_id": "session-1",
+        "stream_sequence": 3,
+        "record_checksum": "sha256:jcs-v1:missing",
+        "payload": {}
+    });
+    let error =
+        StoredEvent::from_value(missing_class).expect_err("missing event_class should fail closed");
+    assert!(error.to_string().contains("event_class"));
+}
+
+#[test]
+fn stored_event_rejects_missing_event_type_and_unknown_critical_on_wire() {
+    let missing_event_type = json!({
+        "schema_version": 1,
+        "event_class": "critical",
+        "event_version": 1,
+        "event_id": "event-missing-type",
+        "session_id": "session-1",
+        "stream_sequence": 1,
+        "record_checksum": "sha256:jcs-v1:missing",
+        "payload": {}
+    });
+    let missing_error = StoredEvent::from_value(missing_event_type)
+        .expect_err("missing event_type should fail closed");
+    assert!(missing_error.to_string().contains("event_type"));
+
+    let critical = StoredEvent::new_raw(
+        "new_critical_event",
+        EventClass::Critical,
+        "event-critical".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({"value": 1}),
+    )
+    .expect("critical unknown event can be serialized by a newer writer");
+    let critical_error = StoredEvent::from_json_str(
+        &critical
+            .to_json_line()
+            .expect("critical unknown event serializes"),
+    )
+    .expect_err("unknown critical event should fail closed");
+    assert!(
+        critical_error
+            .to_string()
+            .contains("unknown critical event")
+    );
+}
+
+#[test]
+fn stored_event_rejects_unsupported_schema_and_known_event_versions() {
+    let mut schema_event = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-schema".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({"tool": "read_file"}),
+    )
+    .expect("stored event should be valid");
+    schema_event.schema_version += 1;
+    schema_event.record_checksum = schema_event
+        .compute_record_checksum()
+        .expect("checksum can be recomputed");
+    let schema_error = StoredEvent::from_json_str(
+        &schema_event
+            .to_json_line()
+            .expect("event should serialize with updated checksum"),
+    )
+    .expect_err("unsupported schema version should fail closed");
+    assert!(schema_error.to_string().contains("schema_version"));
+
+    let mut event_version = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-version".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({"tool": "read_file"}),
+    )
+    .expect("stored event should be valid");
+    event_version.event_version += 1;
+    event_version.record_checksum = event_version
+        .compute_record_checksum()
+        .expect("checksum can be recomputed");
+    let version_error = StoredEvent::from_json_str(
+        &event_version
+            .to_json_line()
+            .expect("event should serialize with updated checksum"),
+    )
+    .expect_err("unsupported event version should fail closed");
+    assert!(version_error.to_string().contains("event_version"));
+}
+
+#[test]
+fn stored_event_decode_returns_strong_domain_event_variant() {
+    let event = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-typed".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({"tool": "read_file"}),
+    )
+    .expect("stored event should be valid");
+
+    let decoded = decode_stored_event(event).expect("known event should decode");
+
+    let StoredEventDecode::Known(domain_event) = decoded else {
+        panic!("known event should decode to domain event");
+    };
+    assert_eq!(
+        domain_event.event_type(),
+        DurableEventType::ToolExecutionStarted
+    );
+}
+
+#[test]
+fn stored_event_decode_rejects_legacy_stored_event() {
+    let event = StoredEvent::new(
+        DurableEventType::Legacy,
+        EventClass::Critical,
+        "event-legacy".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({}),
+    )
+    .expect("legacy event envelope can be constructed for decode validation");
+
+    let error = decode_stored_event(event).expect_err("legacy event should not decode from v2");
+
+    assert!(error.to_string().contains("upcast-only"));
+}
+
+#[test]
+fn stored_event_decode_covers_every_known_domain_variant() {
+    for event_type in ALL_DURABLE_EVENT_TYPES
+        .iter()
+        .copied()
+        .filter(|event_type| *event_type != DurableEventType::Legacy)
+    {
+        let event = StoredEvent::new(
+            event_type,
+            EventClass::Critical,
+            format!("event-{}", event_type.as_str()),
+            "session-1".to_owned(),
+            1,
+            json!({"event_type": event_type.as_str()}),
+        )
+        .expect("stored event should be valid");
+
+        let decoded = decode_stored_event(event).expect("known event should decode");
+
+        let StoredEventDecode::Known(domain_event) = decoded else {
+            panic!("known event should decode to domain event");
+        };
+        assert_eq!(domain_event.event_type(), event_type);
+    }
+}
+
+#[test]
+fn stored_event_sync_class_handles_unknown_and_non_appendable_events() {
+    let unknown = StoredEvent::new_raw(
+        "future_noncritical_event",
+        EventClass::NonCritical,
+        "event-future".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({}),
+    )
+    .expect("unknown non-critical event should build");
+    assert_eq!(
+        unknown
+            .sync_class()
+            .expect("unknown non-critical sync class should be normal"),
+        EventSyncClass::NormalEvent
+    );
+
+    let critical = StoredEvent::new_raw(
+        "future_critical_event",
+        EventClass::Critical,
+        "event-critical".to_owned(),
+        "session-1".to_owned(),
+        2,
+        json!({}),
+    )
+    .expect("unknown critical event should build before reader classification");
+    assert!(
+        critical
+            .sync_class()
+            .expect_err("critical unknown events fail closed")
+            .to_string()
+            .contains("unknown critical event")
+    );
+
+    let legacy = StoredEvent::new_raw(
+        DurableEventType::Legacy.as_str(),
+        EventClass::Critical,
+        "event-legacy".to_owned(),
+        "session-1".to_owned(),
+        3,
+        json!({}),
+    )
+    .expect("raw legacy envelope should build for compatibility tests");
+    assert!(
+        legacy
+            .sync_class()
+            .expect_err("legacy is upcast-only")
+            .to_string()
+            .contains("cannot be appended")
+    );
+}
+
+#[test]
+fn stored_event_rejects_over_nested_payload() {
+    let mut payload = json!("leaf");
+    for _ in 0..MAX_PAYLOAD_DEPTH {
+        payload = json!({"next": payload});
+    }
+
+    let error = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-deep".to_owned(),
+        "session-1".to_owned(),
+        1,
+        payload,
+    )
+    .expect_err("over-nested event should fail");
+
+    assert!(error.to_string().contains("nesting depth"));
+}
+
+#[test]
+fn stored_event_rejects_oversized_payload() {
+    let payload = json!({
+        "large": "x".repeat(MAX_EVENT_BYTES)
+    });
+
+    let error = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-large".to_owned(),
+        "session-1".to_owned(),
+        1,
+        payload,
+    )
+    .expect_err("oversized event should fail");
+
+    assert!(error.to_string().contains("maximum byte size"));
+}
+
+#[test]
+fn durable_event_sync_mapping_covers_all_appendable_events() {
+    for event_type in ALL_DURABLE_EVENT_TYPES {
+        if *event_type == DurableEventType::Legacy {
+            assert!(event_type.sync_class().is_none());
+            assert!(!event_type.appendable());
+            continue;
+        }
+        assert!(
+            event_type.sync_class().is_some(),
+            "{} should have a sync class",
+            event_type.as_str()
+        );
+    }
+
+    assert_eq!(
+        DurableEventType::UserMessageRecorded.sync_class(),
+        Some(EventSyncClass::NormalEvent)
+    );
+    assert_eq!(
+        DurableEventType::ToolExecutionStarted.sync_class(),
+        Some(EventSyncClass::RecoveryCritical)
+    );
+    assert_eq!(
+        DurableEventType::SandboxDecisionRecorded.sync_class(),
+        Some(EventSyncClass::RecoveryCritical)
+    );
+    assert_eq!(
+        DurableEventType::LogTailRecovered.sync_class(),
+        Some(EventSyncClass::TailRecovery)
+    );
+}
+
+#[test]
+fn durable_event_type_names_roundtrip_all_known_types() {
+    for event_type in ALL_DURABLE_EVENT_TYPES {
+        let name = event_type.as_str();
+        assert_eq!(DurableEventType::from_event_type(name), Some(*event_type));
+    }
+
+    assert_eq!(DurableEventType::from_event_type("future_event"), None);
+}
+
+#[test]
+fn reducer_disposition_covers_every_durable_event_variant() {
+    for event_type in ALL_DURABLE_EVENT_TYPES {
+        match reducer_disposition(*event_type) {
+            ReducerDisposition::Consumed(reducer) => assert!(!reducer.is_empty()),
+            ReducerDisposition::ExplicitlyIgnored { reducer, reason } => {
+                assert!(!reducer.is_empty());
+                assert!(!reason.is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn projection_cursor_apply_decision_fails_closed_on_conflicts() {
+    let applied = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        7,
+        json!({"tool": "read_file"}),
+    )
+    .expect("event should build");
+    let cursor = ProjectionCursor {
+        session_id: "session-1".to_owned(),
+        projection_schema_version: 1,
+        last_applied_stream_sequence: 7,
+        last_applied_event_id: applied.event_id.clone(),
+        last_applied_record_checksum: applied.record_checksum.clone(),
+    };
+
+    assert_eq!(
+        projection_apply_decision(Some(&cursor), &applied).expect("duplicate should be ignored"),
+        ProjectionApplyDecision::IgnoreAlreadyApplied
+    );
+
+    let next = StoredEvent::new(
+        DurableEventType::ToolExecutionFinished,
+        EventClass::Critical,
+        "event-2".to_owned(),
+        "session-1".to_owned(),
+        8,
+        json!({"tool": "read_file"}),
+    )
+    .expect("event should build");
+    assert_eq!(
+        projection_apply_decision(Some(&cursor), &next).expect("next should apply"),
+        ProjectionApplyDecision::Apply
+    );
+
+    let wrong_session = StoredEvent::new(
+        DurableEventType::ToolExecutionFinished,
+        EventClass::Critical,
+        "event-wrong-session".to_owned(),
+        "other-session".to_owned(),
+        8,
+        json!({"tool": "read_file"}),
+    )
+    .expect("event should build");
+    assert!(
+        projection_apply_decision(Some(&cursor), &wrong_session)
+            .expect_err("session mismatch should fail")
+            .to_string()
+            .contains("session")
+    );
+
+    let conflict = StoredEvent::new(
+        DurableEventType::ToolExecutionFinished,
+        EventClass::Critical,
+        "event-conflict".to_owned(),
+        "session-1".to_owned(),
+        7,
+        json!({"tool": "read_file"}),
+    )
+    .expect("event should build");
+    assert!(
+        projection_apply_decision(Some(&cursor), &conflict)
+            .expect_err("same sequence with different event should fail")
+            .to_string()
+            .contains("sequence conflict")
+    );
+
+    let gap = StoredEvent::new(
+        DurableEventType::ToolExecutionFinished,
+        EventClass::Critical,
+        "event-gap".to_owned(),
+        "session-1".to_owned(),
+        9,
+        json!({"tool": "read_file"}),
+    )
+    .expect("event should build");
+    assert!(
+        projection_apply_decision(Some(&cursor), &gap)
+            .expect_err("gap should fail")
+            .to_string()
+            .contains("sequence gap")
+    );
+
+    let old = StoredEvent::new(
+        DurableEventType::ToolExecutionFinished,
+        EventClass::Critical,
+        "event-old".to_owned(),
+        "session-1".to_owned(),
+        6,
+        json!({"tool": "read_file"}),
+    )
+    .expect("event should build");
+    assert!(
+        projection_apply_decision(Some(&cursor), &old)
+            .expect_err("older unproven event should fail")
+            .to_string()
+            .contains("cannot prove")
+    );
+}
+
+#[test]
+fn run_event_transient_boundary_excludes_durable_facts() {
+    assert!(is_transient_run_event(&RunEvent::TextDelta(
+        "hello".to_owned()
+    )));
+    assert!(is_transient_run_event(&RunEvent::ReasoningDelta(
+        "thinking".to_owned()
+    )));
+    assert!(is_transient_run_event(&RunEvent::ToolCallArgsDelta {
+        id: "call-1".to_owned(),
+        delta: "{}".to_owned(),
+    }));
+    assert!(!is_transient_run_event(&RunEvent::ToolCallStarted(
+        tool_call("call-1")
+    )));
+    assert!(!is_transient_run_event(&RunEvent::ToolResult(
+        ToolResult::ok("call-1", "read_file", "ok", ToolResultMeta::default())
+    )));
+}
 
 #[test]
 fn public_run_event_serializes_stable_text_delta_envelope() {
