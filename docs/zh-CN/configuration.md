@@ -20,8 +20,7 @@
 TUI 和 CLI 按这个顺序找配置：
 
 1. 命令行指定的 `--config <path>`
-2. 当前工作目录下的 `./sigil.toml`
-3. 标准用户配置目录里的 `sigil.toml`
+2. 标准用户配置目录里的 `sigil.toml`
 
 标准用户配置路径：
 
@@ -29,7 +28,7 @@ TUI 和 CLI 按这个顺序找配置：
 - Linux：`$XDG_CONFIG_HOME/sigil/sigil.toml` 或 `~/.config/sigil/sigil.toml`
 - Windows：`%APPDATA%\sigil\sigil.toml`
 
-仓库根目录的 `sigil.toml` 默认不应提交，因为它可能包含真实密钥。
+Quick Setup 写入用户配置目录。workspace 根目录的 `sigil.toml` 默认不会被读取；如果需要临时实验配置，请显式传入 `--config <path>`。
 
 ## 推荐最小路径
 
@@ -73,9 +72,6 @@ sigil --config ./sigil.toml doctor
 ```toml
 [workspace]
 root = "."
-
-[session]
-log_dir = ".sigil/sessions"
 
 [agent]
 provider = "deepseek"
@@ -259,6 +255,7 @@ Provider 专项行为保留在 provider 配置和 provider crate 内。共享的
 
 ```toml
 [permission]
+preset = "balanced"
 default_mode = "ask"
 
 [permission.access]
@@ -272,10 +269,12 @@ rules = []
 
 含义：
 
+- `preset = "balanced"` 是默认交互安全档位：只读操作默认放行，普通编辑和 shell 命令进入审批，destructive/protected 路径继续受保护。
+- `preset = "read_only"` 用于 planning、audit 和 dry run；即使旧配置里写了 write allow，也会拒绝写入和 mutating shell 操作。
 - 未显式覆盖的工具调用默认进入审批。
 - 只读文件和搜索工具默认放行。
 - workspace 外路径默认不可执行；开启 external directory 后仍会按规则进入审批或放行。
-- 临时 scratch 文件应使用 workspace 内 `.sigil/tmp/`。系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍属于 workspace 外路径，默认不会放行。
+- 临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`。它由 Sigil 用户态 cache root 承载，对模型显示为 `cache/tmp`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍属于 workspace 外路径，默认不会放行。
 - headless `run` 遇到最终 `ask` 不会静默自动执行，而是向模型回灌结构化 `approval_required` 工具错误。
 
 ## Memory

@@ -66,7 +66,7 @@ sigil doctor
 - 把 coding 工作留在 TUI：transcript、composer、live tool activity、approval、status、usage 和 controls。
 - 让 agent 通过结构化工具读取、搜索、编辑文件和运行命令。
 - 在高风险写操作前展示 approval card、受影响文件和有边界的 diff。
-- 从 `.sigil/sessions/` 下的 append-only JSONL 恢复 session。
+- 从 Sigil 用户态 state 目录下的 append-only JSONL 恢复 session。
 - 用 `/plan` 执行只读规划 prompt，用 `/task` 执行 durable 多步骤任务，进入 planner、executor 和可选 subagent 流程。
 - 普通 chat 明确要求子 agent 时，会在最终回答前强制等待有效 agent 结果。
 - 受信任的 agent profile 可通过 `@profile <prompt>` 或受信任的 profile slash name 直接调用。

@@ -103,16 +103,16 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 
 `write_file`、`edit_file` 和 `delete_file` 的结果 activity 默认展开执行时捕获的 bounded unified diff。diff 行显示旧/新行号，activity 正文跳过重复 hunk header，并在文件头汇总 hunk 数。大 diff 会提示 `diff truncated` 和隐藏行数。
 
-`apply_changeset` 支持一次审批后的多文件 create / update / delete。执行前会统一校验 workspace path、hash、mtime、snippet、symlink 和 binary 文本边界；validation 失败时不写任何文件。执行成功或 partial failure 时会写 `.sigil/changesets/<id>/preview.diff` 与 `reverse.diff` artifact，并在结构化结果中返回 artifact path、hash、stats 和 apply status；model-visible content 只返回摘要，不直接返回完整 diff。
+`apply_changeset` 支持一次审批后的多文件 create / update / delete。执行前会统一校验 workspace path、hash、mtime、snippet、symlink 和 binary 文本边界；validation 失败时不写任何文件。执行成功或 partial failure 时会写入 Sigil 用户态 state artifact root 下的 `changesets/<id>/preview.diff` 与 `reverse.diff` artifact，并在结构化结果中返回 artifact label、hash、stats 和 apply status；model-visible content 只返回摘要，不直接返回完整 diff 或 home 绝对路径。
 
 审批卡片固定为 `Summary / Files / Diff / Actions` 四区。`write_file`、`edit_file`、`delete_file` 和 `apply_changeset` 的 diff 预览支持按文件切换、按 hunk 跳转和 diff mode 切换。`apply_changeset` 审批会额外显示 change set id、整体 risk、每文件 action/risk，以及基于文件类型的格式化建议。
 
 ## Session 与 Control State
 
-默认 session log 位于：
+默认 session log 位于 Sigil 用户态 state 目录：
 
 ```text
-.sigil/sessions/
+<state-root>/workspaces/<workspace-id>/sessions/
 ```
 
 当前实现采用 append-only JSONL：
@@ -123,7 +123,7 @@ Tool result 默认以独立 activity 展示。当前 renderer 会区分常见内
 - task run、plan、step、child-session 和 subagent approval-route 摘要会追加到 control log，并通过 `Session::task_state_projection` 投影。
 - skill index snapshot 和 skill loaded 摘要已有 `SkillIndexCaptured` / `SkillLoaded` control entry，并通过 `Session::skill_state_projection` 投影；runtime discovery 已支持 `.sigil/skills`、`.sigil/agents`、`.claude/skills`、`.claude/agents`、显式 compatibility source 开启后的 `.reasonix/agents` 和可选 user skills，包含 frontmatter 解析、shadowing warning、hash 与 invalid path/name 跳过；internal read-only `load_skill` 会按 enabled/trusted/model-invocable 与 permission policy 校验后只读取 skill entrypoint，将 skill body 作为当前 run 的 transient context 注入并追加 `SkillLoaded` control entry；TUI `/config` 的 `Agents` section 已改用 workspace-aware `AgentProfileRegistry` 展示 built-in、native、compatibility 与 plugin-contributed profiles，显示 source/kind/trust/effective enabled/user/model、provider/model、tool scope 与 nickname candidates，并通过 footer trust/block/enable/user/model actions 追加 profile snapshot 与 append-only trust/policy decision；`Skills` section 只展示 inline/reusable skill，显示 enabled/trust/source/hash/run mode/tool scope/path patterns，并保留 footer load/invoke；TUI slash fallback 也只列出 trusted inline skills，`run_as=child_session` 兼容资源不再作为普通 skill slash row 展示或通过 `/skill-id` 解析启动；composer 起始 `@` 会打开 agent mention selector，只列出 enabled、trusted、user-invocable 的 agent profiles；提交 `@profile <prompt>` 会通过 TUI worker `InvokeAgentProfile` 调用 runtime `AgentToolRuntime::invoke_agent_profile`，以 `AgentInvocationSource::Mention` 启动 foreground child thread，手动入口按 enabled/trusted/user-invocable 校验且不依赖普通 chat delegation hard-gate；native 与 plugin agent profile 都支持 `aliases` / `alias` 和 `slash_names` / `slash_name` metadata，registry 会对 alias/slash 冲突做 deterministic warning 并禁用冲突别名；plugin manifest discovery 已支持 `.sigil/plugins/<id>/plugin.toml`，manifest 可贡献 agents、skills、hooks 与 MCP servers。TUI `/config` Plugins section 会展示 manifest path、id/name/version、agents/skills/hooks/MCP commands、hash 和执行影响，并通过 footer approve/deny 追加 `PluginManifestCaptured` 与 `PluginTrustDecision` control entries；只有 session 中 trust decision 匹配当前 manifest hash 的 plugin 才会把 agent registration 输入 `AgentProfileRegistry`，并以 namespaced profile id 进入 Agents section。
 - terminal task handle/status/output preview 摘要有独立 control entry 和 `Session::terminal_task_projection`；terminal tool metadata 会被同步成 append-only `TerminalTask` control entry，TUI 会把它们恢复成 activity card，在 info rail 展示 running terminal count，并支持对 focused running terminal card 通过 `Alt-X` 二次确认走 worker `terminal_cancel` 路径取消，同时保留 execution audit entry。
-- `sigil-tools-builtin` 已有 terminal process manager：默认 non-PTY 输出写入 `.sigil/tasks/<task-id>/{meta.json,output.log,stdout.log,stderr.log}`，支持 bounded read、status 和 cooperative cancel；显式 `terminal_start` `pty=true` 会走 `portable-pty` backend，专用 blocking read thread 写 combined artifact log，并支持有界队列 `terminal_input`、`terminal_resize` 和 cancel。单次 terminal input 上限为 8 KiB，permission/audit 只记录 task id 与 input bytes，不记录 stdin 原文；non-PTY task 的 input/resize 仍返回结构化 unsupported。
+- `sigil-tools-builtin` 已有 terminal process manager：运行时注入的默认 non-PTY 输出写入 Sigil 用户态 state artifact root 下的 `tasks/<task-id>/{meta.json,output.log,stdout.log,stderr.log}`，model-visible 路径使用 `state/artifacts/tasks/...` label；显式 `terminal_start` `pty=true` 会走 `portable-pty` backend，专用 blocking read thread 写 combined artifact log，并支持有界队列 `terminal_input`、`terminal_resize` 和 cancel。单次 terminal input 上限为 8 KiB，permission/audit 只记录 task id 与 input bytes，不记录 stdin 原文；non-PTY task 的 input/resize 仍返回结构化 unsupported。`bash` 和 `terminal_start` 会注入 `$SIGIL_SCRATCH_DIR`，对应用户态 cache root 下的 workspace scratch 目录，对模型显示为 `cache/tmp`。
 - 已开始但没有终态的工具执行在恢复时标记为 `interrupted`。
 - 悬空 tool call 会投影为结构化 `interrupted` tool result。
 - 文件变更工具的历史结果卡片会随 session restore 恢复。

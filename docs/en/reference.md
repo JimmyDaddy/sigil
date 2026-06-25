@@ -72,8 +72,7 @@ Subcommands are for automation, diagnostics, scripts, and adapter preflight chec
 Sigil resolves config in this order:
 
 1. `--config <path>`
-2. `./sigil.toml` in the current working directory
-3. `sigil.toml` in the standard per-user config directory
+2. `sigil.toml` in the standard per-user config directory
 
 Common per-user paths:
 
@@ -85,14 +84,17 @@ Common per-user paths:
 
 | Path | Meaning |
 | --- | --- |
-| `.sigil/sessions/` | Default append-only session logs under the workspace |
-| `.sigil/tmp/` | Workspace-local scratch files created during a Sigil session |
-| `sigil.toml` | Local or user config |
+| User state root `workspaces/<workspace-id>/sessions/` | Default append-only session logs |
+| User state root `workspaces/<workspace-id>/input-history.jsonl` | Composer input history |
+| User state root `workspaces/<workspace-id>/artifacts/` | Terminal and changeset artifacts |
+| User cache root `workspaces/<workspace-id>/tmp/` | Shell scratch directory exposed as `$SIGIL_SCRATCH_DIR` and shown as `cache/tmp` |
+| User config `sigil.toml` | Default local machine config |
+| `.sigil/agents/`, `.sigil/skills/`, `.sigil/plugins/` | Optional workspace project assets |
 | `SIGIL.md` | Stable workspace memory file |
 | `AGENTS.md` | Agent collaboration instructions that Sigil can load as memory |
 | `SIGIL.local.md` | Local-only memory file |
 
-Do not commit real secrets in `sigil.toml` or local memory files.
+Do not commit real secrets in `sigil.toml` or local memory files. A workspace-root `sigil.toml` is not loaded by default; pass `--config <path>` explicitly if you need one for an experiment.
 
 ## Provider Environment Variables
 

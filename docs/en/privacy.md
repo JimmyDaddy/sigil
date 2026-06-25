@@ -20,8 +20,10 @@ Sigil does not automatically publish repository data, but provider and MCP confi
 
 These are local by default:
 
-- `sigil.toml`;
-- `.sigil/sessions/`;
+- per-user `sigil.toml`;
+- per-user session logs and input history under the Sigil state directory;
+- per-user terminal and changeset artifacts under the Sigil state directory;
+- per-user scratch/cache files under the Sigil cache directory;
 - local memory files such as `SIGIL.md`, `AGENTS.md`, and `SIGIL.local.md`;
 - release archives and checksums you build locally;
 - doctor output unless you copy it elsewhere.
@@ -34,13 +36,13 @@ Prefer environment variables:
 export SIGIL_API_KEY="sk-..."
 ```
 
-If you save an API key through Quick Setup or `/config`, it is stored as plaintext in `sigil.toml`. Do not commit real config files containing secrets.
+If you save an API key through Quick Setup or `/config`, it is stored as plaintext in the per-user `sigil.toml`. Do not copy real config files containing secrets into a repository.
 
 `sigil doctor` reports where the key came from, but it does not print the key value.
 
 ## Session Logs
 
-Session and control state are append-only JSONL under `.sigil/sessions/` by default. They can contain:
+Session and control state are append-only JSONL under the per-user Sigil state directory by default. They can contain:
 
 - prompts and assistant responses;
 - tool call summaries;
@@ -50,7 +52,7 @@ Session and control state are append-only JSONL under `.sigil/sessions/` by defa
 - compaction records;
 - task planning state.
 
-Treat session logs as sensitive repository-local artifacts. Review them before sharing.
+Treat session logs as sensitive local artifacts. Review them before sharing.
 
 ## MCP And Secret Egress
 

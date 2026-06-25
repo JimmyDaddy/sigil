@@ -1,15 +1,13 @@
 [workspace]
 root = "."
 
-[session]
-log_dir = ".sigil/sessions"
-
 [agent]
 provider = "anthropic"
 model = "claude-sonnet-4-5"
 tool_timeout_secs = 30
 
 [permission]
+preset = "balanced"
 default_mode = "ask"
 
 [permission.access]

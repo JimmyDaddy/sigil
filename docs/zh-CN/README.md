@@ -57,7 +57,7 @@ Sigil 围绕几个用户可感知的概念工作：
 - **启动目录很重要。** 常规 `workspace.root = "."` 配置下，启动 Sigil 时所在目录就是 agent 可以读取和修改的 workspace。
 - **工具执行是可见工作。** 读取、搜索、编辑、shell 命令、MCP 调用和 code-intelligence action 都会作为 activity 出现在 transcript 中。
 - **高风险动作要保留控制权。** 文件修改、命令执行、删除和外部工具可要求审批，并展示摘要和 diff。
-- **Session 是持久状态。** 默认 session 和 control records 以 append-only JSONL 写入 `.sigil/sessions/`，重启和恢复不会静默重放中断工具。
+- **Session 是持久状态。** 默认 session 和 control records 以 append-only JSONL 写入 Sigil 用户态 state 目录，重启和恢复不会静默重放中断工具。
 
 ## 当前分发状态
 

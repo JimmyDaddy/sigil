@@ -98,7 +98,7 @@
 - 所有路径操作必须限制在 workspace root 内
 - workspace confinement 必须基于 canonicalized root 和路径组件判断；文件、目录和父目录链上的 symlink 指向 workspace 外时必须标记为 `External` subject
 - workspace 外路径只能通过 `permission.external_directory` 高级权限进入审批或放行，默认关闭时必须返回 `external_directory_required`
-- Sigil 自身和模型可见工具需要临时 scratch 文件时，优先使用 workspace 内 `.sigil/tmp/`；不要把 OS temp 目录（如 `/tmp`、`/private/tmp`、`%TEMP%`）作为默认放行例外
+- Sigil 自身和模型可见 shell 工具需要临时 scratch 文件时，优先使用运行时注入的 `$SIGIL_SCRATCH_DIR`；它位于用户态 cache root，对模型显示为 `cache/tmp`。不要把 OS temp 目录（如 `/tmp`、`/private/tmp`、`%TEMP%`）作为默认放行例外
 - 工具失败必须结构化返回，不能 panic
 - provider-visible tool result 必须使用 `ToolResult::to_model_content()` 的 JSON envelope，不要在 session 历史里写裸文本结果
 
@@ -250,7 +250,7 @@ cargo clippy --all-targets -- -D warnings
 
 单测覆盖率门禁必须保持 `>= 96%` 行覆盖率。覆盖率统计入口统一使用仓库根目录的 `scripts/coverage.sh`，不要在 CI 或本地文档中另写一套不同参数。
 
-覆盖率门禁默认聚焦可单测的领域逻辑和状态模型；`scripts/coverage.sh` 会排除少量 orchestration loop / adapter 文件（例如 agent 主循环、runtime agent-tool adapter、TUI worker/spawn 入口），这些文件主要承载 raw terminal / worker / agent 主循环调度、provider I/O 桥接和启动失败出口，回归应通过其下层模块单测、状态转换测试和必要的人工冒烟覆盖。新增业务逻辑不要为了规避覆盖率而放进这些排除文件。
+覆盖率门禁默认聚焦可单测的领域逻辑和状态模型；`scripts/coverage.sh` 会排除少量 orchestration loop / adapter 文件（例如 agent 主循环、runtime agent-tool adapter、TUI launcher/worker/spawn 入口），这些文件主要承载 raw terminal / worker / agent 主循环调度、provider I/O 桥接和启动失败出口，回归应通过其下层模块单测、状态转换测试和必要的人工冒烟覆盖。新增业务逻辑不要为了规避覆盖率而放进这些排除文件。
 
 本地提交应启用仓库内版本化 hook：
 

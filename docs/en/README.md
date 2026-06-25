@@ -57,7 +57,7 @@ Sigil is built around a few user-facing ideas:
 - **The launch directory matters.** With the normal `workspace.root = "."` setup, the directory where you start Sigil is the workspace the agent can inspect and modify.
 - **Tools are visible work.** Reads, searches, edits, shell commands, MCP calls, and code-intelligence actions appear as activities in the transcript.
 - **Risky actions require control.** File changes, shell execution, deletes, and external tools can require approval with summaries and diffs.
-- **Sessions are durable.** Session and control records are append-only JSONL under `.sigil/sessions/` by default, so restart and recovery do not silently replay interrupted tools.
+- **Sessions are durable.** Session and control records are append-only JSONL under the per-user Sigil state directory by default, so restart and recovery do not silently replay interrupted tools.
 
 ## Current Distribution Status
 

@@ -66,7 +66,7 @@ sigil doctor
 - Keeps coding work in the TUI: transcript, composer, live tool activity, approvals, status, usage, and controls.
 - Lets the agent read, search, edit, and run commands through structured tools.
 - Shows risky write operations through approval cards, affected files, and bounded diffs.
-- Restores sessions from append-only JSONL records under `.sigil/sessions/`.
+- Restores sessions from append-only JSONL records under the per-user Sigil state directory.
 - Supports `/plan` for read-only planning prompts and `/task` for durable multi-step work with planner, executor, and optional subagent roles.
 - Honors explicit ordinary-chat requests to delegate to a subagent before accepting a final answer.
 - Lets trusted agent profiles be invoked directly with `@profile <prompt>` or trusted profile slash names.

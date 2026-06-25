@@ -72,8 +72,7 @@ Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应
 Sigil 按以下顺序解析 config：
 
 1. `--config <path>`
-2. 当前工作目录下的 `./sigil.toml`
-3. 标准用户配置目录下的 `sigil.toml`
+2. 标准用户配置目录下的 `sigil.toml`
 
 常见用户级路径：
 
@@ -85,14 +84,17 @@ Sigil 按以下顺序解析 config：
 
 | Path | 含义 |
 | --- | --- |
-| `.sigil/sessions/` | workspace 下默认 append-only session logs |
-| `.sigil/tmp/` | Sigil session 期间使用的 workspace-local scratch 文件 |
-| `sigil.toml` | 本地或用户配置 |
+| 用户态 state root `workspaces/<workspace-id>/sessions/` | 默认 append-only session logs |
+| 用户态 state root `workspaces/<workspace-id>/input-history.jsonl` | composer input history |
+| 用户态 state root `workspaces/<workspace-id>/artifacts/` | terminal 和 changeset artifacts |
+| 用户态 cache root `workspaces/<workspace-id>/tmp/` | shell scratch 目录，通过 `$SIGIL_SCRATCH_DIR` 暴露，对模型显示为 `cache/tmp` |
+| 用户配置目录 `sigil.toml` | 默认本机配置 |
+| `.sigil/agents/`、`.sigil/skills/`、`.sigil/plugins/` | 可选 workspace project assets |
 | `SIGIL.md` | 稳定 workspace memory file |
 | `AGENTS.md` | Sigil 可作为 memory 加载的 agent 协作说明 |
 | `SIGIL.local.md` | 本地专用 memory file |
 
-不要提交包含真实 secret 的 `sigil.toml` 或本地 memory 文件。
+不要提交包含真实 secret 的 `sigil.toml` 或本地 memory 文件。workspace 根目录的 `sigil.toml` 默认不会被读取；如需实验配置，请显式传入 `--config <path>`。
 
 ## Provider 环境变量
 

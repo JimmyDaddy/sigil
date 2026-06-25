@@ -9,4 +9,4 @@ These snippets are copyable starting points. Review paths, model names, API key 
 - [mcp-safe-defaults.toml](mcp-safe-defaults.toml)
 - [code-intelligence-rust.toml](code-intelligence-rust.toml)
 
-Do not commit real `sigil.toml` files that contain API keys.
+Use these as examples for the per-user config file. Do not commit real `sigil.toml` files that contain API keys.

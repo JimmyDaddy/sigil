@@ -119,10 +119,10 @@ After a file-changing tool runs, the activity keeps a bounded diff. Large diffs 
 
 ## Sessions and Recovery
 
-By default, session logs are written under the workspace:
+By default, session logs are written under Sigil's per-user state directory:
 
 ```text
-.sigil/sessions/
+<state-root>/workspaces/<workspace-id>/sessions/
 ```
 
 Sigil stores session and control state as append-only JSONL. For users, this means:

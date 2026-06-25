@@ -1,15 +1,13 @@
 [workspace]
 root = "."
 
-[session]
-log_dir = ".sigil/sessions"
-
 [agent]
 provider = "openai_compat"
 model = "gpt-4.1"
 tool_timeout_secs = 30
 
 [permission]
+preset = "balanced"
 default_mode = "ask"
 
 [permission.access]

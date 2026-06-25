@@ -99,7 +99,7 @@ default_mode = "ask"
 rules = []
 ```
 
-只在明确需要时启用，并保持 `default_mode = "ask"`，除非外部路径低风险且稳定。临时 scratch 文件应使用 workspace 内 `.sigil/tmp/`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍需要 external-directory 权限。
+只在明确需要时启用，并保持 `default_mode = "ask"`，除非外部路径低风险且稳定。临时 shell scratch 文件应使用 `bash` 或 `terminal_start` 提供的 `$SIGIL_SCRATCH_DIR`；系统 temp 目录（如 `/tmp`、macOS `/private/tmp`、Windows `%TEMP%`）仍需要 external-directory 权限。
 
 ## Shell Commands
 
@@ -140,7 +140,7 @@ export SIGIL_API_KEY="sk-..."
 
 ## Recovery And Audit
 
-默认 session 和 control records 是 `.sigil/sessions/` 下的 append-only JSONL。
+默认 session 和 control records 是 Sigil 用户态 state 目录下的 append-only JSONL。
 
 用户需要知道：
 

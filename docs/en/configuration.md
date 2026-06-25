@@ -20,8 +20,7 @@ This guide covers user-facing Sigil configuration. Most users should start with 
 The TUI and CLI resolve configuration in this order:
 
 1. `--config <path>`
-2. `./sigil.toml` in the current working directory
-3. `sigil.toml` in the standard per-user config directory
+2. `sigil.toml` in the standard per-user config directory
 
 Common per-user paths:
 
@@ -29,7 +28,7 @@ Common per-user paths:
 - Linux: `$XDG_CONFIG_HOME/sigil/sigil.toml` or `~/.config/sigil/sigil.toml`
 - Windows: `%APPDATA%\sigil\sigil.toml`
 
-Do not commit a real repository-local `sigil.toml`; it may contain secrets.
+Quick Setup writes the per-user config path. A workspace-root `sigil.toml` is not loaded by default; pass it explicitly with `--config <path>` if you need one for a local experiment.
 
 ## Minimal Path
 
@@ -73,9 +72,6 @@ If you want to write config manually, start here:
 ```toml
 [workspace]
 root = "."
-
-[session]
-log_dir = ".sigil/sessions"
 
 [agent]
 provider = "deepseek"
@@ -259,6 +255,7 @@ Default shape:
 
 ```toml
 [permission]
+preset = "balanced"
 default_mode = "ask"
 
 [permission.access]
@@ -272,10 +269,12 @@ rules = []
 
 Meaning:
 
+- `preset = "balanced"` is the default interactive safety profile: reads are allowed, ordinary edits and shell commands ask, and destructive/protected paths remain guarded.
+- `preset = "read_only"` is for planning, audits, and dry runs; it denies writes and mutating shell operations even if a legacy write allow is configured.
 - Tool calls without an explicit override default to approval.
 - Read-only file and search tools are allowed by default.
 - Paths outside the workspace are disabled by default; if external directories are enabled, they still go through rules and approval.
-- Temporary scratch files should use `.sigil/tmp/` inside the workspace. OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` are still external paths and are not allowed by default.
+- Temporary shell scratch files should use `$SIGIL_SCRATCH_DIR` from `bash` or `terminal_start`. It is backed by Sigil's per-user cache root and shown to the model as `cache/tmp`; OS temp directories such as `/tmp`, macOS `/private/tmp`, or Windows `%TEMP%` are still external paths and are not allowed by default.
 - In headless `run`, final `ask` decisions are returned to the model as structured `approval_required` tool errors instead of being executed silently.
 
 ## Memory
