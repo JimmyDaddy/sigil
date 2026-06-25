@@ -1199,6 +1199,11 @@ impl EventHandler for AppState {
                 call,
                 spec,
                 subjects,
+                operation,
+                risk,
+                subject_zones,
+                confirmation,
+                snapshot_required,
                 preview,
             } => {
                 self.run_phase = RunPhase::Tool(call.name.clone());
@@ -1221,6 +1226,11 @@ impl EventHandler for AppState {
                     call: call.clone(),
                     spec,
                     subjects,
+                    operation,
+                    risk,
+                    subject_zones,
+                    confirmation,
+                    snapshot_required,
                     preview,
                 });
                 self.active_pane = PaneFocus::Activity;

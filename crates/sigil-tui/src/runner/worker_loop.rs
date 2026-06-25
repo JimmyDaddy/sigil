@@ -2370,8 +2370,14 @@ fn load_worker_skill(
     run_id: Option<u64>,
 ) -> std::result::Result<sigil_runtime::LoadedSkillContext, String> {
     let user_config_dir = default_user_config_dir().ok();
-    let report = sigil_runtime::discover_skill_index_with_user_dir(
+    let sigil_paths = sigil_runtime::resolve_sigil_paths(
+        &root_config.storage,
+        &root_config.session,
         &options.workspace_root,
+    );
+    let report = sigil_runtime::discover_skill_index_with_project_assets_root(
+        &options.workspace_root,
+        &sigil_paths.project_assets_root,
         user_config_dir.as_deref(),
         &root_config.skills,
     )

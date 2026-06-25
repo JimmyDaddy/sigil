@@ -9,7 +9,11 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{permission::ApprovalMode, provider::ModelMessage, session::ControlEntry};
+use crate::{
+    permission::{ApprovalMode, ToolOperation, infer_tool_operation},
+    provider::ModelMessage,
+    session::ControlEntry,
+};
 
 /// JSON-schema-backed tool contract exposed to model providers and UI approvals.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -930,6 +934,20 @@ pub trait Tool: Send + Sync {
         Ok(self.spec().access)
     }
 
+    /// Returns the fine-grained operation used by permission policy on this concrete call.
+    ///
+    /// Tools with argument-dependent behavior can override this. The default keeps existing tools
+    /// compatible by deriving the operation from the stable tool name and dynamic access class.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the arguments are invalid and no reliable operation can be derived.
+    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+        let spec = self.spec();
+        let access = self.permission_access(ctx, args)?;
+        Ok(infer_tool_operation(&spec.name, access))
+    }
+
     /// Returns an optional tool-provided default approval mode for this concrete call.
     ///
     /// This is used for configuration domains that are more specific than the global
@@ -1202,6 +1220,29 @@ impl ToolRegistry {
         tool.permission_access(ctx, &args)
     }
 
+    /// Returns the fine-grained permission operation for a tool call by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is unknown, the JSON args are invalid, or the tool cannot
+    /// derive a reliable operation for the call.
+    pub fn permission_operation(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<ToolOperation> {
+        let tool = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            self.allowed_tool(&tools, &call.name)?
+        };
+        let args: Value = serde_json::from_str(&call.args_json)
+            .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
+        tool.permission_operation(ctx, &args)
+    }
+
     /// Returns an optional tool-provided default approval mode for a tool call by name.
     ///
     /// # Errors
@@ -1323,6 +1364,14 @@ impl ScopedToolRegistry {
         call: &crate::provider::ToolCall,
     ) -> Result<ToolAccess> {
         self.inner.permission_access(ctx, call)
+    }
+
+    pub fn permission_operation(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<ToolOperation> {
+        self.inner.permission_operation(ctx, call)
     }
 
     pub fn permission_default_mode(

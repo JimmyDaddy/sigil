@@ -219,6 +219,7 @@ async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()
     let result = registry.execute(ctx.clone(), call.clone()).await?;
     let preview = registry.preview(ctx.clone(), call.clone()).await?;
     let access = registry.permission_access(&ctx, &call)?;
+    let operation = registry.permission_operation(&ctx, &call)?;
     let default_mode = registry.permission_default_mode(&ctx, &call)?;
     let egress = registry.egress_audit(&ctx, &call)?;
 
@@ -228,6 +229,7 @@ async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()
         "Fixture preview"
     );
     assert_eq!(access, ToolAccess::Execute);
+    assert_eq!(operation, crate::ToolOperation::ExecuteUnknownCommand);
     assert_eq!(default_mode, Some(ApprovalMode::Ask));
     assert!(matches!(
         egress,
@@ -352,8 +354,22 @@ fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
     .join();
 
     let drained = registry.drain_by_name_prefix("mcp__poisoned__");
+    let operation = registry
+        .permission_operation(
+            &ToolContext {
+                workspace_root: std::env::temp_dir(),
+                timeout_secs: 5,
+            },
+            &ToolCall {
+                id: "call-read".to_owned(),
+                name: "read_file".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .expect("poisoned registry lock should recover for permission operation");
 
     assert_eq!(drained.len(), 1);
+    assert_eq!(operation, crate::ToolOperation::Read);
     assert!(registry.spec_for("mcp__poisoned__echo").is_none());
     assert!(registry.spec_for("read_file").is_some());
 }
@@ -436,6 +452,7 @@ async fn scoped_tool_registry_gates_all_tool_paths() -> Result<()> {
             .is_err()
     );
     assert!(scoped.permission_access(&ctx, &blocked_call).is_err());
+    assert!(scoped.permission_operation(&ctx, &blocked_call).is_err());
     assert!(scoped.permission_subjects(&ctx, &blocked_call).is_err());
     assert!(scoped.permission_default_mode(&ctx, &blocked_call).is_err());
     assert!(scoped.egress_audit(&ctx, &blocked_call).is_err());

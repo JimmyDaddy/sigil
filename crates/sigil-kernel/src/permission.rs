@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize};
 
-use crate::tool::{ToolAccess, ToolSpec, ToolSubject, ToolSubjectScope};
+use crate::tool::{ToolAccess, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope};
 
 /// Default interaction surface for one agent run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,16 @@ impl ApprovalMode {
             Self::Deny => "deny",
         }
     }
+}
+
+/// User-facing permission preset. Presets stay intentionally coarse so normal users do not need
+/// to understand the internal operation/path-rule lattice.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionPreset {
+    ReadOnly,
+    #[default]
+    Balanced,
 }
 
 /// Per-access permission defaults.
@@ -121,6 +131,8 @@ pub struct ExternalDirectoryRule {
 #[serde(rename_all = "snake_case")]
 pub struct PermissionConfig {
     #[serde(default)]
+    pub preset: PermissionPreset,
+    #[serde(default)]
     pub default_mode: ApprovalMode,
     #[serde(default)]
     pub access: PermissionAccessConfig,
@@ -135,6 +147,7 @@ pub struct PermissionConfig {
 impl Default for PermissionConfig {
     fn default() -> Self {
         Self {
+            preset: PermissionPreset::default(),
             default_mode: ApprovalMode::Ask,
             access: PermissionAccessConfig::default(),
             tools: BTreeMap::new(),
@@ -144,18 +157,175 @@ impl Default for PermissionConfig {
     }
 }
 
+/// Provider-neutral operation class derived from a tool call for fine-grained permission logic.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOperation {
+    Read,
+    Search,
+    CreateFile,
+    EditFile,
+    OverwriteFile,
+    DeleteFile,
+    RenamePath,
+    CreateDirectory,
+    DeleteDirectory,
+    RecursiveDelete,
+    ApplyChangeSet,
+    ExecuteReadOnlyCommand,
+    ExecuteMutatingCommand,
+    ExecuteUnknownCommand,
+    ExecuteDestructiveCommand,
+    SendTerminalInput,
+    NetworkRequest,
+    SpawnAgent,
+    MessageAgent,
+    CloseAgent,
+    LoadSkill,
+    InvokePlugin,
+}
+
+/// Product safety category for one path subject.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PathTrustZone {
+    WorkspaceSource,
+    WorkspaceDocs,
+    WorkspaceProjectAsset,
+    WorkspaceRuntimeState,
+    WorkspaceIgnored,
+    WorkspaceGitMetadata,
+    WorkspaceConfigSecret,
+    UserState,
+    UserCache,
+    External,
+    Unknown,
+}
+
+/// Derived risk label used by policy overlays and approval UI.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionRisk {
+    Low,
+    Medium,
+    High,
+    Destructive,
+    Protected,
+}
+
+/// Extra confirmation a policy decision may require before the tool can execute.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum PermissionConfirmation {
+    Standard,
+    TypePath,
+    TypePhrase { phrase: String },
+}
+
+/// Resolved context supplied by entrypoints once runtime paths and caps are known.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionEvaluationContext {
+    pub workspace_root: PathBuf,
+    pub project_asset_roots: Vec<PathBuf>,
+    pub runtime_state_roots: Vec<PathBuf>,
+    pub user_state_roots: Vec<PathBuf>,
+    pub user_cache_roots: Vec<PathBuf>,
+    pub effective_policy_cap: Option<EffectivePermissionPolicyCap>,
+}
+
+/// A materialized permission cap candidate accepted by the decision lattice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectivePermissionPolicyCap {
+    pub policy_hash: String,
+    pub mode: ApprovalMode,
+}
+
 /// One resolved permission decision for a tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionDecision {
     pub mode: ApprovalMode,
     pub access: ToolAccess,
+    pub operation: ToolOperation,
+    pub risk: PermissionRisk,
     pub subjects: Vec<ToolSubject>,
+    pub subject_zones: Vec<PathTrustZone>,
     pub external_directory_required: bool,
+    pub confirmation: Option<PermissionConfirmation>,
+    pub snapshot_required: bool,
+}
+
+impl PermissionDecision {
+    /// Constructs a decision and derives operation, path zones, risk, confirmation, and snapshot
+    /// metadata from the tool/access/subject tuple.
+    pub fn new(
+        mode: ApprovalMode,
+        tool_name: &str,
+        access: ToolAccess,
+        subjects: Vec<ToolSubject>,
+        external_directory_required: bool,
+    ) -> Self {
+        Self::new_with_operation(
+            mode,
+            infer_tool_operation(tool_name, access),
+            access,
+            subjects,
+            external_directory_required,
+        )
+    }
+
+    /// Constructs a decision with a caller-provided fine-grained operation.
+    pub fn new_with_operation(
+        mode: ApprovalMode,
+        operation: ToolOperation,
+        access: ToolAccess,
+        subjects: Vec<ToolSubject>,
+        external_directory_required: bool,
+    ) -> Self {
+        let subject_zones = subjects
+            .iter()
+            .map(classify_path_trust_zone)
+            .collect::<Vec<_>>();
+        Self::new_with_operation_and_zones(
+            mode,
+            operation,
+            access,
+            subjects,
+            subject_zones,
+            external_directory_required,
+        )
+    }
+
+    /// Constructs a decision with pre-classified path zones from the active runtime context.
+    pub fn new_with_operation_and_zones(
+        mode: ApprovalMode,
+        operation: ToolOperation,
+        access: ToolAccess,
+        subjects: Vec<ToolSubject>,
+        subject_zones: Vec<PathTrustZone>,
+        external_directory_required: bool,
+    ) -> Self {
+        let risk = derive_permission_risk(access, operation, &subject_zones);
+        let mode = apply_operation_risk_overlay(mode, operation, risk);
+        let confirmation = confirmation_for_risk(risk, &subject_zones);
+        let snapshot_required = matches!(risk, PermissionRisk::Destructive);
+        Self {
+            mode,
+            access,
+            operation,
+            risk,
+            subjects,
+            subject_zones,
+            external_directory_required,
+            confirmation,
+            snapshot_required,
+        }
+    }
 }
 
 /// Policy evaluator that resolves allow/ask/deny for one tool call.
 pub struct PermissionPolicy<'a> {
     config: &'a PermissionConfig,
+    context: Option<&'a PermissionEvaluationContext>,
     rules: Vec<CompiledPermissionRule<'a>>,
     external_rules: Vec<CompiledExternalDirectoryRule<'a>>,
 }
@@ -165,6 +335,29 @@ impl<'a> PermissionPolicy<'a> {
     pub fn new(config: &'a PermissionConfig) -> Self {
         Self {
             config,
+            context: None,
+            rules: config
+                .rules
+                .iter()
+                .map(CompiledPermissionRule::new)
+                .collect(),
+            external_rules: config
+                .external_directory
+                .rules
+                .iter()
+                .map(CompiledExternalDirectoryRule::new)
+                .collect(),
+        }
+    }
+
+    /// Creates a policy evaluator with the resolved runtime path context.
+    pub fn new_with_context(
+        config: &'a PermissionConfig,
+        context: &'a PermissionEvaluationContext,
+    ) -> Self {
+        Self {
+            config,
+            context: Some(context),
             rules: config
                 .rules
                 .iter()
@@ -215,9 +408,33 @@ impl<'a> PermissionPolicy<'a> {
     /// Returns an error when one configured subject glob is invalid.
     pub fn decide_with_access_and_default(
         &self,
+        spec: &ToolSpec,
+        tool_name: &str,
+        access: ToolAccess,
+        subjects: Vec<ToolSubject>,
+        tool_default_mode: Option<ApprovalMode>,
+    ) -> Result<PermissionDecision> {
+        self.decide_with_operation_and_default(
+            spec,
+            tool_name,
+            access,
+            infer_tool_operation(tool_name, access),
+            subjects,
+            tool_default_mode,
+        )
+    }
+
+    /// Resolves one tool call decision with a tool-provided operation and default approval mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when one configured subject glob is invalid.
+    pub fn decide_with_operation_and_default(
+        &self,
         _spec: &ToolSpec,
         tool_name: &str,
         access: ToolAccess,
+        operation: ToolOperation,
         subjects: Vec<ToolSubject>,
         tool_default_mode: Option<ApprovalMode>,
     ) -> Result<PermissionDecision> {
@@ -236,12 +453,36 @@ impl<'a> PermissionPolicy<'a> {
                 .collect::<Result<Vec<_>>>()?
         };
 
-        Ok(PermissionDecision {
-            mode: combine_modes(subject_modes),
+        let mut mode = combine_modes(subject_modes);
+        if let Some(cap_mode) = self
+            .context
+            .and_then(|context| context.effective_policy_cap.as_ref())
+            .map(|cap| cap.mode)
+        {
+            mode = combine_modes(vec![mode, cap_mode]);
+        }
+        let subject_zones = self.classify_subject_zones(&subjects);
+
+        Ok(PermissionDecision::new_with_operation_and_zones(
+            mode,
+            operation,
             access,
             subjects,
+            subject_zones,
             external_directory_required,
-        })
+        ))
+    }
+
+    fn classify_subject_zones(&self, subjects: &[ToolSubject]) -> Vec<PathTrustZone> {
+        subjects
+            .iter()
+            .map(|subject| {
+                self.context.map_or_else(
+                    || classify_path_trust_zone(subject),
+                    |context| classify_path_trust_zone_with_context(subject, context),
+                )
+            })
+            .collect()
     }
 
     fn decide_one_subject(
@@ -251,6 +492,10 @@ impl<'a> PermissionPolicy<'a> {
         tool_default_mode: Option<ApprovalMode>,
         subject: Option<&ToolSubject>,
     ) -> Result<ApprovalMode> {
+        if self.config.preset == PermissionPreset::ReadOnly && access != ToolAccess::Read {
+            return Ok(ApprovalMode::Deny);
+        }
+
         let mut mode = self
             .config
             .access
@@ -323,6 +568,262 @@ impl<'a> PermissionPolicy<'a> {
             Ok(combine_modes(matching_rule_modes))
         }
     }
+}
+
+/// Returns the best currently-known operation classification for one tool.
+pub fn infer_tool_operation(tool_name: &str, access: ToolAccess) -> ToolOperation {
+    match tool_name {
+        "read_file" => ToolOperation::Read,
+        "ls" | "glob" | "grep" => ToolOperation::Search,
+        "write_file" => ToolOperation::OverwriteFile,
+        "edit_file" => ToolOperation::EditFile,
+        "delete_file" => ToolOperation::DeleteFile,
+        "apply_changeset" => ToolOperation::ApplyChangeSet,
+        "terminal_input" => ToolOperation::SendTerminalInput,
+        "spawn_agent" => ToolOperation::SpawnAgent,
+        "message_agent" => ToolOperation::MessageAgent,
+        "close_agent" => ToolOperation::CloseAgent,
+        "load_skill" => ToolOperation::LoadSkill,
+        "bash" | "terminal_start" if access == ToolAccess::Read => {
+            ToolOperation::ExecuteReadOnlyCommand
+        }
+        "bash" | "terminal_start" => ToolOperation::ExecuteUnknownCommand,
+        _ => match access {
+            ToolAccess::Read => ToolOperation::Read,
+            ToolAccess::Write => ToolOperation::EditFile,
+            ToolAccess::Execute => ToolOperation::ExecuteUnknownCommand,
+            ToolAccess::Network => ToolOperation::NetworkRequest,
+        },
+    }
+}
+
+/// Classifies a path subject into a trust zone using conservative built-in defaults.
+pub fn classify_path_trust_zone(subject: &ToolSubject) -> PathTrustZone {
+    if subject.scope == ToolSubjectScope::External {
+        return PathTrustZone::External;
+    }
+    if subject.kind != ToolSubjectKind::Path {
+        return PathTrustZone::Unknown;
+    }
+
+    let normalized = subject.normalized.trim_start_matches("./");
+    if path_is_under(normalized, ".git") {
+        return PathTrustZone::WorkspaceGitMetadata;
+    }
+    if normalized == ".sigil" {
+        return PathTrustZone::WorkspaceRuntimeState;
+    }
+    if path_is_under_any(
+        normalized,
+        &[
+            ".sigil/sessions",
+            ".sigil/state",
+            ".sigil/cache",
+            ".sigil/tasks",
+            ".sigil/changesets",
+            ".sigil/tmp",
+        ],
+    ) {
+        return PathTrustZone::WorkspaceRuntimeState;
+    }
+    if path_is_under_any(
+        normalized,
+        &[".sigil/agents", ".sigil/skills", ".sigil/plugins"],
+    ) {
+        return PathTrustZone::WorkspaceProjectAsset;
+    }
+    if normalized == "sigil.toml"
+        || normalized == ".env"
+        || normalized.starts_with(".env.")
+        || normalized.contains("credentials")
+        || normalized.contains("secret")
+    {
+        return PathTrustZone::WorkspaceConfigSecret;
+    }
+    if normalized.starts_with("docs/") || normalized.starts_with("dev/docs/") {
+        return PathTrustZone::WorkspaceDocs;
+    }
+    PathTrustZone::WorkspaceSource
+}
+
+/// Classifies a path subject into a trust zone using the active runtime path context.
+pub fn classify_path_trust_zone_with_context(
+    subject: &ToolSubject,
+    context: &PermissionEvaluationContext,
+) -> PathTrustZone {
+    if subject.scope == ToolSubjectScope::External {
+        return PathTrustZone::External;
+    }
+    if subject.kind != ToolSubjectKind::Path {
+        return PathTrustZone::Unknown;
+    }
+
+    let Some(subject_path) = subject_path_for_context(subject, context) else {
+        return classify_path_trust_zone(subject);
+    };
+    if path_starts_with_any_context_root(&subject_path, &context.runtime_state_roots, context) {
+        return PathTrustZone::WorkspaceRuntimeState;
+    }
+    if path_starts_with_any_context_root(&subject_path, &context.project_asset_roots, context) {
+        return PathTrustZone::WorkspaceProjectAsset;
+    }
+    if path_starts_with_any_context_root(&subject_path, &context.user_state_roots, context) {
+        return PathTrustZone::UserState;
+    }
+    if path_starts_with_any_context_root(&subject_path, &context.user_cache_roots, context) {
+        return PathTrustZone::UserCache;
+    }
+
+    let workspace_root = normalize_policy_path(&context.workspace_root);
+    if !workspace_root.as_os_str().is_empty() && !subject_path.starts_with(&workspace_root) {
+        return PathTrustZone::External;
+    }
+
+    classify_path_trust_zone(subject)
+}
+
+fn subject_path_for_context(
+    subject: &ToolSubject,
+    context: &PermissionEvaluationContext,
+) -> Option<PathBuf> {
+    subject
+        .canonical_path
+        .as_ref()
+        .cloned()
+        .or_else(|| {
+            let normalized = subject.normalized.trim();
+            if normalized.is_empty() {
+                return None;
+            }
+            let path = PathBuf::from(normalized);
+            Some(if path.is_absolute() {
+                path
+            } else {
+                context.workspace_root.join(path)
+            })
+        })
+        .map(|path| normalize_policy_path(&path))
+}
+
+fn path_starts_with_any_context_root(
+    path: &Path,
+    roots: &[PathBuf],
+    context: &PermissionEvaluationContext,
+) -> bool {
+    roots.iter().any(|root| {
+        let root = if root.is_absolute() {
+            root.clone()
+        } else {
+            context.workspace_root.join(root)
+        };
+        let root = normalize_policy_path(&root);
+        !root.as_os_str().is_empty() && path.starts_with(root)
+    })
+}
+
+fn normalize_policy_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// Derives a conservative risk label from access, operation, and path zones.
+pub fn derive_permission_risk(
+    access: ToolAccess,
+    operation: ToolOperation,
+    zones: &[PathTrustZone],
+) -> PermissionRisk {
+    if zones.iter().any(|zone| {
+        matches!(
+            zone,
+            PathTrustZone::WorkspaceGitMetadata
+                | PathTrustZone::WorkspaceRuntimeState
+                | PathTrustZone::UserState
+                | PathTrustZone::UserCache
+        )
+    }) && access != ToolAccess::Read
+    {
+        return PermissionRisk::Protected;
+    }
+
+    if matches!(
+        operation,
+        ToolOperation::DeleteFile
+            | ToolOperation::DeleteDirectory
+            | ToolOperation::RecursiveDelete
+            | ToolOperation::ApplyChangeSet
+            | ToolOperation::ExecuteDestructiveCommand
+    ) {
+        return PermissionRisk::Destructive;
+    }
+
+    if matches!(
+        operation,
+        ToolOperation::ExecuteUnknownCommand | ToolOperation::SendTerminalInput
+    ) {
+        return PermissionRisk::High;
+    }
+
+    match access {
+        ToolAccess::Read => PermissionRisk::Low,
+        ToolAccess::Write => PermissionRisk::Medium,
+        ToolAccess::Execute | ToolAccess::Network => PermissionRisk::High,
+    }
+}
+
+/// Applies safety overlays that no allow source can bypass.
+pub fn apply_risk_overlay(mode: ApprovalMode, risk: PermissionRisk) -> ApprovalMode {
+    apply_operation_risk_overlay(mode, ToolOperation::Read, risk)
+}
+
+fn apply_operation_risk_overlay(
+    mode: ApprovalMode,
+    operation: ToolOperation,
+    risk: PermissionRisk,
+) -> ApprovalMode {
+    match risk {
+        PermissionRisk::Protected => ApprovalMode::Deny,
+        PermissionRisk::Destructive if mode == ApprovalMode::Allow => ApprovalMode::Ask,
+        PermissionRisk::High if operation == ToolOperation::SendTerminalInput => {
+            combine_modes(vec![mode, ApprovalMode::Ask])
+        }
+        _ => mode,
+    }
+}
+
+fn confirmation_for_risk(
+    risk: PermissionRisk,
+    zones: &[PathTrustZone],
+) -> Option<PermissionConfirmation> {
+    if risk == PermissionRisk::Destructive
+        && zones
+            .iter()
+            .any(|zone| matches!(zone, PathTrustZone::WorkspaceProjectAsset))
+    {
+        return Some(PermissionConfirmation::TypePath);
+    }
+    None
+}
+
+fn path_is_under_any(path: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| path_is_under(path, prefix))
+}
+
+fn path_is_under(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 struct CompiledPermissionRule<'a> {

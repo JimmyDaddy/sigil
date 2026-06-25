@@ -25,7 +25,8 @@ use sigil_kernel::{
 
 use super::{
     LOAD_SKILL_TOOL_NAME, SkillDiscoveryWarningKind, discover_skill_index,
-    discover_skill_index_with_user_dir, namespaced_plugin_skill_id, register_skill_tools,
+    discover_skill_index_with_project_assets_root, discover_skill_index_with_user_dir,
+    namespaced_plugin_skill_id, register_skill_tools,
 };
 
 struct LoadSkillProvider {
@@ -182,6 +183,56 @@ disable-model-invocation: true
             .count(),
         2
     );
+}
+
+#[test]
+fn discovery_uses_explicit_project_assets_root_for_workspace_skills_and_agents() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let project_assets = workspace.path().join("project-assets");
+    write_skill(
+        project_assets.join("skills/review/SKILL.md"),
+        r#"---
+name: review
+description: Project asset review skill.
+---
+
+# Review
+"#,
+    );
+    write_skill(
+        project_assets.join("agents/audit.md"),
+        r#"---
+name: audit
+description: Project asset agent skill.
+---
+
+# Audit
+"#,
+    );
+
+    let report = discover_skill_index_with_project_assets_root(
+        workspace.path(),
+        &project_assets,
+        None,
+        &SkillConfig::default(),
+    )
+    .expect("discovery should succeed");
+
+    assert_eq!(
+        report
+            .snapshot
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["audit", "review"]
+    );
+    let review = descriptor(&report, "review");
+    assert_eq!(review.source, SkillSource::Workspace);
+    assert!(review.entrypoint.starts_with(Path::new("project-assets")));
+    let audit = descriptor(&report, "audit");
+    assert_eq!(audit.run_as, SkillRunMode::ChildSession);
+    assert!(audit.entrypoint.starts_with(Path::new("project-assets")));
 }
 
 #[test]
@@ -1403,6 +1454,7 @@ where
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config,
+                permission_context: sigil_kernel::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },

@@ -29,8 +29,9 @@ pub(super) fn test_root_config(workspace_root: &Path, provider: &str, model: &st
         workspace: WorkspaceConfig {
             root: workspace_root.display().to_string(),
         },
+        storage: Default::default(),
         session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+            log_dir: Some(".sigil/sessions".to_owned()),
         },
         agent: AgentConfig {
             provider: provider.to_owned(),

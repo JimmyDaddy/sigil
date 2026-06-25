@@ -12,7 +12,8 @@ use sigil_kernel::{
 };
 
 use super::{
-    PluginDiscoveryWarningKind, discover_workspace_plugins, merge_plugin_mcp_servers,
+    PluginDiscoveryWarningKind, discover_workspace_plugins,
+    discover_workspace_plugins_with_project_assets_root, merge_plugin_mcp_servers,
     merge_plugin_skill_descriptors,
 };
 use crate::build_tool_registry_without_eager_mcp;
@@ -28,6 +29,46 @@ fn missing_plugin_directory_returns_empty_report() {
     assert!(report.manifests.is_empty());
     assert!(report.registrations.is_empty());
     assert!(report.warnings.is_empty());
+}
+
+#[test]
+fn plugin_discovery_uses_explicit_project_assets_root() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let project_assets = workspace.path().join("project-assets");
+    let plugin_root = project_assets.join("plugins/repo-review");
+    write_file(
+        &plugin_root.join("plugin.toml"),
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+description = "Reusable review pack."
+
+[[skills]]
+path = "skills/review/SKILL.md"
+"#,
+    );
+    write_file(
+        &plugin_root.join("skills/review/SKILL.md"),
+        r#"---
+id: review
+description: Review repositories.
+trust: trusted
+---
+
+# Review
+"#,
+    );
+
+    let pending =
+        discover_workspace_plugins_with_project_assets_root(workspace.path(), &project_assets, &[])
+            .expect("plugin discovery should succeed");
+    assert_eq!(pending.manifests.len(), 1);
+    assert_eq!(pending.manifests[0].plugin_id, "repo-review");
+    assert!(
+        pending.manifests[0]
+            .manifest_path
+            .starts_with("project-assets")
+    );
 }
 
 #[test]
@@ -915,8 +956,9 @@ fn root_config() -> RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
+        storage: Default::default(),
         session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+            log_dir: Some(".sigil/sessions".to_owned()),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),

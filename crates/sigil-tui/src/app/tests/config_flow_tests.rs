@@ -6,6 +6,37 @@ fn config_for_workspace(workspace_root: &Path) -> RootConfig {
     config
 }
 
+#[test]
+fn config_storage_section_shows_resolved_paths_readonly() {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let mut config = config_for_workspace(temp.path());
+    config.storage.state_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("state").display().to_string());
+    config.storage.cache_root =
+        sigil_kernel::StorageRoot::Path(temp.path().join("cache").display().to_string());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Storage);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Storage"));
+    assert!(detail.contains("[roots]"));
+    assert!(detail.contains("State root"));
+    assert!(detail.contains("Cache root"));
+    assert!(detail.contains("Workspace state"));
+    assert!(detail.contains("Project assets"));
+    assert!(detail.contains("[files]"));
+    assert!(detail.contains("Session logs"));
+    assert!(detail.contains("Input history"));
+    assert!(detail.contains("Scratch"));
+    assert!(detail.contains("SIGIL_STATE_HOME"));
+    assert_eq!(app.config_selected_field_label(), None);
+}
+
 fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
     let path = workspace_root
         .join(".sigil")
@@ -358,9 +389,14 @@ fn config_left_right_switches_steps() -> Result<()> {
     app.open_config_panel();
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    assert_eq!(app.config_section_title(), Some("Storage"));
+    // Right again to reach Permissions (step 3 now, was step 2 before Storage was added).
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Permissions"));
     assert_eq!(app.config_selected_field_label(), Some("Default mode"));
 
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
+    assert_eq!(app.config_section_title(), Some("Storage"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Provider"));
     assert_eq!(app.config_selected_field_label(), Some("Model"));
@@ -418,10 +454,10 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     let lines = app.config_detail_lines();
     let detail = lines.join("\n");
 
-    assert_eq!(lines[0], "Provider 1/11 · provider settings");
+    assert_eq!(lines[0], "Provider 1/12 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] permissions memory compaction code intel terminal appearance agents skills plugins mcp"
+        "[provider] storage policy memory context code terminal theme agents skills plugins mcp"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -579,7 +615,7 @@ fn config_code_intelligence_step_shows_trust_and_readiness() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Code Intel 5/11 · LSP readiness"));
+    assert!(detail.contains("Code Intel 6/12 · LSP readiness"));
     assert!(detail.contains("[controls]"));
     assert!(detail.contains("Code intelligence: yes"));
     assert!(detail.contains("Startup: lazy"));
@@ -610,7 +646,7 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Terminal 6/11 · terminal integration"));
+    assert!(detail.contains("Terminal 7/12 · terminal integration"));
     assert!(detail.contains("[interaction]"));
     assert!(detail.contains("Mouse capture: yes"));
     assert!(detail.contains("OSC52 clipboard: yes"));
@@ -638,7 +674,7 @@ fn config_appearance_step_shows_theme_and_scope() {
     let detail = app.config_detail_lines().join("\n");
     let nav = app.config_nav_lines().join("\n");
 
-    assert!(detail.contains("Appearance 7/11 · TUI theme"));
+    assert!(detail.contains("Appearance 8/12 · TUI theme"));
     assert!(nav.contains("Appearance: Enter cycle"));
     assert!(nav.contains("Appearance: Backspace reset"));
     assert!(nav.contains("Appearance: Ctrl-R clear all"));
@@ -1180,7 +1216,7 @@ slash_names = ["review-agent"]
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Agents 8/11 · agent profiles"));
+    assert!(detail.contains("Agents 9/12 · agent profiles"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 5 agents"));
     assert!(detail.contains("- Compatibility: 0 agents"));
@@ -1893,7 +1929,7 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("Plugins 10/11 · plugin trust review"));
+    assert!(detail.contains("Plugins 11/12 · plugin trust review"));
     assert!(detail.contains("[discovery]"));
     assert!(detail.contains("- Configured: 1 plugins"));
     assert!(detail.contains("- Selected: 1 of 1"));
@@ -3165,7 +3201,7 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
     assert_eq!(app.last_notice(), Some("Ctrl-D: MCP only"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
-    assert_eq!(app.config_section_title(), Some("Permissions"));
+    assert_eq!(app.config_section_title(), Some("Storage"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))?;
     assert_eq!(app.config_section_title(), Some("Provider"));

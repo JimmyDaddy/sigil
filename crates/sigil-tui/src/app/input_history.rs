@@ -1,14 +1,9 @@
-use std::{
-    fs,
-    io::ErrorKind,
-    path::{Path, PathBuf},
-};
+use std::{fs, io::ErrorKind, path::Path};
 
 use anyhow::{Context, Result};
 
 use super::AppState;
 
-const INPUT_HISTORY_FILE: &str = "input-history.jsonl";
 const INPUT_HISTORY_LIMIT: usize = 100;
 
 impl AppState {
@@ -77,8 +72,8 @@ impl AppState {
         }
     }
 
-    fn input_history_path(&self) -> PathBuf {
-        input_history_path_for_session_dir(&self.session_log_dir, &self.workspace_root)
+    fn input_history_path(&self) -> std::path::PathBuf {
+        self.sigil_paths.input_history_file.clone()
     }
 
     fn persist_input_history(&self) {
@@ -98,14 +93,6 @@ fn input_history_persistence_enabled() -> bool {
     {
         true
     }
-}
-
-fn input_history_path_for_session_dir(session_log_dir: &Path, workspace_root: &Path) -> PathBuf {
-    let state_dir = session_log_dir
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(workspace_root);
-    state_dir.join(INPUT_HISTORY_FILE)
 }
 
 fn push_input_history_entry(history: &mut Vec<String>, prompt: String, limit: usize) -> bool {
@@ -253,12 +240,10 @@ mod tests {
     }
 
     #[test]
-    fn input_history_path_uses_session_state_parent() {
-        let path = input_history_path_for_session_dir(
-            Path::new("/workspace/.sigil/sessions"),
-            Path::new("/workspace"),
-        );
+    fn app_input_history_path_uses_resolved_state_file() {
+        let config = crate::app::tests::common::test_config();
+        let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
-        assert_eq!(path, Path::new("/workspace/.sigil/input-history.jsonl"));
+        assert_eq!(app.input_history_path(), app.sigil_paths.input_history_file);
     }
 }

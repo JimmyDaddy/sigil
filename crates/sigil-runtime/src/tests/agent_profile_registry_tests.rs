@@ -29,8 +29,9 @@ fn root_config() -> RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
+        storage: Default::default(),
         session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+            log_dir: Some(".sigil/sessions".to_owned()),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
@@ -133,6 +134,40 @@ slash_names = ["review-agent"]
         .map(|entry| entry.profile_id.as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, vec![EXPLORE_PROFILE_ID, "review"]);
+    Ok(())
+}
+
+#[test]
+fn registry_uses_project_assets_root_for_native_workspace_agents() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let agent_dir = workspace
+        .join("project-assets")
+        .join("agents")
+        .join("review");
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(
+        agent_dir.join("agent.toml"),
+        r#"
+description = "Project asset review agent."
+instructions = "Review repository changes from configured project assets."
+trust = "trusted"
+invocation_policy = "model_allowed"
+"#,
+    )?;
+    let mut config = root_config();
+    config.workspace.root = workspace.display().to_string();
+    config.storage.project_assets_root = "project-assets".to_owned();
+
+    let registry = AgentProfileRegistry::from_root_config_with_workspace(&config, &workspace)?;
+    let review = registry
+        .get(&AgentProfileId::new("review")?)
+        .expect("native workspace agent exists");
+
+    assert_eq!(review.source, AgentProfileSource::Workspace);
+    assert_eq!(review.profile.description, "Project asset review agent.");
+    assert!(review.profile.model_invocation_allowed());
+    assert!(registry.warnings().is_empty());
     Ok(())
 }
 

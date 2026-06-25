@@ -564,6 +564,11 @@ fn render_approval_modal_renders_file_list_diff_and_actions() -> anyhow::Result<
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: Some(multi_file_preview()),
     })?;
     app.code_intelligence_diagnostics_by_path.insert(
@@ -615,6 +620,11 @@ fn render_approval_modal_uses_configured_theme_colors() -> anyhow::Result<()> {
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: Some(ToolPreview {
             title: "Edit src/lib.rs".to_owned(),
             summary: "`approval-code` summary".to_owned(),
@@ -664,6 +674,11 @@ fn render_approval_modal_uses_hidden_metadata_and_preview_fallback() -> anyhow::
             preview: ToolPreviewCapability::None,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::NetworkRequest,
+        risk: sigil_kernel::PermissionRisk::High,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     })?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE))?;
@@ -801,8 +816,9 @@ fn test_config() -> RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
+        storage: Default::default(),
         session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+            log_dir: Some(".sigil/sessions".to_owned()),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),

@@ -341,7 +341,7 @@ fn ctrl_c_then_run_cancelled_restores_durable_session_view() -> Result<()> {
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
     let restored_path = session_dir.join("session-cancelled.jsonl");
     let restored = restored_entries("cancel-provider", "cancel-model");
@@ -920,6 +920,11 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     });
     app.modal_state = Some(ModalState::KeyboardHelp);
@@ -1277,6 +1282,11 @@ fn agent_thread_event_projects_live_child_event_variants() -> Result<()> {
                 preview: ToolPreviewCapability::Required,
             },
             subjects: Vec::new(),
+            operation: sigil_kernel::ToolOperation::OverwriteFile,
+            risk: sigil_kernel::PermissionRisk::Medium,
+            subject_zones: Vec::new(),
+            confirmation: None,
+            snapshot_required: false,
             preview: None,
         }),
     })?;
@@ -1420,6 +1430,11 @@ fn model_spawned_agent_events_keep_live_phase_on_agent_wait() -> Result<()> {
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::SpawnAgent,
+        risk: sigil_kernel::PermissionRisk::High,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     })?;
     assert_eq!(app.run_phase(), RunPhase::Tool("spawn_agent".to_owned()));

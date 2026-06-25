@@ -8,8 +8,10 @@ use crate::{
 };
 
 use super::{
-    ApprovalMode, ExternalDirectoryConfig, ExternalDirectoryRule, PermissionAccessConfig,
-    PermissionConfig, PermissionPolicy, PermissionRule,
+    ApprovalMode, EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule,
+    PathTrustZone, PermissionAccessConfig, PermissionConfig, PermissionConfirmation,
+    PermissionEvaluationContext, PermissionPolicy, PermissionPreset, PermissionRisk,
+    PermissionRule, ToolOperation, classify_path_trust_zone, classify_path_trust_zone_with_context,
 };
 
 fn spec(access: ToolAccess) -> ToolSpec {
@@ -37,6 +39,37 @@ fn external_path_subject(path: PathBuf) -> ToolSubject {
 }
 
 #[test]
+fn permission_fine_grained_enums_serde_roundtrip() -> Result<()> {
+    assert_eq!(
+        serde_json::from_str::<ToolOperation>(r#""delete_file""#)?,
+        ToolOperation::DeleteFile
+    );
+    assert_eq!(
+        serde_json::from_str::<PathTrustZone>(r#""workspace_project_asset""#)?,
+        PathTrustZone::WorkspaceProjectAsset
+    );
+    assert_eq!(
+        serde_json::from_str::<PermissionRisk>(r#""destructive""#)?,
+        PermissionRisk::Destructive
+    );
+    assert_eq!(
+        serde_json::to_string(&PermissionConfirmation::TypePath)?,
+        r#"{"kind":"type_path"}"#
+    );
+    Ok(())
+}
+
+#[test]
+fn permission_preset_defaults_to_balanced_and_parses_read_only() -> Result<()> {
+    let default_config: PermissionConfig = toml::from_str("")?;
+    assert_eq!(default_config.preset, PermissionPreset::Balanced);
+
+    let read_only: PermissionConfig = toml::from_str(r#"preset = "read_only""#)?;
+    assert_eq!(read_only.preset, PermissionPreset::ReadOnly);
+    Ok(())
+}
+
+#[test]
 fn permission_access_overrides_default_mode_for_read_tools() -> Result<()> {
     let decision = PermissionPolicy::new(&PermissionConfig::default()).decide(
         &spec(ToolAccess::Read),
@@ -45,6 +78,309 @@ fn permission_access_overrides_default_mode_for_read_tools() -> Result<()> {
     )?;
 
     assert_eq!(decision.mode, ApprovalMode::Allow);
+    Ok(())
+}
+
+#[test]
+fn read_only_preset_is_a_write_safety_cap() -> Result<()> {
+    let config = PermissionConfig {
+        preset: PermissionPreset::ReadOnly,
+        access: PermissionAccessConfig {
+            write: Some(ApprovalMode::Allow),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![path_subject("src/main.rs")],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn destructive_allow_is_overlaid_to_ask() -> Result<()> {
+    let config = PermissionConfig {
+        tools: BTreeMap::from([("delete_file".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Write),
+        "delete_file",
+        vec![path_subject("src/main.rs")],
+    )?;
+
+    assert_eq!(decision.operation, ToolOperation::DeleteFile);
+    assert_eq!(decision.risk, PermissionRisk::Destructive);
+    assert_eq!(decision.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn protected_paths_deny_even_when_tool_allows() -> Result<()> {
+    let config = PermissionConfig {
+        tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![path_subject(".git/config")],
+    )?;
+
+    assert_eq!(
+        decision.subject_zones,
+        vec![PathTrustZone::WorkspaceGitMetadata]
+    );
+    assert_eq!(decision.risk, PermissionRisk::Protected);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn project_asset_delete_requires_typed_path_confirmation() -> Result<()> {
+    let decision = PermissionPolicy::new(&PermissionConfig::default()).decide(
+        &spec(ToolAccess::Write),
+        "delete_file",
+        vec![path_subject(".sigil/agents/writer/agent.toml")],
+    )?;
+
+    assert_eq!(
+        decision.subject_zones,
+        vec![PathTrustZone::WorkspaceProjectAsset]
+    );
+    assert_eq!(decision.risk, PermissionRisk::Destructive);
+    assert_eq!(
+        decision.confirmation,
+        Some(PermissionConfirmation::TypePath)
+    );
+    assert!(decision.snapshot_required);
+    Ok(())
+}
+
+#[test]
+fn permission_context_classifies_runtime_user_and_project_asset_roots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let state_root = temp.path().join("state");
+    let cache_root = temp.path().join("cache");
+    std::fs::create_dir_all(workspace.join(".sigil/skills"))?;
+    std::fs::create_dir_all(state_root.join("workspaces/ws/artifacts"))?;
+    std::fs::create_dir_all(cache_root.join("workspaces/ws"))?;
+    let context = PermissionEvaluationContext {
+        workspace_root: workspace.clone(),
+        project_asset_roots: vec![workspace.join(".sigil")],
+        runtime_state_roots: vec![state_root.join("workspaces/ws")],
+        user_state_roots: vec![state_root.clone()],
+        user_cache_roots: vec![cache_root.clone()],
+        effective_policy_cap: None,
+    };
+    let config = PermissionConfig {
+        access: PermissionAccessConfig {
+            write: Some(ApprovalMode::Allow),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let policy = PermissionPolicy::new_with_context(&config, &context);
+
+    let project_asset = policy.decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![ToolSubject::path_with_scope(
+            ".sigil/skills/review/SKILL.md",
+            ".sigil/skills/review/SKILL.md",
+            Some(workspace.join(".sigil/skills/review/SKILL.md")),
+            ToolSubjectScope::Workspace,
+        )],
+    )?;
+    assert_eq!(
+        project_asset.subject_zones,
+        vec![PathTrustZone::WorkspaceProjectAsset]
+    );
+
+    let runtime_state = policy.decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![ToolSubject::path_with_scope(
+            "state/artifacts/changesets/change-1",
+            "state/artifacts/changesets/change-1",
+            Some(state_root.join("workspaces/ws/artifacts/changesets/change-1")),
+            ToolSubjectScope::Workspace,
+        )],
+    )?;
+    assert_eq!(
+        runtime_state.subject_zones,
+        vec![PathTrustZone::WorkspaceRuntimeState]
+    );
+    assert_eq!(runtime_state.mode, ApprovalMode::Deny);
+
+    let user_cache = policy.decide(
+        &spec(ToolAccess::Write),
+        "write_file",
+        vec![ToolSubject::path_with_scope(
+            "cache/tmp/output.txt",
+            "cache/tmp/output.txt",
+            Some(cache_root.join("workspaces/ws/tmp/output.txt")),
+            ToolSubjectScope::Workspace,
+        )],
+    )?;
+    assert_eq!(user_cache.subject_zones, vec![PathTrustZone::UserCache]);
+    assert_eq!(user_cache.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn permission_context_handles_caps_relative_roots_and_fallbacks() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join(".sigil/plugins"))?;
+    let context = PermissionEvaluationContext {
+        workspace_root: workspace.clone(),
+        project_asset_roots: vec![PathBuf::from(".sigil")],
+        runtime_state_roots: Vec::new(),
+        user_state_roots: Vec::new(),
+        user_cache_roots: Vec::new(),
+        effective_policy_cap: Some(EffectivePermissionPolicyCap {
+            policy_hash: "cap".to_owned(),
+            mode: ApprovalMode::Deny,
+        }),
+    };
+    let config = PermissionConfig {
+        access: PermissionAccessConfig {
+            read: Some(ApprovalMode::Allow),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let policy = PermissionPolicy::new_with_context(&config, &context);
+
+    let capped = policy.decide(
+        &spec(ToolAccess::Read),
+        "read_file",
+        vec![ToolSubject::path_with_scope(
+            ".sigil/plugins/example/plugin.toml",
+            ".sigil/plugins/example/plugin.toml",
+            None,
+            ToolSubjectScope::Workspace,
+        )],
+    )?;
+    assert_eq!(capped.mode, ApprovalMode::Deny);
+    assert_eq!(
+        capped.subject_zones,
+        vec![PathTrustZone::WorkspaceProjectAsset]
+    );
+
+    let empty_subject = ToolSubject::path_with_scope(
+        String::new(),
+        String::new(),
+        None,
+        ToolSubjectScope::Workspace,
+    );
+    assert_eq!(
+        classify_path_trust_zone_with_context(&empty_subject, &context),
+        PathTrustZone::WorkspaceSource
+    );
+
+    let outside_workspace = ToolSubject::path_with_scope(
+        "outside".to_owned(),
+        "outside".to_owned(),
+        Some(temp.path().join("outside.txt")),
+        ToolSubjectScope::Workspace,
+    );
+    assert_eq!(
+        classify_path_trust_zone_with_context(&outside_workspace, &context),
+        PathTrustZone::External
+    );
+    Ok(())
+}
+
+#[test]
+fn built_in_path_trust_zone_classifier_covers_sensitive_and_doc_paths() {
+    assert_eq!(
+        classify_path_trust_zone(&path_subject(".sigil/sessions/session.jsonl")),
+        PathTrustZone::WorkspaceRuntimeState
+    );
+    assert_eq!(
+        classify_path_trust_zone(&path_subject("sigil.toml")),
+        PathTrustZone::WorkspaceConfigSecret
+    );
+    assert_eq!(
+        classify_path_trust_zone(&path_subject("docs/en/safety.md")),
+        PathTrustZone::WorkspaceDocs
+    );
+    assert_eq!(
+        classify_path_trust_zone(&ToolSubject::command("stdin", "terminal_input")),
+        PathTrustZone::Unknown
+    );
+}
+
+#[test]
+fn terminal_input_cannot_be_auto_allowed_by_execute_allow() -> Result<()> {
+    let config = PermissionConfig {
+        access: PermissionAccessConfig {
+            execute: Some(ApprovalMode::Allow),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide(
+        &spec(ToolAccess::Execute),
+        "terminal_input",
+        vec![ToolSubject::command("stdin:12 bytes", "terminal_input")],
+    )?;
+
+    assert_eq!(decision.operation, ToolOperation::SendTerminalInput);
+    assert_eq!(decision.risk, PermissionRisk::High);
+    assert_eq!(decision.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn destructive_shell_operation_cannot_be_auto_allowed() -> Result<()> {
+    let config = PermissionConfig {
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteDestructiveCommand,
+        vec![path_subject("src/main.rs")],
+        None,
+    )?;
+
+    assert_eq!(decision.risk, PermissionRisk::Destructive);
+    assert_eq!(decision.mode, ApprovalMode::Ask);
+    assert!(decision.snapshot_required);
+    Ok(())
+}
+
+#[test]
+fn destructive_shell_operation_on_sigil_root_is_protected() -> Result<()> {
+    let config = PermissionConfig {
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+    let decision = PermissionPolicy::new(&config).decide_with_operation_and_default(
+        &spec(ToolAccess::Execute),
+        "bash",
+        ToolAccess::Execute,
+        ToolOperation::ExecuteDestructiveCommand,
+        vec![path_subject(".sigil")],
+        None,
+    )?;
+
+    assert_eq!(
+        decision.subject_zones,
+        vec![PathTrustZone::WorkspaceRuntimeState]
+    );
+    assert_eq!(decision.risk, PermissionRisk::Protected);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
     Ok(())
 }
 

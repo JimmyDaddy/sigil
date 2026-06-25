@@ -812,6 +812,44 @@ fn timeline_cache_and_scroll_edges_cover_empty_and_guard_paths() -> Result<()> {
 }
 
 #[test]
+fn parent_scrollback_clamps_stale_parent_cache_while_child_view_is_active() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    app.set_terminal_size(80, 1);
+    app.timeline = vec![TimelineEntry {
+        role: TimelineRole::User,
+        text: "parent prompt".to_owned(),
+    }];
+    app.timeline_render_cache = vec![Line::raw("parent prompt")];
+    app.timeline_plain_cache = vec!["parent prompt".to_owned()];
+    app.timeline_prefix_hashes = vec![1];
+    app.timeline_render_ranges = vec![0..2];
+    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries: Vec::new(),
+        rendered_body_lines: (0..8)
+            .map(|index| Line::from(format!("child line {index}")))
+            .collect(),
+        total_timeline_entries: 8,
+        transcript_truncated: false,
+        load_error: None,
+    });
+
+    assert_eq!(
+        app.scrollback_cutoff_line(),
+        app.timeline_render_cache.len()
+    );
+    assert_eq!(
+        app.scrollback_lines().len(),
+        app.timeline_render_cache.len()
+    );
+    assert!(app.visible_timeline_render_range(4).end <= app.timeline_render_cache.len());
+    assert!(transcript_plain(app.transcript_lines(12)).contains("child line"));
+    Ok(())
+}
+
+#[test]
 fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     sync_child_agent_for_transcript_tests(&mut app)?;

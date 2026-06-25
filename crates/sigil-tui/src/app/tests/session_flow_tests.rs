@@ -22,7 +22,7 @@ fn latest_session_can_be_restored_on_launch() -> Result<()> {
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     let restored_path = session_dir.join("session-restored.jsonl");
     write_session_log(
         &restored_path,
@@ -688,7 +688,7 @@ fn sessions_filter_narrows_sidebar_results() -> Result<()> {
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
     std::fs::write(session_dir.join("session-alpha.jsonl"), "")?;
     std::fs::write(session_dir.join("session-beta.jsonl"), "")?;
@@ -711,7 +711,7 @@ fn session_rows_mark_selected_and_current_entry() -> Result<()> {
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
     let alpha = session_dir.join("session-alpha.jsonl");
     let beta = session_dir.join("session-beta.jsonl");
@@ -746,7 +746,7 @@ fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
     let session_path = session_dir.join("session-title.jsonl");
     write_session_log(
@@ -789,7 +789,7 @@ fn resume_command_shows_session_selector_and_enter_switches_selected_session() -
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
     let restored_path = session_dir.join("session-restored.jsonl");
     let restored = restored_entries("restored-provider", "restored-model");
@@ -824,7 +824,7 @@ fn resume_command_then_session_switch_restores_durable_view() -> Result<()> {
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
     let restored_path = session_dir.join("session-restored.jsonl");
     let restored = restored_entries("restored-provider", "restored-model");
@@ -893,7 +893,7 @@ fn refresh_session_history_reads_titles_and_resolves_resume_targets() -> Result<
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
 
     let current_path = session_dir.join("session-current.jsonl");
@@ -1037,6 +1037,11 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
                 tool_name: "write_file".to_owned(),
                 access: ToolAccess::Write,
                 subjects: Vec::new(),
+                operation: None,
+                risk: None,
+                subject_zones: Vec::new(),
+                confirmation: None,
+                snapshot_required: false,
                 policy_decision: ApprovalMode::Ask,
                 external_directory_required: false,
                 user_decision: None,
@@ -1189,7 +1194,7 @@ fn resolve_resume_target_returns_none_for_ambiguous_query() -> Result<()> {
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
     let alpha = session_dir.join("session-alpha.jsonl");
     let alpha_copy = session_dir.join("session-alpha-copy.jsonl");

@@ -20,9 +20,9 @@ use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
     ChangeSetValidationKind, ChangeSetValidationStatus, TerminalTaskEntry, TerminalTaskId, Tool,
-    ToolAccess, ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectScope,
+    ToolAccess, ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta,
+    ToolSpec, ToolSubject, ToolSubjectScope,
 };
 use similar::TextDiff;
 use tokio::{process::Command, task, time::Duration};
@@ -32,33 +32,91 @@ mod terminal_process;
 pub use terminal_process::{
     MAX_TERMINAL_INPUT_BYTES, TerminalBackendKind, TerminalInputResult, TerminalProcessManager,
     TerminalPtySize, TerminalReadResult, TerminalResizeResult, TerminalStartRequest,
-    TerminalTaskArtifacts,
+    TerminalTaskArtifacts, TerminalTaskPermissionContext,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinToolPaths {
+    pub changesets_root: PathBuf,
+    pub changesets_label_root: PathBuf,
+    pub terminal_tasks_root: PathBuf,
+    pub terminal_tasks_label_root: PathBuf,
+    pub scratch_root: PathBuf,
+    pub scratch_label: String,
+}
+
+impl BuiltinToolPaths {
+    #[must_use]
+    pub fn workspace_defaults(workspace_root: &Path) -> Self {
+        Self {
+            changesets_root: workspace_root.join(CHANGESET_ARTIFACT_ROOT),
+            changesets_label_root: PathBuf::from(CHANGESET_ARTIFACT_ROOT),
+            terminal_tasks_root: workspace_root.join(terminal_process::TERMINAL_TASK_ARTIFACT_ROOT),
+            terminal_tasks_label_root: PathBuf::from(terminal_process::TERMINAL_TASK_ARTIFACT_ROOT),
+            scratch_root: workspace_root.join(WORKSPACE_TEMP_ROOT),
+            scratch_label: WORKSPACE_TEMP_ROOT.to_owned(),
+        }
+    }
+}
+
 pub fn register_builtin_tools(registry: &mut ToolRegistry) {
+    register_builtin_tools_with_paths(
+        registry,
+        BuiltinToolPaths {
+            changesets_root: PathBuf::from(CHANGESET_ARTIFACT_ROOT),
+            changesets_label_root: PathBuf::from(CHANGESET_ARTIFACT_ROOT),
+            terminal_tasks_root: PathBuf::from(terminal_process::TERMINAL_TASK_ARTIFACT_ROOT),
+            terminal_tasks_label_root: PathBuf::from(terminal_process::TERMINAL_TASK_ARTIFACT_ROOT),
+            scratch_root: PathBuf::from(WORKSPACE_TEMP_ROOT),
+            scratch_label: WORKSPACE_TEMP_ROOT.to_owned(),
+        },
+    );
+}
+
+pub fn register_builtin_tools_with_paths(registry: &mut ToolRegistry, paths: BuiltinToolPaths) {
     let terminal_managers = Arc::new(TerminalProcessManagers::default());
+    let terminal_tasks_root = paths.terminal_tasks_root;
+    let terminal_tasks_label_root = paths.terminal_tasks_label_root;
     registry.register(Arc::new(ReadFileTool));
     registry.register(Arc::new(WriteFileTool));
     registry.register(Arc::new(EditFileTool));
     registry.register(Arc::new(DeleteFileTool));
-    registry.register(Arc::new(ApplyChangeSetTool));
+    registry.register(Arc::new(ApplyChangeSetTool {
+        artifact_root: paths.changesets_root,
+        artifact_label_root: paths.changesets_label_root,
+    }));
     registry.register(Arc::new(ListTool));
     registry.register(Arc::new(GlobTool));
     registry.register(Arc::new(GrepTool));
-    registry.register(Arc::new(BashTool));
+    registry.register(Arc::new(BashTool {
+        scratch_root: paths.scratch_root.clone(),
+        scratch_label: paths.scratch_label.clone(),
+    }));
     registry.register(Arc::new(TerminalStartTool {
         managers: Arc::clone(&terminal_managers),
+        artifact_root: terminal_tasks_root.clone(),
+        artifact_label_root: terminal_tasks_label_root.clone(),
+        scratch_root: paths.scratch_root,
+        scratch_label: paths.scratch_label,
     }));
     registry.register(Arc::new(TerminalReadTool {
         managers: Arc::clone(&terminal_managers),
+        artifact_root: terminal_tasks_root.clone(),
+        artifact_label_root: terminal_tasks_label_root.clone(),
     }));
     registry.register(Arc::new(TerminalInputTool {
         managers: Arc::clone(&terminal_managers),
+        artifact_root: terminal_tasks_root.clone(),
+        artifact_label_root: terminal_tasks_label_root.clone(),
     }));
     registry.register(Arc::new(TerminalResizeTool {
         managers: Arc::clone(&terminal_managers),
+        artifact_root: terminal_tasks_root.clone(),
+        artifact_label_root: terminal_tasks_label_root.clone(),
     }));
     registry.register(Arc::new(TerminalCancelTool {
+        artifact_root: terminal_tasks_root,
+        artifact_label_root: terminal_tasks_label_root,
         managers: terminal_managers,
     }));
 }
@@ -67,30 +125,48 @@ struct ReadFileTool;
 struct WriteFileTool;
 struct EditFileTool;
 struct DeleteFileTool;
-struct ApplyChangeSetTool;
+struct ApplyChangeSetTool {
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
+}
 struct ListTool;
 struct GlobTool;
 struct GrepTool;
-struct BashTool;
+struct BashTool {
+    scratch_root: PathBuf,
+    scratch_label: String,
+}
 struct TerminalStartTool {
     managers: Arc<TerminalProcessManagers>,
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
+    scratch_root: PathBuf,
+    scratch_label: String,
 }
 struct TerminalReadTool {
     managers: Arc<TerminalProcessManagers>,
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
 }
 struct TerminalInputTool {
     managers: Arc<TerminalProcessManagers>,
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
 }
 struct TerminalResizeTool {
     managers: Arc<TerminalProcessManagers>,
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
 }
 struct TerminalCancelTool {
     managers: Arc<TerminalProcessManagers>,
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
 }
 
 #[derive(Default)]
 struct TerminalProcessManagers {
-    managers: StdMutex<BTreeMap<PathBuf, Arc<TerminalProcessManager>>>,
+    managers: StdMutex<BTreeMap<(PathBuf, PathBuf), Arc<TerminalProcessManager>>>,
 }
 
 const DEFAULT_TEXT_LIMIT_BYTES: usize = 64 * 1024;
@@ -106,35 +182,49 @@ const DEFAULT_GLOB_LIMIT: usize = 100;
 const HARD_GLOB_LIMIT: usize = 1000;
 const DEFAULT_GREP_LIMIT: usize = 100;
 const HARD_GREP_LIMIT: usize = 1000;
-const CHANGESET_ARTIFACT_ROOT: &str = ".sigil/changesets";
-const WORKSPACE_TEMP_ROOT: &str = ".sigil/tmp";
+const CHANGESET_ARTIFACT_ROOT: &str = "state/artifacts/changesets";
+const WORKSPACE_TEMP_ROOT: &str = "cache/tmp";
 const CHANGESET_PREVIEW_DIFF_FILE: &str = "preview.diff";
 const CHANGESET_REVERSE_DIFF_FILE: &str = "reverse.diff";
 const DEFAULT_CHANGESET_SUMMARY_LIMIT_BYTES: usize = 16 * 1024;
 const DEFAULT_TERMINAL_READ_LIMIT_BYTES: usize = 16 * 1024;
 const HARD_TERMINAL_READ_LIMIT_BYTES: usize = 128 * 1024;
+const SIGIL_SCRATCH_DIR_ENV: &str = "SIGIL_SCRATCH_DIR";
 
 impl TerminalProcessManagers {
-    fn manager_for(&self, workspace_root: &Path) -> Result<Arc<TerminalProcessManager>> {
+    fn manager_for(
+        &self,
+        workspace_root: &Path,
+        artifact_root: &Path,
+        artifact_label_root: &Path,
+    ) -> Result<Arc<TerminalProcessManager>> {
         let workspace_root = canonical_workspace_root(workspace_root)?;
+        let artifact_root = absolute_path_from(&workspace_root, artifact_root);
+        let key = (workspace_root.clone(), artifact_root.clone());
         let mut managers = self
             .managers
             .lock()
             .map_err(|_| anyhow!("terminal process manager registry lock poisoned"))?;
-        if let Some(manager) = managers.get(&workspace_root) {
+        if let Some(manager) = managers.get(&key) {
             return Ok(Arc::clone(manager));
         }
 
-        let manager = Arc::new(TerminalProcessManager::new(&workspace_root)?);
-        managers.insert(workspace_root, Arc::clone(&manager));
+        let manager = Arc::new(TerminalProcessManager::new_with_artifact_root(
+            &workspace_root,
+            artifact_root,
+            artifact_label_root.to_path_buf(),
+        )?);
+        managers.insert(key, Arc::clone(&manager));
         Ok(manager)
     }
 }
 
-/// Workspace-local artifact writer for durable change set diffs.
+/// Artifact writer for durable change set diffs.
 #[derive(Debug, Clone)]
 pub struct ChangeSetArtifactStore {
     workspace_root: PathBuf,
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
     summary_limit_bytes: usize,
 }
 
@@ -184,14 +274,38 @@ struct ChangeSetArtifactPaths {
 }
 
 impl ChangeSetArtifactStore {
-    /// Creates a store rooted at `<workspace>/.sigil/changesets`.
+    /// Creates a store rooted at `<workspace>/state/artifacts/changesets`.
     ///
     /// # Errors
     ///
     /// Returns an error when `workspace_root` cannot be canonicalized.
     pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self> {
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
+        Self::new_with_artifact_root(
+            &workspace_root,
+            workspace_root.join(CHANGESET_ARTIFACT_ROOT),
+            PathBuf::from(CHANGESET_ARTIFACT_ROOT),
+        )
+    }
+
+    /// Creates a store rooted at an injected artifact directory.
+    ///
+    /// `artifact_label_root` is returned in model-visible metadata instead of the absolute
+    /// machine-local artifact root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `workspace_root` cannot be canonicalized.
+    pub fn new_with_artifact_root(
+        workspace_root: impl AsRef<Path>,
+        artifact_root: impl AsRef<Path>,
+        artifact_label_root: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         Ok(Self {
-            workspace_root: canonical_workspace_root(workspace_root.as_ref())?,
+            artifact_root: absolute_path_from(&workspace_root, artifact_root.as_ref()),
+            artifact_label_root: artifact_label_root.into(),
+            workspace_root,
             summary_limit_bytes: DEFAULT_CHANGESET_SUMMARY_LIMIT_BYTES,
         })
     }
@@ -261,31 +375,62 @@ impl ChangeSetArtifactStore {
     ///
     /// Returns an error when the recorded path is outside the workspace or cannot be read.
     pub fn verify_diff_artifact(&self, artifact: &ChangeSetDiffArtifact) -> Result<bool> {
-        let path = self.workspace_artifact_path(&artifact.path)?;
+        let path = self.stored_artifact_path(&artifact.path)?;
         let bytes =
             fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
         Ok(sha256_hex(&bytes) == artifact.sha256)
     }
 
     fn artifact_paths(&self, change_set_id: &ChangeSetId) -> Result<ChangeSetArtifactPaths> {
-        let relative_dir = format!("{CHANGESET_ARTIFACT_ROOT}/{}", change_set_id.as_str());
-        let relative_preview = format!("{relative_dir}/{CHANGESET_PREVIEW_DIFF_FILE}");
-        let relative_reverse = format!("{relative_dir}/{CHANGESET_REVERSE_DIFF_FILE}");
+        let relative_dir = self
+            .artifact_label_root
+            .join(change_set_id.as_str())
+            .to_string_lossy()
+            .into_owned();
+        let relative_preview = PathBuf::from(&relative_dir)
+            .join(CHANGESET_PREVIEW_DIFF_FILE)
+            .to_string_lossy()
+            .into_owned();
+        let relative_reverse = PathBuf::from(&relative_dir)
+            .join(CHANGESET_REVERSE_DIFF_FILE)
+            .to_string_lossy()
+            .into_owned();
+        let absolute_dir = self.artifact_root.join(change_set_id.as_str());
         Ok(ChangeSetArtifactPaths {
-            absolute_dir: self.workspace_artifact_path(&relative_dir)?,
-            absolute_preview: self.workspace_artifact_path(&relative_preview)?,
-            absolute_reverse: self.workspace_artifact_path(&relative_reverse)?,
+            absolute_preview: absolute_dir.join(CHANGESET_PREVIEW_DIFF_FILE),
+            absolute_reverse: absolute_dir.join(CHANGESET_REVERSE_DIFF_FILE),
+            absolute_dir,
             relative_dir,
             relative_preview,
             relative_reverse,
         })
     }
 
-    fn workspace_artifact_path(&self, relative_path: &str) -> Result<PathBuf> {
-        let lexical = lexically_normalize_path(&self.workspace_root.join(relative_path))?;
+    fn stored_artifact_path(&self, relative_path: &str) -> Result<PathBuf> {
+        let relative_path = Path::new(relative_path);
+        if relative_path.is_absolute() {
+            bail!(
+                "change set artifact path must be relative: {}",
+                relative_path.display()
+            );
+        }
+        let suffix = relative_path
+            .strip_prefix(&self.artifact_label_root)
+            .with_context(|| {
+                format!(
+                    "change set artifact path has unknown label: {}",
+                    relative_path.display()
+                )
+            })?;
+        let lexical = lexically_normalize_path(&self.artifact_root.join(suffix))?;
         let resolved_prefix = resolve_existing_prefix(&lexical)?;
-        if !resolved_prefix.starts_with(&self.workspace_root) {
-            bail!("change set artifact path is outside workspace: {relative_path}");
+        if !resolved_prefix.starts_with(&self.artifact_root)
+            && !resolved_prefix.starts_with(&self.workspace_root)
+        {
+            bail!(
+                "change set artifact path is outside artifact root: {}",
+                relative_path.display()
+            );
         }
         Ok(lexical)
     }
@@ -449,7 +594,7 @@ impl Tool for WriteFileTool {
         ToolSpec {
             name: "write_file".to_owned(),
             description: format!(
-                "Write UTF-8 content to a workspace file. Use {WORKSPACE_TEMP_ROOT}/ for temporary scratch files; OS temp directories are outside the workspace and require permission.external_directory."
+                "Write UTF-8 content to a workspace file. For temporary shell files, use ${SIGIL_SCRATCH_DIR_ENV} with bash or terminal_start (shown as cache/tmp); OS temp directories are outside the workspace and require permission.external_directory.",
             ),
             input_schema: json!({
                 "type": "object",
@@ -468,6 +613,26 @@ impl Tool for WriteFileTool {
     fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let path = required_string(args, "path")?;
         Ok(vec![tool_path_subject(&ctx.workspace_root, path)?])
+    }
+
+    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+        let path = required_string(args, "path")?;
+        let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
+        let requested_path = Path::new(path);
+        let target = if requested_path.is_absolute() {
+            lexically_normalize_path(requested_path)?
+        } else {
+            lexically_normalize_path(&workspace_root.join(requested_path))?
+        };
+        let resolved = resolve_tool_path_from_base(&workspace_root, &workspace_root, path)?;
+        if resolved.scope != ToolSubjectScope::Workspace {
+            bail!("write_file path is outside workspace: {path}");
+        }
+        if target.exists() {
+            Ok(ToolOperation::OverwriteFile)
+        } else {
+            Ok(ToolOperation::CreateFile)
+        }
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -787,8 +952,16 @@ impl Tool for ApplyChangeSetTool {
         };
 
         let workspace_root = ctx.workspace_root.clone();
+        let artifact_root = self.artifact_root.clone();
+        let artifact_label_root = self.artifact_label_root.clone();
         Ok(run_blocking_io("apply_changeset", move || {
-            apply_changeset_plan(&workspace_root, call_id, plan)
+            apply_changeset_plan(
+                &workspace_root,
+                &artifact_root,
+                artifact_label_root,
+                call_id,
+                plan,
+            )
         })
         .await?)
     }
@@ -1064,7 +1237,8 @@ impl Tool for BashTool {
         ToolSpec {
             name: "bash".to_owned(),
             description: format!(
-                "Run a shell command from the workspace root. Use {WORKSPACE_TEMP_ROOT}/ for temporary shell files; OS temp directories are outside the workspace and require permission.external_directory."
+                "Run a shell command from the workspace root. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                self.scratch_label
             ),
             input_schema: json!({
                 "type": "object",
@@ -1099,17 +1273,27 @@ impl Tool for BashTool {
         }
     }
 
+    fn permission_operation(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+        let command = required_string(args, "command")?;
+        Ok(shell_command_permission_operation(command))
+    }
+
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let command = required_string(&args, "command")?;
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(Value::as_u64)
             .unwrap_or(ctx.timeout_secs);
+        let scratch_root = absolute_path_from(&ctx.workspace_root, &self.scratch_root);
+        tokio::fs::create_dir_all(&scratch_root)
+            .await
+            .with_context(|| format!("failed to create {}", self.scratch_label))?;
         let mut child = Command::new("sh");
         child
             .arg("-lc")
             .arg(command)
             .current_dir(&ctx.workspace_root)
+            .env(SIGIL_SCRATCH_DIR_ENV, &scratch_root)
             .kill_on_drop(true);
         let output =
             match tokio::time::timeout(Duration::from_secs(timeout_secs), child.output()).await {
@@ -1177,7 +1361,8 @@ impl Tool for TerminalStartTool {
         ToolSpec {
             name: "terminal_start".to_owned(),
             description: format!(
-                "Start a background terminal task from the workspace, optionally with PTY support. Use {WORKSPACE_TEMP_ROOT}/ for temporary shell files; OS temp directories are outside the workspace and require permission.external_directory."
+                "Start a background terminal task from the workspace, optionally with PTY support. Use ${SIGIL_SCRATCH_DIR_ENV} for temporary shell files (shown as {}); OS temp directories are outside the workspace and require permission.external_directory.",
+                self.scratch_label
             ),
             input_schema: json!({
                 "type": "object",
@@ -1221,14 +1406,33 @@ impl Tool for TerminalStartTool {
         Ok(subjects)
     }
 
+    fn permission_operation(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+        let command = required_string(args, "command")?;
+        Ok(shell_command_permission_operation(command))
+    }
+
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let args = parse_terminal_start_args(&args)?;
-        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        let manager = self.managers.manager_for(
+            &ctx.workspace_root,
+            &self.artifact_root,
+            &self.artifact_label_root,
+        )?;
+        let scratch_root = absolute_path_from(&ctx.workspace_root, &self.scratch_root);
+        tokio::fs::create_dir_all(&scratch_root)
+            .await
+            .with_context(|| format!("failed to create {}", self.scratch_label))?;
+        let mut env = BTreeMap::new();
+        env.insert(
+            SIGIL_SCRATCH_DIR_ENV.to_owned(),
+            scratch_root.to_string_lossy().into_owned(),
+        );
         let request = TerminalStartRequest {
             task_id: args.task_id,
             command: args.command,
             cwd: args.cwd,
             shell: args.shell,
+            env,
         };
         let entry = if args.pty {
             manager.start_pty(request, args.pty_size).await?
@@ -1274,7 +1478,11 @@ impl Tool for TerminalReadTool {
         let task_id = required_terminal_task_id(&args)?;
         let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0);
         let limit_bytes = terminal_read_limit(&args)?;
-        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        let manager = self.managers.manager_for(
+            &ctx.workspace_root,
+            &self.artifact_root,
+            &self.artifact_label_root,
+        )?;
         let read = manager.read(&task_id, offset, limit_bytes).await?;
         Ok(ToolResult::ok(
             call_id,
@@ -1319,14 +1527,30 @@ impl Tool for TerminalInputTool {
         }
     }
 
-    fn permission_subjects(&self, _ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
+    fn permission_subjects(&self, ctx: &ToolContext, args: &Value) -> Result<Vec<ToolSubject>> {
         let task_id = required_terminal_task_id(args)?;
         let input = required_string(args, "input")?;
         validate_terminal_input_len(input)?;
-        Ok(vec![
+        let context = self.terminal_input_permission_context(ctx, &task_id)?;
+        let workspace_root = canonical_workspace_root(&ctx.workspace_root)?;
+        let mut subjects = vec![
             terminal_task_subject(&task_id),
             terminal_input_subject(input.len()),
-        ])
+        ];
+        subjects.extend(bash_path_subjects_from_cwd(
+            &workspace_root,
+            &context.cwd,
+            input,
+        )?);
+        Ok(subjects)
+    }
+
+    fn permission_operation(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOperation> {
+        let task_id = required_terminal_task_id(args)?;
+        let input = required_string(args, "input")?;
+        validate_terminal_input_len(input)?;
+        let _context = self.terminal_input_permission_context(ctx, &task_id)?;
+        Ok(terminal_input_permission_operation(input))
     }
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
@@ -1353,7 +1577,11 @@ impl Tool for TerminalInputTool {
             };
             return Ok(result);
         }
-        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        let manager = self.managers.manager_for(
+            &ctx.workspace_root,
+            &self.artifact_root,
+            &self.artifact_label_root,
+        )?;
         match manager.input(&task_id, input.to_owned()).await {
             Ok(result) => Ok(terminal_input_result(call_id, self.spec().name, result)),
             Err(error) if is_terminal_backend_unsupported(&error) => {
@@ -1379,6 +1607,21 @@ impl Tool for TerminalInputTool {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+impl TerminalInputTool {
+    fn terminal_input_permission_context(
+        &self,
+        ctx: &ToolContext,
+        task_id: &TerminalTaskId,
+    ) -> Result<TerminalTaskPermissionContext> {
+        let manager = self.managers.manager_for(
+            &ctx.workspace_root,
+            &self.artifact_root,
+            &self.artifact_label_root,
+        )?;
+        manager.permission_context(task_id)
     }
 }
 
@@ -1411,7 +1654,11 @@ impl Tool for TerminalResizeTool {
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let task_id = required_terminal_task_id(&args)?;
         let size = required_terminal_pty_size(&args)?;
-        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        let manager = self.managers.manager_for(
+            &ctx.workspace_root,
+            &self.artifact_root,
+            &self.artifact_label_root,
+        )?;
         match manager.resize(&task_id, size).await {
             Ok(result) => Ok(terminal_resize_result(call_id, self.spec().name, result)),
             Err(error) if is_terminal_backend_unsupported(&error) => {
@@ -1467,7 +1714,11 @@ impl Tool for TerminalCancelTool {
 
     async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let task_id = required_terminal_task_id(&args)?;
-        let manager = self.managers.manager_for(&ctx.workspace_root)?;
+        let manager = self.managers.manager_for(
+            &ctx.workspace_root,
+            &self.artifact_root,
+            &self.artifact_label_root,
+        )?;
         let entry = manager.cancel(&task_id).await?;
         Ok(terminal_entry_result(
             call_id,
@@ -2049,6 +2300,8 @@ fn plan_changeset_file(
 
 fn apply_changeset_plan(
     workspace_root: &Path,
+    artifact_root: &Path,
+    artifact_label_root: PathBuf,
     call_id: String,
     plan: ApplyChangeSetPlan,
 ) -> Result<ToolResult> {
@@ -2131,11 +2384,13 @@ fn apply_changeset_plan(
         } else {
             applied_reverse_diffs.join("\n")
         };
-        match ChangeSetArtifactStore::new(workspace_root)?.write_diff_artifacts(
-            plan.change_set.id.clone(),
-            &preview_diff,
-            &reverse_diff,
-        ) {
+        match ChangeSetArtifactStore::new_with_artifact_root(
+            workspace_root,
+            artifact_root,
+            artifact_label_root,
+        )?
+        .write_diff_artifacts(plan.change_set.id.clone(), &preview_diff, &reverse_diff)
+        {
             Ok(record) => Some(record),
             Err(error) => {
                 apply_result.status = ChangeSetResultStatus::PartiallyApplied;
@@ -2744,6 +2999,14 @@ fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf> {
     })
 }
 
+fn absolute_path_from(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
 fn lexically_normalize_path(path: &Path) -> Result<PathBuf> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -2816,6 +3079,147 @@ fn command_permission_subject(command: &str) -> String {
     }
     let truncated = normalized.chars().take(MAX_CHARS).collect::<String>();
     format!("{truncated}...")
+}
+
+fn shell_command_permission_operation(command: &str) -> ToolOperation {
+    if shell_command_is_destructive(command) {
+        ToolOperation::ExecuteDestructiveCommand
+    } else if bash_command_is_safe_readonly(command) {
+        ToolOperation::ExecuteReadOnlyCommand
+    } else {
+        ToolOperation::ExecuteUnknownCommand
+    }
+}
+
+fn terminal_input_permission_operation(input: &str) -> ToolOperation {
+    if shell_command_is_destructive(input) {
+        ToolOperation::ExecuteDestructiveCommand
+    } else {
+        ToolOperation::SendTerminalInput
+    }
+}
+
+fn shell_command_is_destructive(command: &str) -> bool {
+    let tokens = tokenize_shell_subject_words(command);
+    let mut segment = Vec::new();
+    for token in tokens {
+        if matches!(token.as_str(), "&&" | "||" | ";") {
+            if shell_segment_is_destructive(&segment) {
+                return true;
+            }
+            segment.clear();
+        } else {
+            segment.push(token);
+        }
+    }
+    shell_segment_is_destructive(&segment)
+}
+
+fn shell_segment_is_destructive(words: &[String]) -> bool {
+    let Some((command, args)) = shell_segment_command_and_args(words) else {
+        return false;
+    };
+
+    if matches!(command, "sudo" | "doas" | "env" | "command") && !args.is_empty() {
+        return shell_segment_is_destructive(args);
+    }
+
+    if shell_segment_has_overwrite_redirection(words) {
+        return true;
+    }
+
+    match command {
+        "rm" => true,
+        "rmdir" => true,
+        "truncate" => true,
+        "dd" => args.iter().any(|word| word.starts_with("of=")),
+        "find" => find_segment_is_destructive(args),
+        "git" => git_segment_is_destructive(args),
+        "sh" | "bash" | "zsh" | "fish" => shell_invocation_is_destructive(args),
+        _ => false,
+    }
+}
+
+fn shell_segment_command_and_args(words: &[String]) -> Option<(&str, &[String])> {
+    let mut index = 0usize;
+    while let Some(word) = words.get(index) {
+        if is_shell_assignment(word) {
+            index += 1;
+            continue;
+        }
+        return Some((shell_command_basename(word), &words[index + 1..]));
+    }
+    None
+}
+
+fn is_shell_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+}
+
+fn shell_command_basename(command: &str) -> &str {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+}
+
+fn shell_segment_has_overwrite_redirection(words: &[String]) -> bool {
+    words
+        .iter()
+        .any(|word| is_overwrite_redirection_operator(word) || overwrite_redirection_target(word))
+}
+
+fn is_overwrite_redirection_operator(word: &str) -> bool {
+    matches!(word, ">" | "1>" | "2>" | "&>")
+}
+
+fn overwrite_redirection_target(word: &str) -> bool {
+    ["1>", "2>", "&>", ">"].iter().any(|prefix| {
+        word.strip_prefix(prefix)
+            .is_some_and(|target| !target.is_empty())
+    })
+}
+
+fn find_segment_is_destructive(words: &[String]) -> bool {
+    words.iter().enumerate().any(|(index, word)| {
+        word == "-delete"
+            || matches!(word.as_str(), "-exec" | "-execdir")
+                && words
+                    .get(index + 1)
+                    .map(|command| shell_command_basename(command) == "rm")
+                    .unwrap_or(false)
+    })
+}
+
+fn git_segment_is_destructive(words: &[String]) -> bool {
+    let Some(subcommand) = words.first().map(String::as_str) else {
+        return false;
+    };
+    match subcommand {
+        "clean" => true,
+        "reset" => words.iter().skip(1).any(|word| word == "--hard"),
+        "checkout" | "restore" => words
+            .iter()
+            .skip(1)
+            .any(|word| word == "-f" || word == "--force"),
+        _ => false,
+    }
+}
+
+fn shell_invocation_is_destructive(words: &[String]) -> bool {
+    words.windows(2).any(|pair| {
+        matches!(pair[0].as_str(), "-c" | "-lc") && shell_command_is_destructive(&pair[1])
+    })
 }
 
 fn bash_command_is_safe_readonly(command: &str) -> bool {
@@ -2962,6 +3366,8 @@ fn collect_bash_segment_subjects(
         let word = &words[index];
         if let Some(target) = redirection_target(word) {
             subjects.push(shell_path_subject(workspace_root, cwd, target)?);
+        } else if command == "dd" && word.starts_with("of=") && word.len() > 3 {
+            subjects.push(shell_path_subject(workspace_root, cwd, &word[3..])?);
         } else if is_redirection_operator(word) {
             if let Some(target) = words.get(index + 1) {
                 subjects.push(shell_path_subject(workspace_root, cwd, target)?);
@@ -3097,6 +3503,10 @@ fn is_path_argument(command: &str, word: &str) -> bool {
             | "cmp"
             | "ls"
             | "find"
+            | "rm"
+            | "rmdir"
+            | "truncate"
+            | "dd"
     )
 }
 

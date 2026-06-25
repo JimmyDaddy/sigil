@@ -93,7 +93,9 @@ impl AppState {
         let live_tail_start = self
             .effective_timeline_render_len()
             .saturating_sub(self.timeline_viewport_rows().max(1));
-        durable_cutoff_line.min(live_tail_start)
+        durable_cutoff_line
+            .min(live_tail_start)
+            .min(self.timeline_render_cache.len())
     }
 
     pub(super) fn transcript_page_step(&self) -> usize {
@@ -577,7 +579,9 @@ impl AppState {
     }
 
     pub(crate) fn visible_timeline_render_range(&self, max_lines: usize) -> Range<usize> {
-        let effective_len = self.effective_timeline_render_len();
+        let effective_len = self
+            .effective_timeline_render_len()
+            .min(self.timeline_render_cache.len());
         if effective_len == 0 {
             return 0..0;
         }

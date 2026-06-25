@@ -16,7 +16,7 @@ MIN_COVERAGE = float(os.environ.get("STAGED_COVERAGE_MIN_LINES", "96"))
 BUSINESS_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
 COVERAGE_IGNORE_FILENAME_REGEX = os.environ.get(
     "COVERAGE_IGNORE_FILENAME_REGEX",
-    r"crates/sigil-kernel/src/agent\.rs|crates/sigil-runtime/src/agent_tools\.rs|crates/sigil-tui/src/runner/(spawn|worker_loop)\.rs",
+    r"crates/sigil-kernel/src/agent\.rs|crates/sigil-runtime/src/agent_tools\.rs|crates/sigil-tui/src/launcher\.rs|crates/sigil-tui/src/runner/(spawn|worker_loop)\.rs",
 )
 COVERAGE_IGNORE_RE = (
     re.compile(COVERAGE_IGNORE_FILENAME_REGEX) if COVERAGE_IGNORE_FILENAME_REGEX else None

@@ -30,6 +30,7 @@ pub(crate) const CONFIG_ACTIONS_HINT: &str = "actions: Down to actions · Ctrl-S
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigSection {
     Provider,
+    Storage,
     Permissions,
     Memory,
     Compaction,
@@ -43,8 +44,9 @@ pub(crate) enum ConfigSection {
 }
 
 impl ConfigSection {
-    pub(crate) const FLOW: [Self; 11] = [
+    pub(crate) const FLOW: [Self; 12] = [
         Self::Provider,
+        Self::Storage,
         Self::Permissions,
         Self::Memory,
         Self::Compaction,
@@ -60,6 +62,7 @@ impl ConfigSection {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Provider => "Provider",
+            Self::Storage => "Storage",
             Self::Permissions => "Permissions",
             Self::Memory => "Memory",
             Self::Compaction => "Compaction",
@@ -73,9 +76,27 @@ impl ConfigSection {
         }
     }
 
+    pub(crate) fn nav_label(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Storage => "storage",
+            Self::Permissions => "policy",
+            Self::Memory => "memory",
+            Self::Compaction => "context",
+            Self::CodeIntelligence => "code",
+            Self::Terminal => "terminal",
+            Self::Appearance => "theme",
+            Self::Agents => "agents",
+            Self::Skills => "skills",
+            Self::Plugins => "plugins",
+            Self::Mcp => "mcp",
+        }
+    }
+
     pub(crate) fn summary(self) -> &'static str {
         match self {
             Self::Provider => "provider settings",
+            Self::Storage => "local state paths",
             Self::Permissions => "approval rules",
             Self::Memory => "memory status",
             Self::Compaction => "context and thresholds",
@@ -162,6 +183,7 @@ impl ConfigField {
         Self::ProviderFimModel,
         Self::ProviderName,
     ];
+    const STORAGE_FIELDS: [Self; 0] = [];
     const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionsDefaultMode];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
     const COMPACTION_FIELDS: [Self; 5] = [
@@ -201,6 +223,7 @@ impl ConfigField {
     pub(crate) fn fields_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
             ConfigSection::Provider => &Self::PROVIDER_FIELDS,
+            ConfigSection::Storage => &Self::STORAGE_FIELDS,
             ConfigSection::Permissions => &Self::PERMISSION_FIELDS,
             ConfigSection::Memory => &Self::MEMORY_FIELDS,
             ConfigSection::Compaction => &Self::COMPACTION_FIELDS,
@@ -464,6 +487,7 @@ impl ConfigFooterAction {
             ConfigSection::Skills => &Self::SKILLS_ORDER,
             ConfigSection::Plugins => &Self::PLUGINS_ORDER,
             ConfigSection::Provider
+            | ConfigSection::Storage
             | ConfigSection::Permissions
             | ConfigSection::Memory
             | ConfigSection::Compaction

@@ -3,8 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ControlEntry, ModelMessage, ProviderContinuationState, ToolCall, ToolPreview, ToolResult,
-    ToolSpec, ToolSubject, UsageStats,
+    ControlEntry, ModelMessage, PathTrustZone, PermissionConfirmation, PermissionRisk,
+    ProviderContinuationState, ToolCall, ToolOperation, ToolPreview, ToolResult, ToolSpec,
+    ToolSubject, UsageStats,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -25,6 +26,11 @@ pub enum RunEvent {
         call: ToolCall,
         spec: ToolSpec,
         subjects: Vec<ToolSubject>,
+        operation: ToolOperation,
+        risk: PermissionRisk,
+        subject_zones: Vec<PathTrustZone>,
+        confirmation: Option<PermissionConfirmation>,
+        snapshot_required: bool,
         preview: Option<ToolPreview>,
     },
     ToolApprovalResolved {
@@ -124,6 +130,16 @@ pub enum PublicRunEventKind {
         call: ToolCall,
         spec: ToolSpec,
         subjects: Vec<ToolSubject>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operation: Option<ToolOperation>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        risk: Option<PermissionRisk>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subject_zones: Vec<PathTrustZone>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confirmation: Option<PermissionConfirmation>,
+        #[serde(default)]
+        snapshot_required: bool,
         preview: Option<ToolPreview>,
     },
     ApprovalResolved {
@@ -203,11 +219,21 @@ impl From<RunEvent> for PublicRunEventKind {
                 call,
                 spec,
                 subjects,
+                operation,
+                risk,
+                subject_zones,
+                confirmation,
+                snapshot_required,
                 preview,
             } => Self::ApprovalRequested {
                 call,
                 spec,
                 subjects,
+                operation: Some(operation),
+                risk: Some(risk),
+                subject_zones,
+                confirmation,
+                snapshot_required,
                 preview,
             },
             RunEvent::ToolApprovalResolved {

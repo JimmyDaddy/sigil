@@ -21,6 +21,7 @@ sigil-kernel = { path = "../sigil-kernel" }
 
 [dev-dependencies]
 tempfile.workspace = true
+serial_test = "3"
 
 [lints]
 workspace = true

@@ -104,6 +104,22 @@ pub fn discover_workspace_plugins(
     Ok(discovery.finish())
 }
 
+/// Discovers workspace plugins using an explicit project assets root.
+///
+/// # Errors
+///
+/// Returns an error if the workspace plugin directory cannot be listed.
+pub fn discover_workspace_plugins_with_project_assets_root(
+    workspace_root: &Path,
+    project_assets_root: &Path,
+    trust_entries: &[PluginTrustEntry],
+) -> Result<PluginDiscoveryReport> {
+    let mut discovery =
+        PluginDiscovery::new_with_plugin_dir(workspace_root, project_assets_root.join("plugins"));
+    discovery.discover(trust_entries)?;
+    Ok(discovery.finish())
+}
+
 /// Merges plugin skill descriptors into an existing deterministic skill snapshot.
 ///
 /// # Errors
@@ -164,6 +180,7 @@ pub fn merge_plugin_mcp_servers(
 struct PluginDiscovery {
     workspace_root: PathBuf,
     canonical_workspace_root: PathBuf,
+    plugin_dir: PathBuf,
     manifests: Vec<PluginManifestSnapshot>,
     registrations: PluginRegistrations,
     warnings: Vec<PluginDiscoveryWarning>,
@@ -171,12 +188,22 @@ struct PluginDiscovery {
 
 impl PluginDiscovery {
     fn new(workspace_root: &Path) -> Self {
+        Self::new_with_plugin_dir(
+            workspace_root,
+            workspace_root
+                .join(crate::DEFAULT_PROJECT_ASSETS_ROOT)
+                .join("plugins"),
+        )
+    }
+
+    fn new_with_plugin_dir(workspace_root: &Path, plugin_dir: PathBuf) -> Self {
         let canonical_workspace_root = workspace_root
             .canonicalize()
             .unwrap_or_else(|_| workspace_root.to_path_buf());
         Self {
             workspace_root: workspace_root.to_path_buf(),
             canonical_workspace_root,
+            plugin_dir,
             manifests: Vec::new(),
             registrations: PluginRegistrations::default(),
             warnings: Vec::new(),
@@ -184,7 +211,7 @@ impl PluginDiscovery {
     }
 
     fn discover(&mut self, trust_entries: &[PluginTrustEntry]) -> Result<()> {
-        let plugin_dir = self.workspace_root.join(".sigil").join("plugins");
+        let plugin_dir = self.plugin_dir.clone();
         if !plugin_dir.exists() {
             return Ok(());
         }

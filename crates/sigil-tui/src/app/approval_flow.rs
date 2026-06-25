@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
+use sigil_kernel::{PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation};
 
 use super::{
     AppAction, AppState, ApprovalChangeSetSummary, ApprovalDiagnosticSummary, ApprovalDiffLine,
@@ -27,6 +28,13 @@ impl AppState {
                 if let Some(source_agent) = self.pending_approval_source_agent(&pending.call.id) {
                     lines.push(format!("source_agent={source_agent}"));
                 }
+                lines.extend(approval_permission_lines(
+                    pending.operation,
+                    pending.risk,
+                    &pending.subject_zones,
+                    pending.confirmation.as_ref(),
+                    pending.snapshot_required,
+                ));
                 lines.extend(approval_subject_lines(&pending.subjects));
                 lines.push(format!("preview={}", preview.title));
                 if !preview.summary.trim().is_empty() {
@@ -102,6 +110,13 @@ impl AppState {
             if let Some(source_agent) = self.pending_approval_source_agent(&pending.call.id) {
                 lines.push(format!("source_agent={source_agent}"));
             }
+            lines.extend(approval_permission_lines(
+                pending.operation,
+                pending.risk,
+                &pending.subject_zones,
+                pending.confirmation.as_ref(),
+                pending.snapshot_required,
+            ));
             lines.extend(approval_subject_lines(&pending.subjects));
             lines.push(format!("args={}", pending.call.args_json));
         }
@@ -549,6 +564,100 @@ impl AppState {
 
 fn approval_access_label(spec: &sigil_kernel::ToolSpec) -> String {
     format!("{} {}", spec.category.as_str(), spec.access.as_str())
+}
+
+fn approval_permission_lines(
+    operation: ToolOperation,
+    risk: PermissionRisk,
+    zones: &[PathTrustZone],
+    confirmation: Option<&PermissionConfirmation>,
+    snapshot_required: bool,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("operation={}", approval_operation_label(operation)),
+        format!("risk={}", approval_risk_label(risk)),
+    ];
+    if !zones.is_empty() {
+        lines.push(format!(
+            "path_zone={}",
+            zones
+                .iter()
+                .map(|zone| approval_path_zone_label(*zone))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(confirmation) = confirmation {
+        lines.push(format!(
+            "confirmation={}",
+            approval_confirmation_label(confirmation)
+        ));
+    }
+    if snapshot_required {
+        lines.push("recovery=pre-change snapshot required".to_owned());
+    }
+    lines
+}
+
+fn approval_operation_label(operation: ToolOperation) -> &'static str {
+    match operation {
+        ToolOperation::Read => "read",
+        ToolOperation::Search => "search",
+        ToolOperation::CreateFile => "create file",
+        ToolOperation::EditFile => "edit file",
+        ToolOperation::OverwriteFile => "overwrite file",
+        ToolOperation::DeleteFile => "delete file",
+        ToolOperation::RenamePath => "rename path",
+        ToolOperation::CreateDirectory => "create directory",
+        ToolOperation::DeleteDirectory => "delete directory",
+        ToolOperation::RecursiveDelete => "recursive delete",
+        ToolOperation::ApplyChangeSet => "apply change set",
+        ToolOperation::ExecuteReadOnlyCommand => "run read-only command",
+        ToolOperation::ExecuteMutatingCommand => "run mutating command",
+        ToolOperation::ExecuteUnknownCommand => "run command",
+        ToolOperation::ExecuteDestructiveCommand => "run destructive command",
+        ToolOperation::SendTerminalInput => "send terminal input",
+        ToolOperation::NetworkRequest => "network request",
+        ToolOperation::SpawnAgent => "spawn agent",
+        ToolOperation::MessageAgent => "message agent",
+        ToolOperation::CloseAgent => "close agent",
+        ToolOperation::LoadSkill => "load skill",
+        ToolOperation::InvokePlugin => "invoke plugin",
+    }
+}
+
+fn approval_risk_label(risk: PermissionRisk) -> &'static str {
+    match risk {
+        PermissionRisk::Low => "low",
+        PermissionRisk::Medium => "medium",
+        PermissionRisk::High => "high",
+        PermissionRisk::Destructive => "destructive",
+        PermissionRisk::Protected => "protected",
+    }
+}
+
+fn approval_path_zone_label(zone: PathTrustZone) -> &'static str {
+    match zone {
+        PathTrustZone::WorkspaceSource => "workspace source",
+        PathTrustZone::WorkspaceDocs => "workspace docs",
+        PathTrustZone::WorkspaceProjectAsset => "project asset",
+        PathTrustZone::WorkspaceRuntimeState => "runtime state",
+        PathTrustZone::WorkspaceIgnored => "ignored file",
+        PathTrustZone::WorkspaceGitMetadata => "git metadata",
+        PathTrustZone::WorkspaceConfigSecret => "config or secret",
+        PathTrustZone::UserState => "user state",
+        PathTrustZone::UserCache => "user cache",
+        PathTrustZone::External => "external path",
+        PathTrustZone::Unknown => "unknown",
+    }
+}
+
+fn approval_confirmation_label(confirmation: &PermissionConfirmation) -> &'static str {
+    match confirmation {
+        PermissionConfirmation::Standard => "standard approval",
+        PermissionConfirmation::TypePath => "type the path before approval",
+        PermissionConfirmation::TypePhrase { .. } => "type the requested phrase before approval",
+    }
 }
 
 fn approval_subject_lines(subjects: &[sigil_kernel::ToolSubject]) -> Vec<String> {

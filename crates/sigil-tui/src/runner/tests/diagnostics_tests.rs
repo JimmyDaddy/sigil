@@ -6,8 +6,8 @@ use sigil_kernel::{
     Agent, ApprovalMode, ControlEntry, JsonlSessionStore, LanguageServerConfig,
     PermissionAccessConfig, PermissionConfig, PermissionDecision, Provider, RunEvent, Session,
     SessionLogEntry, Tool, ToolAccess, ToolCall, ToolCategory, ToolContext, ToolErrorKind,
-    ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolResultStatus, ToolSpec, ToolSubject, ToolSubjectScope,
+    ToolExecutionStatus, ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolResultStatus, ToolSpec, ToolSubject, ToolSubjectScope,
 };
 use tempfile::tempdir;
 
@@ -35,6 +35,7 @@ struct DiagnosticsTestTool {
     access: ToolAccess,
     subjects: std::result::Result<Vec<ToolSubject>, &'static str>,
     dynamic_access: std::result::Result<ToolAccess, &'static str>,
+    operation: std::result::Result<ToolOperation, &'static str>,
     execute_plan: ExecutePlan,
 }
 
@@ -44,6 +45,7 @@ impl DiagnosticsTestTool {
             access,
             subjects: Ok(Vec::new()),
             dynamic_access: Ok(access),
+            operation: Ok(ToolOperation::Read),
             execute_plan,
         }
     }
@@ -55,6 +57,11 @@ impl DiagnosticsTestTool {
 
     fn with_access_error(mut self, error: &'static str) -> Self {
         self.dynamic_access = Err(error);
+        self
+    }
+
+    fn with_operation_error(mut self, error: &'static str) -> Self {
+        self.operation = Err(error);
         self
     }
 
@@ -101,6 +108,14 @@ impl Tool for DiagnosticsTestTool {
     ) -> anyhow::Result<ToolAccess> {
         self.dynamic_access
             .map_err(|error| anyhow!(error.to_owned()))
+    }
+
+    fn permission_operation(
+        &self,
+        _ctx: &ToolContext,
+        _args: &serde_json::Value,
+    ) -> anyhow::Result<ToolOperation> {
+        self.operation.map_err(|error| anyhow!(error.to_owned()))
     }
 
     async fn execute(
@@ -439,29 +454,32 @@ fn permission_block_reason_covers_approval_deny_and_external_directory() {
         args_json: "{}".to_owned(),
     };
 
-    let ask = PermissionDecision {
-        mode: ApprovalMode::Ask,
-        access: ToolAccess::Execute,
-        subjects: Vec::new(),
-        external_directory_required: false,
-    };
-    let deny = PermissionDecision {
-        mode: ApprovalMode::Deny,
-        access: ToolAccess::Execute,
-        subjects: vec![ToolSubject::path("src/main.rs", "src/main.rs")],
-        external_directory_required: false,
-    };
-    let external = PermissionDecision {
-        mode: ApprovalMode::Deny,
-        access: ToolAccess::Execute,
-        subjects: vec![ToolSubject::path_with_scope(
+    let ask = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "bash",
+        ToolAccess::Execute,
+        Vec::new(),
+        false,
+    );
+    let deny = PermissionDecision::new(
+        ApprovalMode::Deny,
+        "bash",
+        ToolAccess::Execute,
+        vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+        false,
+    );
+    let external = PermissionDecision::new(
+        ApprovalMode::Deny,
+        "bash",
+        ToolAccess::Execute,
+        vec![ToolSubject::path_with_scope(
             "/tmp/external.rs",
             "/tmp/external.rs",
             None,
             ToolSubjectScope::External,
         )],
-        external_directory_required: true,
-    };
+        true,
+    );
 
     let (ask_kind, ask_reason) = permission_block_reason(&call, &ask);
     let (deny_kind, deny_reason) = permission_block_reason(&call, &deny);
@@ -473,7 +491,7 @@ fn permission_block_reason_covers_approval_deny_and_external_directory() {
     assert!(deny_reason.contains("src/main.rs"));
     assert_eq!(external_kind, ToolErrorKind::ExternalDirectoryRequired);
     assert!(external_reason.contains("permission.external_directory.enabled"));
-    assert!(external_reason.contains(".sigil/tmp"));
+    assert!(external_reason.contains("$SIGIL_SCRATCH_DIR"));
 }
 
 #[test]
@@ -691,6 +709,44 @@ fn check_changed_files_diagnostics_surfaces_access_resolution_errors() -> Result
         result
             .content
             .contains("invalid code diagnostics arguments: bad access")
+    );
+    Ok(())
+}
+
+#[test]
+fn check_changed_files_diagnostics_surfaces_operation_resolution_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let runtime = test_runtime()?;
+    let mut session = Session::new("planned", "planned-model");
+    let options = test_options(temp.path(), ApprovalMode::Allow);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(
+        DiagnosticsTestTool::new(
+            ToolAccess::Execute,
+            ExecutePlan::Ok(Box::new(ToolResult::ok(
+                "call-1",
+                "code_diagnostics",
+                "ok",
+                ToolResultMeta::default(),
+            ))),
+        )
+        .with_operation_error("bad operation"),
+    ));
+
+    let result = check_changed_files_diagnostics(
+        &runtime,
+        &registry,
+        &mut session,
+        &options,
+        4,
+        vec!["src/main.rs".to_owned()],
+    )?;
+
+    assert_eq!(tool_error_kind(&result), ToolErrorKind::InvalidInput);
+    assert!(
+        result
+            .content
+            .contains("invalid code diagnostics arguments: bad operation")
     );
     Ok(())
 }

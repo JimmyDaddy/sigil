@@ -3,12 +3,15 @@ use std::{path::PathBuf, time::Duration};
 #[cfg(not(test))]
 use std::{
     env, io,
+    panic::{self, AssertUnwindSafe},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
 #[cfg(not(test))]
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         Event as CrosstermEvent, KeyEventKind, KeyboardEnhancementFlags,
@@ -64,11 +67,18 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
     enable_raw_mode()?;
     let inline_viewport_height = current_inline_viewport_height()?;
     let mut stdout = io::stdout();
+    let mut cleanup = TerminalCleanupGuard::new();
+    cleanup.raw_mode_enabled = true;
+    let panic_hook = TuiPanicHookGuard::install();
+
     let keyboard_enhancement_enabled = enable_keyboard_enhancement(&mut stdout)?;
+    cleanup.keyboard_enhancement_enabled = keyboard_enhancement_enabled;
     let bracketed_paste_enabled = enable_bracketed_paste(&mut stdout)?;
+    cleanup.bracketed_paste_enabled = bracketed_paste_enabled;
     let mut mouse_capture_active = app.terminal_mouse_capture_enabled();
     if mouse_capture_active {
         execute!(stdout, EnableMouseCapture)?;
+        cleanup.mouse_capture_active = true;
     }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::with_options(
@@ -77,26 +87,134 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
             viewport: Viewport::Inline(inline_viewport_height),
         },
     )?;
-    let result = run_app(
-        &mut terminal,
-        &mut app,
-        &mut worker,
-        &mut mouse_capture_active,
-    );
-
-    if keyboard_enhancement_enabled {
-        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
-    }
-    if bracketed_paste_enabled {
-        execute!(terminal.backend_mut(), DisableBracketedPaste)?;
-    }
-    if mouse_capture_active {
-        execute!(terminal.backend_mut(), DisableMouseCapture)?;
-    }
-    disable_raw_mode()?;
-    terminal.show_cursor()?;
-
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        run_app(
+            &mut terminal,
+            &mut app,
+            &mut worker,
+            &mut mouse_capture_active,
+        )
+    }));
+    cleanup.mouse_capture_active = mouse_capture_active;
+    let cleanup_result = cleanup.restore();
+    panic_hook.restore();
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => panic::resume_unwind(payload),
+    };
+    cleanup_result?;
     result
+}
+
+#[cfg(not(test))]
+struct TerminalCleanupGuard {
+    raw_mode_enabled: bool,
+    keyboard_enhancement_enabled: bool,
+    bracketed_paste_enabled: bool,
+    mouse_capture_active: bool,
+}
+
+#[cfg(not(test))]
+impl TerminalCleanupGuard {
+    fn new() -> Self {
+        Self {
+            raw_mode_enabled: false,
+            keyboard_enhancement_enabled: false,
+            bracketed_paste_enabled: false,
+            mouse_capture_active: false,
+        }
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        let mut stdout = io::stdout();
+        let mut first_error = None;
+        if self.keyboard_enhancement_enabled {
+            remember_cleanup_error(
+                execute!(stdout, PopKeyboardEnhancementFlags),
+                &mut first_error,
+            );
+            self.keyboard_enhancement_enabled = false;
+        }
+        if self.bracketed_paste_enabled {
+            remember_cleanup_error(execute!(stdout, DisableBracketedPaste), &mut first_error);
+            self.bracketed_paste_enabled = false;
+        }
+        if self.mouse_capture_active {
+            remember_cleanup_error(execute!(stdout, DisableMouseCapture), &mut first_error);
+            self.mouse_capture_active = false;
+        }
+        remember_cleanup_error(execute!(stdout, Show), &mut first_error);
+        if self.raw_mode_enabled {
+            remember_cleanup_error(disable_raw_mode(), &mut first_error);
+            self.raw_mode_enabled = false;
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+#[cfg(not(test))]
+fn remember_cleanup_error(result: io::Result<()>, first_error: &mut Option<io::Error>) {
+    if first_error.is_none()
+        && let Err(error) = result
+    {
+        *first_error = Some(error);
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for TerminalCleanupGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+#[cfg(not(test))]
+struct TuiPanicHookGuard {
+    previous: Option<Arc<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>>,
+}
+
+#[cfg(not(test))]
+impl TuiPanicHookGuard {
+    fn install() -> Self {
+        let previous =
+            Arc::<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync>::from(panic::take_hook());
+        let hook_previous = Arc::clone(&previous);
+        panic::set_hook(Box::new(move |info| {
+            restore_terminal_escape_state();
+            hook_previous(info);
+        }));
+        Self {
+            previous: Some(previous),
+        }
+    }
+
+    fn restore(mut self) {
+        if let Some(previous) = self.previous.take() {
+            panic::set_hook(Box::new(move |info| previous(info)));
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl Drop for TuiPanicHookGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(previous) = self.previous.take() {
+            panic::set_hook(Box::new(move |info| previous(info)));
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn restore_terminal_escape_state() {
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
+    let _ = execute!(stdout, DisableBracketedPaste);
+    let _ = execute!(stdout, DisableMouseCapture);
+    let _ = execute!(stdout, Show);
+    let _ = disable_raw_mode();
 }
 
 #[cfg(not(test))]

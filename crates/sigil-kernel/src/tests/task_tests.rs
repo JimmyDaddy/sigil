@@ -93,8 +93,8 @@ fn child_session_ref_uses_stable_relative_layout() -> Result<()> {
         std::path::Path::new("children/task_1/step_2-child_1.jsonl")
     );
     assert_eq!(
-        reference.resolve(std::path::Path::new(".sigil/sessions")),
-        std::path::Path::new(".sigil/sessions/children/task_1/step_2-child_1.jsonl")
+        reference.resolve(std::path::Path::new("sessions")),
+        std::path::Path::new("sessions/children/task_1/step_2-child_1.jsonl")
     );
     Ok(())
 }

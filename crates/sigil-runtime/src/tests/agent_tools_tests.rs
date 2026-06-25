@@ -14,11 +14,12 @@ use serde_json::json;
 use sigil_kernel::{
     Agent, AgentConfig, AgentInvocationSource, AgentProfileId, AgentProfilePolicyEntry,
     AgentProfileTrustEntry, AgentRunInput, AgentRunOptions, AgentThreadStatus, AgentToolDelegate,
-    AgentTrustState, AutoApproveHandler, CompactionConfig, CompletionRequest, ControlEntry,
-    EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, PermissionConfig,
-    Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport,
-    RootConfig, RunEvent, Session, SessionConfig, SessionLogEntry, ToolCall, ToolRegistry,
-    UsageStats, WorkspaceConfig,
+    AgentTrustState, ApprovalMode, AutoApproveHandler, CompactionConfig, CompletionRequest,
+    ControlEntry, EventHandler, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
+    PermissionAccessConfig, PermissionConfig, PermissionPolicy, PermissionPreset, Provider,
+    ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RootConfig,
+    RunEvent, Session, SessionConfig, SessionLogEntry, ToolAccess, ToolCall, ToolCategory,
+    ToolPreviewCapability, ToolRegistry, ToolSpec, ToolSubject, UsageStats, WorkspaceConfig,
 };
 
 use super::{
@@ -32,6 +33,254 @@ use super::{
 #[derive(Default)]
 struct RecordingEventHandler {
     events: Vec<RunEvent>,
+}
+
+fn permission_test_spec(access: ToolAccess) -> ToolSpec {
+    ToolSpec {
+        name: "write_file".to_owned(),
+        description: "write".to_owned(),
+        input_schema: json!({"type":"object"}),
+        category: ToolCategory::File,
+        access,
+        preview: ToolPreviewCapability::Required,
+    }
+}
+
+#[test]
+fn child_permission_config_keeps_parent_read_only_cap() -> Result<()> {
+    let parent = PermissionConfig {
+        preset: PermissionPreset::ReadOnly,
+        access: PermissionAccessConfig {
+            write: Some(ApprovalMode::Allow),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig {
+        access: PermissionAccessConfig {
+            write: Some(ApprovalMode::Allow),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let profile = PermissionConfig::default();
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Write),
+        "write_file",
+        vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+    )?;
+
+    assert_eq!(effective.preset, PermissionPreset::ReadOnly);
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_profile_deny_narrows_parent_allow() -> Result<()> {
+    let parent = PermissionConfig {
+        access: PermissionAccessConfig {
+            write: Some(ApprovalMode::Allow),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let role = parent.clone();
+    let profile = PermissionConfig {
+        tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Deny)]),
+        ..PermissionConfig::default()
+    };
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Write),
+        "write_file",
+        vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_profile_tool_allow_cannot_widen_parent_deny() -> Result<()> {
+    let parent = PermissionConfig {
+        access: PermissionAccessConfig {
+            write: Some(ApprovalMode::Deny),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig::default();
+    let profile = PermissionConfig {
+        tools: BTreeMap::from([("write_file".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Write),
+        "write_file",
+        vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_profile_tool_allow_cannot_widen_parent_tool_deny() -> Result<()> {
+    let parent = PermissionConfig {
+        default_mode: ApprovalMode::Allow,
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Deny)]),
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig::default();
+    let profile = PermissionConfig {
+        tools: BTreeMap::from([("bash".to_owned(), ApprovalMode::Allow)]),
+        ..PermissionConfig::default()
+    };
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command("cargo test", "cargo test")],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_default_role_and_profile_inherit_parent_allow() -> Result<()> {
+    let parent = PermissionConfig {
+        default_mode: ApprovalMode::Allow,
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig::default();
+    let profile = PermissionConfig::default();
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command("cargo test", "cargo test")],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Allow);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_explicit_execute_ask_narrows_parent_allow() -> Result<()> {
+    let parent = PermissionConfig {
+        default_mode: ApprovalMode::Allow,
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig::default();
+    let profile = PermissionConfig {
+        access: PermissionAccessConfig {
+            execute: Some(ApprovalMode::Ask),
+            ..PermissionAccessConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Execute),
+        "bash",
+        vec![ToolSubject::command("cargo test", "cargo test")],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_profile_rule_allow_cannot_widen_parent_default_deny() -> Result<()> {
+    let parent = PermissionConfig {
+        default_mode: ApprovalMode::Deny,
+        access: PermissionAccessConfig {
+            read: Some(ApprovalMode::Deny),
+            write: Some(ApprovalMode::Deny),
+            execute: Some(ApprovalMode::Deny),
+            network: Some(ApprovalMode::Deny),
+        },
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig::default();
+    let profile = PermissionConfig {
+        rules: vec![sigil_kernel::PermissionRule {
+            tool_name: Some("write_file".to_owned()),
+            subject_glob: Some("src/**".to_owned()),
+            mode: ApprovalMode::Allow,
+        }],
+        ..PermissionConfig::default()
+    };
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Write),
+        "write_file",
+        vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
+}
+
+#[test]
+fn child_permission_config_external_rule_allow_cannot_widen_parent_default_deny() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let external_root = temp.path().canonicalize()?;
+    let external_path = external_root.join("allowed").join("note.txt");
+    std::fs::create_dir_all(external_path.parent().expect("path should have a parent"))?;
+    std::fs::write(&external_path, "note")?;
+    let parent = PermissionConfig {
+        external_directory: sigil_kernel::ExternalDirectoryConfig {
+            enabled: true,
+            default_mode: ApprovalMode::Deny,
+            ..sigil_kernel::ExternalDirectoryConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let role = PermissionConfig {
+        external_directory: sigil_kernel::ExternalDirectoryConfig {
+            enabled: true,
+            default_mode: ApprovalMode::Allow,
+            ..sigil_kernel::ExternalDirectoryConfig::default()
+        },
+        ..PermissionConfig::default()
+    };
+    let profile = PermissionConfig {
+        external_directory: sigil_kernel::ExternalDirectoryConfig {
+            enabled: true,
+            default_mode: ApprovalMode::Allow,
+            rules: vec![sigil_kernel::ExternalDirectoryRule {
+                path_glob: format!("{}/allowed/**", external_root.display()),
+                mode: ApprovalMode::Allow,
+            }],
+        },
+        ..PermissionConfig::default()
+    };
+
+    let effective = super::effective_child_permission_config(&parent, &role, &profile);
+    let decision = PermissionPolicy::new(&effective).decide(
+        &permission_test_spec(ToolAccess::Read),
+        "read_file",
+        vec![ToolSubject::path_with_scope(
+            external_path.display().to_string(),
+            external_path.display().to_string(),
+            Some(external_path),
+            sigil_kernel::ToolSubjectScope::External,
+        )],
+    )?;
+
+    assert_eq!(decision.mode, ApprovalMode::Deny);
+    Ok(())
 }
 
 impl EventHandler for RecordingEventHandler {
@@ -2475,8 +2724,9 @@ fn root_config() -> RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
+        storage: Default::default(),
         session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+            log_dir: Some(".sigil/sessions".to_owned()),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
@@ -2512,6 +2762,7 @@ fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
+        permission_context: sigil_kernel::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig { enabled: false },
         compaction_config: CompactionConfig::default(),
     }

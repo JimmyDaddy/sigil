@@ -26,7 +26,7 @@ use tokio::{
     time::{Duration, sleep, timeout},
 };
 
-const TERMINAL_TASK_ARTIFACT_ROOT: &str = ".sigil/tasks";
+pub const TERMINAL_TASK_ARTIFACT_ROOT: &str = "state/artifacts/tasks";
 const TERMINAL_TASK_META_FILE: &str = "meta.json";
 const TERMINAL_TASK_OUTPUT_FILE: &str = "output.log";
 const TERMINAL_TASK_STDOUT_FILE: &str = "stdout.log";
@@ -103,6 +103,7 @@ pub struct TerminalStartRequest {
     pub command: String,
     pub cwd: Option<PathBuf>,
     pub shell: Option<String>,
+    pub env: BTreeMap<String, String>,
 }
 
 impl TerminalStartRequest {
@@ -159,6 +160,15 @@ pub struct TerminalInputResult {
     pub backend: TerminalBackendKind,
 }
 
+/// Synchronous permission context for a live terminal task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalTaskPermissionContext {
+    pub task_id: TerminalTaskId,
+    pub command: String,
+    pub cwd: PathBuf,
+    pub shell: String,
+}
+
 /// Result for a terminal task resize operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -171,7 +181,10 @@ pub struct TerminalResizeResult {
 #[derive(Clone)]
 pub struct TerminalProcessManager {
     workspace_root: PathBuf,
+    artifact_root: PathBuf,
+    artifact_label_root: PathBuf,
     tasks: Arc<Mutex<BTreeMap<TerminalTaskId, ManagedTerminalTask>>>,
+    permission_contexts: Arc<StdMutex<BTreeMap<TerminalTaskId, TerminalTaskPermissionContext>>>,
     next_counter: Arc<AtomicU64>,
     preview_limit_bytes: usize,
     cancel_grace: Duration,
@@ -184,9 +197,34 @@ impl TerminalProcessManager {
     ///
     /// Returns an error when the workspace root cannot be canonicalized.
     pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self> {
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
+        Self::new_with_artifact_root(
+            &workspace_root,
+            workspace_root.join(TERMINAL_TASK_ARTIFACT_ROOT),
+            PathBuf::from(TERMINAL_TASK_ARTIFACT_ROOT),
+        )
+    }
+
+    /// Creates a non-PTY process manager rooted at an injected artifact directory.
+    ///
+    /// `artifact_label_root` is stored in model-visible task metadata instead of the absolute
+    /// machine-local artifact root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workspace root cannot be canonicalized.
+    pub fn new_with_artifact_root(
+        workspace_root: impl AsRef<Path>,
+        artifact_root: impl AsRef<Path>,
+        artifact_label_root: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         Ok(Self {
-            workspace_root: canonical_workspace_root(workspace_root.as_ref())?,
+            artifact_root: absolute_path_from(&workspace_root, artifact_root.as_ref()),
+            artifact_label_root: artifact_label_root.into(),
+            workspace_root,
             tasks: Arc::new(Mutex::new(BTreeMap::new())),
+            permission_contexts: Arc::new(StdMutex::new(BTreeMap::new())),
             next_counter: Arc::new(AtomicU64::new(1)),
             preview_limit_bytes: DEFAULT_TERMINAL_PREVIEW_LIMIT_BYTES,
             cancel_grace: Duration::from_millis(DEFAULT_CANCEL_GRACE_MS),
@@ -217,6 +255,7 @@ impl TerminalProcessManager {
             .arg("-lc")
             .arg(&plan.command)
             .current_dir(&plan.resolved_cwd.absolute)
+            .envs(&plan.env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -250,6 +289,7 @@ impl TerminalProcessManager {
             .lock()
             .await
             .insert(plan.task_id.clone(), managed);
+        self.record_permission_context(&plan)?;
         tokio::spawn(run_terminal_worker(TerminalWorker {
             child,
             process_id,
@@ -297,6 +337,7 @@ impl TerminalProcessManager {
             .lock()
             .await
             .insert(plan.task_id.clone(), managed);
+        self.record_permission_context(&plan)?;
         tokio::spawn(run_pty_worker(PtyWorker {
             summary,
             artifacts: plan.artifacts,
@@ -330,7 +371,7 @@ impl TerminalProcessManager {
     ) -> Result<TerminalReadResult> {
         let task = self.managed_task(task_id).await?;
         let entry = task.summary.lock().await.clone();
-        let path = self.workspace_artifact_path(&entry.handle.log_path)?;
+        let path = self.stored_artifact_path(&entry.handle.log_path)?;
         read_terminal_output_log(task_id.clone(), &path, offset, limit_bytes.max(1)).await
     }
 
@@ -468,24 +509,47 @@ impl TerminalProcessManager {
     }
 
     pub fn artifacts_for(&self, task_id: &TerminalTaskId) -> Result<TerminalTaskArtifacts> {
-        let relative_dir = PathBuf::from(TERMINAL_TASK_ARTIFACT_ROOT).join(task_id.as_str());
+        let relative_dir = self.artifact_label_root.join(task_id.as_str());
         let relative_meta = relative_dir.join(TERMINAL_TASK_META_FILE);
         let relative_output = relative_dir.join(TERMINAL_TASK_OUTPUT_FILE);
         let relative_stdout = relative_dir.join(TERMINAL_TASK_STDOUT_FILE);
         let relative_stderr = relative_dir.join(TERMINAL_TASK_STDERR_FILE);
+        let absolute_dir = self.artifact_root.join(task_id.as_str());
         Ok(TerminalTaskArtifacts {
             task_id: task_id.clone(),
-            absolute_dir: self.workspace_artifact_path(&relative_dir)?,
-            absolute_meta: self.workspace_artifact_path(&relative_meta)?,
-            absolute_output: self.workspace_artifact_path(&relative_output)?,
-            absolute_stdout: self.workspace_artifact_path(&relative_stdout)?,
-            absolute_stderr: self.workspace_artifact_path(&relative_stderr)?,
+            absolute_meta: absolute_dir.join(TERMINAL_TASK_META_FILE),
+            absolute_output: absolute_dir.join(TERMINAL_TASK_OUTPUT_FILE),
+            absolute_stdout: absolute_dir.join(TERMINAL_TASK_STDOUT_FILE),
+            absolute_stderr: absolute_dir.join(TERMINAL_TASK_STDERR_FILE),
+            absolute_dir,
             relative_dir,
             relative_meta,
             relative_output,
             relative_stdout,
             relative_stderr,
         })
+    }
+
+    /// Returns the permission context for a live terminal task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task is not known to this process manager.
+    pub fn permission_context(
+        &self,
+        task_id: &TerminalTaskId,
+    ) -> Result<TerminalTaskPermissionContext> {
+        self.permission_contexts
+            .lock()
+            .map_err(|_| anyhow!("terminal permission context lock poisoned"))?
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "terminal task permission context is unavailable: {}",
+                    task_id.as_str()
+                )
+            })
     }
 
     async fn managed_task(&self, task_id: &TerminalTaskId) -> Result<ManagedTerminalTask> {
@@ -497,18 +561,28 @@ impl TerminalProcessManager {
             .ok_or_else(|| anyhow!("unknown terminal task: {}", task_id.as_str()))
     }
 
-    fn workspace_artifact_path(&self, relative_path: &Path) -> Result<PathBuf> {
+    fn stored_artifact_path(&self, relative_path: &Path) -> Result<PathBuf> {
         if relative_path.is_absolute() {
             bail!(
-                "terminal artifact path must be workspace-relative: {}",
+                "terminal artifact path must be relative: {}",
                 relative_path.display()
             );
         }
-        let lexical = lexically_normalize_path(&self.workspace_root.join(relative_path))?;
+        let suffix = relative_path
+            .strip_prefix(&self.artifact_label_root)
+            .map_err(|_| {
+                anyhow!(
+                    "terminal artifact path has unknown label: {}",
+                    relative_path.display()
+                )
+            })?;
+        let lexical = lexically_normalize_path(&self.artifact_root.join(suffix))?;
         let resolved_prefix = resolve_existing_prefix(&lexical)?;
-        if !resolved_prefix.starts_with(&self.workspace_root) {
+        if !resolved_prefix.starts_with(&self.artifact_root)
+            && !resolved_prefix.starts_with(&self.workspace_root)
+        {
             bail!(
-                "terminal artifact path is outside workspace: {}",
+                "terminal artifact path is outside artifact root: {}",
                 relative_path.display()
             );
         }
@@ -518,6 +592,22 @@ impl TerminalProcessManager {
     fn next_task_id(&self, created_at_ms: u64) -> Result<TerminalTaskId> {
         let counter = self.next_counter.fetch_add(1, Ordering::Relaxed);
         TerminalTaskId::new(format!("terminal-{created_at_ms}-{counter}"))
+    }
+
+    fn record_permission_context(&self, plan: &TerminalTaskStartPlan) -> Result<()> {
+        self.permission_contexts
+            .lock()
+            .map_err(|_| anyhow!("terminal permission context lock poisoned"))?
+            .insert(
+                plan.task_id.clone(),
+                TerminalTaskPermissionContext {
+                    task_id: plan.task_id.clone(),
+                    command: plan.command.clone(),
+                    cwd: plan.resolved_cwd.absolute.clone(),
+                    shell: plan.shell.clone(),
+                },
+            );
+        Ok(())
     }
 
     async fn prepare_start(&self, request: TerminalStartRequest) -> Result<TerminalTaskStartPlan> {
@@ -569,6 +659,7 @@ impl TerminalProcessManager {
             task_id,
             command,
             shell,
+            env: request.env,
             artifacts,
             resolved_cwd,
             initial_entry,
@@ -607,6 +698,7 @@ struct TerminalTaskStartPlan {
     task_id: TerminalTaskId,
     command: String,
     shell: String,
+    env: BTreeMap<String, String>,
     artifacts: TerminalTaskArtifacts,
     resolved_cwd: ResolvedTerminalCwd,
     initial_entry: TerminalTaskEntry,
@@ -677,6 +769,9 @@ fn spawn_pty_runtime(plan: &TerminalTaskStartPlan, size: TerminalPtySize) -> Res
     command.arg("-lc");
     command.arg(&plan.command);
     command.cwd(&plan.resolved_cwd.absolute);
+    for (key, value) in &plan.env {
+        command.env(key, value);
+    }
     let mut child = slave
         .spawn_command(command)
         .with_context(|| format!("failed to start terminal pty command: {}", plan.command))?;
@@ -1278,6 +1373,14 @@ fn canonical_workspace_root(workspace_root: &Path) -> Result<PathBuf> {
             workspace_root.display()
         )
     })
+}
+
+fn absolute_path_from(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
 }
 
 fn lexically_normalize_path(path: &Path) -> Result<PathBuf> {

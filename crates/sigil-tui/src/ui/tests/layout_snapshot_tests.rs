@@ -26,8 +26,9 @@ fn test_config() -> RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
+        storage: Default::default(),
         session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+            log_dir: Some(".sigil/sessions".to_owned()),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
@@ -148,6 +149,11 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
             preview: ToolPreviewCapability::Optional,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     });
     let approval = LayoutSnapshot::from_app(Rect::new(0, 0, 120, 20), &approval_app);
@@ -252,6 +258,11 @@ fn layout_snapshot_hits_approval_file_rows_and_actions() {
             preview: ToolPreviewCapability::Optional,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: Some(sigil_kernel::ToolPreview {
             title: "Update files".to_owned(),
             summary: "summary".to_owned(),
@@ -514,6 +525,11 @@ fn visible_timeline_rows_keeps_one_row_when_status_band_is_tight() -> anyhow::Re
             preview: ToolPreviewCapability::Optional,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     });
 

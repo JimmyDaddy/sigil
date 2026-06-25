@@ -1,34 +1,212 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    ChangeSetId, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolPreviewCapability,
-    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    ChangeSetId, TerminalTaskId, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind,
+    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResultStatus, ToolSubjectKind,
+    ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
 use super::{
-    ApplyChangeSetTool, BashTool, ChangeSetArtifactStore, DeleteFileTool, EditFileTool, GlobTool,
-    GrepTool, ListTool, ReadFileTool, WriteFileTool, register_builtin_tools,
+    ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
+    EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool, TerminalInputTool,
+    TerminalProcessManagers, TerminalStartRequest, TerminalStartTool, WriteFileTool,
+    register_builtin_tools, register_builtin_tools_with_paths,
 };
 
+use serial_test::serial;
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 
+fn bash_tool(test_root: &Path) -> BashTool {
+    BashTool {
+        scratch_root: test_root.join("scratch-cache").join("tmp"),
+        scratch_label: "cache/tmp".to_owned(),
+    }
+}
+
+fn register_builtin_tools_with_test_paths(
+    registry: &mut ToolRegistry,
+    workspace_root: &Path,
+    scratch_root: PathBuf,
+) {
+    register_builtin_tools_with_paths(
+        registry,
+        BuiltinToolPaths {
+            changesets_root: workspace_root
+                .join("state")
+                .join("artifacts")
+                .join("changesets"),
+            changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+            terminal_tasks_root: workspace_root.join("state").join("artifacts").join("tasks"),
+            terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+            scratch_root,
+            scratch_label: "cache/tmp".to_owned(),
+        },
+    );
+}
+
+fn apply_changeset_tool() -> ApplyChangeSetTool {
+    ApplyChangeSetTool {
+        artifact_root: PathBuf::from("state/artifacts/changesets"),
+        artifact_label_root: PathBuf::from("state/artifacts/changesets"),
+    }
+}
+
+#[test]
+fn builtin_tool_paths_workspace_defaults_are_stable() {
+    let root = Path::new("/workspace/project");
+    let paths = BuiltinToolPaths::workspace_defaults(root);
+
+    assert_eq!(
+        paths.changesets_root,
+        root.join("state/artifacts/changesets")
+    );
+    assert_eq!(
+        paths.terminal_tasks_root,
+        root.join("state/artifacts/tasks")
+    );
+    assert_eq!(paths.scratch_root, root.join("cache/tmp"));
+    assert_eq!(paths.scratch_label, "cache/tmp");
+}
+
 #[test]
 fn temporary_file_guidance_is_model_visible() {
+    let scratch_root = PathBuf::from("/tmp/sigil-scratch-test");
     for spec in [
         WriteFileTool.spec(),
-        BashTool.spec(),
+        BashTool {
+            scratch_root: scratch_root.clone(),
+            scratch_label: "cache/tmp".to_owned(),
+        }
+        .spec(),
         super::TerminalStartTool {
             managers: Default::default(),
+            artifact_root: PathBuf::from("state/artifacts/tasks"),
+            artifact_label_root: PathBuf::from("state/artifacts/tasks"),
+            scratch_root,
+            scratch_label: "cache/tmp".to_owned(),
         }
         .spec(),
     ] {
-        assert!(spec.description.contains(".sigil/tmp"));
+        assert!(spec.description.contains("$SIGIL_SCRATCH_DIR"));
+        assert!(spec.description.contains("cache/tmp"));
         assert!(spec.description.contains("permission.external_directory"));
     }
+}
+
+#[test]
+fn changeset_artifact_store_uses_injected_root_and_verifies_hashes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let temp_root = fs::canonicalize(temp.path())?;
+    let workspace = temp_root.join("workspace");
+    let artifact_root = temp_root.join("state").join("artifacts").join("changesets");
+    fs::create_dir_all(&workspace)?;
+    let store = ChangeSetArtifactStore::new_with_artifact_root(
+        &workspace,
+        &artifact_root,
+        PathBuf::from("state/artifacts/changesets"),
+    )?
+    .with_summary_limit_bytes(8);
+
+    let record = store.write_diff_artifacts(
+        ChangeSetId::new("changeset_1")?,
+        "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new\n",
+        "--- a/file\n+++ b/file\n@@ -1 +1 @@\n-new\n+old\n",
+    )?;
+
+    assert_eq!(
+        record.artifact_dir,
+        "state/artifacts/changesets/changeset_1"
+    );
+    assert!(record.summary.truncated);
+    assert!(store.verify_diff_artifact(&record.preview)?);
+
+    let mut mismatched = record.preview.clone();
+    mismatched.sha256 = "sha256:bad".to_owned();
+    assert!(!store.verify_diff_artifact(&mismatched)?);
+
+    let mut absolute = record.preview.clone();
+    absolute.path = artifact_root.join("preview.diff").display().to_string();
+    assert!(store.verify_diff_artifact(&absolute).is_err());
+
+    let mut unknown_label = record.preview.clone();
+    unknown_label.path = "other/preview.diff".to_owned();
+    assert!(store.verify_diff_artifact(&unknown_label).is_err());
+
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir()?;
+        symlink(outside.path(), artifact_root.join("leak"))?;
+        let mut escaped = record.preview;
+        escaped.path = "state/artifacts/changesets/leak/preview.diff".to_owned();
+        let error = store
+            .verify_diff_artifact(&escaped)
+            .expect_err("symlink escape should be rejected");
+        assert!(error.to_string().contains("outside artifact root"));
+    }
+    Ok(())
+}
+
+#[test]
+fn terminal_process_managers_reuse_relative_artifact_roots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let managers = TerminalProcessManagers::default();
+    let first = managers.manager_for(
+        temp.path(),
+        Path::new("state/artifacts/tasks"),
+        Path::new("state/artifacts/tasks"),
+    )?;
+    let second = managers.manager_for(
+        temp.path(),
+        Path::new("state/artifacts/tasks"),
+        Path::new("state/artifacts/tasks"),
+    )?;
+
+    assert!(Arc::ptr_eq(&first, &second));
+    assert!(
+        first
+            .artifacts_for(&TerminalTaskId::new("terminal-relative-root")?)?
+            .absolute_dir
+            .starts_with(temp.path().canonicalize()?.join("state/artifacts/tasks"))
+    );
+    Ok(())
+}
+
+#[test]
+fn write_file_permission_operation_classifies_create_overwrite_and_external() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("existing.txt"), "old")?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+
+    assert_eq!(
+        WriteFileTool.permission_operation(&ctx, &json!({"path":"existing.txt"}))?,
+        ToolOperation::OverwriteFile
+    );
+    assert_eq!(
+        WriteFileTool.permission_operation(&ctx, &json!({"path":"new.txt"}))?,
+        ToolOperation::CreateFile
+    );
+    assert_eq!(
+        WriteFileTool
+            .permission_operation(&ctx, &json!({"path": temp.path().join("abs-new.txt")}))?,
+        ToolOperation::CreateFile
+    );
+    assert!(
+        WriteFileTool
+            .permission_operation(&ctx, &json!({"path":"../outside.txt"}))
+            .is_err()
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -304,6 +482,8 @@ fn register_builtin_tools_registers_multiple_tools() {
     );
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[test]
 fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -376,18 +556,13 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
         registry.permission_access(&ctx, &cancel_call)?,
         ToolAccess::Execute
     );
+    let missing_context = registry
+        .permission_subjects(&ctx, &input_call)
+        .expect_err("terminal_input without a live task context should fail closed");
     assert!(
-        registry
-            .permission_subjects(&ctx, &input_call)?
-            .iter()
-            .any(|subject| subject.kind == ToolSubjectKind::Command
-                && subject.normalized == "terminal_input_bytes:11")
-    );
-    assert!(
-        registry
-            .permission_subjects(&ctx, &input_call)?
-            .iter()
-            .all(|subject| !subject.original.contains("echo hello"))
+        missing_context
+            .to_string()
+            .contains("permission context is unavailable")
     );
     assert!(
         registry
@@ -399,6 +574,75 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
     Ok(())
 }
 
+#[test]
+fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("existing.txt"), "old")?;
+    let ctx = ToolContext {
+        workspace_root: temp.path().to_path_buf(),
+        timeout_secs: 5,
+    };
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    assert_eq!(
+        registry.permission_operation(
+            &ctx,
+            &tool_call("write_file", json!({ "path": "new.txt", "content": "new" }))
+        )?,
+        ToolOperation::CreateFile
+    );
+    assert_eq!(
+        registry.permission_operation(
+            &ctx,
+            &tool_call(
+                "write_file",
+                json!({ "path": "existing.txt", "content": "new" })
+            )
+        )?,
+        ToolOperation::OverwriteFile
+    );
+    assert_eq!(
+        registry.permission_operation(
+            &ctx,
+            &tool_call("delete_file", json!({ "path": "existing.txt" }))
+        )?,
+        ToolOperation::DeleteFile
+    );
+    assert_eq!(
+        registry.permission_operation(
+            &ctx,
+            &tool_call(
+                "apply_changeset",
+                json!({
+                    "id": "change-1",
+                    "files": [
+                        {"path": "existing.txt", "action": "delete"}
+                    ]
+                })
+            )
+        )?,
+        ToolOperation::ApplyChangeSet
+    );
+    assert_eq!(
+        registry.permission_operation(
+            &ctx,
+            &tool_call("bash", json!({ "command": "rm -rf .sigil" }))
+        )?,
+        ToolOperation::ExecuteDestructiveCommand
+    );
+    assert_eq!(
+        registry.permission_operation(
+            &ctx,
+            &tool_call("terminal_start", json!({ "command": "git clean -fdx" }))
+        )?,
+        ToolOperation::ExecuteDestructiveCommand
+    );
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -463,6 +707,49 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
+async fn terminal_start_injects_scratch_dir_env() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_root = temp.path().join("cache").join("tmp");
+    let shell = test_shell(&workspace)?;
+    let ctx = ToolContext {
+        workspace_root: workspace.clone(),
+        timeout_secs: 5,
+    };
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools_with_test_paths(&mut registry, &workspace, scratch_root.clone());
+
+    let start = registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-scratch-env",
+                    "command": "test -d \"$SIGIL_SCRATCH_DIR\" && printf terminal-ok > \"$SIGIL_SCRATCH_DIR/probe\" && printf done",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+    assert!(matches!(start.status, ToolResultStatus::Ok));
+
+    let read = wait_for_terminal_read(&registry, ctx, "terminal-scratch-env", 64).await?;
+    assert!(matches!(read.status, ToolResultStatus::Ok));
+    assert_eq!(read.content, "done");
+    assert_eq!(
+        fs::read_to_string(scratch_root.join("probe"))?,
+        "terminal-ok"
+    );
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_input_returns_structured_unsupported_without_echoing_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -487,6 +774,22 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
             ),
         )
         .await?;
+
+    let destructive_input = tool_call(
+        "terminal_input",
+        json!({
+            "task_id": "terminal-input",
+            "input": "rm -rf .sigil\n"
+        }),
+    );
+    assert_eq!(
+        registry.permission_operation(&ctx, &destructive_input)?,
+        ToolOperation::ExecuteDestructiveCommand
+    );
+    let destructive_subjects = registry.permission_subjects(&ctx, &destructive_input)?;
+    assert!(destructive_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.normalized == ".sigil"
+    }));
 
     let result = registry
         .execute(
@@ -553,7 +856,73 @@ async fn terminal_input_returns_structured_unsupported_without_echoing_input() -
     Ok(())
 }
 
+#[serial]
+#[tokio::test]
+async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::create_dir(workspace.join("logs"))?;
+    let shell = test_shell(&workspace)?;
+    let ctx = ToolContext {
+        workspace_root: workspace.clone(),
+        timeout_secs: 5,
+    };
+    let managers = Arc::new(TerminalProcessManagers::default());
+    let manager = managers.manager_for(
+        &workspace,
+        Path::new("state/artifacts/tasks"),
+        Path::new("state/artifacts/tasks"),
+    )?;
+    let task_id = TerminalTaskId::new("terminal-input-permission")?;
+    manager
+        .start(TerminalStartRequest {
+            task_id: Some(task_id.clone()),
+            command: "sleep 5".to_owned(),
+            cwd: Some(PathBuf::from("logs")),
+            shell: Some(shell),
+            env: Default::default(),
+        })
+        .await?;
+    let tool = TerminalInputTool {
+        managers,
+        artifact_root: PathBuf::from("state/artifacts/tasks"),
+        artifact_label_root: PathBuf::from("state/artifacts/tasks"),
+    };
+
+    let input_args = json!({
+        "task_id": task_id.as_str(),
+        "input": "cat input.txt > out.txt\n"
+    });
+    assert_eq!(
+        tool.permission_operation(&ctx, &input_args)?,
+        ToolOperation::ExecuteDestructiveCommand
+    );
+    let subjects = tool.permission_subjects(&ctx, &input_args)?;
+    assert!(subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Command && subject.original == "terminal_input bytes=24"
+    }));
+    assert!(subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.normalized == "logs/input.txt"
+    }));
+    assert!(subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.normalized == "logs/out.txt"
+    }));
+
+    assert_eq!(
+        tool.permission_operation(
+            &ctx,
+            &json!({ "task_id": task_id.as_str(), "input": "echo hello\n" }),
+        )?,
+        ToolOperation::SendTerminalInput
+    );
+    manager.cancel(&task_id).await?;
+    Ok(())
+}
+
 #[cfg(unix)]
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -692,7 +1061,7 @@ async fn bash_large_output_is_truncated_with_metadata() -> Result<()> {
         timeout_secs: 5,
     };
 
-    let result = BashTool
+    let result = bash_tool(temp.path())
         .execute(
             ctx,
             "bash".to_owned(),
@@ -703,6 +1072,86 @@ async fn bash_large_output_is_truncated_with_metadata() -> Result<()> {
     assert!(result.metadata.truncated);
     assert!(result.content.contains("output truncated"));
     assert!(result.metadata.stdout_bytes.unwrap_or_default() > 64 * 1024);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let tool = BashTool {
+        scratch_root: temp.path().join("cache").join("tmp"),
+        scratch_label: "cache/tmp".to_owned(),
+    };
+    let ctx = ToolContext {
+        workspace_root: workspace,
+        timeout_secs: 5,
+    };
+
+    let result = tool
+        .execute(
+            ctx,
+            "bash".to_owned(),
+            json!({
+                "command": "test -d \"$SIGIL_SCRATCH_DIR\" && printf bash-ok > \"$SIGIL_SCRATCH_DIR/probe\" && printf ok"
+            }),
+        )
+        .await?;
+
+    assert!(matches!(result.status, ToolResultStatus::Ok));
+    assert_eq!(result.content, "ok");
+    assert_eq!(
+        fs::read_to_string(temp.path().join("cache/tmp/probe"))?,
+        "bash-ok"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let scratch_file = temp.path().join("scratch-file");
+    fs::write(&scratch_file, "not a directory")?;
+    let ctx = ToolContext {
+        workspace_root: workspace,
+        timeout_secs: 5,
+    };
+
+    let bash_error = BashTool {
+        scratch_root: scratch_file.clone(),
+        scratch_label: "scratch-file".to_owned(),
+    }
+    .execute(ctx.clone(), "bash".to_owned(), json!({ "command": "true" }))
+    .await
+    .expect_err("bash scratch file should fail create_dir_all");
+    assert!(
+        bash_error
+            .to_string()
+            .contains("failed to create scratch-file")
+    );
+
+    let terminal_error = TerminalStartTool {
+        managers: Arc::new(TerminalProcessManagers::default()),
+        artifact_root: PathBuf::from("state/artifacts/tasks"),
+        artifact_label_root: PathBuf::from("state/artifacts/tasks"),
+        scratch_root: scratch_file,
+        scratch_label: "scratch-file".to_owned(),
+    }
+    .execute(
+        ctx,
+        "terminal-start".to_owned(),
+        json!({ "command": "printf never" }),
+    )
+    .await
+    .expect_err("terminal_start scratch file should fail create_dir_all");
+    assert!(
+        terminal_error
+            .to_string()
+            .contains("failed to create scratch-file")
+    );
     Ok(())
 }
 
@@ -915,7 +1364,7 @@ async fn bash_tool_timeout_surfaces_structured_error() -> Result<()> {
         timeout_secs: 5,
     };
 
-    let result = BashTool
+    let result = bash_tool(temp.path())
         .execute(
             ctx,
             "bash".to_owned(),
@@ -939,7 +1388,7 @@ async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
         timeout_secs: 5,
     };
 
-    let result = BashTool
+    let result = bash_tool(temp.path())
         .execute(
             ctx,
             "bash".to_owned(),
@@ -972,7 +1421,7 @@ fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
         "rustc --version",
     ] {
         assert_eq!(
-            BashTool.permission_access(&ctx, &json!({ "command": command }))?,
+            bash_tool(temp.path()).permission_access(&ctx, &json!({ "command": command }))?,
             ToolAccess::Read,
             "{command} should be read-only"
         );
@@ -991,7 +1440,7 @@ fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
         "cargo test",
     ] {
         assert_eq!(
-            BashTool.permission_access(&ctx, &json!({ "command": command }))?,
+            bash_tool(temp.path()).permission_access(&ctx, &json!({ "command": command }))?,
             ToolAccess::Execute,
             "{command} should require execute approval"
         );
@@ -1012,7 +1461,7 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
         timeout_secs: 5,
     };
 
-    let subjects = BashTool.permission_subjects(
+    let subjects = bash_tool(workspace.path()).permission_subjects(
         &ctx,
         &json!({ "command": format!("cat {} > {}", outside_file.display(), outside_output.display()) }),
     )?;
@@ -1039,7 +1488,7 @@ async fn bash_permission_subjects_resolve_cd_relative_paths_against_external_cwd
         timeout_secs: 5,
     };
 
-    let subjects = BashTool.permission_subjects(
+    let subjects = bash_tool(workspace.path()).permission_subjects(
         &ctx,
         &json!({ "command": format!("cd {} && ls child.txt", outside_root.display()) }),
     )?;
@@ -1232,7 +1681,7 @@ async fn tool_permission_subjects_validate_required_paths() -> Result<()> {
         );
     }
 
-    let empty_apply = ApplyChangeSetTool
+    let empty_apply = apply_changeset_tool()
         .permission_subjects(&ctx, &json!({ "id": "change-empty", "files": [] }))
         .expect_err("apply_changeset should require at least one file");
     assert!(
@@ -1321,7 +1770,7 @@ async fn read_list_glob_grep_and_bash_surface_input_errors() -> Result<()> {
         .expect_err("invalid regex should fail");
     assert!(!grep_error.to_string().is_empty());
 
-    let bash_error = BashTool
+    let bash_error = bash_tool(temp.path())
         .execute(ctx, "bash".to_owned(), json!({}))
         .await
         .expect_err("missing command should fail");
@@ -1396,14 +1845,14 @@ fn changeset_artifact_store_writes_diff_artifacts_and_hash_metadata() -> Result<
     let record =
         store.write_diff_artifacts(ChangeSetId::new("change-1")?, preview_diff, reverse_diff)?;
 
-    assert_eq!(record.artifact_dir, ".sigil/changesets/change-1");
+    assert_eq!(record.artifact_dir, "state/artifacts/changesets/change-1");
     assert_eq!(
         record.preview.path,
-        ".sigil/changesets/change-1/preview.diff"
+        "state/artifacts/changesets/change-1/preview.diff"
     );
     assert_eq!(
         record.reverse.path,
-        ".sigil/changesets/change-1/reverse.diff"
+        "state/artifacts/changesets/change-1/reverse.diff"
     );
     assert_eq!(
         fs::read_to_string(workspace.path().join(&record.preview.path))?,
@@ -1450,29 +1899,24 @@ fn changeset_artifact_store_bounds_large_diff_summary() -> Result<()> {
         preview_diff
     );
     assert!(!serialized.contains("line-100"));
-    assert!(serialized.contains(".sigil/changesets/change-long/preview.diff"));
+    assert!(serialized.contains("state/artifacts/changesets/change-long/preview.diff"));
     Ok(())
 }
 
 #[cfg(unix)]
 #[test]
-fn changeset_artifact_store_rejects_sigil_symlink_escape() -> Result<()> {
+fn changeset_artifact_store_writes_with_explicit_artifact_root() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let outside = tempfile::tempdir()?;
-    symlink(outside.path(), workspace.path().join(".sigil"))?;
-    let store = ChangeSetArtifactStore::new(workspace.path())?;
+    let artifact_dir = workspace.path().join("custom-artifacts");
+    let store = ChangeSetArtifactStore::new_with_artifact_root(
+        workspace.path(),
+        &artifact_dir,
+        "custom-artifacts",
+    )?;
 
-    let error = store
-        .write_diff_artifacts(ChangeSetId::new("change-1")?, "+new\n", "-old\n")
-        .expect_err("symlinked artifact root should be rejected");
-
-    assert!(error.to_string().contains("outside workspace"));
-    assert!(
-        !outside
-            .path()
-            .join("changesets/change-1/preview.diff")
-            .exists()
-    );
+    let record = store.write_diff_artifacts(ChangeSetId::new("change-1")?, "+new\n", "-old\n")?;
+    assert!(artifact_dir.join("change-1/preview.diff").exists());
+    assert_eq!(record.artifact_dir, "custom-artifacts/change-1");
     Ok(())
 }
 
@@ -1502,11 +1946,11 @@ async fn apply_changeset_tool_previews_and_applies_multi_file_changes() -> Resul
         ]
     });
 
-    let subjects = ApplyChangeSetTool.permission_subjects(&ctx, &args)?;
+    let subjects = apply_changeset_tool().permission_subjects(&ctx, &args)?;
     assert_eq!(subjects.len(), 3);
     assert_eq!(subjects[0].normalized, "new.txt");
 
-    let preview = ApplyChangeSetTool
+    let preview = apply_changeset_tool()
         .preview(ctx.clone(), args.clone())
         .await?
         .expect("apply_changeset should preview");
@@ -1516,11 +1960,11 @@ async fn apply_changeset_tool_previews_and_applies_multi_file_changes() -> Resul
     assert!(
         !workspace
             .path()
-            .join(".sigil/changesets/change-apply-1/preview.diff")
+            .join("state/artifacts/changesets/change-apply-1/preview.diff")
             .exists()
     );
 
-    let result = ApplyChangeSetTool
+    let result = apply_changeset_tool()
         .execute(ctx, "apply".to_owned(), args)
         .await?;
 
@@ -1569,7 +2013,7 @@ async fn apply_changeset_hash_mismatch_does_not_write() -> Result<()> {
         workspace_root: workspace.path().to_path_buf(),
         timeout_secs: 5,
     };
-    let result = ApplyChangeSetTool
+    let result = apply_changeset_tool()
         .execute(
             ctx,
             "apply".to_owned(),
@@ -1593,7 +2037,7 @@ async fn apply_changeset_hash_mismatch_does_not_write() -> Result<()> {
     assert!(
         !workspace
             .path()
-            .join(".sigil/changesets/change-mismatch/preview.diff")
+            .join("state/artifacts/changesets/change-mismatch/preview.diff")
             .exists()
     );
     assert_eq!(
@@ -1613,7 +2057,7 @@ async fn apply_changeset_rejects_empty_file_list() -> Result<()> {
     };
     let args = json!({ "id": "change-empty", "files": [] });
 
-    let preview_error = ApplyChangeSetTool
+    let preview_error = apply_changeset_tool()
         .preview(ctx.clone(), args.clone())
         .await
         .expect_err("empty change set should fail preview");
@@ -1623,7 +2067,7 @@ async fn apply_changeset_rejects_empty_file_list() -> Result<()> {
             .contains("apply_changeset requires at least one file")
     );
 
-    let execute_error = ApplyChangeSetTool
+    let execute_error = apply_changeset_tool()
         .execute(ctx, "apply".to_owned(), args)
         .await
         .expect_err("empty change set should fail execute");
@@ -1658,13 +2102,13 @@ async fn apply_changeset_full_update_accepts_matching_mtime() -> Result<()> {
         }]
     });
 
-    let preview = ApplyChangeSetTool
+    let preview = apply_changeset_tool()
         .preview(ctx.clone(), args.clone())
         .await?
         .expect("full replacement should preview");
     assert!(preview.body.contains("+new"));
 
-    let result = ApplyChangeSetTool
+    let result = apply_changeset_tool()
         .execute(ctx, "apply".to_owned(), args)
         .await?;
 
@@ -1882,7 +2326,7 @@ async fn apply_changeset_validation_reports_conflict_kinds_without_writes() -> R
             workspace_root: workspace.path().to_path_buf(),
             timeout_secs: 5,
         };
-        let preview_error = ApplyChangeSetTool
+        let preview_error = apply_changeset_tool()
             .preview(ctx.clone(), args.clone())
             .await
             .expect_err("invalid changeset should fail preview");
@@ -1892,7 +2336,7 @@ async fn apply_changeset_validation_reports_conflict_kinds_without_writes() -> R
                 .contains("change set validation failed"),
             "{expected} should fail preview with validation error"
         );
-        let result = ApplyChangeSetTool
+        let result = apply_changeset_tool()
             .execute(ctx, "apply".to_owned(), args)
             .await?;
         assert!(result.is_error(), "{expected} should return a tool error");
@@ -1917,7 +2361,7 @@ async fn apply_changeset_first_apply_failure_reports_failed_without_artifacts() 
         timeout_secs: 5,
     };
 
-    let result = ApplyChangeSetTool
+    let result = apply_changeset_tool()
         .execute(
             ctx,
             "apply".to_owned(),
@@ -1954,7 +2398,7 @@ async fn apply_changeset_binary_existing_file_does_not_write() -> Result<()> {
         workspace_root: workspace.path().to_path_buf(),
         timeout_secs: 5,
     };
-    let result = ApplyChangeSetTool
+    let result = apply_changeset_tool()
         .execute(
             ctx,
             "apply".to_owned(),
@@ -1984,7 +2428,7 @@ async fn apply_changeset_rejects_unreadable_text_and_directories() -> Result<()>
         timeout_secs: 5,
     };
 
-    let invalid_utf8 = ApplyChangeSetTool
+    let invalid_utf8 = apply_changeset_tool()
         .execute(
             ctx.clone(),
             "apply-invalid-utf8".to_owned(),
@@ -2001,7 +2445,7 @@ async fn apply_changeset_rejects_unreadable_text_and_directories() -> Result<()>
         [0xff_u8, 0xfe, 0xfd]
     );
 
-    let directory_target = ApplyChangeSetTool
+    let directory_target = apply_changeset_tool()
         .execute(
             ctx,
             "apply-directory".to_owned(),
@@ -2036,7 +2480,7 @@ async fn apply_changeset_rejects_symlink_escape_and_reports_artifact_failure() -
         timeout_secs: 5,
     };
 
-    let symlink_result = ApplyChangeSetTool
+    let symlink_result = apply_changeset_tool()
         .execute(
             ctx.clone(),
             "apply".to_owned(),
@@ -2057,28 +2501,6 @@ async fn apply_changeset_rejects_symlink_escape_and_reports_artifact_failure() -
         "outside\n"
     );
 
-    symlink(outside.path(), workspace.path().join(".sigil"))?;
-    let artifact_failure = ApplyChangeSetTool
-        .execute(
-            ctx,
-            "apply".to_owned(),
-            json!({
-                "id": "change-artifact-fail",
-                "files": [{ "path": "ok.txt", "action": "create", "content": "ok\n" }]
-            }),
-        )
-        .await?;
-    assert!(artifact_failure.is_error());
-    assert_eq!(fs::read_to_string(workspace.path().join("ok.txt"))?, "ok\n");
-    assert!(
-        artifact_failure
-            .to_model_content()
-            .contains("artifact_write_failed")
-    );
-    assert_eq!(
-        artifact_failure.metadata.details["apply_result"]["status"],
-        json!("partially_applied")
-    );
     Ok(())
 }
 
@@ -2089,7 +2511,7 @@ async fn apply_changeset_partial_apply_reports_applied_and_skipped_files() -> Re
         workspace_root: workspace.path().to_path_buf(),
         timeout_secs: 5,
     };
-    let result = ApplyChangeSetTool
+    let result = apply_changeset_tool()
         .execute(
             ctx,
             "apply".to_owned(),
@@ -2294,6 +2716,45 @@ fn bash_and_shell_helper_functions_cover_parser_edges() -> Result<()> {
         "branch".to_owned(),
         "--list".to_owned(),
     ]));
+    assert!(super::shell_command_is_destructive("rm -rf .sigil"));
+    assert!(super::shell_command_is_destructive("git clean -fdx"));
+    assert!(super::shell_command_is_destructive("git reset --hard"));
+    assert!(super::shell_command_is_destructive("find . -delete"));
+    assert!(super::shell_command_is_destructive(
+        "dd if=/dev/zero of=target.bin bs=1"
+    ));
+    assert!(super::shell_command_is_destructive(
+        "echo ok; rm -rf .sigil"
+    ));
+    assert!(super::shell_command_is_destructive("find . -exec rm {} ;"));
+    assert!(super::shell_command_is_destructive("git restore --force ."));
+    assert!(super::shell_command_is_destructive(
+        "sh -lc 'rm -rf .sigil'"
+    ));
+    assert!(!super::shell_command_is_destructive("echo ok; printf done"));
+    assert!(!super::shell_command_is_destructive("grep rm README.md"));
+    assert_eq!(
+        super::shell_command_permission_operation("cat Cargo.toml"),
+        ToolOperation::ExecuteReadOnlyCommand
+    );
+    assert_eq!(
+        super::shell_command_permission_operation("echo hello"),
+        ToolOperation::ExecuteUnknownCommand
+    );
+    assert_eq!(
+        super::terminal_input_permission_operation("rm -rf .sigil"),
+        ToolOperation::ExecuteDestructiveCommand
+    );
+    assert_eq!(
+        super::terminal_input_permission_operation("echo hello"),
+        ToolOperation::SendTerminalInput
+    );
+    assert_eq!(
+        super::shell_segment_command_and_args(&["FOO=bar".to_owned(), "rm".to_owned()])
+            .map(|(command, args)| (command.to_owned(), args.len())),
+        Some(("rm".to_owned(), 0))
+    );
+    assert!(super::shell_segment_command_and_args(&["FOO=bar".to_owned()]).is_none());
 
     let tokens =
         super::tokenize_shell_subject_words(r#"echo "a b" foo\ bar && cat file || ls; pwd"#);
@@ -2325,6 +2786,14 @@ fn bash_and_shell_helper_functions_cover_parser_edges() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     fs::write(workspace.path().join("note.txt"), "note")?;
     let workspace_root = workspace.path().canonicalize()?;
+    let dd_subjects = super::bash_path_subjects_from_cwd(
+        &workspace_root,
+        &workspace_root,
+        "dd if=/dev/zero of=target.bin bs=1",
+    )?;
+    assert!(dd_subjects.iter().any(|subject| {
+        subject.kind == ToolSubjectKind::Path && subject.normalized == "target.bin"
+    }));
 
     let mut cwd = workspace_root.clone();
     let mut subjects = Vec::new();

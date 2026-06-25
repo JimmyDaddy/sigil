@@ -247,8 +247,9 @@ impl AppState {
             return Vec::new();
         };
         let user_config_dir = default_user_config_dir().ok();
-        sigil_runtime::discover_skill_index_with_user_dir(
+        sigil_runtime::discover_skill_index_with_project_assets_root(
             &self.workspace_root,
+            &self.sigil_paths.project_assets_root,
             user_config_dir.as_deref(),
             &root_config.skills,
         )

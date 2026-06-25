@@ -19,8 +19,9 @@ fn test_config() -> RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
+        storage: Default::default(),
         session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+            log_dir: Some(".sigil/sessions".to_owned()),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
@@ -676,6 +677,11 @@ fn footer_hints_track_approval_state() -> anyhow::Result<()> {
             preview: ToolPreviewCapability::None,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::Read,
+        risk: sigil_kernel::PermissionRisk::Low,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     })?;
 
@@ -766,6 +772,11 @@ fn footer_view_model_treats_pending_approval_as_blocking_prompt() -> anyhow::Res
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     })?;
 

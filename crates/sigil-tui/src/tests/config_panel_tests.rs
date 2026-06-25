@@ -3,6 +3,7 @@ use super::*;
 fn test_root_config() -> RootConfig {
     RootConfig {
         workspace: Default::default(),
+        storage: Default::default(),
         session: Default::default(),
         agent: sigil_kernel::AgentConfig {
             provider: "deepseek".to_owned(),
@@ -95,8 +96,9 @@ fn test_plugin(id: &str) -> sigil_kernel::PluginManifestSnapshot {
 
 #[test]
 fn config_section_flow_wraps() {
+    assert_eq!(ConfigSection::Provider.next_flow(), ConfigSection::Storage);
     assert_eq!(
-        ConfigSection::Provider.next_flow(),
+        ConfigSection::Storage.next_flow(),
         ConfigSection::Permissions
     );
     assert_eq!(
@@ -117,6 +119,10 @@ fn config_section_flow_wraps() {
     assert_eq!(ConfigSection::Plugins.next_flow(), ConfigSection::Mcp);
     assert_eq!(ConfigSection::Mcp.next_flow(), ConfigSection::Provider);
     assert_eq!(ConfigSection::Provider.previous_flow(), ConfigSection::Mcp);
+    assert_eq!(
+        ConfigSection::Permissions.previous_flow(),
+        ConfigSection::Storage
+    );
 }
 
 #[test]
@@ -184,6 +190,7 @@ fn compaction_context_field_uses_short_fallback_label() {
 
     let state = ConfigState::from_root_config(&RootConfig {
         workspace: Default::default(),
+        storage: Default::default(),
         session: Default::default(),
         agent: sigil_kernel::AgentConfig {
             provider: "deepseek".to_owned(),
@@ -213,6 +220,7 @@ fn compaction_context_field_uses_short_fallback_label() {
 fn config_rows_do_not_pre_pad_labels() {
     let state = ConfigState::from_root_config(&RootConfig {
         workspace: Default::default(),
+        storage: Default::default(),
         session: Default::default(),
         agent: sigil_kernel::AgentConfig {
             provider: "deepseek".to_owned(),
@@ -246,6 +254,7 @@ fn config_rows_do_not_pre_pad_labels() {
 fn api_key_display_uses_status_without_secret_length() {
     let mut config = RootConfig {
         workspace: Default::default(),
+        storage: Default::default(),
         session: Default::default(),
         agent: sigil_kernel::AgentConfig {
             provider: "deepseek".to_owned(),
@@ -411,14 +420,17 @@ fn default_provider_field_draft_uses_provider_specific_defaults() {
 #[test]
 fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Permissions.summary(), "approval rules");
+    assert_eq!(ConfigSection::Storage.summary(), "local state paths");
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));
-    assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(4));
-    assert_eq!(ConfigSection::Terminal.flow_index(), Some(5));
-    assert_eq!(ConfigSection::Appearance.flow_index(), Some(6));
-    assert_eq!(ConfigSection::Agents.flow_index(), Some(7));
-    assert_eq!(ConfigSection::Skills.flow_index(), Some(8));
-    assert_eq!(ConfigSection::Plugins.flow_index(), Some(9));
-    assert_eq!(ConfigSection::Mcp.flow_index(), Some(10));
+    assert_eq!(ConfigSection::Storage.flow_index(), Some(1));
+    assert_eq!(ConfigSection::CodeIntelligence.flow_index(), Some(5));
+    assert_eq!(ConfigSection::Terminal.flow_index(), Some(6));
+    assert_eq!(ConfigSection::Appearance.flow_index(), Some(7));
+    assert_eq!(ConfigSection::Agents.flow_index(), Some(8));
+    assert_eq!(ConfigSection::Skills.flow_index(), Some(9));
+    assert_eq!(ConfigSection::Plugins.flow_index(), Some(10));
+    assert_eq!(ConfigSection::Mcp.flow_index(), Some(11));
+    assert_eq!(ConfigField::fields_for_section(ConfigSection::Storage), &[]);
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
         &[

@@ -260,6 +260,11 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
     let root_config = RootConfig::load(config_path)?;
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
+    let sigil_paths = sigil_runtime::resolve_sigil_paths(
+        &root_config.storage,
+        &root_config.session,
+        &workspace_root,
+    );
 
     let provider = sigil_runtime::build_provider(&root_config)?;
     let registry = sigil_runtime::build_tool_registry(
@@ -270,10 +275,7 @@ async fn run_command(config_path: &Path, launch_cwd: &Path, prompt: String) -> R
     .await?;
     let agent = Agent::new(provider, registry);
 
-    let session_store = JsonlSessionStore::new(default_session_path(
-        &workspace_root,
-        &root_config.session.log_dir,
-    ))?;
+    let session_store = JsonlSessionStore::new(default_session_path(&sigil_paths.session_log_dir))?;
     let mut session = Session::load_from_store(
         root_config.agent.provider.clone(),
         root_config.agent.model.clone(),
@@ -363,10 +365,8 @@ fn headless_traffic_partition_key(
         .traffic_partition_key
 }
 
-fn default_session_path(workspace_root: &Path, configured_log_dir: &str) -> PathBuf {
-    workspace_root
-        .join(configured_log_dir)
-        .join(format!("session-{}.jsonl", uuid::Uuid::new_v4()))
+fn default_session_path(session_log_dir: &Path) -> PathBuf {
+    session_log_dir.join(format!("session-{}.jsonl", uuid::Uuid::new_v4()))
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -445,6 +445,7 @@ fn render_run_event(event: RunEvent) -> RenderedOutput {
             spec,
             subjects,
             preview,
+            ..
         } => {
             let mut stderr = format!(
                 "[tool:approval] {} ({}) {} {} subjects={}\n",

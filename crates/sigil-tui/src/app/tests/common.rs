@@ -1,6 +1,15 @@
 use super::*;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEST_STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn test_config() -> RootConfig {
+    let storage_id = TEST_STORAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let storage_root = std::env::temp_dir().join(format!(
+        "sigil-tui-test-storage-{}-{storage_id}",
+        std::process::id()
+    ));
     let skills = sigil_kernel::SkillConfig {
         user_skills: false,
         user_agents: false,
@@ -12,9 +21,16 @@ pub(crate) fn test_config() -> RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
-        session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+        storage: sigil_kernel::StorageConfig {
+            state_root: sigil_kernel::StorageRoot::Path(
+                storage_root.join("state").display().to_string(),
+            ),
+            cache_root: sigil_kernel::StorageRoot::Path(
+                storage_root.join("cache").display().to_string(),
+            ),
+            project_assets_root: ".sigil".to_owned(),
         },
+        session: SessionConfig::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
             model: "deepseek-v4-flash".to_owned(),
@@ -32,6 +48,11 @@ pub(crate) fn test_config() -> RootConfig {
         providers: std::collections::BTreeMap::new(),
         mcp_servers: Vec::new(),
     }
+}
+
+pub(crate) fn resolved_session_log_dir(config: &RootConfig, workspace_root: &Path) -> PathBuf {
+    sigil_runtime::resolve_sigil_paths(&config.storage, &config.session, workspace_root)
+        .session_log_dir
 }
 
 pub(crate) fn restored_entries(provider_name: &str, model_name: &str) -> Vec<SessionLogEntry> {
@@ -132,6 +153,11 @@ pub(crate) fn inject_write_file_approval(app: &mut AppState, preview: ToolPrevie
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: Some(preview),
     })
 }

@@ -16,7 +16,8 @@ use crate::{
     config::{CompactionConfig, MemoryConfig},
     event::{EventHandler, RunEvent},
     permission::{
-        ApprovalMode, InteractionMode, PermissionConfig, PermissionDecision, PermissionPolicy,
+        ApprovalMode, InteractionMode, PermissionConfig, PermissionDecision,
+        PermissionEvaluationContext, PermissionPolicy, PermissionRisk,
     },
     provider::{ModelMessage, Provider, ProviderChunk, ProviderContinuationState, ToolCall},
     session::{
@@ -47,6 +48,7 @@ pub struct AgentRunOptions {
     pub traffic_partition_key: Option<String>,
     pub interaction_mode: InteractionMode,
     pub permission_config: PermissionConfig,
+    pub permission_context: PermissionEvaluationContext,
     pub memory_config: MemoryConfig,
     pub compaction_config: CompactionConfig,
 }
@@ -431,7 +433,10 @@ where
             session.append_user_message(ModelMessage::user(message))?;
         }
 
-        let permission_policy = PermissionPolicy::new(&options.permission_config);
+        let permission_policy = PermissionPolicy::new_with_context(
+            &options.permission_config,
+            &options.permission_context,
+        );
         let mut previous_response_handle = session.latest_response_handle(self.provider.name());
         let mut total_tool_calls = 0usize;
         let mut outcome = AgentRunOutcome::default();
@@ -689,6 +694,30 @@ where
                                 continue;
                             }
                         };
+                        let operation = match tools.permission_operation(&tool_ctx, &call) {
+                            Ok(operation) => operation,
+                            Err(error) => {
+                                let mut result = ToolResult::error(
+                                    call.id.clone(),
+                                    call.name.clone(),
+                                    ToolErrorKind::InvalidInput,
+                                    format!("invalid tool arguments for {}: {error}", call.name),
+                                );
+                                attach_tool_call_context(&mut result, &call, &subjects);
+                                append_tool_execution_audit(
+                                    session,
+                                    &call,
+                                    &subjects,
+                                    ToolExecutionStatus::Failed,
+                                    None,
+                                    Some(&result),
+                                )?;
+                                record_tool_run_outcome(&mut outcome, &result);
+                                session.append_tool_message(result.to_model_message())?;
+                                handler.handle(RunEvent::ToolResult(result))?;
+                                continue;
+                            }
+                        };
                         let tool_default_mode = match tools
                             .permission_default_mode(&tool_ctx, &call)
                         {
@@ -715,10 +744,11 @@ where
                                 continue;
                             }
                         };
-                        let decision = permission_policy.decide_with_access_and_default(
+                        let decision = permission_policy.decide_with_operation_and_default(
                             &spec,
                             &call.name,
                             access,
+                            operation,
                             subjects.clone(),
                             tool_default_mode,
                         )?;
@@ -845,8 +875,48 @@ where
                                     call: call.clone(),
                                     spec: spec.clone(),
                                     subjects: decision.subjects.clone(),
+                                    operation: decision.operation,
+                                    risk: decision.risk,
+                                    subject_zones: decision.subject_zones.clone(),
+                                    confirmation: decision.confirmation.clone(),
+                                    snapshot_required: decision.snapshot_required,
                                     preview,
                                 })?;
+                                if let Some(confirmation) = decision.confirmation.as_ref() {
+                                    let reason = format!(
+                                        "tool {} requires typed confirmation ({confirmation:?}) before execution",
+                                        call.name
+                                    );
+                                    append_tool_approval_audit(
+                                        session,
+                                        &call,
+                                        &decision,
+                                        ToolApprovalAuditAction::Resolved,
+                                        Some(ToolApprovalUserDecision::Denied),
+                                        Some(reason.clone()),
+                                        preview_hash,
+                                    )?;
+                                    let mut result = ToolResult::error(
+                                        call.id.clone(),
+                                        call.name.clone(),
+                                        ToolErrorKind::ApprovalRequired,
+                                        reason.clone(),
+                                    );
+                                    attach_tool_call_context(
+                                        &mut result,
+                                        &call,
+                                        &decision.subjects,
+                                    );
+                                    record_tool_run_outcome(&mut outcome, &result);
+                                    session.append_tool_message(result.to_model_message())?;
+                                    handler.handle(RunEvent::ToolApprovalResolved {
+                                        call_id: call.id.clone(),
+                                        approved: false,
+                                        reason: Some(reason),
+                                    })?;
+                                    handler.handle(RunEvent::ToolResult(result))?;
+                                    continue;
+                                }
                                 let approval = approval_handler.approve_tool_call(&call, &spec)?;
                                 match approval {
                                     ToolApproval::Approve => {
@@ -920,7 +990,7 @@ where
                                     (
                                         ToolErrorKind::ExternalDirectoryRequired,
                                         format!(
-                                            "external directory access requires permission.external_directory.enabled for {}. For scratch files, use .sigil/tmp/... inside the workspace.",
+                                            "external directory access requires permission.external_directory.enabled for {}. For scratch files, use $SIGIL_SCRATCH_DIR from bash or terminal_start.",
                                             if subject_label == "-" {
                                                 call.name.as_str()
                                             } else {
@@ -1209,7 +1279,10 @@ fn plan_approval_decision_override(
     spec: &ToolSpec,
     mut decision: PermissionDecision,
 ) -> PermissionDecision {
-    if decision.mode != ApprovalMode::Ask || decision.external_directory_required {
+    if decision.mode != ApprovalMode::Ask
+        || decision.external_directory_required
+        || !plan_approval_can_auto_allow_decision(&decision)
+    {
         return decision;
     }
     let Some(approval) = active_plan_approval(session) else {
@@ -1221,6 +1294,10 @@ fn plan_approval_decision_override(
         decision.mode = ApprovalMode::Allow;
     }
     decision
+}
+
+fn plan_approval_can_auto_allow_decision(decision: &PermissionDecision) -> bool {
+    matches!(decision.risk, PermissionRisk::Low | PermissionRisk::Medium)
 }
 
 fn active_plan_approval(session: &Session) -> Option<crate::PlanApprovedEntry> {
@@ -1532,9 +1609,14 @@ fn append_tool_approval_audit(
         call_id: call.id.clone(),
         tool_name: call.name.clone(),
         access: decision.access,
+        operation: Some(decision.operation),
+        risk: Some(decision.risk),
         subjects: audit_subjects(&decision.subjects),
+        subject_zones: decision.subject_zones.clone(),
         policy_decision: decision.mode,
         external_directory_required: decision.external_directory_required,
+        confirmation: decision.confirmation.clone(),
+        snapshot_required: decision.snapshot_required,
         user_decision,
         reason,
         preview_hash,

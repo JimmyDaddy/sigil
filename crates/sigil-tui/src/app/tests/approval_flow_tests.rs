@@ -85,6 +85,11 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
             preview: ToolPreviewCapability::None,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::NetworkRequest,
+        risk: sigil_kernel::PermissionRisk::High,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     })?;
 
@@ -106,6 +111,208 @@ fn approval_request_without_preview_uses_visible_fallback() -> Result<()> {
             .iter()
             .any(|line| line.text.contains("No structured diff preview available"))
     );
+    Ok(())
+}
+
+#[test]
+fn approval_permission_metadata_lines_cover_label_variants() -> Result<()> {
+    let operations = [
+        (sigil_kernel::ToolOperation::Read, "operation=read"),
+        (sigil_kernel::ToolOperation::Search, "operation=search"),
+        (
+            sigil_kernel::ToolOperation::CreateFile,
+            "operation=create file",
+        ),
+        (sigil_kernel::ToolOperation::EditFile, "operation=edit file"),
+        (
+            sigil_kernel::ToolOperation::OverwriteFile,
+            "operation=overwrite file",
+        ),
+        (
+            sigil_kernel::ToolOperation::DeleteFile,
+            "operation=delete file",
+        ),
+        (
+            sigil_kernel::ToolOperation::RenamePath,
+            "operation=rename path",
+        ),
+        (
+            sigil_kernel::ToolOperation::CreateDirectory,
+            "operation=create directory",
+        ),
+        (
+            sigil_kernel::ToolOperation::DeleteDirectory,
+            "operation=delete directory",
+        ),
+        (
+            sigil_kernel::ToolOperation::RecursiveDelete,
+            "operation=recursive delete",
+        ),
+        (
+            sigil_kernel::ToolOperation::ApplyChangeSet,
+            "operation=apply change set",
+        ),
+        (
+            sigil_kernel::ToolOperation::ExecuteReadOnlyCommand,
+            "operation=run read-only command",
+        ),
+        (
+            sigil_kernel::ToolOperation::ExecuteMutatingCommand,
+            "operation=run mutating command",
+        ),
+        (
+            sigil_kernel::ToolOperation::ExecuteUnknownCommand,
+            "operation=run command",
+        ),
+        (
+            sigil_kernel::ToolOperation::ExecuteDestructiveCommand,
+            "operation=run destructive command",
+        ),
+        (
+            sigil_kernel::ToolOperation::SendTerminalInput,
+            "operation=send terminal input",
+        ),
+        (
+            sigil_kernel::ToolOperation::NetworkRequest,
+            "operation=network request",
+        ),
+        (
+            sigil_kernel::ToolOperation::SpawnAgent,
+            "operation=spawn agent",
+        ),
+        (
+            sigil_kernel::ToolOperation::MessageAgent,
+            "operation=message agent",
+        ),
+        (
+            sigil_kernel::ToolOperation::CloseAgent,
+            "operation=close agent",
+        ),
+        (
+            sigil_kernel::ToolOperation::LoadSkill,
+            "operation=load skill",
+        ),
+        (
+            sigil_kernel::ToolOperation::InvokePlugin,
+            "operation=invoke plugin",
+        ),
+    ];
+    for (operation, expected) in operations {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.handle(RunEvent::ToolApprovalRequested {
+            call: ToolCall {
+                id: "call-meta".to_owned(),
+                name: "meta_tool".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            spec: ToolSpec {
+                name: "meta_tool".to_owned(),
+                description: "Meta tool".to_owned(),
+                input_schema: json!({"type":"object"}),
+                category: ToolCategory::Custom,
+                access: ToolAccess::Execute,
+                preview: ToolPreviewCapability::None,
+            },
+            subjects: Vec::new(),
+            operation,
+            risk: sigil_kernel::PermissionRisk::Low,
+            subject_zones: Vec::new(),
+            confirmation: None,
+            snapshot_required: false,
+            preview: None,
+        })?;
+        assert!(app.approval_preview_lines().join("\n").contains(expected));
+    }
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.handle(RunEvent::ToolApprovalRequested {
+        call: ToolCall {
+            id: "call-risk".to_owned(),
+            name: "risk_tool".to_owned(),
+            args_json: "{}".to_owned(),
+        },
+        spec: ToolSpec {
+            name: "risk_tool".to_owned(),
+            description: "Risk tool".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::None,
+        },
+        subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::DeleteFile,
+        risk: sigil_kernel::PermissionRisk::Protected,
+        subject_zones: vec![
+            sigil_kernel::PathTrustZone::WorkspaceSource,
+            sigil_kernel::PathTrustZone::WorkspaceDocs,
+            sigil_kernel::PathTrustZone::WorkspaceProjectAsset,
+            sigil_kernel::PathTrustZone::WorkspaceRuntimeState,
+            sigil_kernel::PathTrustZone::WorkspaceIgnored,
+            sigil_kernel::PathTrustZone::WorkspaceGitMetadata,
+            sigil_kernel::PathTrustZone::WorkspaceConfigSecret,
+            sigil_kernel::PathTrustZone::UserState,
+            sigil_kernel::PathTrustZone::UserCache,
+            sigil_kernel::PathTrustZone::External,
+            sigil_kernel::PathTrustZone::Unknown,
+        ],
+        confirmation: Some(sigil_kernel::PermissionConfirmation::TypePhrase {
+            phrase: "DELETE".to_owned(),
+        }),
+        snapshot_required: true,
+        preview: None,
+    })?;
+    let lines = app.approval_preview_lines().join("\n");
+    assert!(lines.contains("risk=protected"));
+    assert!(lines.contains("workspace source"));
+    assert!(lines.contains("workspace docs"));
+    assert!(lines.contains("project asset"));
+    assert!(lines.contains("runtime state"));
+    assert!(lines.contains("ignored file"));
+    assert!(lines.contains("git metadata"));
+    assert!(lines.contains("config or secret"));
+    assert!(lines.contains("user state"));
+    assert!(lines.contains("user cache"));
+    assert!(lines.contains("external path"));
+    assert!(lines.contains("unknown"));
+    assert!(lines.contains("confirmation=type the requested phrase before approval"));
+    assert!(lines.contains("recovery=pre-change snapshot required"));
+
+    for (confirmation, expected) in [
+        (
+            Some(sigil_kernel::PermissionConfirmation::Standard),
+            "confirmation=standard approval",
+        ),
+        (
+            Some(sigil_kernel::PermissionConfirmation::TypePath),
+            "confirmation=type the path before approval",
+        ),
+        (None, "risk=destructive"),
+    ] {
+        let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+        app.handle(RunEvent::ToolApprovalRequested {
+            call: ToolCall {
+                id: "call-confirmation".to_owned(),
+                name: "confirmation_tool".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            spec: ToolSpec {
+                name: "confirmation_tool".to_owned(),
+                description: "Confirmation tool".to_owned(),
+                input_schema: json!({"type":"object"}),
+                category: ToolCategory::Custom,
+                access: ToolAccess::Write,
+                preview: ToolPreviewCapability::None,
+            },
+            subjects: Vec::new(),
+            operation: sigil_kernel::ToolOperation::DeleteFile,
+            risk: sigil_kernel::PermissionRisk::Destructive,
+            subject_zones: Vec::new(),
+            confirmation,
+            snapshot_required: false,
+            preview: None,
+        })?;
+        assert!(app.approval_preview_lines().join("\n").contains(expected));
+    }
     Ok(())
 }
 
@@ -182,6 +389,11 @@ fn approval_modal_view_projects_apply_changeset_metadata() -> Result<()> {
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::ApplyChangeSet,
+        risk: sigil_kernel::PermissionRisk::Destructive,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: true,
         preview: Some(ToolPreview {
             title: "Apply change set change-123".to_owned(),
             summary: "2 files, risk=high".to_owned(),
@@ -257,6 +469,11 @@ fn approval_request_shows_external_subjects_without_preview() -> Result<()> {
             Some(external_path.clone()),
             ToolSubjectScope::External,
         )],
+        operation: sigil_kernel::ToolOperation::Read,
+        risk: sigil_kernel::PermissionRisk::Low,
+        subject_zones: vec![sigil_kernel::PathTrustZone::External],
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     })?;
 
@@ -315,6 +532,11 @@ fn spawn_agent_approval_key_can_switch_call_to_background() -> Result<()> {
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::SpawnAgent,
+        risk: sigil_kernel::PermissionRisk::High,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: None,
     })?;
 
@@ -548,6 +770,11 @@ fn approval_preview_lines_cover_changed_files_scroll_keys_and_escape() -> Result
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: Some(ToolPreview {
             title: "Plain preview".to_owned(),
             summary: String::new(),

@@ -29,7 +29,9 @@ use crate::{
         ConversationInputStatusEntry, ConversationQueueProjection,
     },
     memory::{apply_memory_report, materialize_memory},
-    permission::ApprovalMode,
+    permission::{
+        ApprovalMode, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation,
+    },
     plan::{PlanApprovalProjection, PlanApprovedEntry},
     plugin::{PluginManifestSnapshot, PluginStateProjection, PluginTrustEntry},
     provider::{
@@ -214,9 +216,19 @@ pub struct ToolApprovalEntry {
     pub call_id: String,
     pub tool_name: String,
     pub access: ToolAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<ToolOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<PermissionRisk>,
     pub subjects: Vec<ToolSubjectAudit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subject_zones: Vec<PathTrustZone>,
     pub policy_decision: ApprovalMode,
     pub external_directory_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<PermissionConfirmation>,
+    #[serde(default)]
+    pub snapshot_required: bool,
     pub user_decision: Option<ToolApprovalUserDecision>,
     pub reason: Option<String>,
     pub preview_hash: Option<String>,

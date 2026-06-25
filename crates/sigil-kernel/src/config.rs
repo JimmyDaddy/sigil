@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::{
@@ -20,6 +20,8 @@ use crate::{
 pub struct RootConfig {
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
     #[serde(default)]
     pub session: SessionConfig,
     pub agent: AgentConfig,
@@ -449,20 +451,17 @@ pub fn default_user_config_path() -> Result<PathBuf> {
 
 /// Resolves the config path that entrypoints should prefer on startup.
 ///
-/// Explicit paths always win. Otherwise a local `sigil.toml` inside `cwd` wins over the
-/// per-user config directory, so repository-local development keeps working naturally.
+/// Explicit paths always win. Otherwise Sigil uses the standard per-user config file.
+///
+/// Workspace-local `sigil.toml` files are intentionally not discovered implicitly because they
+/// often contain personal provider, permission, and MCP settings that should not be committed.
 ///
 /// # Errors
 ///
 /// Returns an error when the implicit per-user config directory cannot be determined.
-pub fn preferred_config_path(explicit: Option<&Path>, cwd: &Path) -> Result<PathBuf> {
+pub fn preferred_config_path(explicit: Option<&Path>, _cwd: &Path) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
-    }
-
-    let local = cwd.join("sigil.toml");
-    if local.exists() {
-        return Ok(local);
     }
 
     default_user_config_path()
@@ -513,18 +512,74 @@ impl Default for WorkspaceConfig {
 }
 
 /// Session persistence configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SessionConfig {
-    #[serde(default = "default_log_dir")]
-    pub log_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_dir: Option<String>,
 }
 
-impl Default for SessionConfig {
+/// User-local storage root configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct StorageConfig {
+    #[serde(default)]
+    pub state_root: StorageRoot,
+    #[serde(default)]
+    pub cache_root: StorageRoot,
+    #[serde(default = "default_project_assets_root")]
+    pub project_assets_root: String,
+}
+
+impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            log_dir: default_log_dir(),
+            state_root: StorageRoot::Auto,
+            cache_root: StorageRoot::Auto,
+            project_assets_root: default_project_assets_root(),
         }
+    }
+}
+
+/// Storage root selector.
+///
+/// `auto` resolves to the platform user state/cache directory at runtime. Any other string is
+/// treated as an explicit path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum StorageRoot {
+    #[default]
+    Auto,
+    Path(String),
+}
+
+impl Serialize for StorageRoot {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Path(path) => serializer.serialize_str(path),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StorageRoot {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(serde::de::Error::custom(
+                "storage root path cannot be empty",
+            ));
+        }
+        if trimmed.eq_ignore_ascii_case("auto") {
+            return Ok(Self::Auto);
+        }
+        Ok(Self::Path(trimmed.to_owned()))
     }
 }
 
@@ -902,10 +957,6 @@ fn default_workspace_root() -> String {
     ".".to_owned()
 }
 
-fn default_log_dir() -> String {
-    ".sigil/sessions".to_owned()
-}
-
 fn default_timeout_secs() -> u64 {
     30
 }
@@ -996,6 +1047,10 @@ fn default_skill_workspace_dir() -> String {
 
 fn default_skill_workspace_agents_dir() -> String {
     ".sigil/agents".to_owned()
+}
+
+fn default_project_assets_root() -> String {
+    ".sigil".to_owned()
 }
 
 fn default_skill_user_skills() -> bool {

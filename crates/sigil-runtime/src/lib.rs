@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentRole, AgentRunOptions, ApprovalMode, InteractionMode, McpServerConfig, McpServerStartup,
-    Provider, ProviderCapabilities, ReasoningEffort, RoleModelConfig, RootConfig,
-    ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig,
-    ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
-    ToolSubjectScope, default_user_config_dir,
+    PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RoleModelConfig,
+    RootConfig, ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess,
+    ToolAllowlistConfig, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
+    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, ToolSubjectKind, ToolSubjectScope, default_user_config_dir,
 };
 pub use sigil_mcp::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
@@ -38,6 +38,7 @@ pub mod agent_profile_registry;
 pub mod agent_supervisor;
 pub mod agent_tools;
 pub mod doctor;
+pub mod paths;
 pub mod plugins;
 pub mod skills;
 pub use agent_profile_registry::{
@@ -57,15 +58,24 @@ pub use agent_tools::{
     register_agent_tools, register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
+pub use paths::{
+    DEFAULT_ARTIFACTS_DIR, DEFAULT_CHANGESETS_DIR, DEFAULT_PROJECT_ASSETS_ROOT,
+    DEFAULT_SCRATCH_DIR, DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR,
+    DEFAULT_WORKSPACE_AGENTS_DIR, DEFAULT_WORKSPACE_SKILLS_DIR, INPUT_HISTORY_FILE,
+    PathResolverEnv, SIGIL_CACHE_HOME_ENV, SIGIL_STATE_HOME_ENV, SigilPaths, StoragePlatform,
+    project_asset_dir, resolve_sigil_paths, resolve_sigil_paths_with_env, workspace_id_for_root,
+};
 pub use plugins::{
     PluginDiscoveryReport, PluginDiscoveryWarning, PluginDiscoveryWarningKind,
     PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
-    discover_workspace_plugins, merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
+    discover_workspace_plugins, discover_workspace_plugins_with_project_assets_root,
+    merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
 };
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
-    SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_user_dir,
-    load_user_invoked_skill, namespaced_plugin_skill_id, register_skill_tools,
+    SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_project_assets_root,
+    discover_skill_index_with_user_dir, load_user_invoked_skill, namespaced_plugin_skill_id,
+    register_skill_tools, register_skill_tools_with_project_assets_root,
 };
 
 /// Builds the configured model provider for runtime entrypoints.
@@ -556,16 +566,28 @@ fn register_local_tools(
     root_config: &RootConfig,
     workspace_root: PathBuf,
 ) {
-    sigil_tools_builtin::register_builtin_tools(registry);
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    sigil_tools_builtin::register_builtin_tools_with_paths(
+        registry,
+        sigil_tools_builtin::BuiltinToolPaths {
+            changesets_root: paths.changesets_root.clone(),
+            changesets_label_root: PathBuf::from("state/artifacts/changesets"),
+            terminal_tasks_root: paths.terminal_tasks_root.clone(),
+            terminal_tasks_label_root: PathBuf::from("state/artifacts/tasks"),
+            scratch_root: paths.scratch_root.clone(),
+            scratch_label: "cache/tmp".to_owned(),
+        },
+    );
     sigil_code_intel::register_code_intelligence_tools(
         registry,
         &root_config.code_intelligence,
         workspace_root.clone(),
     );
     let user_config_dir = default_user_config_dir().ok();
-    let _ = skills::register_skill_tools(
+    let _ = skills::register_skill_tools_with_project_assets_root(
         registry,
         &workspace_root,
+        &paths.project_assets_root,
         user_config_dir.as_deref(),
         &root_config.skills,
     );
@@ -832,6 +854,7 @@ pub fn build_run_options(
     interaction_mode: InteractionMode,
 ) -> AgentRunOptions {
     let workspace_root = canonical_workspace_root(workspace_root);
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
     AgentRunOptions {
         traffic_partition_key: Some(workspace_partition_key(&workspace_root)),
         workspace_root,
@@ -840,8 +863,47 @@ pub fn build_run_options(
         reasoning_effort: Some(default_reasoning_effort(root_config)),
         interaction_mode,
         permission_config: root_config.permission.clone(),
+        permission_context: permission_evaluation_context(root_config, &paths),
         memory_config: root_config.memory.clone(),
         compaction_config: root_config.compaction.clone(),
+    }
+}
+
+fn permission_evaluation_context(
+    root_config: &RootConfig,
+    paths: &SigilPaths,
+) -> PermissionEvaluationContext {
+    PermissionEvaluationContext {
+        workspace_root: paths.workspace_root.clone(),
+        project_asset_roots: vec![
+            paths.project_assets_root.clone(),
+            project_asset_dir(
+                &paths.workspace_root,
+                &paths.project_assets_root,
+                &root_config.skills.workspace_dir,
+                DEFAULT_WORKSPACE_SKILLS_DIR,
+                "skills",
+            ),
+            project_asset_dir(
+                &paths.workspace_root,
+                &paths.project_assets_root,
+                &root_config.skills.workspace_agents_dir,
+                DEFAULT_WORKSPACE_AGENTS_DIR,
+                "agents",
+            ),
+            paths.project_assets_root.join("plugins"),
+        ],
+        runtime_state_roots: vec![
+            paths.workspace_state_root.clone(),
+            paths.session_log_dir.clone(),
+            paths.input_history_file.clone(),
+            paths.artifacts_root.clone(),
+            paths.changesets_root.clone(),
+            paths.terminal_tasks_root.clone(),
+        ],
+        user_state_roots: vec![paths.state_root.clone()],
+        user_cache_roots: vec![paths.cache_root.clone(), paths.workspace_cache_root.clone()],
+        effective_policy_cap: None,
     }
 }
 

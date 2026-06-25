@@ -149,12 +149,37 @@ async fn execute_changed_files_diagnostics(
             return Ok(result);
         }
     };
-    let decision = PermissionPolicy::new(&options.permission_config).decide_with_access(
-        &spec,
-        &call.name,
-        access,
-        subjects.clone(),
-    )?;
+    let operation = match tools.permission_operation(&tool_ctx, &call) {
+        Ok(operation) => operation,
+        Err(error) => {
+            let mut result = ToolResult::error(
+                call.id.clone(),
+                call.name.clone(),
+                ToolErrorKind::InvalidInput,
+                format!("invalid code diagnostics arguments: {error}"),
+            );
+            attach_diagnostics_context(&mut result, &paths);
+            append_execution_audit(
+                session,
+                &call,
+                &subjects,
+                ToolExecutionStatus::Failed,
+                None,
+                Some(&result),
+            )?;
+            return Ok(result);
+        }
+    };
+    let decision =
+        PermissionPolicy::new_with_context(&options.permission_config, &options.permission_context)
+            .decide_with_operation_and_default(
+                &spec,
+                &call.name,
+                access,
+                operation,
+                subjects.clone(),
+                None,
+            )?;
     append_policy_audit(
         session,
         &call,
@@ -356,7 +381,7 @@ pub(super) fn permission_block_reason(
         (
             ToolErrorKind::ExternalDirectoryRequired,
             format!(
-                "external directory access requires permission.external_directory.enabled for {subject_label}. For scratch files, use .sigil/tmp/... inside the workspace."
+                "external directory access requires permission.external_directory.enabled for {subject_label}. For scratch files, use $SIGIL_SCRATCH_DIR from bash or terminal_start."
             ),
         )
     } else if decision.mode == ApprovalMode::Ask {
@@ -386,6 +411,11 @@ fn append_policy_audit(
         tool_name: call.name.clone(),
         access: decision.access,
         subjects: audit_subjects(&decision.subjects),
+        operation: Some(decision.operation),
+        risk: Some(decision.risk),
+        subject_zones: decision.subject_zones.clone(),
+        confirmation: decision.confirmation.clone(),
+        snapshot_required: decision.snapshot_required,
         policy_decision: decision.mode,
         external_directory_required: decision.external_directory_required,
         user_decision,

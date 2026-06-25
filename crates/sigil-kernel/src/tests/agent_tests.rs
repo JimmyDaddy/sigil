@@ -1551,6 +1551,7 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -1630,6 +1631,7 @@ async fn required_agent_delegation_blocks_direct_final_answer() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -1705,6 +1707,7 @@ async fn required_agent_delegation_ignores_failed_agent_tool_before_final_answer
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -1779,6 +1782,7 @@ async fn required_agent_delegation_accepts_terminal_agent_tool_result() -> Resul
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -1846,6 +1850,7 @@ async fn required_agent_delegation_ignores_spawn_agent_without_terminal_result()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -1921,6 +1926,7 @@ async fn required_agent_delegation_ignores_non_terminal_agent_tool_result() -> R
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -1988,6 +1994,7 @@ async fn agent_persists_text_before_tool_call_on_assistant_message() -> Result<(
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2032,6 +2039,7 @@ async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Resu
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2087,6 +2095,7 @@ async fn agent_run_input_transient_context_does_not_append_user_message() -> Res
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2141,6 +2150,7 @@ async fn agent_run_output_reports_approval_denials() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2186,6 +2196,7 @@ async fn agent_materializes_tool_result_transient_context_and_control_entries() 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2242,6 +2253,7 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2304,6 +2316,7 @@ async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Re
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2609,6 +2622,84 @@ fn approved_workspace_plan(workspace_paths: Vec<&str>) -> PlanApprovedEntry {
     }
 }
 
+fn required_preview_file_spec(name: &str) -> crate::ToolSpec {
+    crate::ToolSpec {
+        name: name.to_owned(),
+        description: name.to_owned(),
+        input_schema: json!({"type":"object"}),
+        category: ToolCategory::File,
+        access: ToolAccess::Write,
+        preview: ToolPreviewCapability::Required,
+    }
+}
+
+fn session_scoped_approved_workspace_plan(workspace_paths: Vec<&str>) -> PlanApprovedEntry {
+    let mut approval = approved_workspace_plan(workspace_paths);
+    approval.expires = PlanApprovalExpiry::Session;
+    approval
+}
+
+#[test]
+fn plan_approval_override_keeps_destructive_tools_behind_approval() -> Result<()> {
+    let mut session = Session::new("mock-write", "mock-model");
+    session.append_control(ControlEntry::PlanApproved(
+        session_scoped_approved_workspace_plan(vec!["file.txt"]),
+    ))?;
+
+    let delete_decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "delete_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("file.txt", "file.txt")],
+        false,
+    );
+    let delete_decision = super::plan_approval_decision_override(
+        &session,
+        &required_preview_file_spec("delete_file"),
+        delete_decision,
+    );
+    assert_eq!(delete_decision.mode, ApprovalMode::Ask);
+
+    let changeset_decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "apply_changeset",
+        ToolAccess::Write,
+        vec![ToolSubject::path("file.txt", "file.txt")],
+        false,
+    );
+    let changeset_decision = super::plan_approval_decision_override(
+        &session,
+        &required_preview_file_spec("apply_changeset"),
+        changeset_decision,
+    );
+    assert_eq!(changeset_decision.mode, ApprovalMode::Ask);
+    Ok(())
+}
+
+#[test]
+fn plan_approval_override_still_allows_ordinary_file_edits() -> Result<()> {
+    let mut session = Session::new("mock-write", "mock-model");
+    session.append_control(ControlEntry::PlanApproved(
+        session_scoped_approved_workspace_plan(vec!["file.txt"]),
+    ))?;
+    let decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "write_file",
+        ToolAccess::Write,
+        vec![ToolSubject::path("file.txt", "file.txt")],
+        false,
+    );
+
+    let decision = super::plan_approval_decision_override(
+        &session,
+        &required_preview_file_spec("write_file"),
+        decision,
+    );
+
+    assert_eq!(decision.mode, ApprovalMode::Allow);
+    Ok(())
+}
+
 #[tokio::test]
 async fn agent_respects_denied_write_approval() -> Result<()> {
     let executed = Arc::new(AtomicBool::new(false));
@@ -2632,6 +2723,7 @@ async fn agent_respects_denied_write_approval() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2708,6 +2800,7 @@ async fn approved_plan_workspace_edits_allows_required_preview_write_without_pro
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2772,6 +2865,7 @@ async fn approved_plan_workspace_edits_requires_reapproval_for_empty_scope() -> 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2820,6 +2914,7 @@ async fn approved_plan_workspace_edits_keeps_out_of_scope_write_behind_approval(
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -2889,6 +2984,7 @@ async fn agent_captures_tool_preview_snapshot_before_approval_request() -> Resul
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3015,6 +3111,7 @@ async fn agent_stops_after_max_turns_without_failing_the_run() -> Result<()> {
                     },
                     ..PermissionConfig::default()
                 },
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3053,6 +3150,7 @@ async fn agent_returns_tool_error_when_permission_subject_is_invalid() -> Result
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3100,6 +3198,7 @@ async fn agent_returns_approval_required_in_headless_ask_mode() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Headless,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3148,6 +3247,7 @@ async fn agent_uses_tool_default_permission_mode() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Headless,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3215,6 +3315,7 @@ async fn agent_denies_write_when_subject_rule_matches() -> Result<()> {
                     }],
                     ..PermissionConfig::default()
                 },
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3261,6 +3362,7 @@ async fn agent_returns_external_directory_required_when_disabled() -> Result<()>
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3280,7 +3382,7 @@ async fn agent_returns_external_directory_required_when_disabled() -> Result<()>
         matches!(message.role, MessageRole::Tool)
             && message.content.as_deref().is_some_and(|content| {
                 content.contains(r#""kind":"external_directory_required""#)
-                    && content.contains(".sigil/tmp")
+                    && content.contains("$SIGIL_SCRATCH_DIR")
             })
     }));
     Ok(())
@@ -3318,6 +3420,7 @@ async fn agent_requests_approval_for_external_directory_default_ask() -> Result<
                     },
                     ..PermissionConfig::default()
                 },
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3378,6 +3481,7 @@ async fn agent_allows_external_directory_when_all_gates_allow() -> Result<()> {
                     },
                     ..PermissionConfig::default()
                 },
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3415,6 +3519,7 @@ async fn agent_tracks_response_handles_background_tasks_and_continuation_state()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3495,6 +3600,7 @@ async fn agent_restores_previous_response_handle_from_durable_control_state() ->
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3539,6 +3645,7 @@ async fn agent_uses_preview_fallback_and_binds_reasoning_state_to_tool_message()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3687,6 +3794,7 @@ async fn agent_returns_internal_tool_result_for_unknown_registered_name() -> Res
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3733,6 +3841,7 @@ async fn agent_guides_direct_task_tool_calls_without_hard_error() -> Result<()> 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3788,6 +3897,7 @@ async fn agent_records_failed_execution_when_tool_returns_error() -> Result<()> 
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3833,6 +3943,7 @@ async fn agent_returns_invalid_input_when_egress_payload_audit_fails() -> Result
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Headless,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3879,6 +3990,7 @@ async fn agent_returns_invalid_input_when_permission_access_fails() -> Result<()
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3932,6 +4044,7 @@ async fn agent_returns_invalid_input_when_egress_audit_fails() -> Result<()> {
                     },
                     ..PermissionConfig::default()
                 },
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -3980,6 +4093,7 @@ async fn agent_records_internal_error_when_tool_execution_fails() -> Result<()> 
                     },
                     ..PermissionConfig::default()
                 },
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -4024,6 +4138,7 @@ async fn agent_wraps_provider_stream_errors_with_context() {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -4390,12 +4505,13 @@ fn agent_helper_audits_previews_and_hashes_are_structured() -> Result<()> {
         Some(external_path.clone()),
         ToolSubjectScope::External,
     )];
-    let decision = PermissionDecision {
-        access: ToolAccess::Write,
-        mode: ApprovalMode::Ask,
-        subjects: subjects.clone(),
-        external_directory_required: true,
-    };
+    let decision = PermissionDecision::new(
+        ApprovalMode::Ask,
+        "write_file",
+        ToolAccess::Write,
+        subjects.clone(),
+        true,
+    );
 
     super::append_reasoning_trace(&mut session, "")?;
     super::append_reasoning_trace(&mut session, "trace details")?;
@@ -4521,6 +4637,7 @@ async fn agent_binds_text_only_continuation_state_to_final_assistant_message() -
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -4570,6 +4687,7 @@ async fn agent_binds_tool_continuation_state_without_reasoning_to_assistant_mess
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -4679,6 +4797,7 @@ async fn agent_surfaces_invalid_permission_access_with_usage_snapshot() -> Resul
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },
@@ -4755,6 +4874,7 @@ async fn agent_surfaces_invalid_tool_default_mode_and_egress_audit_errors() -> R
                     traffic_partition_key: None,
                     interaction_mode: InteractionMode::Interactive,
                     permission_config: PermissionConfig::default(),
+                    permission_context: crate::PermissionEvaluationContext::default(),
                     memory_config: MemoryConfig { enabled: false },
                     compaction_config: CompactionConfig::default(),
                 },
@@ -4818,6 +4938,7 @@ async fn agent_wraps_execute_errors_as_internal_tool_results() -> Result<()> {
                 traffic_partition_key: None,
                 interaction_mode: InteractionMode::Interactive,
                 permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
                 memory_config: MemoryConfig { enabled: false },
                 compaction_config: CompactionConfig::default(),
             },

@@ -569,7 +569,7 @@ fn mouse_click_resume_session_selector_switches_session() -> Result<()> {
         },
         ..test_config()
     };
-    let session_dir = temp.path().join(".sigil/sessions");
+    let session_dir = resolved_session_log_dir(&config, temp.path());
     std::fs::create_dir_all(&session_dir)?;
     let restored_path = session_dir.join("session-restored.jsonl");
     let restored = restored_entries("restored-provider", "restored-model");

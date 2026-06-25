@@ -31,9 +31,11 @@ use ratatui::text::Line;
 use sigil_kernel::{
     AgentThreadId, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
     ConversationInputKind, ConversationInputQueueId, ConversationInputTarget, MemoryConfig,
-    PlanApprovalPermission, ReasoningEffort, RootConfig, SecretRedactor, Session, SessionLogEntry,
-    SessionStats, ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
+    PlanApprovalPermission, ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig,
+    SessionLogEntry, SessionStats, StorageConfig, ToolPreviewSnapshot, plan_text_hash,
+    resolve_workspace_root,
 };
+use sigil_runtime::{SigilPaths, resolve_sigil_paths};
 use uuid::Uuid;
 
 pub(crate) use crate::approval::{
@@ -74,7 +76,7 @@ pub(crate) use self::runtime_status::{
 use self::session_flow::{current_focus_label, short_session_token};
 
 const SESSION_HISTORY_TITLE_SCAN_LIMIT: usize = 256;
-pub(crate) const WORKSPACE_TEMP_DIR: &str = ".sigil/tmp";
+pub(crate) const SCRATCH_DIR_LABEL: &str = "cache/tmp";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AgentView {
@@ -216,6 +218,7 @@ struct ComposerPasteSpan {
 pub struct AppState {
     pub config_path: PathBuf,
     pub workspace_root: PathBuf,
+    pub sigil_paths: SigilPaths,
     pub session_log_dir: PathBuf,
     pub session_log_path: PathBuf,
     pub provider_name: String,
@@ -426,7 +429,9 @@ impl AppState {
         let launch_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let workspace_root =
             resolve_workspace_root(config_path, &launch_cwd, &root_config.workspace.root);
-        let session_log_dir = workspace_root.join(&root_config.session.log_dir);
+        let sigil_paths =
+            resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+        let session_log_dir = sigil_paths.session_log_dir.clone();
         let session_id = Uuid::new_v4().to_string();
         let permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
         let initial_compaction_status = effective_compaction_config(
@@ -443,6 +448,7 @@ impl AppState {
         let mut app = Self {
             config_path: config_path.to_path_buf(),
             workspace_root,
+            sigil_paths,
             session_log_dir,
             session_log_path: PathBuf::new(),
             provider_name: root_config.agent.provider.clone(),
@@ -568,11 +574,17 @@ impl AppState {
         workspace_root: PathBuf,
         startup_error: Option<String>,
     ) -> Self {
-        let session_log_dir = workspace_root.join(".sigil/sessions");
+        let sigil_paths = resolve_sigil_paths(
+            &StorageConfig::default(),
+            &SessionConfig::default(),
+            &workspace_root,
+        );
+        let session_log_dir = sigil_paths.session_log_dir.clone();
         let session_id = Uuid::new_v4().to_string();
         let mut app = Self {
             config_path: config_path.clone(),
             workspace_root: workspace_root.clone(),
+            sigil_paths,
             session_log_dir,
             session_log_path: PathBuf::new(),
             provider_name: "deepseek".to_owned(),
@@ -744,7 +756,7 @@ impl AppState {
         self.timeline.clear();
         self.tool_activity_cache.clear();
         self.events.clear();
-        self.ensure_workspace_temp_dir();
+        self.ensure_scratch_dir();
         self.push_timeline(TimelineRole::System, "sigil ready.");
         self.push_event("session", format!("active {}", self.session_id));
         self.push_event("workspace", self.workspace_root.display().to_string());
@@ -772,7 +784,7 @@ impl AppState {
         self.timeline.clear();
         self.tool_activity_cache.clear();
         self.events.clear();
-        self.ensure_workspace_temp_dir();
+        self.ensure_scratch_dir();
         self.push_timeline(TimelineRole::System, "quick setup");
         self.push_timeline(TimelineRole::Notice, "launch dir = workspace");
         if let Some(error) = self
@@ -790,12 +802,12 @@ impl AppState {
         self.reset_scroll();
     }
 
-    fn ensure_workspace_temp_dir(&mut self) {
-        let temp_dir = self.workspace_root.join(WORKSPACE_TEMP_DIR);
+    fn ensure_scratch_dir(&mut self) {
+        let temp_dir = self.sigil_paths.scratch_root.clone();
         match std::fs::create_dir_all(&temp_dir) {
-            Ok(()) => self.push_event("workspace_tmp", WORKSPACE_TEMP_DIR),
+            Ok(()) => self.push_event("scratch", SCRATCH_DIR_LABEL),
             Err(error) => self.push_event(
-                "workspace_tmp",
+                "scratch",
                 format!("failed to create {}: {error}", temp_dir.display()),
             ),
         }

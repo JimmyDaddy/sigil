@@ -542,7 +542,7 @@ fn config_section_hit_areas(
 }
 
 fn config_section_token(section: ConfigSection) -> String {
-    section.title().to_lowercase()
+    section.nav_label().to_owned()
 }
 
 fn config_field_hit_areas(

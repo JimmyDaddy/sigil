@@ -50,9 +50,9 @@ pub use config::{
     CodeIntelligenceDiscoveryConfig, CompactionConfig, CompactionThresholdStatus,
     LanguageServerConfig, McpServerConfig, McpServerPinnedIdentity, McpServerStartup,
     McpServerTrustPolicy, McpTrustClass, MemoryConfig, RoleModelConfig, RootConfig, SessionConfig,
-    SkillConfig, SyntaxThemeId, TaskConfig, TaskMode, ThemeColorOverrides, ThemeId,
-    ToolAllowlistConfig, WorkspaceConfig, default_user_config_dir, default_user_config_path,
-    preferred_config_path, resolve_workspace_root,
+    SkillConfig, StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskMode,
+    ThemeColorOverrides, ThemeId, ToolAllowlistConfig, WorkspaceConfig, default_user_config_dir,
+    default_user_config_path, preferred_config_path, resolve_workspace_root,
 };
 pub use conversation_queue::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
@@ -66,8 +66,11 @@ pub use event::{
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use permission::{
-    ApprovalMode, ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode,
-    PermissionAccessConfig, PermissionConfig, PermissionDecision, PermissionPolicy, PermissionRule,
+    ApprovalMode, EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule,
+    InteractionMode, PathTrustZone, PermissionAccessConfig, PermissionConfig,
+    PermissionConfirmation, PermissionDecision, PermissionEvaluationContext, PermissionPolicy,
+    PermissionPreset, PermissionRisk, PermissionRule, ToolOperation, apply_risk_overlay,
+    classify_path_trust_zone, derive_permission_risk, infer_tool_operation,
 };
 pub use plan::{
     PLAN_HASH_PREFIX, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalProjection,

@@ -6,7 +6,8 @@ use super::{
     default_user_config_path, preferred_config_path, resolve_workspace_root,
 };
 use crate::{
-    AgentConfig, AgentRole, ApprovalMode, SkillConfig, TaskConfig, TaskMode, WorkspaceConfig,
+    AgentConfig, AgentRole, ApprovalMode, SkillConfig, StorageRoot, TaskConfig, TaskMode,
+    WorkspaceConfig,
 };
 
 #[test]
@@ -81,7 +82,33 @@ compatibility_sources = ["opencode"]
 }
 
 #[test]
-fn preferred_config_path_uses_explicit_or_local_file() {
+fn storage_root_toml_parses_auto_paths_and_rejects_empty_values() {
+    #[derive(Debug, serde::Deserialize)]
+    struct StorageRootFixture {
+        value: StorageRoot,
+    }
+
+    let auto: StorageRootFixture = toml::from_str(r#"value = "auto""#).expect("auto should parse");
+    assert_eq!(auto.value, StorageRoot::Auto);
+
+    let explicit: StorageRootFixture =
+        toml::from_str(r#"value = "/tmp/sigil-state""#).expect("path should parse");
+    assert_eq!(
+        explicit.value,
+        StorageRoot::Path("/tmp/sigil-state".to_owned())
+    );
+
+    let error =
+        toml::from_str::<StorageRootFixture>(r#"value = """#).expect_err("empty path should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("storage root path cannot be empty")
+    );
+}
+
+#[test]
+fn preferred_config_path_uses_explicit_or_user_config_file() {
     let temp = tempfile::tempdir().expect("tempdir should build");
     let explicit = temp.path().join("explicit.toml");
     assert_eq!(
@@ -92,8 +119,8 @@ fn preferred_config_path_uses_explicit_or_local_file() {
     let local = temp.path().join("sigil.toml");
     std::fs::write(&local, "").expect("local config should write");
     assert_eq!(
-        preferred_config_path(None, temp.path()).expect("local path should win"),
-        local
+        preferred_config_path(None, temp.path()).expect("user config path should win"),
+        default_user_config_path().expect("default user config path should resolve")
     );
 }
 
@@ -105,6 +132,7 @@ fn root_config_save_roundtrips() {
         workspace: WorkspaceConfig {
             root: "/tmp/workspace".to_owned(),
         },
+        storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
@@ -137,6 +165,7 @@ fn root_config_save_handles_paths_without_parent() {
 
     let config = RootConfig {
         workspace: WorkspaceConfig::default(),
+        storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
@@ -176,7 +205,8 @@ model = "deepseek-v4-flash"
     .expect("minimal config should parse");
 
     assert_eq!(config.workspace.root, ".");
-    assert_eq!(config.session.log_dir, ".sigil/sessions");
+    assert_eq!(config.session.log_dir, None);
+    assert_eq!(config.storage, Default::default());
     assert_eq!(config.agent.tool_timeout_secs, 30);
     assert_eq!(config.memory, Default::default());
     assert_eq!(config.compaction.tail_messages, 6);
@@ -287,6 +317,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
     colors.insert("text_primary".to_owned(), "#ecf0f6".to_owned());
     let config = RootConfig {
         workspace: WorkspaceConfig::default(),
+        storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
@@ -755,6 +786,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         workspace: WorkspaceConfig {
             root: "/tmp/workspace".to_owned(),
         },
+        storage: Default::default(),
         session: Default::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),

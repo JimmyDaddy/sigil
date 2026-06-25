@@ -11,9 +11,9 @@ use anyhow::{Result, anyhow};
 use clap::Parser;
 use futures::{Stream, stream};
 use sigil_kernel::{
-    EventHandler, ModelMessage, ProviderChunk, RunEvent, ToolAccess, ToolCall, ToolCategory,
-    ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, UsageStats,
+    EventHandler, ModelMessage, ProviderChunk, RootConfig, RunEvent, ToolAccess, ToolCall,
+    ToolCategory, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolResult, ToolResultMeta,
+    ToolSpec, ToolSubject, UsageStats,
 };
 use sigil_runtime::doctor::{DoctorCheck, DoctorReport, DoctorStatus};
 use tokio::{
@@ -67,9 +67,10 @@ fn resolve_workspace_root_uses_launch_cwd_for_default_dot() {
 #[test]
 fn default_session_path_uses_configured_log_dir_and_jsonl_suffix() {
     let workspace_root = std::env::temp_dir().join("sigil-workspace");
-    let session_path = default_session_path(&workspace_root, ".sigil/sessions");
+    let session_dir = workspace_root.join("state/sessions");
+    let session_path = default_session_path(&session_dir);
 
-    assert!(session_path.starts_with(workspace_root.join(".sigil/sessions")));
+    assert!(session_path.starts_with(session_dir));
     assert_eq!(
         session_path.extension().and_then(|ext| ext.to_str()),
         Some("jsonl")
@@ -130,6 +131,11 @@ fn render_run_event_formats_tool_events_usage_and_notice() {
         call: call.clone(),
         spec,
         subjects: vec![ToolSubject::path("src/main.rs", "src/main.rs")],
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: vec![sigil_kernel::PathTrustZone::WorkspaceSource],
+        confirmation: None,
+        snapshot_required: false,
         preview: Some(ToolPreview {
             title: "Write".to_owned(),
             summary: "1 file changed".to_owned(),
@@ -610,6 +616,11 @@ fn stdout_event_handler_accepts_all_visible_event_variants() -> Result<()> {
         call: call.clone(),
         spec,
         subjects: vec![ToolSubject::path("README.md", "README.md")],
+        operation: sigil_kernel::ToolOperation::Read,
+        risk: sigil_kernel::PermissionRisk::Low,
+        subject_zones: vec![sigil_kernel::PathTrustZone::WorkspaceSource],
+        confirmation: None,
+        snapshot_required: false,
         preview: Some(ToolPreview {
             title: "Preview".to_owned(),
             summary: "read README".to_owned(),
@@ -720,7 +731,7 @@ async fn fim_command_streams_against_configured_provider() -> Result<()> {
 }
 
 #[tokio::test]
-async fn run_command_creates_session_log_in_workspace() -> Result<()> {
+async fn run_command_creates_session_log_in_user_state() -> Result<()> {
     let requests = Arc::new(Mutex::new(VecDeque::new()));
     let responses = Arc::new(Mutex::new(VecDeque::from(vec![http_response(
         200,
@@ -742,7 +753,10 @@ async fn run_command_creates_session_log_in_workspace() -> Result<()> {
     assert!(raw_request.contains("POST /chat/completions"));
     assert!(raw_request.contains("\"Say hi\""));
 
-    let session_dir = workspace.join(".sigil/sessions");
+    let root_config = RootConfig::load(&config_path)?;
+    let paths =
+        sigil_runtime::resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace);
+    let session_dir = paths.session_log_dir;
     let entries = fs::read_dir(&session_dir)?.collect::<std::io::Result<Vec<_>>>()?;
     assert_eq!(
         entries.len(),
@@ -776,12 +790,18 @@ fn default_serve_options() -> ServeOptions {
 }
 
 fn write_test_config(path: &std::path::Path, base_url: &str) -> Result<()> {
+    let workspace = path
+        .parent()
+        .ok_or_else(|| anyhow!("test config path should have a parent"))?;
+    let state_root = workspace.join("state");
+    let cache_root = workspace.join("cache");
     let config = format!(
         r#"[workspace]
 root = "."
 
-[session]
-log_dir = ".sigil/sessions"
+[storage]
+state_root = "{}"
+cache_root = "{}"
 
 [agent]
 provider = "deepseek"
@@ -797,7 +817,9 @@ fim_model = "deepseek-v4-pro"
 api_key = "test-key"
 strict_tools_mode = "auto"
 request_timeout_secs = 5
-"#
+"#,
+        state_root.display(),
+        cache_root.display()
     );
     fs::write(path, config)?;
     Ok(())

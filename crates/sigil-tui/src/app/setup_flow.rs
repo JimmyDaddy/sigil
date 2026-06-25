@@ -319,9 +319,8 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
-        session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
-        },
+        storage: Default::default(),
+        session: SessionConfig::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
             model: model.to_owned(),

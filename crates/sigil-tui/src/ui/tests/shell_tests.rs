@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend, style::Color};
@@ -10,6 +15,7 @@ use sigil_kernel::{
 };
 
 use crate::app::AppState;
+use crate::config_panel::ConfigSection;
 use crate::timeline::RunPhase;
 
 use super::super::theme::{
@@ -17,14 +23,28 @@ use super::super::theme::{
 };
 use super::*;
 
+static TEST_STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 fn test_config() -> RootConfig {
+    let storage_id = TEST_STORAGE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let storage_root = std::env::temp_dir().join(format!(
+        "sigil-tui-shell-test-storage-{}-{storage_id}",
+        std::process::id()
+    ));
     RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
-        session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+        storage: sigil_kernel::StorageConfig {
+            state_root: sigil_kernel::StorageRoot::Path(
+                storage_root.join("state").display().to_string(),
+            ),
+            cache_root: sigil_kernel::StorageRoot::Path(
+                storage_root.join("cache").display().to_string(),
+            ),
+            project_assets_root: ".sigil".to_owned(),
         },
+        session: SessionConfig::default(),
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
             model: "deepseek-v4-flash".to_owned(),
@@ -277,7 +297,7 @@ fn render_config_screen_uses_details_side_panel_on_wide_terminals() -> anyhow::R
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("Config"));
     assert!(rendered.contains("Details"));
-    assert!(rendered.contains("Provider 1/11"));
+    assert!(rendered.contains("Provider 1/12"));
     assert!(rendered.contains("▸ Model"));
     assert!(rendered.contains("key model"));
     assert!(rendered.contains("keys Tab section"));
@@ -388,7 +408,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    for _ in 0..6 {
+    for _ in 0..7 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -407,7 +427,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
         .bg;
     assert_eq!(actual, expected);
     assert_eq!(
-        cell_fg_at_text(&terminal, "Appearance 7/11", "Appearance"),
+        cell_fg_at_text(&terminal, "Appearance 8/12", "Appearance"),
         expected_theme.palette.text_primary
     );
     assert_eq!(
@@ -415,7 +435,7 @@ fn render_config_theme_draft_previews_immediately() -> anyhow::Result<()> {
         expected_theme.palette.text_secondary
     );
     assert_ne!(
-        cell_fg_at_text(&terminal, "Appearance 7/11", "Appearance"),
+        cell_fg_at_text(&terminal, "Appearance 8/12", "Appearance"),
         Theme::builtin(sigil_kernel::ThemeId::SigilDark)
             .palette
             .text_primary
@@ -453,7 +473,7 @@ fn render_config_saved_theme_uses_theme_text_palette() -> anyhow::Result<()> {
         expected.palette.config_bg
     );
     assert_eq!(
-        cell_fg_at_text(&terminal, "Provider 1/11", "Provider"),
+        cell_fg_at_text(&terminal, "Provider 1/12", "Provider"),
         expected.palette.text_primary
     );
     assert_eq!(
@@ -473,10 +493,14 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    for _ in 0..6 {
+    for _ in 0..7 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     }
-    let backend = TestBackend::new(128, 32);
+    assert_eq!(
+        app.config_selected_section(),
+        Some(ConfigSection::Appearance)
+    );
+    let backend = TestBackend::new(128, 80);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render(frame, &app))?;
@@ -501,9 +525,9 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
 fn render_config_common_widths_keep_core_structure() -> anyhow::Result<()> {
     for width in [80, 96, 160] {
         for (right_presses, title, selected) in [
-            (0, "Provider 1/11", "▸ Model"),
-            (2, "Memory 3/11", "▸ Memory"),
-            (3, "Compaction 4/11", "▸ Auto compact"),
+            (0, "Provider 1/12", "▸ Model"),
+            (3, "Memory 4/12", "▸ Memory"),
+            (4, "Compaction 5/12", "▸ Auto compact"),
         ] {
             let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
             app.input = "/config".to_owned();
@@ -856,6 +880,7 @@ fn render_config_readonly_rows_align_value_column() -> anyhow::Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/config".to_owned();
     let _ = app.submit_input()?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let backend = TestBackend::new(132, 36);
@@ -1276,7 +1301,7 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    for _ in 0..9 {
+    for _ in 0..10 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     }
     let backend = TestBackend::new(96, 80);
@@ -1285,7 +1310,7 @@ fn render_config_plugins_keeps_fourth_capability_visible_on_narrow_screen() -> a
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Plugins 10/11"));
+    assert!(rendered.contains("Plugins 11/12"));
     assert!(rendered.contains("Hook 4"));
     assert!(rendered.contains("session_stop"));
     assert!(rendered.contains("scripts/hook-4.sh --flag-4"));
@@ -1302,7 +1327,7 @@ fn render_config_short_terminal_scrolls_to_selected_field() -> anyhow::Result<()
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/config".to_owned();
     let _ = app.submit_input()?;
-    for _ in 0..3 {
+    for _ in 0..4 {
         let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     }
     for _ in 0..4 {
@@ -1393,13 +1418,14 @@ fn render_config_screen_marks_readonly_and_hint_rows() -> anyhow::Result<()> {
     let _ = app.submit_input()?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     let backend = TestBackend::new(132, 30);
     let mut terminal = Terminal::new(backend)?;
 
     terminal.draw(|frame| render(frame, &app))?;
 
     let rendered = rendered_content(&terminal);
-    assert!(rendered.contains("Memory 3/11"));
+    assert!(rendered.contains("Memory 4/12"));
     assert!(rendered.contains("◇ Documents"));
     assert!(rendered.contains("Last scan"));
     assert!(rendered.contains("Root files"));
@@ -1684,6 +1710,11 @@ fn inject_write_file_approval(app: &mut AppState) -> anyhow::Result<()> {
             preview: ToolPreviewCapability::Required,
         },
         subjects: Vec::new(),
+        operation: sigil_kernel::ToolOperation::OverwriteFile,
+        risk: sigil_kernel::PermissionRisk::Medium,
+        subject_zones: Vec::new(),
+        confirmation: None,
+        snapshot_required: false,
         preview: Some(ToolPreview {
             title: "Update note.txt".to_owned(),
             summary: "summary".to_owned(),

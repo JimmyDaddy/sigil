@@ -366,6 +366,66 @@ pin_version = true
 }
 
 #[test]
+fn doctor_warns_about_legacy_workspace_state_without_fallback() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let user_config_dir = temp.path().join("user-config");
+    fs::create_dir_all(&user_config_dir)?;
+    let config_path = user_config_dir.join("sigil.toml");
+    fs::create_dir_all(workspace.join(".sigil").join("sessions"))?;
+    fs::write(
+        workspace.join(".sigil").join("input-history.jsonl"),
+        "old\n",
+    )?;
+    fs::write(workspace.join("sigil.toml"), "# old workspace config\n")?;
+    fs::write(
+        &config_path,
+        format!(
+            r#"[workspace]
+root = "{}"
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+api_key = "test-secret-key"
+"#,
+            workspace.display()
+        ),
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "config:legacy_workspace"
+                && check.status == DoctorStatus::Warn
+                && check.message.contains("no longer loaded by default"))
+    );
+    assert!(report.checks.iter().any(|check| {
+        check.name == "storage:legacy_sessions"
+            && check.status == DoctorStatus::Warn
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("sessions"))
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.name == "storage:legacy_input_history"
+            && check.status == DoctorStatus::Warn
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("input-history.jsonl"))
+    }));
+    Ok(())
+}
+
+#[test]
 fn session_log_dir_checks_cover_existing_creatable_absolute_and_parentless_paths() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path();
@@ -375,13 +435,9 @@ fn session_log_dir_checks_cover_existing_creatable_absolute_and_parentless_paths
     fs::create_dir(&creatable_parent)?;
 
     let mut report = DoctorReport::default();
-    check_session_log_dir(
-        &mut report,
-        workspace,
-        existing.to_str().expect("test path should be utf-8"),
-    );
-    check_session_log_dir(&mut report, workspace, "logs/new-session-dir");
-    check_session_log_dir(&mut report, Path::new(""), "");
+    check_session_log_dir(&mut report, &existing);
+    check_session_log_dir(&mut report, &workspace.join("logs/new-session-dir"));
+    check_session_log_dir(&mut report, Path::new(""));
 
     assert!(
         report

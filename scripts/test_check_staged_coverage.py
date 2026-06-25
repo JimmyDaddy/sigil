@@ -42,6 +42,11 @@ class StagedCoverageHelpersTests(unittest.TestCase):
                 "crates/sigil-tui/src/runner/spawn.rs"
             )
         )
+        self.assertFalse(
+            check_staged_coverage.is_business_rust_file(
+                "crates/sigil-tui/src/launcher.rs"
+            )
+        )
         self.assertFalse(check_staged_coverage.is_business_rust_file("README.md"))
 
     def test_package_names_for_staged_files_uses_crate_directories(self) -> None:

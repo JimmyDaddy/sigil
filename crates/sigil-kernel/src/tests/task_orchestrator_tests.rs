@@ -1844,6 +1844,7 @@ fn options() -> AgentRunOptions {
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
+        permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig { enabled: false },
         compaction_config: crate::CompactionConfig::default(),
     }

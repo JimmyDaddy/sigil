@@ -236,8 +236,9 @@ fn root_config() -> RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
         },
+        storage: Default::default(),
         session: SessionConfig {
-            log_dir: ".sigil/sessions".to_owned(),
+            log_dir: Some(".sigil/sessions".to_owned()),
         },
         agent: AgentConfig {
             provider: "deepseek".to_owned(),
@@ -302,6 +303,7 @@ fn run_options(workspace_root: PathBuf) -> AgentRunOptions {
         traffic_partition_key: None,
         interaction_mode: InteractionMode::Interactive,
         permission_config: PermissionConfig::default(),
+        permission_context: sigil_kernel::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig { enabled: false },
         compaction_config: CompactionConfig::default(),
     }

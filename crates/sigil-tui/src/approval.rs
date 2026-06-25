@@ -1,4 +1,7 @@
-use sigil_kernel::{ToolCall, ToolPreview, ToolSpec, ToolSubject};
+use sigil_kernel::{
+    PathTrustZone, PermissionConfirmation, PermissionRisk, ToolCall, ToolOperation, ToolPreview,
+    ToolSpec, ToolSubject,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalAction {
@@ -88,6 +91,11 @@ pub struct PendingApproval {
     pub call: ToolCall,
     pub spec: ToolSpec,
     pub subjects: Vec<ToolSubject>,
+    pub operation: ToolOperation,
+    pub risk: PermissionRisk,
+    pub subject_zones: Vec<PathTrustZone>,
+    pub confirmation: Option<PermissionConfirmation>,
+    pub snapshot_required: bool,
     pub preview: Option<ToolPreview>,
 }
 

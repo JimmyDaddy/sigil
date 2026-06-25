@@ -17,8 +17,10 @@ use sigil_kernel::{
 };
 
 use crate::{
-    LOAD_SKILL_TOOL_NAME, plugins::discover_workspace_plugins, provider_config_key,
-    skills::discover_skill_index,
+    DEFAULT_WORKSPACE_AGENTS_DIR, LOAD_SKILL_TOOL_NAME,
+    plugins::discover_workspace_plugins_with_project_assets_root, project_asset_dir,
+    provider_config_key, resolve_sigil_paths,
+    skills::discover_skill_index_with_project_assets_root,
 };
 
 pub const BUILD_PROFILE_ID: &str = "build";
@@ -450,7 +452,14 @@ fn discover_workspace_agent_profiles(
     if !root_config.skills.enabled {
         return Ok(());
     }
-    let agents_dir = configured_dir(workspace_root, &root_config.skills.workspace_agents_dir);
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+    let agents_dir = project_asset_dir(
+        workspace_root,
+        &paths.project_assets_root,
+        &root_config.skills.workspace_agents_dir,
+        DEFAULT_WORKSPACE_AGENTS_DIR,
+        "agents",
+    );
     if !agents_dir.exists() {
         return Ok(());
     }
@@ -573,7 +582,12 @@ fn discover_plugin_agent_profiles(
         .trust_entries
         .into_values()
         .collect::<Vec<_>>();
-    let report = discover_workspace_plugins(workspace_root, &trust_entries)?;
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+    let report = discover_workspace_plugins_with_project_assets_root(
+        workspace_root,
+        &paths.project_assets_root,
+        &trust_entries,
+    )?;
     warnings.extend(report.warnings.into_iter().map(|warning| {
         format!(
             "plugin discovery warning while projecting agent profiles: {}: {}",
@@ -671,7 +685,13 @@ fn discover_child_session_skill_profiles(
     profiles: &mut Vec<ResolvedAgentProfile>,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
-    let report = discover_skill_index(workspace_root, &root_config.skills)?;
+    let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, workspace_root);
+    let report = discover_skill_index_with_project_assets_root(
+        workspace_root,
+        &paths.project_assets_root,
+        None,
+        &root_config.skills,
+    )?;
     warnings.extend(report.warnings.into_iter().map(|warning| {
         format!(
             "skill discovery warning while projecting agent profiles: {}: {}",
@@ -1322,6 +1342,7 @@ fn normalized_scalar(value: &str) -> String {
         .replace('-', "_")
 }
 
+#[cfg(test)]
 fn configured_dir(workspace_root: &Path, configured: &str) -> PathBuf {
     let path = Path::new(configured);
     if path.is_absolute() {

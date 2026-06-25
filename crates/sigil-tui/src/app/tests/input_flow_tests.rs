@@ -1,5 +1,4 @@
 use super::*;
-use crate::app::WORKSPACE_TEMP_DIR;
 use crate::{app::ComposerQueueAction, runner::QueueMoveDirection};
 
 fn task_run_entry(status: sigil_kernel::TaskRunStatus) -> Result<SessionLogEntry> {
@@ -80,37 +79,42 @@ fn cjk_input_cursor_visual_position_uses_display_width() {
 }
 
 #[test]
-fn bootstrap_creates_workspace_temp_dir() {
+fn bootstrap_creates_scratch_dir() {
     let temp = tempfile::tempdir().expect("workspace tempdir should create");
     let mut config = test_config();
     config.workspace.root = temp.path().display().to_string();
 
     let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
-    assert!(temp.path().join(WORKSPACE_TEMP_DIR).is_dir());
+    assert!(app.sigil_paths.scratch_root.is_dir());
     assert!(
         app.events
             .iter()
-            .any(|event| { event.label == "workspace_tmp" && event.detail == WORKSPACE_TEMP_DIR })
+            .any(|event| { event.label == "scratch" && event.detail == "cache/tmp" })
     );
 }
 
 #[test]
-fn bootstrap_reports_temp_dir_creation_failure() {
+fn bootstrap_reports_scratch_dir_creation_failure() {
     let temp = tempfile::tempdir().expect("workspace tempdir should create");
     let mut config = test_config();
     config.workspace.root = temp.path().display().to_string();
 
-    // Place a regular file where the temp dir would be created.
-    std::fs::create_dir_all(temp.path().join(".sigil")).unwrap();
-    std::fs::write(temp.path().join(WORKSPACE_TEMP_DIR), "block").unwrap();
+    let scratch_root =
+        sigil_runtime::resolve_sigil_paths(&config.storage, &config.session, temp.path())
+            .scratch_root;
+    let scratch_parent = scratch_root
+        .parent()
+        .expect("scratch root should have a parent directory");
+    std::fs::create_dir_all(scratch_parent).expect("scratch parent should create");
+    std::fs::write(&scratch_root, "block").expect("scratch blocker file should write");
 
     let app = AppState::from_root_config(Path::new("sigil.toml"), &config);
 
     assert!(
-        app.events
-            .iter()
-            .any(|event| { event.label == "workspace_tmp" && event.detail.starts_with("failed to create") })
+        app.events.iter().any(|event| {
+            event.label == "scratch" && event.detail.starts_with("failed to create")
+        })
     );
 }
 
@@ -541,7 +545,7 @@ fn input_history_persists_and_loads_when_test_flag_is_enabled() -> Result<()> {
     let temp = tempdir()?;
     let mut config = test_config();
     config.workspace.root = temp.path().display().to_string();
-    config.session.log_dir = ".sigil/sessions".to_owned();
+    config.session.log_dir = Some(".sigil/sessions".to_owned());
 
     let mut app = AppState::from_root_config(&temp.path().join("sigil.toml"), &config);
     app.record_input_history("first prompt".to_owned());

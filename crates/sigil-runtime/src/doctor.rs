@@ -18,7 +18,13 @@ use crate::{
     load_gemini_config, load_openai_compat_config, provider_capabilities_for_name,
     provider_capability_view, provider_config_key, resolve_anthropic_api_key,
     resolve_deepseek_api_key, resolve_gemini_api_key, resolve_openai_compat_api_key,
+    resolve_sigil_paths,
 };
+
+const WORKSPACE_CONFIG_FILE: &str = "sigil.toml";
+const LEGACY_WORKSPACE_STATE_DIR: &str = ".sigil";
+const LEGACY_SESSIONS_DIR: &str = "sessions";
+const LEGACY_INPUT_HISTORY_FILE: &str = "input-history.jsonl";
 
 /// Severity for one local diagnostics check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,7 +137,7 @@ pub fn build_doctor_report_with_options(
             DoctorStatus::Error,
             "config:load",
             format!("missing config at {}", config_path.display()),
-            Some("start `sigil-tui` to complete Quick Setup, or create sigil.toml at this path"),
+            Some("start `sigil-tui` to complete Quick Setup, or pass an explicit --config path"),
         );
         check_terminal(&mut report, None);
         return report;
@@ -163,7 +169,10 @@ pub fn build_doctor_report_with_options(
     let workspace_root =
         resolve_workspace_root(config_path, launch_cwd, &root_config.workspace.root);
     let canonical_workspace = check_workspace(&mut report, &workspace_root);
-    check_session_log_dir(&mut report, &workspace_root, &root_config.session.log_dir);
+    let sigil_paths =
+        resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
+    check_storage_paths(&mut report, &sigil_paths);
+    check_legacy_workspace_state(&mut report, config_path, &sigil_paths);
     check_provider(&mut report, &root_config);
     check_mcp_servers(&mut report, &root_config.mcp_servers, &workspace_root);
     check_code_intelligence(
@@ -224,17 +233,98 @@ fn check_workspace(report: &mut DoctorReport, workspace_root: &Path) -> Option<P
     }
 }
 
-fn check_session_log_dir(
+fn check_storage_paths(report: &mut DoctorReport, paths: &crate::SigilPaths) {
+    report.push(
+        DoctorStatus::Ok,
+        "storage:state_root",
+        paths.state_root.display().to_string(),
+    );
+    report.push(
+        DoctorStatus::Ok,
+        "storage:cache_root",
+        paths.cache_root.display().to_string(),
+    );
+    report.push(
+        DoctorStatus::Ok,
+        "storage:workspace_state",
+        paths.workspace_state_root.display().to_string(),
+    );
+    report.push(
+        DoctorStatus::Ok,
+        "storage:project_assets",
+        paths.project_assets_root.display().to_string(),
+    );
+    check_session_log_dir(report, &paths.session_log_dir);
+}
+
+fn check_legacy_workspace_state(
     report: &mut DoctorReport,
-    workspace_root: &Path,
-    configured_log_dir: &str,
+    config_path: &Path,
+    paths: &crate::SigilPaths,
 ) {
-    let configured = Path::new(configured_log_dir);
-    let session_dir = if configured.is_absolute() {
-        configured.to_path_buf()
-    } else {
-        workspace_root.join(configured)
-    };
+    let workspace_config = paths.workspace_root.join(WORKSPACE_CONFIG_FILE);
+    if workspace_config.exists() && !same_path(&workspace_config, config_path) {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "config:legacy_workspace",
+            format!(
+                "workspace {} is no longer loaded by default",
+                workspace_config.display()
+            ),
+            Some(format!(
+                "move local config to {}, pass --config explicitly, or delete the workspace copy",
+                config_path.display()
+            )),
+        );
+    }
+
+    let legacy_sessions = paths
+        .workspace_root
+        .join(LEGACY_WORKSPACE_STATE_DIR)
+        .join(LEGACY_SESSIONS_DIR);
+    if legacy_sessions.exists() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "storage:legacy_sessions",
+            format!(
+                "legacy workspace sessions remain at {}",
+                legacy_sessions.display()
+            ),
+            Some(format!(
+                "migrate sessions to {} and remove the workspace copy",
+                paths.session_log_dir.display()
+            )),
+        );
+    }
+
+    let legacy_input_history = paths
+        .workspace_root
+        .join(LEGACY_WORKSPACE_STATE_DIR)
+        .join(LEGACY_INPUT_HISTORY_FILE);
+    if legacy_input_history.exists() {
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "storage:legacy_input_history",
+            format!(
+                "legacy workspace input history remains at {}",
+                legacy_input_history.display()
+            ),
+            Some(format!(
+                "migrate input history to {} and remove the workspace copy",
+                paths.input_history_file.display()
+            )),
+        );
+    }
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+fn check_session_log_dir(report: &mut DoctorReport, session_dir: &Path) {
     if session_dir.is_dir() {
         report.push(
             DoctorStatus::Ok,
@@ -263,7 +353,7 @@ fn check_session_log_dir(
             DoctorStatus::Warn,
             "session:log_dir",
             format!("parent does not exist for {}", session_dir.display()),
-            Some("create the parent directory, or set [session].log_dir under the workspace"),
+            Some("create the parent directory, or use the default user state directory"),
         );
     }
 }

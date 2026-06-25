@@ -200,9 +200,9 @@ impl AppState {
             .iter()
             .map(|candidate| {
                 if *candidate == section {
-                    format!("[{}]", candidate.title().to_lowercase())
+                    format!("[{}]", candidate.nav_label())
                 } else {
-                    candidate.title().to_lowercase()
+                    candidate.nav_label().to_owned()
                 }
             })
             .collect::<Vec<_>>()
@@ -255,6 +255,61 @@ impl AppState {
                 lines.push(String::new());
                 lines.push("[capabilities]".to_owned());
                 lines.extend(render_provider_capability_summary(config_state));
+            }
+            ConfigSection::Storage => {
+                let paths = &self.sigil_paths;
+                lines.push("[roots]".to_owned());
+                lines.push(render_config_readonly_row(
+                    "State root",
+                    &paths.state_root.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Cache root",
+                    &paths.cache_root.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Workspace state",
+                    &paths.workspace_state_root.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Workspace cache",
+                    &paths.workspace_cache_root.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Project assets",
+                    &paths.project_assets_root.display().to_string(),
+                ));
+                lines.push(String::new());
+                lines.push("[files]".to_owned());
+                lines.push(render_config_readonly_row(
+                    "Session logs",
+                    &paths.session_log_dir.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Input history",
+                    &paths.input_history_file.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Artifacts",
+                    &paths.artifacts_root.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Changesets",
+                    &paths.changesets_root.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Terminal tasks",
+                    &paths.terminal_tasks_root.display().to_string(),
+                ));
+                lines.push(render_config_readonly_row(
+                    "Scratch",
+                    &paths.scratch_root.display().to_string(),
+                ));
+                lines.push(String::new());
+                lines.push("[details]".to_owned());
+                lines.push(render_config_hint_row(
+                    "read-only; set [storage] roots or SIGIL_STATE_HOME/SIGIL_CACHE_HOME to override",
+                ));
             }
             ConfigSection::Permissions => {
                 lines.push("[policy]".to_owned());
@@ -1346,8 +1401,9 @@ impl AppState {
         root_config: &RootConfig,
     ) -> (Vec<SkillDescriptor>, Vec<String>) {
         let user_config_dir = default_user_config_dir().ok();
-        match sigil_runtime::discover_skill_index_with_user_dir(
+        match sigil_runtime::discover_skill_index_with_project_assets_root(
             &self.workspace_root,
+            &self.sigil_paths.project_assets_root,
             user_config_dir.as_deref(),
             &root_config.skills,
         ) {
@@ -1383,7 +1439,11 @@ impl AppState {
             .trust_entries
             .into_values()
             .collect::<Vec<PluginTrustEntry>>();
-        match sigil_runtime::discover_workspace_plugins(&self.workspace_root, &trust_entries) {
+        match sigil_runtime::discover_workspace_plugins_with_project_assets_root(
+            &self.workspace_root,
+            &self.sigil_paths.project_assets_root,
+            &trust_entries,
+        ) {
             Ok(report) => {
                 let warnings = report
                     .warnings
@@ -1957,6 +2017,13 @@ impl AppState {
             .config_snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.appearance != root_config.appearance);
+        let sigil_paths = sigil_runtime::resolve_sigil_paths(
+            &root_config.storage,
+            &root_config.session,
+            &self.workspace_root,
+        );
+        self.sigil_paths = sigil_paths;
+        self.session_log_dir = self.sigil_paths.session_log_dir.clone();
         self.config_snapshot = Some(root_config.clone());
         self.secret_redactor = sigil_runtime::secret_redactor_for_root_config(root_config);
         self.permission_default_mode = root_config.permission.default_mode.as_str().to_owned();
@@ -1973,8 +2040,10 @@ impl AppState {
             self.model_name = root_config.agent.model.clone();
         }
         self.refresh_memory_summary();
+        self.load_input_history();
         self.recompute_compaction_status(false);
         self.refresh_usage_sidebar_cache();
+        self.refresh_session_history();
         let (agents, agent_warnings) = self.discover_config_agents(root_config);
         let (skills, warnings) = self.discover_config_skills(root_config);
         let (plugins, plugin_warnings) = self.discover_config_plugins();

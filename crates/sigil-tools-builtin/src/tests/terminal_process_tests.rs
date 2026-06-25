@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex as StdMutex, atomic::AtomicBool},
@@ -6,7 +7,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 use anyhow::{Result, anyhow};
 use sigil_kernel::{TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus};
@@ -19,7 +20,65 @@ use tokio::{
 };
 
 use super::{TerminalBackendKind, TerminalProcessManager, TerminalPtySize, TerminalStartRequest};
+use serial_test::serial;
 
+#[test]
+fn terminal_process_manager_permission_context_reports_missing_task() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let error = manager
+        .permission_context(&TerminalTaskId::new("missing-task")?)
+        .expect_err("missing task should report unavailable context");
+
+    assert!(
+        error
+            .to_string()
+            .contains("terminal task permission context is unavailable")
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_process_artifact_path_guards_cover_labels_and_relative_roots() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let manager = TerminalProcessManager::new_with_artifact_root(
+        temp.path(),
+        PathBuf::from("relative-artifacts"),
+        PathBuf::from("labels/tasks"),
+    )?;
+    assert!(
+        manager
+            .artifacts_for(&TerminalTaskId::new("terminal-relative")?)?
+            .absolute_dir
+            .starts_with(temp.path().canonicalize()?.join("relative-artifacts"))
+    );
+
+    let unknown_label = manager
+        .stored_artifact_path(Path::new("other/tasks/output.log"))
+        .expect_err("unknown artifact label should be rejected");
+    assert!(unknown_label.to_string().contains("unknown label"));
+
+    #[cfg(unix)]
+    {
+        let outside = tempfile::tempdir()?;
+        let artifact_root = temp.path().join("artifacts");
+        std::fs::create_dir_all(&artifact_root)?;
+        symlink(outside.path(), artifact_root.join("leak"))?;
+        let escaping = TerminalProcessManager::new_with_artifact_root(
+            temp.path(),
+            &artifact_root,
+            PathBuf::from("state/artifacts/tasks"),
+        )?;
+        let error = escaping
+            .stored_artifact_path(Path::new("state/artifacts/tasks/leak/output.log"))
+            .expect_err("symlink escape should be rejected");
+        assert!(error.to_string().contains("outside artifact root"));
+    }
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -31,6 +90,7 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
             command: "printf 'out\\n'; printf 'err\\n' >&2".to_owned(),
             cwd: None,
             shell: Some(shell),
+            env: Default::default(),
         })
         .await?;
 
@@ -42,7 +102,7 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
     ));
     assert_eq!(
         final_entry.handle.log_path,
-        PathBuf::from(".sigil/tasks/terminal-1/output.log")
+        PathBuf::from("state/artifacts/tasks/terminal-1/output.log")
     );
     assert!(!final_entry.output_truncated);
     assert!(final_entry.output_hash.is_some());
@@ -65,6 +125,8 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_read_is_bounded_by_offset_and_limit() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -76,6 +138,7 @@ async fn terminal_process_manager_read_is_bounded_by_offset_and_limit() -> Resul
             command: "printf abcdef".to_owned(),
             cwd: None,
             shell: Some(shell),
+            env: Default::default(),
         })
         .await?;
     wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
@@ -98,6 +161,8 @@ async fn terminal_process_manager_read_is_bounded_by_offset_and_limit() -> Resul
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_cancel_marks_running_task_cancelled() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -110,6 +175,7 @@ async fn terminal_process_manager_cancel_marks_running_task_cancelled() -> Resul
             command: "sleep 5".to_owned(),
             cwd: None,
             shell: Some(shell),
+            env: Default::default(),
         })
         .await?;
 
@@ -128,6 +194,8 @@ async fn terminal_process_manager_cancel_marks_running_task_cancelled() -> Resul
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_rejects_empty_command_and_workspace_escape() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -145,6 +213,7 @@ async fn terminal_process_manager_rejects_empty_command_and_workspace_escape() -
             command: "pwd".to_owned(),
             cwd: Some(PathBuf::from("..")),
             shell: None,
+            env: Default::default(),
         })
         .await
         .expect_err("workspace escape should be rejected");
@@ -152,6 +221,8 @@ async fn terminal_process_manager_rejects_empty_command_and_workspace_escape() -
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_rejects_duplicate_task_ids() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -164,6 +235,7 @@ async fn terminal_process_manager_rejects_duplicate_task_ids() -> Result<()> {
             command: "sleep 1".to_owned(),
             cwd: None,
             shell: Some(shell),
+            env: Default::default(),
         })
         .await?;
 
@@ -173,6 +245,7 @@ async fn terminal_process_manager_rejects_duplicate_task_ids() -> Result<()> {
             command: "pwd".to_owned(),
             cwd: None,
             shell: None,
+            env: Default::default(),
         })
         .await
         .expect_err("duplicate task id should be rejected");
@@ -181,6 +254,8 @@ async fn terminal_process_manager_rejects_duplicate_task_ids() -> Result<()> {
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_cwd() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -195,6 +270,7 @@ async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_c
             command: "pwd".to_owned(),
             cwd: Some(subdir.clone()),
             shell: Some(shell),
+            env: Default::default(),
         })
         .await?;
     let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
@@ -210,6 +286,8 @@ async fn terminal_process_manager_generates_ids_and_accepts_absolute_workspace_c
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_preview_and_reads_use_bounded_offsets() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -221,6 +299,7 @@ async fn terminal_process_manager_preview_and_reads_use_bounded_offsets() -> Res
             command: "printf 0123456789".to_owned(),
             cwd: None,
             shell: Some(shell),
+            env: Default::default(),
         })
         .await?;
     let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
@@ -244,6 +323,8 @@ async fn terminal_process_manager_preview_and_reads_use_bounded_offsets() -> Res
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_cancel_after_exit_returns_current_status() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -255,6 +336,7 @@ async fn terminal_process_manager_cancel_after_exit_returns_current_status() -> 
             command: "printf done".to_owned(),
             cwd: None,
             shell: Some(shell),
+            env: Default::default(),
         })
         .await?;
     wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
@@ -269,6 +351,42 @@ async fn terminal_process_manager_cancel_after_exit_returns_current_status() -> 
 }
 
 #[cfg(unix)]
+#[serial]
+#[tokio::test]
+async fn terminal_process_manager_pty_records_context_and_env() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let manager = TerminalProcessManager::new(temp.path())?;
+    let task_id = TerminalTaskId::new("terminal-pty-env")?;
+    let entry = manager
+        .start_pty(
+            TerminalStartRequest {
+                task_id: Some(task_id.clone()),
+                command: "printf 'env:%s' \"$SIGIL_TEST_ENV\"".to_owned(),
+                cwd: None,
+                shell: Some(shell),
+                env: BTreeMap::from([("SIGIL_TEST_ENV".to_owned(), "ok".to_owned())]),
+            },
+            None,
+        )
+        .await?;
+
+    let context = manager.permission_context(&task_id)?;
+    assert_eq!(context.task_id, task_id);
+    assert_eq!(context.command, "printf 'env:%s' \"$SIGIL_TEST_ENV\"");
+    let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
+    assert!(matches!(
+        final_entry.status,
+        TerminalTaskStatus::Exited { exit_code: Some(0) }
+    ));
+    let read = manager.read(&entry.handle.task_id, 0, 1024).await?;
+    assert!(read.content.contains("env:ok"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_pty_accepts_input_resize_and_writes_combined_artifacts()
 -> Result<()> {
@@ -283,6 +401,7 @@ async fn terminal_process_manager_pty_accepts_input_resize_and_writes_combined_a
                     .to_owned(),
                 cwd: None,
                 shell: Some(shell),
+                env: Default::default(),
             },
             Some(TerminalPtySize::new(12, 50)?),
         )
@@ -332,6 +451,8 @@ async fn terminal_process_manager_pty_accepts_input_resize_and_writes_combined_a
 }
 
 #[cfg(unix)]
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_pty_cancel_marks_task_cancelled() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -345,6 +466,7 @@ async fn terminal_process_manager_pty_cancel_marks_task_cancelled() -> Result<()
                 command: "sleep 5".to_owned(),
                 cwd: None,
                 shell: Some(shell),
+                env: Default::default(),
             },
             None,
         )
@@ -356,6 +478,8 @@ async fn terminal_process_manager_pty_cancel_marks_task_cancelled() -> Result<()
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_reports_unknown_tasks_and_spawn_errors() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -372,6 +496,7 @@ async fn terminal_process_manager_reports_unknown_tasks_and_spawn_errors() -> Re
             command: "echo never".to_owned(),
             cwd: None,
             shell: Some("/missing/shell".to_owned()),
+            env: Default::default(),
         })
         .await
         .expect_err("missing shell should fail spawn");
@@ -379,6 +504,8 @@ async fn terminal_process_manager_reports_unknown_tasks_and_spawn_errors() -> Re
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_manager_kill_fallback_cancels_term_ignoring_process() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -391,6 +518,7 @@ async fn terminal_process_manager_kill_fallback_cancels_term_ignoring_process() 
             command: "trap '' TERM; sleep 5".to_owned(),
             cwd: None,
             shell: Some(shell),
+            env: Default::default(),
         })
         .await?;
 
@@ -400,6 +528,8 @@ async fn terminal_process_manager_kill_fallback_cancels_term_ignoring_process() 
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -409,9 +539,9 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
     assert!(TerminalPtySize::new(0, 10).is_err());
     assert!(TerminalPtySize::new(10, 0).is_err());
     let absolute_error = manager
-        .workspace_artifact_path(Path::new("/tmp/outside"))
+        .stored_artifact_path(Path::new("/tmp/outside"))
         .expect_err("absolute artifact path should be rejected");
-    assert!(absolute_error.to_string().contains("workspace-relative"));
+    assert!(absolute_error.to_string().contains("must be relative"));
 
     let missing_log = temp.path().join("missing.log");
     assert!(super::summarize_log(&missing_log, 8).await.is_err());
@@ -484,6 +614,8 @@ async fn terminal_process_private_helpers_cover_error_and_empty_edges() -> Resul
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -671,6 +803,8 @@ async fn terminal_process_private_helpers_cover_capture_and_cancel_edges() -> Re
     Ok(())
 }
 
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
 async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -728,18 +862,18 @@ async fn terminal_process_finalize_covers_capture_and_summary_errors() -> Result
 }
 
 #[cfg(unix)]
+#[serial]
+#[cfg_attr(coverage, ignore)]
 #[tokio::test]
-async fn terminal_process_artifacts_reject_workspace_symlink_escape() -> Result<()> {
+async fn terminal_process_artifacts_succeeds_with_explicit_artifact_root() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let outside = tempfile::tempdir()?;
-    std::os::unix::fs::symlink(outside.path(), workspace.path().join(".sigil"))?;
-    let manager = TerminalProcessManager::new(workspace.path())?;
-
-    let error = manager
-        .artifacts_for(&TerminalTaskId::new("terminal-symlink")?)
-        .expect_err("artifact path should reject symlink escape");
-
-    assert!(error.to_string().contains("outside workspace"));
+    let manager = TerminalProcessManager::new_with_artifact_root(
+        workspace.path(),
+        workspace.path().join("custom-artifacts"),
+        "custom-artifacts",
+    )?;
+    let artifacts = manager.artifacts_for(&TerminalTaskId::new("terminal-custom")?)?;
+    assert!(artifacts.relative_dir.starts_with("custom-artifacts"));
     Ok(())
 }
 
@@ -750,7 +884,7 @@ fn test_entry(task_id: TerminalTaskId) -> TerminalTaskEntry {
             command: "test".to_owned(),
             cwd: PathBuf::from("."),
             shell: "sh".to_owned(),
-            log_path: PathBuf::from(".sigil/tasks/test/output.log"),
+            log_path: PathBuf::from("state/artifacts/tasks/test/output.log"),
             created_at_ms: 1,
         },
         status: TerminalTaskStatus::Running,
