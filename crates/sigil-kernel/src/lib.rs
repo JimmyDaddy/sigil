@@ -75,10 +75,10 @@ pub use event::{
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
-    CommittedFileMutation, MutationBatchId, MutationBatchStatus, MutationCommitted,
-    MutationCoordinator, MutationEventRecorder, MutationObservedState, MutationPrepared,
-    MutationReconciled, MutationResolution, MutationSubject, MutationSyncClass, OperationId,
-    PreparedFileMutation, SnapshotCoverage, WorkspaceMutationDetected,
+    CommittedFileMutation, ExecutionMutationProfile, MutationBatchId, MutationBatchStatus,
+    MutationCommitted, MutationCoordinator, MutationEventRecorder, MutationObservedState,
+    MutationPrepared, MutationReconciled, MutationResolution, MutationSubject, MutationSyncClass,
+    OperationId, PreparedFileMutation, SnapshotCoverage, WorkspaceMutationDetected,
     WorkspaceMutationDetectionReason, WorkspaceMutationScan, bytes_hash, delete_file_with_mutation,
     delete_file_with_mutation_in_batch, file_content_hash, write_file_with_mutation,
     write_file_with_mutation_in_batch,

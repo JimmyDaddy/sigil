@@ -1,11 +1,11 @@
 ---
 name: technical-solution-executor
-description: Execute supplied technical solutions or execution plans with risk-scaled implementation, validation, and audits. Use when the user provides or points to a 技术方案, technical solution, execution plan, or task list and expects implementation without unapproved defers, mocks, stubs, hardcoded shortcuts, missing tests, or deceptive pass-only changes.
+description: Execute supplied technical solutions or execution plans with risk-scaled implementation, minimal necessary validation, and audits. Use when the user provides or points to a 技术方案, technical solution, execution plan, or task list and expects implementation without unapproved defers, mocks, stubs, hardcoded shortcuts, missing tests, or deceptive pass-only changes.
 ---
 
 # Technical Solution Executor
 
-Use this skill to implement a supplied technical solution completely, but scale the ceremony to the risk of the work. The solution remains the source of truth; the optimization is to avoid unnecessary sub-agent passes, repeated full gates, and oversized reports on small safe changes.
+Use this skill to implement a supplied technical solution completely, but scale the ceremony and validation to the risk of the work. The solution remains the source of truth; the optimization is to avoid unnecessary sub-agent passes, repeated full gates, long validation loops, and oversized reports on small safe changes.
 
 ## Always Enforce
 
@@ -14,12 +14,13 @@ Use this skill to implement a supplied technical solution completely, but scale 
 - Do not introduce unapproved "later", "future", "temporary", "MVP", or "defer" items.
 - Do not use mocks, stubs, fake integrations, hardcoded success returns, tests-only branches, or shortcuts that satisfy tests without implementing the requirement.
 - Do not weaken, delete, or bypass tests to make validation pass.
+- Do not use validation volume as a substitute for reading the code, understanding the diff, and choosing precise checks.
 - Stop before editing an affected area if the solution is internally inconsistent or impossible; explain the blocker with evidence and ask for a decision or propose the smallest correction.
 - Preserve repository-specific boundaries, especially provider-neutral kernel APIs, append-only session/control behavior, workspace confinement, approval boundaries, and TUI state/help/docs consistency.
 
 ## Choose Intensity
 
-Honor an explicit user mode when provided: `quick`, `standard`, or `full-audit`. Otherwise choose the lowest safe mode and state the choice briefly.
+Honor an explicit user mode when provided: `quick`, `standard`, or `full-audit`. Otherwise start at `quick` and escalate only for a concrete risk listed below. State the selected mode briefly.
 
 ### Quick
 
@@ -27,7 +28,8 @@ Use for low-risk, localized work such as docs-only changes, renderer/layout twea
 
 - Use a compact checklist of 2-5 items: requirement, edit surface, validation.
 - Do not start sub-agents by default.
-- Run targeted validation for the touched area, plus formatting for code changes when applicable.
+- Run the smallest useful validation for the touched area. For docs/config/text-only skill changes, static review plus a basic format/frontmatter check is enough. For code changes, prefer one targeted test or check plus formatting when applicable.
+- Do not run full workspace tests, clippy, coverage, or broad package gates unless the user asks or a concrete risk appears.
 - Finish with a short summary, changed files, validations, and any skipped heavier checks with reason.
 
 ### Standard
@@ -36,7 +38,8 @@ Use by default for normal implementation work that touches several files or one 
 
 - Decompose the work into tasks that include source requirement, likely files, tests/docs, and validation. Keep each task compact.
 - Use one independent review pass only when the decomposition is non-trivial, ambiguity remains, or the diff is large enough that a second pass is likely to catch real gaps.
-- Validate with narrow tests first, then the relevant crate/module gates. Avoid repeated full workspace gates unless the changed surface warrants them.
+- Validate with narrow tests first, then at most the relevant package/crate/module gate needed for confidence. Avoid repeated full workspace gates unless the changed surface warrants them.
+- Default validation budget: one formatting check, targeted tests for changed behavior, and one relevant compile/check gate. Add clippy, coverage, docs-site, or full test suites only when required by acceptance criteria or risk.
 - Finish with mode, task completion, changed files, validation results, review/audit result if run, and caveats.
 
 ### Full-Audit
@@ -52,14 +55,22 @@ Full-audit mode uses the original strict workflow:
 1. Build a full requirement-to-task decomposition with source section, files/modules, tests/docs, dependencies, acceptance criteria, and validation command for each task.
 2. Run a pre-implementation sub-agent decomposition review when tooling is available; otherwise perform a separate local decomposition audit and report that no sub-agent was available.
 3. Implement task by task. Mark a task done only after code, tests, docs, and its validation are complete.
-4. Run the strongest feasible validation for the touched area, including coverage/docs/site/manual TUI checks when required by the solution or repository standards.
+4. Run the strongest useful validation for the touched area. Before long gates such as full workspace tests, clippy, coverage, docs-site, or manual TUI checks, confirm they are required by the solution, repository standards, user request, or changed risk surface.
 5. Run two post-implementation independent passes when tooling is available: code/project standards review and completeness audit against solution, final task list, diff, and validation results.
-6. Fix every valid finding, rerun relevant validation, and record concrete reasons for any rejected findings.
+6. Fix every valid finding, rerun only the affected or previously failed validation, and record concrete reasons for any rejected findings.
 7. Finish with the full report: implemented solution, requirement-to-task completion, files/modules, validation, sub-agent results, fixes after review, caveats, and next steps.
+
+## Validation Discipline
+
+- Keep a validation ledger: command, purpose, result. Do not rerun a passing command unless files covered by that command changed afterward.
+- Prefer exact targeted filters over broad suites. For Cargo, use one real test-name substring per invocation; if several tests are needed, run them deliberately rather than as a reflexive full suite.
+- Do not run multiple heavy Cargo commands in parallel against the same target dir.
+- Treat slow gates as scarce. If a gate is expected to be slow, explain why it is needed before running it; if it is optional, defer it and report that clearly.
+- If a task is static-only or docs/config-only, say so. Do not imply test-backed confidence when no runtime validation was run.
 
 ## Escalation Rules
 
-Escalate to a higher intensity if implementation reveals unplanned public behavior, missing requirements, cross-crate coupling, migrations, permission/session/tool/provider risk, failing broad tests, or review findings that change the design. Do not downgrade below an explicit user request for review, sub-agents, coverage, or full validation.
+Escalate to a higher intensity if implementation reveals unplanned public behavior, missing requirements, cross-crate coupling, migrations, permission/session/tool/provider risk, failing targeted tests, or review findings that change the design. Do not downgrade below an explicit user request for review, sub-agents, coverage, or full validation.
 
 ## Execution Flow
 
@@ -67,7 +78,7 @@ Escalate to a higher intensity if implementation reveals unplanned public behavi
 2. State the selected intensity and maintain a visible checklist sized to that intensity.
 3. Read relevant existing code/tests before editing. Prefer repository helpers and patterns over new abstractions.
 4. Implement the smallest complete change. Add or update unit tests for new business logic, and update docs when public behavior, config, commands, TUI flow, safety/privacy, or architecture changes.
-5. Validate at the selected intensity. If a required full gate is too slow or blocked, run the best narrower gate and report exactly what was not run and why.
+5. Validate at the selected intensity using the smallest checks that prove the changed behavior. If a required full gate is too slow or blocked, run the best narrower gate and report exactly what was not run and why.
 6. Review/audit according to the selected intensity. Never claim a sub-agent review happened if it did not.
 7. Fix valid findings and rerun relevant validation.
 8. Final response should be concise. Include intensity used, what changed, validations, review/audit status, and remaining caveats.

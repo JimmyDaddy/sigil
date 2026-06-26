@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
-    mutation::{MutationEventRecorder, WorkspaceMutationScan},
+    mutation::{ExecutionMutationProfile, MutationEventRecorder, WorkspaceMutationScan},
     permission::{ApprovalMode, ToolOperation, infer_tool_operation},
     provider::ModelMessage,
     session::ControlEntry,
@@ -1446,6 +1446,29 @@ fn begin_unknown_mutation_scan(
     let scope = VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
     recorder
         .capture_workspace_scan(&ctx.workspace_root, &scope)
+        .map(Some)
+}
+
+pub(crate) fn execution_mutation_profile_for_tool(
+    ctx: &ToolContext,
+    spec: &ToolSpec,
+    call_id: &str,
+) -> Result<Option<ExecutionMutationProfile>> {
+    if !tool_requires_unknown_mutation_scan(spec) {
+        return Ok(None);
+    }
+    let Some(recorder) = &ctx.mutation_recorder else {
+        return Ok(None);
+    };
+    let scope = VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    recorder
+        .execution_mutation_profile(
+            &ctx.workspace_root,
+            &scope,
+            call_id.to_owned(),
+            spec.name.clone(),
+            unknown_mutation_tool_effect(spec),
+        )
         .map(Some)
 }
 

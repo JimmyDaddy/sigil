@@ -580,6 +580,94 @@ fn workspace_mutation_scan_records_changed_snapshot() -> Result<()> {
 }
 
 #[test]
+fn execution_mutation_profile_captures_pre_execution_snapshot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "old")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = VerificationScope::all_tracked("scope-main");
+
+    let profile = recorder.execution_mutation_profile(
+        &workspace,
+        &scope,
+        "call-shell",
+        "bash",
+        ToolEffect::Unknown,
+    )?;
+
+    assert_eq!(profile.tool_call_id, "call-shell");
+    assert_eq!(profile.tool_name, "bash");
+    assert_eq!(profile.effect, ToolEffect::Unknown);
+    assert_eq!(profile.scan_scope_hash, "scope-main");
+    assert_eq!(profile.pre_execution_workspace_revision, 0);
+    assert!(profile.pre_execution_snapshot_id.is_some());
+    assert_eq!(profile.workspace_knowledge, WorkspaceKnowledge::Clean(0));
+    Ok(())
+}
+
+#[test]
+fn execution_mutation_profile_reconcile_skips_legacy_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "same")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "legacy before profile",
+    )))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = VerificationScope::all_tracked("scope-main");
+    let profile = recorder.execution_mutation_profile(
+        &workspace,
+        &scope,
+        "call-shell",
+        "bash",
+        ToolEffect::Unknown,
+    )?;
+
+    let event = recorder.reconcile_execution_mutation_profile(&workspace, &profile)?;
+
+    assert!(event.is_none());
+    Ok(())
+}
+
+#[test]
+fn execution_mutation_profile_reconcile_records_scan_unavailable() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "old")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = VerificationScope::all_tracked("scope-main");
+    let profile = recorder.execution_mutation_profile(
+        &workspace,
+        &scope,
+        "call-shell",
+        "bash",
+        ToolEffect::Unknown,
+    )?;
+    fs::remove_dir_all(&workspace)?;
+    fs::write(&workspace, "not a directory")?;
+
+    let event = recorder
+        .reconcile_execution_mutation_profile(&workspace, &profile)?
+        .expect("unavailable workspace scan should record unknown dirty mutation");
+    let payload: WorkspaceMutationDetected = serde_json::from_value(event.payload)?;
+
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::ScanUnavailable
+    );
+    assert_eq!(payload.tool_call_id.as_deref(), Some("call-shell"));
+    assert_eq!(payload.tool_name, "bash");
+    assert!(payload.unknown_dirty);
+    Ok(())
+}
+
+#[test]
 fn workspace_mutation_scan_ignores_excluded_build_artifacts() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");

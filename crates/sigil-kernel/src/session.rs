@@ -38,7 +38,7 @@ use crate::{
         stable_event_hash, stable_event_uuid,
     },
     memory::{apply_memory_report, materialize_memory},
-    mutation::MutationEventRecorder,
+    mutation::{ExecutionMutationProfile, MutationEventRecorder},
     permission::{
         ApprovalMode, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation,
     },
@@ -1422,6 +1422,30 @@ impl Session {
         recorder.reconcile_prepared_mutations(workspace_root)
     }
 
+    /// Reconciles interrupted write-capable tool executions with persisted mutation profiles.
+    ///
+    /// `Session::load_from_store` can mark unfinished tool executions as interrupted without a
+    /// workspace root. This method runs at the next agent turn, when the workspace root is known,
+    /// and records workspace mutation evidence without replaying the tool.
+    pub fn reconcile_unfinished_write_tool_executions(
+        &mut self,
+        workspace_root: impl AsRef<Path>,
+    ) -> Result<Vec<StoredEvent>> {
+        let Some(recorder) = self.mutation_event_recorder() else {
+            return Ok(Vec::new());
+        };
+        let workspace_root = workspace_root.as_ref();
+        let mut events = Vec::new();
+        for execution in interrupted_tool_execution_profiles(&self.entries) {
+            if let Some(event) =
+                recorder.reconcile_execution_mutation_profile(workspace_root, &execution)?
+            {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
     pub fn entries(&self) -> &[SessionLogEntry] {
         &self.entries
     }
@@ -1944,6 +1968,28 @@ fn interrupted_tool_executions(entries: &[SessionLogEntry]) -> Vec<ToolExecution
             });
             execution.model_content_hash = None;
             execution
+        })
+        .collect()
+}
+
+fn interrupted_tool_execution_profiles(
+    entries: &[SessionLogEntry],
+) -> Vec<ExecutionMutationProfile> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) = entry else {
+                return None;
+            };
+            if execution.status != ToolExecutionStatus::Interrupted {
+                return None;
+            }
+            execution
+                .metadata
+                .details
+                .get("execution_mutation_profile")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
         })
         .collect()
 }

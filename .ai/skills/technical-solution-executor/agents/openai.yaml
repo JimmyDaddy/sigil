@@ -1,4 +1,4 @@
 interface:
   display_name: "Technical Solution Executor"
-  short_description: "Execute plans with risk-scaled audits"
-  default_prompt: "Use $technical-solution-executor in standard mode to implement the referenced technical solution with appropriate validation."
+  short_description: "Execute plans with risk-scaled validation"
+  default_prompt: "Use $technical-solution-executor in the lowest safe mode to implement the referenced technical solution with targeted validation."

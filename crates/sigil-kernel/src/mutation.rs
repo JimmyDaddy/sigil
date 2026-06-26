@@ -153,6 +153,21 @@ pub struct WorkspaceMutationDetected {
     pub unknown_dirty: bool,
 }
 
+/// Pre-execution mutation profile persisted with write-capable tool execution starts.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionMutationProfile {
+    pub tool_call_id: ToolCallId,
+    pub tool_name: String,
+    pub effect: ToolEffect,
+    pub workspace_id: WorkspaceId,
+    pub scan_scope_hash: VerificationScopeHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_execution_snapshot_id: Option<WorkspaceSnapshotId>,
+    pub pre_execution_workspace_revision: WorkspaceRevision,
+    pub workspace_knowledge: WorkspaceKnowledge,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationObservedState {
@@ -587,6 +602,81 @@ impl MutationEventRecorder {
             unknown_dirty: true,
         };
         self.append_workspace_mutation_detected(&payload)
+    }
+
+    pub fn execution_mutation_profile(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        scope: &VerificationScope,
+        tool_call_id: impl Into<ToolCallId>,
+        tool_name: impl Into<String>,
+        effect: ToolEffect,
+    ) -> Result<ExecutionMutationProfile> {
+        let scan = self.capture_workspace_scan(workspace_root, scope)?;
+        let profile = ExecutionMutationProfile {
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            effect,
+            workspace_id: scan.workspace_id,
+            scan_scope_hash: scan.scope_hash,
+            pre_execution_snapshot_id: scan.workspace_snapshot_id,
+            pre_execution_workspace_revision: scan.workspace_revision,
+            workspace_knowledge: scan.workspace_knowledge,
+        };
+        Ok(profile)
+    }
+
+    pub fn reconcile_execution_mutation_profile(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        profile: &ExecutionMutationProfile,
+    ) -> Result<Option<StoredEvent>> {
+        if self.workspace_detection_exists_for_tool_call(&profile.tool_call_id)? {
+            return Ok(None);
+        }
+        let scope = VerificationScope::all_tracked(profile.scan_scope_hash.clone());
+        let before = WorkspaceMutationScan {
+            workspace_id: profile.workspace_id.clone(),
+            scope_hash: profile.scan_scope_hash.clone(),
+            scope: scope.clone(),
+            workspace_revision: profile.pre_execution_workspace_revision,
+            workspace_snapshot_id: profile.pre_execution_snapshot_id.clone(),
+            workspace_knowledge: profile.workspace_knowledge.clone(),
+        };
+        let workspace_root = workspace_root.as_ref();
+        if let Ok(after) = self.capture_workspace_scan(workspace_root, &scope) {
+            return self.record_workspace_mutation_scan_result(
+                &before,
+                &after,
+                profile.tool_call_id.clone(),
+                profile.tool_name.clone(),
+                profile.effect,
+            );
+        }
+        let call_id = profile.tool_call_id.clone();
+        let tool_name = profile.tool_name.clone();
+        let effect = profile.effect;
+        let event =
+            self.record_workspace_scan_unavailable(workspace_root, call_id, tool_name, effect)?;
+        Ok(Some(event))
+    }
+
+    fn workspace_detection_exists_for_tool_call(&self, tool_call_id: &str) -> Result<bool> {
+        for record in JsonlSessionStore::read_event_records(self.store.path())? {
+            if let crate::SessionStreamRecord::Stored(event) = record {
+                if DurableEventType::from_event_type(&event.event_type)
+                    != Some(DurableEventType::WorkspaceMutationDetected)
+                {
+                    continue;
+                }
+                let payload = serde_json::from_value::<WorkspaceMutationDetected>(event.payload)
+                    .context("failed to decode workspace mutation detected payload")?;
+                if payload.tool_call_id.as_deref() == Some(tool_call_id) {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 }
 

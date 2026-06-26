@@ -9,11 +9,12 @@ use crate::{
     ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
     ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, DomainEvent,
-    DomainPayload, DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, LegacyEvent,
-    MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig, MemoryLoadReport,
-    MemorySnapshot, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
-    PluginTrustEntry, ProjectionCursor, ProviderContinuationState, ReadinessEvaluatedEntry,
-    ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction, ResponseHandle, RunStatus,
+    DomainPayload, DurableEventType, EventClass, EvidenceReceipt, EvidenceScope,
+    ExecutionMutationProfile, LegacyEvent, MAX_EVENT_BYTES, McpElicitationDecision,
+    McpElicitationEntry, MemoryConfig, MemoryLoadReport, MemorySnapshot, MutationEventRecorder,
+    PluginCapability, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry,
+    ProjectionCursor, ProviderContinuationState, ReadinessEvaluatedEntry, ReadinessEvaluation,
+    ReceiptStatus, RedactionState, RequiredAction, ResponseHandle, RunStatus,
     SandboxProfileRequirement, SessionRef, SessionStreamRecord, SkillDescriptor,
     SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
     TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
@@ -23,8 +24,8 @@ use crate::{
     ToolResultMeta, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats,
     VerificationBinding, VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceipt,
     VerificationRecordedEntry, VerificationScope, VerificationStateProjection, VerificationVerdict,
-    VisibleCompletionState, WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
-    provider::ModelMessage, stable_event_hash,
+    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WorkspaceTrustRequirement, provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
@@ -2691,6 +2692,89 @@ fn load_from_store_marks_started_tool_execution_as_interrupted() -> Result<()> {
                     && execution.status == ToolExecutionStatus::Interrupted
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn unfinished_write_tool_execution_profile_reconciles_workspace_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "old")?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let scope = VerificationScope::all_tracked("scope-main");
+    let profile = recorder.execution_mutation_profile(
+        &workspace,
+        &scope,
+        "call-shell",
+        "bash",
+        ToolEffect::Unknown,
+    )?;
+    let metadata = ToolResultMeta {
+        details: serde_json::json!({
+            "execution_mutation_profile": profile,
+        }),
+        ..Default::default()
+    };
+    store.append(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+        Box::new(ToolExecutionEntry {
+            call_id: "call-shell".to_owned(),
+            tool_name: "bash".to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata,
+            error: None,
+            model_content_hash: None,
+        }),
+    )))?;
+    fs::write(workspace.join("note.txt"), "new")?;
+    let mut session = Session::load_from_store("deepseek", "deepseek-v4-flash", store.clone())?;
+
+    let events = session.reconcile_unfinished_write_tool_executions(&workspace)?;
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].event_type,
+        DurableEventType::WorkspaceMutationDetected.as_str()
+    );
+    let payload: WorkspaceMutationDetected = serde_json::from_value(events[0].payload.clone())?;
+    assert_eq!(payload.tool_call_id.as_deref(), Some("call-shell"));
+    assert_eq!(payload.tool_name, "bash");
+    assert_eq!(payload.scope_hash, "scope-main");
+    assert!(!payload.unknown_dirty);
+
+    let duplicate = session.reconcile_unfinished_write_tool_executions(&workspace)?;
+    assert!(duplicate.is_empty());
+    Ok(())
+}
+
+#[test]
+fn execution_mutation_profile_roundtrips_from_tool_metadata() -> Result<()> {
+    let profile = ExecutionMutationProfile {
+        tool_call_id: "call-shell".to_owned(),
+        tool_name: "bash".to_owned(),
+        effect: ToolEffect::Unknown,
+        workspace_id: "workspace-1".to_owned(),
+        scan_scope_hash: "scope-main".to_owned(),
+        pre_execution_snapshot_id: Some("snapshot-before".to_owned()),
+        pre_execution_workspace_revision: 7,
+        workspace_knowledge: crate::WorkspaceKnowledge::Clean(7),
+    };
+    let metadata = ToolResultMeta {
+        details: serde_json::json!({
+            "execution_mutation_profile": profile,
+        }),
+        ..Default::default()
+    };
+    let restored: ExecutionMutationProfile =
+        serde_json::from_value(metadata.details["execution_mutation_profile"].clone())?;
+
+    assert_eq!(restored.tool_call_id, "call-shell");
+    assert_eq!(restored.pre_execution_workspace_revision, 7);
     Ok(())
 }
 

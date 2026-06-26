@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    PlanApprovalExpiry,
+    ExecutionMutationProfile, PlanApprovalExpiry,
     approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
     config::{CompactionConfig, MemoryConfig},
     event::{DurableEventType, EventClass, EventHandler, RunEvent},
@@ -34,7 +34,7 @@ use crate::{
     tool::{
         ToolCategory, ToolContext, ToolDiffBudget, ToolEgressAudit, ToolErrorKind, ToolPreview,
         ToolPreviewSnapshot, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSpec,
-        ToolSubject, ToolSubjectScope,
+        ToolSubject, ToolSubjectScope, execution_mutation_profile_for_tool,
     },
 };
 
@@ -440,6 +440,7 @@ where
         } = input;
 
         session.reconcile_prepared_mutations(&options.workspace_root)?;
+        session.reconcile_unfinished_write_tool_executions(&options.workspace_root)?;
 
         if let Some(message) = persisted_user_message {
             session.append_user_message(ModelMessage::user(message))?;
@@ -688,7 +689,8 @@ where
                     let mut execution_subjects = Vec::new();
                     let mut tool_registered = false;
                     let mut tool_is_agent_category = false;
-                    if let Some(spec) = tools.spec_for(&call.name) {
+                    let execution_spec = tools.spec_for(&call.name);
+                    if let Some(spec) = execution_spec.as_ref() {
                         tool_registered = true;
                         tool_is_agent_category = spec.category == ToolCategory::Agent;
                         let subjects = match tools.permission_subjects(&tool_ctx, &call) {
@@ -790,14 +792,14 @@ where
                             }
                         };
                         let decision = permission_policy.decide_with_operation_and_default(
-                            &spec,
+                            spec,
                             &call.name,
                             access,
                             operation,
                             subjects.clone(),
                             tool_default_mode,
                         )?;
-                        let decision = plan_approval_decision_override(session, &spec, decision);
+                        let decision = plan_approval_decision_override(session, spec, decision);
                         let subject_label = if decision.subjects.is_empty() {
                             "-".to_owned()
                         } else {
@@ -962,7 +964,7 @@ where
                                     handler.handle(RunEvent::ToolResult(result))?;
                                     continue;
                                 }
-                                let approval = approval_handler.approve_tool_call(&call, &spec)?;
+                                let approval = approval_handler.approve_tool_call(&call, spec)?;
                                 match approval {
                                     ToolApproval::Approve => {
                                         append_tool_approval_audit(
@@ -1115,13 +1117,16 @@ where
                         }
                     }
 
-                    append_tool_execution_audit(
+                    let execution_mutation_profile = execution_spec
+                        .as_ref()
+                        .map(|spec| execution_mutation_profile_for_tool(&tool_ctx, spec, &call.id))
+                        .transpose()?
+                        .flatten();
+                    append_tool_execution_started_audit(
                         session,
                         &call,
                         &execution_subjects,
-                        ToolExecutionStatus::Started,
-                        None,
-                        None,
+                        execution_mutation_profile.as_ref(),
                     )?;
                     let execution_started = Instant::now();
                     let mut result = match agent_delegate
@@ -1787,6 +1792,40 @@ fn append_tool_execution_audit(
         metadata,
         error,
         model_content_hash,
+    })))
+}
+
+fn append_tool_execution_started_audit(
+    session: &mut Session,
+    call: &ToolCall,
+    subjects: &[ToolSubject],
+    execution_mutation_profile: Option<&ExecutionMutationProfile>,
+) -> Result<()> {
+    let mut metadata = ToolResultMeta::default();
+    let mut details = Map::new();
+    if let Some(context) = tool_call_context(call, subjects) {
+        details.insert("call".to_owned(), context);
+    }
+    if let Some(profile) = execution_mutation_profile {
+        details.insert(
+            "execution_mutation_profile".to_owned(),
+            serde_json::to_value(profile).context("failed to encode execution mutation profile")?,
+        );
+    }
+    if !details.is_empty() {
+        metadata.details = Value::Object(details);
+    }
+
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        status: ToolExecutionStatus::Started,
+        duration_ms: None,
+        subjects: audit_subjects(subjects),
+        changed_files: Vec::new(),
+        metadata,
+        error: None,
+        model_content_hash: None,
     })))
 }
 
