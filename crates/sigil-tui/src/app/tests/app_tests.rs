@@ -1112,6 +1112,106 @@ fn task_sidebar_lines_project_latest_task_flags_and_status_labels() -> Result<()
 }
 
 #[test]
+fn task_sidebar_lines_surface_missing_verification_actions() -> Result<()> {
+    let task_id = sigil_kernel::TaskId::new("task_1")?;
+    let step_id = sigil_kernel::TaskStepId::new("fix-typo")?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(sigil_kernel::TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+            objective: "fix typo".to_owned(),
+            status: sigil_kernel::TaskRunStatus::Paused,
+            reason: Some("step fix-typo blocked".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(sigil_kernel::TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: sigil_kernel::TaskPlanStatus::Accepted,
+            steps: vec![sigil_kernel::TaskStepSpec {
+                step_id: step_id.clone(),
+                title: "Fix typo".to_owned(),
+                display_name: None,
+                detail: None,
+                role: sigil_kernel::AgentRole::Executor,
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(sigil_kernel::TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: step_id.clone(),
+            role: sigil_kernel::AgentRole::Executor,
+            status: sigil_kernel::TaskStepStatus::Blocked,
+            title: Some("Fix typo".to_owned()),
+            summary: Some("typo fixed but verification missing".to_owned()),
+            reason: Some("missing verification".to_owned()),
+        })),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
+            sigil_kernel::ReadinessEvaluatedEntry {
+                scope: sigil_kernel::EvidenceScope::Step(format!(
+                    "{}:{}",
+                    task_id.as_str(),
+                    step_id.as_str()
+                )),
+                evaluation: sigil_kernel::ReadinessEvaluation {
+                    run_status: sigil_kernel::RunStatus::Blocked,
+                    verification_verdict: sigil_kernel::VerificationVerdict::Missing,
+                    visible_state: sigil_kernel::VisibleCompletionState::NeedsUser,
+                    reasons: vec![sigil_kernel::ReadinessReason::MissingRequiredCheck {
+                        check_spec_id: "kernel-verification".to_owned(),
+                    }],
+                    required_actions: vec![sigil_kernel::RequiredAction::RunCheck {
+                        check_spec_id: "kernel-verification".to_owned(),
+                    }],
+                },
+                policy_hash: Some("policy".to_owned()),
+                workspace_snapshot_id: Some("snapshot".to_owned()),
+            },
+        )),
+    ]);
+
+    let lines = app.task_sidebar_lines();
+
+    assert!(lines.contains(&"status: paused".to_owned()));
+    assert!(lines.contains(&"last: v1:fix-typo needs check".to_owned()));
+    assert!(lines.contains(&"verification: missing".to_owned()));
+    assert!(lines.contains(&"action: run_check kernel-verification".to_owned()));
+    assert!(lines.contains(&"△ 1. needs check fix-typo · Fix typo".to_owned()));
+
+    let strip = app.task_strip_view().expect("task strip should render");
+    assert_eq!(strip.detail, "paused · v1 · 0/1 done · missing");
+    assert_eq!(strip.rows[0].kind, crate::ui::StatusKind::Warning);
+    assert_eq!(strip.rows[0].label, "1. needs check · Fix typo");
+    assert_eq!(strip.rows[0].detail, "needs check · fix-typo");
+    Ok(())
+}
+
+#[test]
+fn mcp_sidebar_lines_summarize_failure_without_repeating_server_name() -> Result<()> {
+    let mut config = test_config();
+    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        name: "filesystem".to_owned(),
+        startup: sigil_kernel::McpServerStartup::Eager,
+        ..sigil_kernel::McpServerConfig::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: Some("filesystem".to_owned()),
+        status: McpActivationStatus::Failed {
+            error: "MCP server filesystem tools/list failed: bad response".to_owned(),
+        },
+    })?;
+
+    assert_eq!(
+        app.mcp_sidebar_lines(),
+        vec!["filesystem: failed: tools/list failed: bad response"]
+    );
+    Ok(())
+}
+
+#[test]
 fn task_sidebar_lines_show_failed_step_and_remaining_plan() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());

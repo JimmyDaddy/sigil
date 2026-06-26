@@ -341,6 +341,10 @@ fn config_mcp_lifecycle_updates_from_worker_activation_status() -> Result<()> {
         .expect("status should exist");
     assert!(label.contains("failed:"));
     assert!(label.contains("bad response"));
+    let sidebar = app.mcp_sidebar_lines();
+    assert_eq!(sidebar.len(), 1);
+    assert!(sidebar[0].starts_with("filesystem: failed:"));
+    assert!(!sidebar[0].contains("filesystem: failed: MCP server filesystem"));
     let detail = app.config_detail_lines().join("\n");
     assert!(detail.contains("failed:"));
     Ok(())
@@ -1176,6 +1180,46 @@ fn config_appearance_syntax_theme_enter_cycles_and_saves() -> Result<()> {
     );
     let rendered = std::fs::read_to_string(&config_path)?;
     assert!(rendered.contains("syntax_theme = \"catppuccin_mocha\""));
+    Ok(())
+}
+
+#[test]
+fn config_appearance_usage_cost_currency_enter_cycles_and_saves() -> Result<()> {
+    let temp = tempdir()?;
+    let config_path = temp.path().join("sigil.toml");
+    let config = test_config();
+    let mut app = AppState::from_root_config(&config_path, &config);
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        state.set_section(ConfigSection::Appearance);
+        assert!(state.focus_field(ConfigField::AppearanceUsageCostCurrency));
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("cost currency -> usd"));
+    assert!(
+        app.config_detail_lines()
+            .join("\n")
+            .contains("- Cost source: manual -> USD")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("cost currency save should return config saved action");
+    };
+
+    assert_eq!(
+        root_config.appearance.usage_cost_currency,
+        sigil_kernel::UsageCostCurrency::Usd
+    );
+    let rendered = std::fs::read_to_string(&config_path)?;
+    assert!(rendered.contains("usage_cost_currency = \"usd\""));
     Ok(())
 }
 

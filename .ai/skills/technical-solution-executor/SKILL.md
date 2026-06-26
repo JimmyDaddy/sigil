@@ -1,177 +1,73 @@
 ---
 name: technical-solution-executor
-description: Execute a technical solution end-to-end with strict task decomposition, sub-agent review, implementation, validation, code review, completeness audit, fixes, and a final report. Use when the user provides or points to a 技术方案 / technical solution / execution plan and expects complete implementation without unapproved defers, mocks, stubs, hardcoded shortcuts, or missing tests.
+description: Execute supplied technical solutions or execution plans with risk-scaled implementation, validation, and audits. Use when the user provides or points to a 技术方案, technical solution, execution plan, or task list and expects implementation without unapproved defers, mocks, stubs, hardcoded shortcuts, missing tests, or deceptive pass-only changes.
 ---
 
 # Technical Solution Executor
 
-Use this skill to turn a supplied technical solution into a complete, audited implementation. Treat the technical solution as the source of truth. Do not broaden scope unless required to compile, validate, or satisfy an explicit requirement in the solution.
+Use this skill to implement a supplied technical solution completely, but scale the ceremony to the risk of the work. The solution remains the source of truth; the optimization is to avoid unnecessary sub-agent passes, repeated full gates, and oversized reports on small safe changes.
 
-## Required Alignment
+## Always Enforce
 
-Before editing implementation files, read and follow:
-
-- `AGENTS.md`
-- Repository code standards and engineering standards, especially `dev/governance/code-standards.md` and `dev/governance/engineering-standards.md` when present
-- The full technical solution supplied by the user
-- Any architecture, implementation snapshot, acceptance checklist, or execution plan explicitly referenced by the technical solution
-
-If the solution changes TUI behavior, verify state model, event flow, renderer, key/help hints, docs, and tests together. If the solution changes durable state, session, permissions, tools, provider contracts, or migrations, preserve auditability and recovery semantics.
-
-## Execution Contract
-
-- Implement the complete confirmed scope. Do not introduce "later", "future", "temporary", "MVP", or "defer" items unless the technical solution explicitly marks them out of scope.
-- Do not use deceptive implementations: no mocks, stubs, fake integrations, hardcoded success returns, tests-only branches, or shortcuts that satisfy current tests without implementing the requirement.
+- Read `AGENTS.md`, repository code/engineering standards when present, the complete supplied technical solution, and any referenced architecture or acceptance material needed to understand the required behavior.
+- Keep changes scoped to the confirmed solution and required integration, test, and doc updates.
+- Do not introduce unapproved "later", "future", "temporary", "MVP", or "defer" items.
+- Do not use mocks, stubs, fake integrations, hardcoded success returns, tests-only branches, or shortcuts that satisfy tests without implementing the requirement.
 - Do not weaken, delete, or bypass tests to make validation pass.
-- Keep changes scoped to the technical solution and necessary integration/doc/test updates.
-- Prefer repository patterns and existing helper APIs over new abstractions.
-- Maintain a visible task checklist while working and update it as tasks move through review, implementation, validation, and fixes.
-- If the technical solution is internally inconsistent or impossible, stop before editing the affected area, explain the blocker with concrete evidence, and ask for a decision or propose the smallest correction.
+- Stop before editing an affected area if the solution is internally inconsistent or impossible; explain the blocker with evidence and ask for a decision or propose the smallest correction.
+- Preserve repository-specific boundaries, especially provider-neutral kernel APIs, append-only session/control behavior, workspace confinement, approval boundaries, and TUI state/help/docs consistency.
 
-## Workflow
+## Choose Intensity
 
-### 1. Ingest The Technical Solution
+Honor an explicit user mode when provided: `quick`, `standard`, or `full-audit`. Otherwise choose the lowest safe mode and state the choice briefly.
 
-Identify and read the complete source:
+### Quick
 
-- A pasted technical solution
-- A file path, commonly under `.repo-local-dev/`
-- A task list that references a solution file
+Use for low-risk, localized work such as docs-only changes, renderer/layout tweaks, test-only fixes, or small implementation changes that do not affect durable state, permissions, tools, provider contracts, public APIs, migrations, release packaging, or cross-crate behavior.
 
-Extract:
+- Use a compact checklist of 2-5 items: requirement, edit surface, validation.
+- Do not start sub-agents by default.
+- Run targeted validation for the touched area, plus formatting for code changes when applicable.
+- Finish with a short summary, changed files, validations, and any skipped heavier checks with reason.
 
-- Goals and non-goals
-- Required behavior and user-facing semantics
-- Data models, APIs, config, migrations, docs, and tests
-- Acceptance criteria and validation gates
-- Explicitly approved future work or defers
-- Ambiguities that would lead to incompatible implementations
+### Standard
 
-Ask one concise clarification only when the ambiguity blocks correct implementation. Otherwise make a conservative assumption and record it in the task list.
+Use by default for normal implementation work that touches several files or one crate boundary, changes tests/docs, or has moderate user-facing behavior but no high-risk durability, security, migration, or cross-crate contract change.
 
-### 2. Decompose All Work
+- Decompose the work into tasks that include source requirement, likely files, tests/docs, and validation. Keep each task compact.
+- Use one independent review pass only when the decomposition is non-trivial, ambiguity remains, or the diff is large enough that a second pass is likely to catch real gaps.
+- Validate with narrow tests first, then the relevant crate/module gates. Avoid repeated full workspace gates unless the changed surface warrants them.
+- Finish with mode, task completion, changed files, validation results, review/audit result if run, and caveats.
 
-Create a task list that covers every implementation requirement in the technical solution. Every task must include:
+### Full-Audit
 
-- Source requirement or section reference
-- Implementation files/modules likely involved
-- Required tests and docs
-- Dependencies on earlier tasks
-- Acceptance criteria
-- Validation command or check
+Use when the user explicitly asks for sub-agent review/audit, or when the solution touches high-risk areas:
 
-The task list must cover code, tests, docs, migration, config, TUI/CLI/help surfaces, error handling, and cleanup when applicable. Do not leave hidden work in prose; if it must happen, make it a task.
+- durable state, session/control logs, recovery, permissions, approval, tools, workspace confinement, provider contracts, migrations, public APIs, release/distribution, or multi-crate behavior
+- broad TUI workflows where state model, event flow, renderer, key/help hints, docs, and tests must move together
+- large technical solutions with multiple dependent tasks or explicit acceptance gates
 
-### 3. Review The Decomposition Before Editing
+Full-audit mode uses the original strict workflow:
 
-Before implementation, use a sub-agent to review the task decomposition against the technical solution when sub-agent tooling is available.
+1. Build a full requirement-to-task decomposition with source section, files/modules, tests/docs, dependencies, acceptance criteria, and validation command for each task.
+2. Run a pre-implementation sub-agent decomposition review when tooling is available; otherwise perform a separate local decomposition audit and report that no sub-agent was available.
+3. Implement task by task. Mark a task done only after code, tests, docs, and its validation are complete.
+4. Run the strongest feasible validation for the touched area, including coverage/docs/site/manual TUI checks when required by the solution or repository standards.
+5. Run two post-implementation independent passes when tooling is available: code/project standards review and completeness audit against solution, final task list, diff, and validation results.
+6. Fix every valid finding, rerun relevant validation, and record concrete reasons for any rejected findings.
+7. Finish with the full report: implemented solution, requirement-to-task completion, files/modules, validation, sub-agent results, fixes after review, caveats, and next steps.
 
-Sub-agent review prompt must provide only:
+## Escalation Rules
 
-- The technical solution path or complete content
-- The proposed task decomposition
-- The requirement that the reviewer check for missing tasks, unauthorized defers, ordering gaps, missing tests/docs/migrations, and non-goal violations
+Escalate to a higher intensity if implementation reveals unplanned public behavior, missing requirements, cross-crate coupling, migrations, permission/session/tool/provider risk, failing broad tests, or review findings that change the design. Do not downgrade below an explicit user request for review, sub-agents, coverage, or full validation.
 
-Do not provide your expected answer. If sub-agent tooling is unavailable, explicitly state that limitation and run a separate local decomposition audit with the same checklist.
+## Execution Flow
 
-Fix every valid decomposition gap before editing code.
-
-### 4. Execute Task By Task
-
-Implement tasks in dependency order. For each task:
-
-1. Read the relevant existing code and tests.
-2. Make the minimal complete implementation.
-3. Add or update unit tests for new business logic.
-4. Update docs when public behavior, config, commands, TUI flow, safety, privacy, or architecture changes.
-5. Run the narrow validation that proves the task works.
-6. Mark the task done only after code, tests, docs, and validation for that task are complete.
-
-Mandatory rules:
-
-- Follow code and engineering standards strictly.
-- Keep `sigil-kernel` provider-neutral in this repository.
-- Preserve append-only session/control behavior when touching durable state.
-- Keep workspace confinement and permission boundaries intact when touching tools or paths.
-- Ensure unit test coverage meets the repository threshold. In this repository, use the repo coverage gate when business code changes and do not rely on superficial compile-only checks.
-- Avoid performance regressions such as unbounded scans, repeated full rebuilds, unbounded output, unnecessary blocking in async paths, or cache-destabilizing request materials.
-
-If a task uncovers extra necessary work, add it to the checklist and map it back to a source requirement. If it cannot be mapped, ask before expanding scope.
-
-### 5. Validate The Full Implementation
-
-Run the strongest feasible validation for the touched area:
-
-- Narrow crate/module tests for focused changes
-- `cargo fmt --all --check`
-- `cargo check`
-- `cargo test`
-- `cargo clippy --all-targets -- -D warnings`
-- Repository coverage gate, such as `./scripts/coverage.sh`, when business logic changed
-- Docs/site checks when docs changed
-- Manual TUI smoke checks when user-facing TUI behavior changed
-
-If a full gate is too slow or blocked, run the relevant narrower gate and state exactly what was not run and why. Do not call the implementation complete when required coverage or critical validation is missing without reporting it as a blocker.
-
-### 6. Post-Implementation Sub-Agent Reviews
-
-After implementation and local validation, run two independent sub-agent passes when sub-agent tooling is available.
-
-#### 6.1 Code And Project Standards Review
-
-Ask one sub-agent to review the diff against:
-
-- `AGENTS.md`
-- Code standards
-- Engineering standards
-- Module boundaries
-- Rust style and async/path/error handling rules
-- Tests, docs, TUI help, performance, and safety/privacy risks
-
-#### 6.2 Completeness Audit
-
-Ask another sub-agent to compare:
-
-- Technical solution
-- Final task list
-- Actual diff
-- Validation results
-
-The audit must verify:
-
-- Every requirement is implemented.
-- Every task is complete.
-- No non-goal was implemented.
-- No unapproved defer remains.
-- No mock/stub/hardcoded/deceptive implementation exists.
-- Tests and docs match the changed behavior.
-
-Do not give reviewers your expected answer. If sub-agent tooling is unavailable, explicitly report that limitation and perform two separate local review passes with the same scopes; do not claim sub-agent review happened.
-
-### 7. Fix Review Findings
-
-For every valid review or audit finding:
-
-1. Add a follow-up task.
-2. Fix the issue.
-3. Rerun the relevant validation.
-4. If the fix changes behavior, update tests/docs.
-
-If rejecting a finding, record the concrete reason. Do not ignore review output silently.
-
-### 8. Final Report
-
-Finish with a concise report that includes:
-
-- Technical solution implemented
-- Requirement-to-task completion summary
-- Files/modules changed
-- Validation commands and results
-- Sub-agent decomposition review result
-- Sub-agent code review result
-- Sub-agent completeness audit result
-- Fixes made after reviews
-- Important notes or caveats, if any
-- Recommended next steps, if any
-
-Do not mark the work complete if required tasks, tests, coverage, docs, validation, or reviews are still pending.
+1. Ingest the solution and extract goals, non-goals, required behavior, APIs/data/config, docs/tests, acceptance criteria, validation gates, approved defers, and blocking ambiguities.
+2. State the selected intensity and maintain a visible checklist sized to that intensity.
+3. Read relevant existing code/tests before editing. Prefer repository helpers and patterns over new abstractions.
+4. Implement the smallest complete change. Add or update unit tests for new business logic, and update docs when public behavior, config, commands, TUI flow, safety/privacy, or architecture changes.
+5. Validate at the selected intensity. If a required full gate is too slow or blocked, run the best narrower gate and report exactly what was not run and why.
+6. Review/audit according to the selected intensity. Never claim a sub-agent review happened if it did not.
+7. Fix valid findings and rerun relevant validation.
+8. Final response should be concise. Include intensity used, what changed, validations, review/audit status, and remaining caveats.

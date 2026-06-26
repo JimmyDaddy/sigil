@@ -20,15 +20,13 @@
 TUI 和 CLI 按这个顺序找配置：
 
 1. 命令行指定的 `--config <path>`
-2. 标准用户配置目录里的 `sigil.toml`
+2. 用户可见 Sigil 配置目录里的 `sigil.toml`
 
-标准用户配置路径：
+默认用户配置路径：
 
-- macOS：`~/Library/Application Support/sigil/sigil.toml`
-- Linux：`$XDG_CONFIG_HOME/sigil/sigil.toml` 或 `~/.config/sigil/sigil.toml`
-- Windows：`%APPDATA%\sigil\sigil.toml`
+- `~/.sigil/sigil.toml`
 
-Quick Setup 写入用户配置目录。workspace 根目录的 `sigil.toml` 默认不会被读取；如果需要临时实验配置，请显式传入 `--config <path>`。
+Quick Setup 写入用户配置路径。启动时如果 `~/.sigil/sigil.toml` 不存在，但旧的按平台划分的用户配置存在，Sigil 会把旧配置复制到 `~/.sigil/sigil.toml` 并使用新路径。workspace 根目录的 `sigil.toml` 默认不会被读取；如果需要临时实验配置，请显式传入 `--config <path>`。
 
 ## 推荐最小路径
 
@@ -86,6 +84,7 @@ scroll_sensitivity = 3
 [appearance]
 theme = "sigil_dark"
 syntax_theme = "auto"
+usage_cost_currency = "auto"
 
 [providers.deepseek]
 model = "deepseek-v4-flash"
@@ -142,12 +141,37 @@ tool_timeout_secs = 30
 - `tool_timeout_secs`：工具执行超时。
 - `max_turns`：可选保险丝。默认不限制；如果显式设置，模型连续达到阈值仍只请求工具而没有最终回答时，本轮会可恢复地停止。
 
+## 验证
+
+```toml
+[verification]
+
+[[verification.checks]]
+id = "cargo-test"
+command = "cargo"
+args = ["test"]
+effect = "read_only"
+```
+
+`[verification]` 是只通过配置文件编辑的显式用户检查配置。当前 task run 会先把这些条目物化成 verification policy 记录，再用于 completion readiness 判断。Sigil 的 kernel 也支持从 `.sigil/verification.toml`、CI `run:` 步骤、`package.json`、`Cargo.toml` 和 `Makefile` 发现仓库本地候选检查，但“发现”不等于“执行”。仓库本地候选在经过 workspace trust decision、显式审批、满足 policy 的 sandbox decision 或 global policy promotion 之前，都只是未信任数据。
+
+在 TUI 中可以使用 `/trust-workspace` 为当前 workspace 记录 trust decision。这个 decision 可以让仓库本地 verification 候选在之后的 `/task` 或 `/task continue` 中被提升为可用检查，但不会单独授予 shell、plugin、MCP 或文件写入权限。
+
+每个 `[[verification.checks]]` 条目定义一个来自用户配置的受信任检查：
+
+- `id`：稳定 check id，用于 verification policy 和审计记录。
+- `command`：可执行命令名。
+- `args`：可选 argv 列表。
+- `cwd`：可选 workspace-relative 工作目录。
+- `effect`：预期工具副作用。普通 build/test/lint 且不修改验证范围文件时使用 `read_only`。会修改文件的检查只能产生 mutation evidence；要得到 `Passed`，修改后必须再运行一次非写入验证。
+
 ## Appearance
 
 ```toml
 [appearance]
 theme = "sigil_dark"
 syntax_theme = "auto"
+usage_cost_currency = "auto"
 
 [appearance.colors]
 surface_base = "#07080A"
@@ -158,6 +182,8 @@ markdown_code_bg = "#1C2129"
 `theme` 控制 TUI 配色。内置值包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。`/config` 面板提供 `Appearance` 区块；在 `Theme` 行按 `Enter` 会循环切换内置主题并立即预览草稿 palette，包括 current/draft 对比、syntax、page、shell、composer、tool-card、approval modal、状态、diff 和 markdown 样片。`Ctrl-S` 会把选中主题保存到 `sigil.toml`。
 
 `syntax_theme` 控制 markdown code block、工具 markdown preview 和 approval preview summary 的 syntect/two-face 语法高亮。默认 `auto` 会跟随选中的 TUI theme。显式值包括 `catppuccin_mocha`、`catppuccin_latte`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`gruvbox_light`、`nord`、`one_half_dark`、`one_half_light` 和 `monokai`。
+
+`usage_cost_currency` 控制 TUI usage cost estimate 的显示币种。默认 `auto` 会优先跟随 provider balance currency，拿不到时显示 USD。也可以显式设置为 `usd` 或 `cny`。该配置只影响展示；provider pricing 和 session usage accounting 仍以 USD-based estimate 记录。
 
 `[appearance.colors]` 可以用 `#RRGGBB` 覆盖稳定语义 color token。未知 token 或非十六进制值会由 appearance diagnostics 报告，不会变成 provider 可见状态。覆盖只影响 TUI 渲染，不写入 session history、approval record、tool payload 或 provider 可见上下文。
 

@@ -226,6 +226,343 @@ fn render_model_and_session_entries_cover_tool_and_control_variants() {
 }
 
 #[test]
+fn render_verification_control_entries_for_audit_view() -> Result<()> {
+    let candidate = sigil_kernel::CandidateCheck {
+        source: sigil_kernel::CheckDiscoverySource::Cargo,
+        command: sigil_kernel::CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-discovery".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+    };
+    let trusted = candidate.promote(
+        "cargo-test",
+        "scope-main",
+        sigil_kernel::ToolEffect::ReadOnly,
+        sigil_kernel::CheckPromotion::UserApproved {
+            approval_event_id: "event-approval".to_owned(),
+        },
+    )?;
+    let check_spec = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::CheckSpecRecorded(sigil_kernel::CheckSpecRecordedEntry::new(
+            sigil_kernel::EvidenceScope::Task("task-1".to_owned()),
+            trusted,
+            "event-discovery",
+        )),
+    ));
+    assert!(
+        check_spec.contains("[ctl] check spec cargo-test source=cargo promotion=user_approved")
+    );
+
+    let policy_entry = sigil_kernel::VerificationPolicyChangedEntry::new(
+        sigil_kernel::EvidenceScope::Task("task-1".to_owned()),
+        sigil_kernel::VerificationPolicy::no_checks_required("scope-main"),
+        "event-policy",
+    )?;
+    let policy = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::VerificationPolicyChanged(policy_entry),
+    ));
+    assert!(policy.contains("[ctl] verification policy task:task-1 checks=0 hash=sha256:"));
+
+    let receipt = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::VerificationRecorded(sigil_kernel::VerificationRecordedEntry {
+            receipt: sigil_kernel::VerificationReceipt {
+                receipt: sigil_kernel::EvidenceReceipt {
+                    receipt_id: "receipt-1".to_owned(),
+                    source_session_id: "session-1".to_owned(),
+                    source_event_id: "event-check-finished".to_owned(),
+                    source_event_type: sigil_kernel::DurableEventType::CheckFinished
+                        .as_str()
+                        .to_owned(),
+                    scope: sigil_kernel::EvidenceScope::Task("task-1".to_owned()),
+                    producer_tool_call: Some("tool-call-1".to_owned()),
+                    workspace_revision: Some(1),
+                    workspace_snapshot_id: Some("snapshot-1".to_owned()),
+                    policy_hash: Some("policy-hash".to_owned()),
+                    changeset_id: None,
+                    status: sigil_kernel::ReceiptStatus::Succeeded,
+                    artifact_refs: Vec::new(),
+                    redaction_state: sigil_kernel::RedactionState::None,
+                    recorded_at_stream_sequence: 2,
+                },
+                binding: sigil_kernel::VerificationBinding {
+                    workspace_id: "workspace-1".to_owned(),
+                    workspace_snapshot_id: "snapshot-1".to_owned(),
+                    verification_scope_hash: "scope-main".to_owned(),
+                    check_spec_hash: "check-hash".to_owned(),
+                    environment_fingerprint: "env-1".to_owned(),
+                    sandbox_profile_hash: "sandbox-local".to_owned(),
+                    workspace_trust_snapshot_id: "trust-1".to_owned(),
+                    approval_event_id: None,
+                    sandbox_decision_id: None,
+                },
+                check_spec_id: "cargo-test".to_owned(),
+                check_status: sigil_kernel::ReceiptStatus::Succeeded,
+                mutates_verification_scope: false,
+            },
+        }),
+    ));
+    assert!(
+        receipt.contains(
+            "[ctl] verification receipt receipt-1 check=cargo-test status=succeeded snapshot=snapshot-1 policy=policy-hash trust=trust-1"
+        )
+    );
+
+    let readiness = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::ReadinessEvaluated(sigil_kernel::ReadinessEvaluatedEntry {
+            scope: sigil_kernel::EvidenceScope::Step("task-1:step-1".to_owned()),
+            evaluation: sigil_kernel::ReadinessEvaluation {
+                run_status: sigil_kernel::RunStatus::Completed,
+                verification_verdict: sigil_kernel::VerificationVerdict::Missing,
+                visible_state: sigil_kernel::VisibleCompletionState::CompletedUnverified,
+                reasons: vec![sigil_kernel::ReadinessReason::MissingRequiredCheck {
+                    check_spec_id: "cargo-test".to_owned(),
+                }],
+                required_actions: vec![sigil_kernel::RequiredAction::RunCheck {
+                    check_spec_id: "cargo-test".to_owned(),
+                }],
+            },
+            policy_hash: Some("policy-hash".to_owned()),
+            workspace_snapshot_id: Some("snapshot-1".to_owned()),
+        }),
+    ));
+    assert!(
+        readiness.contains(
+            "[ctl] readiness step:task-1:step-1 run=completed verification=missing policy=policy-hash snapshot=snapshot-1 actions=run_check:cargo-test reasons=missing_check:cargo-test"
+        )
+    );
+
+    let linked = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::ChildVerificationReceiptLinked(
+            sigil_kernel::ChildVerificationReceiptLinked {
+                parent_session_id: "parent-session".to_owned(),
+                child_session_id: "child-session".to_owned(),
+                child_receipt_id: "child-receipt".to_owned(),
+                child_event_id: "child-event".to_owned(),
+                child_workspace_id: "child-workspace".to_owned(),
+                child_workspace_snapshot_id: "child-snapshot".to_owned(),
+                policy_hash: "policy-hash".to_owned(),
+                changeset_id: Some("changeset-1".to_owned()),
+                merge_event_id: Some("merge-event".to_owned()),
+            },
+        ),
+    ));
+    assert!(linked.contains("[ctl] verification child receipt child-receipt child=child-session"));
+
+    let trust = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::WorkspaceTrustDecision(sigil_kernel::WorkspaceTrustDecisionEntry {
+            workspace_id: "workspace-1".to_owned(),
+            workspace_trust_snapshot_id: "trust-1".to_owned(),
+            trust: sigil_kernel::WorkspaceTrust::Trusted,
+            decided_by_event_id: Some("trust-event".to_owned()),
+            reason: Some("user trusted workspace".to_owned()),
+        }),
+    ));
+    assert!(trust.contains("[ctl] workspace trust workspace-1 trust=trusted snapshot=trust-1"));
+    Ok(())
+}
+
+#[test]
+fn verification_audit_label_helpers_cover_all_variants() {
+    for (status, label) in [
+        (sigil_kernel::RunStatus::Running, "running"),
+        (sigil_kernel::RunStatus::Completed, "completed"),
+        (sigil_kernel::RunStatus::Paused, "paused"),
+        (sigil_kernel::RunStatus::Blocked, "blocked"),
+        (sigil_kernel::RunStatus::Failed, "failed"),
+        (sigil_kernel::RunStatus::Cancelled, "cancelled"),
+        (sigil_kernel::RunStatus::Interrupted, "interrupted"),
+    ] {
+        assert_eq!(run_status_label(status), label);
+    }
+
+    for (verdict, label) in [
+        (
+            sigil_kernel::VerificationVerdict::NotEvaluated,
+            "not_evaluated",
+        ),
+        (
+            sigil_kernel::VerificationVerdict::NotApplicable,
+            "not_applicable",
+        ),
+        (sigil_kernel::VerificationVerdict::Pending, "pending"),
+        (sigil_kernel::VerificationVerdict::Passed, "passed"),
+        (sigil_kernel::VerificationVerdict::Failed, "failed"),
+        (sigil_kernel::VerificationVerdict::Missing, "missing"),
+        (
+            sigil_kernel::VerificationVerdict::Inconclusive,
+            "inconclusive",
+        ),
+        (sigil_kernel::VerificationVerdict::Stale, "stale"),
+        (sigil_kernel::VerificationVerdict::Skipped, "skipped"),
+    ] {
+        assert_eq!(verification_verdict_label(verdict), label);
+    }
+
+    for (status, label) in [
+        (sigil_kernel::ReceiptStatus::Succeeded, "succeeded"),
+        (sigil_kernel::ReceiptStatus::Failed, "failed"),
+        (sigil_kernel::ReceiptStatus::Skipped, "skipped"),
+        (sigil_kernel::ReceiptStatus::Inconclusive, "inconclusive"),
+    ] {
+        assert_eq!(receipt_status_label(status), label);
+    }
+
+    assert_eq!(
+        readiness_required_actions_label(&[
+            sigil_kernel::RequiredAction::ApproveCheckExecution {
+                check_spec_id: "check-a".to_owned(),
+            },
+            sigil_kernel::RequiredAction::TrustWorkspace,
+        ]),
+        "approve_check:check-a+1"
+    );
+    for (action, expected) in [
+        (
+            sigil_kernel::RequiredAction::RunCheck {
+                check_spec_id: "check-a".to_owned(),
+            },
+            "run_check:check-a",
+        ),
+        (
+            sigil_kernel::RequiredAction::ReRunNonWritingCheck {
+                check_spec_id: "check-a".to_owned(),
+            },
+            "rerun_non_writing:check-a",
+        ),
+        (
+            sigil_kernel::RequiredAction::ReviewVerificationFailure {
+                receipt_id: "receipt-a".to_owned(),
+            },
+            "review_failure:receipt-a",
+        ),
+        (
+            sigil_kernel::RequiredAction::ResolveUnknownDirty,
+            "resolve_unknown_dirty",
+        ),
+        (
+            sigil_kernel::RequiredAction::ProvideVerificationConfig,
+            "provide_verification_config",
+        ),
+    ] {
+        assert_eq!(required_action_label(&action), expected);
+    }
+
+    let stale_causes = [
+        sigil_kernel::VerificationStaleReason::WorkspaceChanged("event-a".to_owned()),
+        sigil_kernel::VerificationStaleReason::CheckSpecChanged("event-a".to_owned()),
+        sigil_kernel::VerificationStaleReason::PolicyChanged("event-a".to_owned()),
+        sigil_kernel::VerificationStaleReason::EnvironmentChanged("event-a".to_owned()),
+        sigil_kernel::VerificationStaleReason::SandboxChanged("event-a".to_owned()),
+        sigil_kernel::VerificationStaleReason::TrustChanged("event-a".to_owned()),
+        sigil_kernel::VerificationStaleReason::UnknownDirty("event-a".to_owned()),
+    ];
+    for reason in stale_causes {
+        assert!(verification_stale_reason_label(&reason).contains("event-a"));
+        assert!(
+            readiness_reason_label(&sigil_kernel::ReadinessReason::VerificationStale(
+                sigil_kernel::VerificationStaleCause {
+                    reason,
+                    from_workspace_snapshot_id: None,
+                    to_workspace_snapshot_id: None,
+                },
+            ))
+            .starts_with("verification_stale:")
+        );
+    }
+
+    for reason in [
+        sigil_kernel::ReadinessReason::LegacyEvidenceUnavailable,
+        sigil_kernel::ReadinessReason::NoVerificationRequired,
+        sigil_kernel::ReadinessReason::FinalAssistantTextIgnored {
+            event_id: "event-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::RecoveredToolError {
+            event_id: "event-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::WorkspaceTrustUnsatisfied,
+        sigil_kernel::ReadinessReason::PendingCheckReducedForTerminalRun {
+            check_spec_id: "check-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::MissingRequiredCheck {
+            check_spec_id: "check-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::VerificationPassed {
+            receipt_id: "receipt-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::VerificationFailed {
+            receipt_id: "receipt-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::VerificationSkipped {
+            event_id: "event-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::WorkspaceUnknownDirty { event_id: None },
+        sigil_kernel::ReadinessReason::WorkspaceUnknownDirty {
+            event_id: Some("event-a".to_owned()),
+        },
+        sigil_kernel::ReadinessReason::CheckMutatedVerificationScope {
+            check_spec_id: "check-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::ReceiptScopeMismatch {
+            receipt_id: "receipt-a".to_owned(),
+        },
+        sigil_kernel::ReadinessReason::ReceiptSnapshotMismatch {
+            receipt_id: "receipt-a".to_owned(),
+        },
+    ] {
+        assert!(!readiness_reason_label(&reason).is_empty());
+    }
+
+    for (trust, label) in [
+        (sigil_kernel::WorkspaceTrust::Unknown, "unknown"),
+        (sigil_kernel::WorkspaceTrust::Trusted, "trusted"),
+        (sigil_kernel::WorkspaceTrust::Restricted, "restricted"),
+        (sigil_kernel::WorkspaceTrust::Denied, "denied"),
+    ] {
+        assert_eq!(workspace_trust_label(trust), label);
+    }
+    for source in [
+        sigil_kernel::CheckDiscoverySource::SigilVerificationFile,
+        sigil_kernel::CheckDiscoverySource::UserExplicitConfig,
+        sigil_kernel::CheckDiscoverySource::CiConfig,
+        sigil_kernel::CheckDiscoverySource::PackageScript,
+        sigil_kernel::CheckDiscoverySource::Cargo,
+        sigil_kernel::CheckDiscoverySource::Makefile,
+        sigil_kernel::CheckDiscoverySource::ModelSuggested,
+        sigil_kernel::CheckDiscoverySource::UserConfirmed,
+    ] {
+        assert!(!check_discovery_source_label(source).is_empty());
+    }
+    for promotion in [
+        sigil_kernel::CheckPromotion::WorkspaceTrusted {
+            trust_event_id: "trust-a".to_owned(),
+        },
+        sigil_kernel::CheckPromotion::Sandboxed {
+            sandbox_decision_id: "sandbox-a".to_owned(),
+        },
+        sigil_kernel::CheckPromotion::GlobalPolicy {
+            policy_event_id: "policy-a".to_owned(),
+        },
+        sigil_kernel::CheckPromotion::ExplicitUserConfig {
+            config_event_id: "config-a".to_owned(),
+        },
+    ] {
+        assert!(!check_promotion_label(&promotion).is_empty());
+    }
+    for scope in [
+        sigil_kernel::EvidenceScope::Run("run-a".to_owned()),
+        sigil_kernel::EvidenceScope::Task("task-a".to_owned()),
+        sigil_kernel::EvidenceScope::Step("step-a".to_owned()),
+        sigil_kernel::EvidenceScope::Agent("agent-a".to_owned()),
+        sigil_kernel::EvidenceScope::Changeset("changeset-a".to_owned()),
+    ] {
+        assert!(evidence_scope_label(&scope).contains("-a"));
+    }
+}
+
+#[test]
 fn render_task_control_entries_and_status_labels() -> Result<()> {
     let task_id = sigil_kernel::TaskId::new("task_1")?;
     let step_id = sigil_kernel::TaskStepId::new("step_1")?;

@@ -68,7 +68,7 @@ pub(crate) use crate::timeline::{
 use self::config_flow::cycle_approval_mode;
 use self::formatting::*;
 use self::modal_flow::{ModalState, ModelPickerRefresh, PendingModelPickerRefresh};
-use self::runtime_status::{McpProgressState, UsageCostCurrency};
+use self::runtime_status::{McpProgressState, ResolvedUsageCostCurrency};
 pub(crate) use self::runtime_status::{
     McpServerRuntimeStatus, TimelineTextSelection, code_intelligence_config_status,
     diagnostic_summary_label, initial_mcp_server_status, initial_mcp_server_statuses,
@@ -403,6 +403,7 @@ pub enum AppAction {
     },
     CompactNow,
     CheckChangedFilesDiagnostics,
+    TrustWorkspace,
     ActivateLazyMcp {
         server_name: Option<String>,
     },
@@ -1639,6 +1640,14 @@ impl AppState {
                 let session_log_path = self.new_session_log_path();
                 Ok(Some(AppAction::StartNewSession { session_log_path }))
             }
+            "/trust-workspace" => {
+                if self.is_busy {
+                    self.push_timeline(TimelineRole::Notice, "busy; trust workspace later");
+                    return Ok(None);
+                }
+                self.last_notice = Some("trusting workspace".to_owned());
+                Ok(Some(AppAction::TrustWorkspace))
+            }
             "/plan" => {
                 if self.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; plan later");
@@ -2144,8 +2153,16 @@ impl AppState {
         )
     }
 
-    fn usage_cost_currency(&self) -> UsageCostCurrency {
-        UsageCostCurrency::from_code(self.balance_snapshot.currency.as_deref())
+    fn usage_cost_currency(&self) -> ResolvedUsageCostCurrency {
+        let configured = self
+            .config_snapshot
+            .as_ref()
+            .map(|config| config.appearance.usage_cost_currency)
+            .unwrap_or_default();
+        ResolvedUsageCostCurrency::from_config(
+            configured,
+            self.balance_snapshot.currency.as_deref(),
+        )
     }
 
     #[cfg(test)]

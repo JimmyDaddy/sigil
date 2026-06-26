@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
+    mutation::MutationEventRecorder,
     permission::{ApprovalMode, ToolOperation, infer_tool_operation},
     provider::ModelMessage,
     session::ControlEntry,
@@ -318,10 +319,38 @@ impl ToolSubjectScope {
 }
 
 /// Execution context shared with tools at runtime.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub timeout_secs: u64,
+    pub mutation_recorder: Option<MutationEventRecorder>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("workspace_root", &self.workspace_root)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("mutation_recorder", &self.mutation_recorder.is_some())
+            .finish()
+    }
+}
+
+impl ToolContext {
+    #[must_use]
+    pub fn new(workspace_root: impl Into<PathBuf>, timeout_secs: u64) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            timeout_secs,
+            mutation_recorder: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_mutation_recorder(mut self, recorder: MutationEventRecorder) -> Self {
+        self.mutation_recorder = Some(recorder);
+        self
+    }
 }
 
 /// Normalized tool execution result returned to the agent loop and UI.

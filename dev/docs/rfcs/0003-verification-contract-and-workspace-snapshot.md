@@ -171,7 +171,7 @@ struct TrustedCheckSpec {
 }
 ```
 
-Untrusted repo-local sources can only produce `CandidateCheck`. They become `TrustedCheckSpec` only through user/global policy promotion, explicit approval or a sandbox decision satisfying policy.
+Untrusted repo-local sources can only produce `CandidateCheck`. They become `TrustedCheckSpec` only through user/global policy promotion, a recorded workspace trust decision, explicit approval or a sandbox decision satisfying policy.
 
 ## 7. Verification Scope and Snapshot
 
@@ -487,7 +487,29 @@ Required deterministic tests:
 - policy inheritance cannot relax parent required checks
 - completion criteria, scope, sandbox and trust requirements cannot be relaxed by child policy
 
-## 15. Open Questions
+## 15. Implementation Progress
+
+当前进度：
+
+- 已新增 `RunStatus`、`VerificationVerdict`、`VisibleCompletionState`，并保持执行生命周期和验证结论分离。
+- 已实现 verification policy、policy merge、scope/trust/sandbox requirement、check spec hash 和 receipt applicability。
+- 已实现候选检查 discovery：用户全局配置、`.sigil/verification.toml`、CI、package scripts、Cargo、Makefile；未信任 workspace 只产生 candidate，不自动提升为 trusted check。
+- 已实现 `WorkspaceSnapshotManifestV1`、scope include/exclude/generated roots、git tracked/unignored snapshot、symlink/external/unsupported/missing entry 处理和 content-bound `WorkspaceSnapshotId`。
+- 已实现 `run_verification_check` MVP：执行 trusted check、记录 command/check evidence、绑定 snapshot/policy/trust/sandbox/environment hash，并识别写型或自修改 check 不能产生最终 passed evidence。
+- 已实现 readiness reducer：写入无 receipt -> `Missing`，成功当前 receipt -> `Passed`，后续 mutation -> `Stale`，unknown dirty -> `Stale` 或 `Inconclusive`，失败/skip/cancel/recovered tool error 均有独立语义。
+- 已将 `/task` step completion 接入 readiness：final text 不能直接证明 verified，missing check 会阻断/降级，RunCheck action 可执行 trusted check 后重算 readiness。
+- 已在 TUI 中展示 verification missing/passed/stale 等状态，并补 slash command 高亮、timeline command token 和 MCP failure 展示回归测试。
+
+剩余实现：
+
+- 完成 check runner 产品化：自动执行策略、用户审批/信任 gate、sandbox gate、runner queue、timeout UI 和失败重试体验。
+- 将 RFC-0002 unknown mutation detection 的 `WorkspaceMutationDetected` / `UnknownDirty` 完整接入 check runner 与 readiness，使 shell/MCP/plugin 写入必然污染旧 verification。
+- 扩展 verification scope exclude/profile：构建产物、依赖缓存、生成目录和写型检查后的二次非写检查策略需要更多真实项目测试。
+- 完成 workspace trust UX：repo-local checks 的 promotion、trust provenance、未信任 workspace 的配置/指令降级展示。
+- 完成 child verification / worktree merge 链路：child passed 只适用于 child snapshot，merge 后 parent 必须重新验证。
+- 将更多 historical/projected state 从 RFC-0001 durable replay 重建，而不是依赖运行时临时状态。
+
+## 16. Open Questions
 
 - Exact default exclude list for build/cache/generated roots.
 - How much of CI check discovery should run before workspace trust.

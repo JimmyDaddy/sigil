@@ -4,6 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig,
     PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, SyntaxThemeId, ThemeId,
+    UsageCostCurrency,
 };
 use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
@@ -164,6 +165,7 @@ pub(crate) enum ConfigField {
     TerminalScrollSensitivity,
     AppearanceTheme,
     AppearanceSyntaxTheme,
+    AppearanceUsageCostCurrency,
     AppearanceColorGroup,
     AppearanceColorToken,
     AppearanceColorOverride,
@@ -204,9 +206,10 @@ impl ConfigField {
         Self::TerminalOsc52Clipboard,
         Self::TerminalScrollSensitivity,
     ];
-    const APPEARANCE_FIELDS: [Self; 5] = [
+    const APPEARANCE_FIELDS: [Self; 6] = [
         Self::AppearanceTheme,
         Self::AppearanceSyntaxTheme,
+        Self::AppearanceUsageCostCurrency,
         Self::AppearanceColorGroup,
         Self::AppearanceColorToken,
         Self::AppearanceColorOverride,
@@ -264,6 +267,7 @@ impl ConfigField {
             Self::TerminalScrollSensitivity => "scroll_sensitivity",
             Self::AppearanceTheme => "theme",
             Self::AppearanceSyntaxTheme => "syntax_theme",
+            Self::AppearanceUsageCostCurrency => "usage_cost_currency",
             Self::AppearanceColorGroup => "color_group",
             Self::AppearanceColorToken => "color_token",
             Self::AppearanceColorOverride => "color_override",
@@ -299,6 +303,7 @@ impl ConfigField {
             Self::TerminalScrollSensitivity => "Scroll sensitivity",
             Self::AppearanceTheme => "Theme",
             Self::AppearanceSyntaxTheme => "Syntax theme",
+            Self::AppearanceUsageCostCurrency => "Cost currency",
             Self::AppearanceColorGroup => "Color group",
             Self::AppearanceColorToken => "Color token",
             Self::AppearanceColorOverride => "Override",
@@ -376,6 +381,9 @@ impl ConfigField {
             Self::AppearanceSyntaxTheme => {
                 "Syntax highlighting theme for markdown code blocks and tool previews. Auto follows the selected TUI theme."
             }
+            Self::AppearanceUsageCostCurrency => {
+                "Display currency for usage cost estimates. Auto follows the provider balance currency when available."
+            }
             Self::AppearanceColorGroup => {
                 "Semantic token group used to narrow color override editing. Press Enter to move to the next group."
             }
@@ -425,9 +433,9 @@ impl ConfigField {
             Self::PermissionsDefaultMode
             | Self::CodeIntelStartup
             | Self::AppearanceTheme
-            | Self::AppearanceSyntaxTheme
-            | Self::AppearanceColorGroup
-            | Self::AppearanceColorToken => "Enter cycle",
+            | Self::AppearanceSyntaxTheme => "Enter cycle",
+            Self::AppearanceUsageCostCurrency => "Enter cycle",
+            Self::AppearanceColorGroup | Self::AppearanceColorToken => "Enter cycle",
             Self::MemoryEnabled
             | Self::CompactionEnabled
             | Self::CodeIntelEnabled
@@ -657,6 +665,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) terminal_scroll_sensitivity: String,
     pub(crate) appearance_theme: ThemeId,
     pub(crate) appearance_syntax_theme: SyntaxThemeId,
+    pub(crate) appearance_usage_cost_currency: UsageCostCurrency,
     pub(crate) appearance_color_group_index: usize,
     pub(crate) appearance_color_token_index: usize,
     pub(crate) mcp_servers: Vec<McpServerDraft>,
@@ -782,6 +791,7 @@ impl ConfigDraft {
             terminal_scroll_sensitivity: root_config.terminal.scroll_sensitivity.to_string(),
             appearance_theme: root_config.appearance.theme,
             appearance_syntax_theme: root_config.appearance.syntax_theme,
+            appearance_usage_cost_currency: root_config.appearance.usage_cost_currency,
             appearance_color_group_index: first_appearance_color_group_index(root_config),
             appearance_color_token_index: first_appearance_color_token_index(root_config),
             mcp_servers: root_config
@@ -931,6 +941,7 @@ impl ConfigDraft {
         root_config.terminal.scroll_sensitivity = terminal_scroll_sensitivity;
         root_config.appearance.theme = self.appearance_theme;
         root_config.appearance.syntax_theme = self.appearance_syntax_theme;
+        root_config.appearance.usage_cost_currency = self.appearance_usage_cost_currency;
         root_config.appearance.colors = self.base_root_config.appearance.colors.clone();
         root_config.mcp_servers = self
             .mcp_servers
@@ -1032,6 +1043,10 @@ impl ConfigDraft {
 
     pub(crate) fn cycle_appearance_syntax_theme(&mut self) {
         self.appearance_syntax_theme = self.appearance_syntax_theme.next();
+    }
+
+    pub(crate) fn cycle_appearance_usage_cost_currency(&mut self) {
+        self.appearance_usage_cost_currency = self.appearance_usage_cost_currency.next();
     }
 
     pub(crate) fn resolved_appearance_syntax_theme(&self) -> SyntaxThemeId {
@@ -1698,6 +1713,7 @@ impl ConfigState {
             | ConfigField::TerminalOsc52Clipboard
             | ConfigField::AppearanceTheme
             | ConfigField::AppearanceSyntaxTheme
+            | ConfigField::AppearanceUsageCostCurrency
             | ConfigField::AppearanceColorGroup
             | ConfigField::AppearanceColorToken => None,
             ConfigField::AppearanceColorOverride => self.draft.selected_appearance_color_override(),
@@ -1747,8 +1763,9 @@ impl ConfigState {
             | ConfigField::TerminalMouseCapture
             | ConfigField::TerminalOsc52Clipboard
             | ConfigField::AppearanceTheme
-            | ConfigField::AppearanceSyntaxTheme
-            | ConfigField::AppearanceColorGroup
+            | ConfigField::AppearanceSyntaxTheme => None,
+            ConfigField::AppearanceUsageCostCurrency => None,
+            ConfigField::AppearanceColorGroup
             | ConfigField::AppearanceColorToken
             | ConfigField::AppearanceColorOverride => None,
         }
@@ -1813,6 +1830,10 @@ impl ConfigState {
             }
             ConfigField::AppearanceSyntaxTheme => {
                 return self.draft.appearance_syntax_theme.as_str().to_owned();
+            }
+            ConfigField::AppearanceUsageCostCurrency => {
+                let currency = self.draft.appearance_usage_cost_currency.as_str();
+                return currency.to_owned();
             }
             ConfigField::AppearanceColorGroup => {
                 return self.draft.selected_appearance_color_group().key.to_owned();
@@ -2037,9 +2058,9 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         | ConfigField::TerminalMouseCapture
         | ConfigField::TerminalOsc52Clipboard
         | ConfigField::AppearanceTheme
-        | ConfigField::AppearanceSyntaxTheme
-        | ConfigField::AppearanceColorGroup
-        | ConfigField::AppearanceColorToken => false,
+        | ConfigField::AppearanceSyntaxTheme => false,
+        ConfigField::AppearanceUsageCostCurrency => false,
+        ConfigField::AppearanceColorGroup | ConfigField::AppearanceColorToken => false,
     }
 }
 

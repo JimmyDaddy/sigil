@@ -1,4 +1,4 @@
 interface:
   display_name: "Technical Solution Executor"
-  short_description: "Execute technical plans with audited completeness"
-  default_prompt: "Use $technical-solution-executor to fully implement the provided technical solution with task review, validation, and completeness audit."
+  short_description: "Execute plans with risk-scaled audits"
+  default_prompt: "Use $technical-solution-executor in standard mode to implement the referenced technical solution with appropriate validation."

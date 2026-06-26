@@ -1,3 +1,4 @@
+use crate::view_model::ComposerViewModel;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -7,9 +8,8 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::view_model::ComposerViewModel;
-
 use super::{
+    command_text::known_slash_command_token,
     geometry::inset_rect,
     status_indicator::{FocusKind, StatusIndicator, focus_style_with_palette},
     text::{pad_display_width, truncate_display_width, wrap_composer_input},
@@ -98,12 +98,7 @@ pub(crate) fn render_input_with_theme(
             .into_iter()
             .skip(row_offset)
             .take(visible_rows)
-            .map(|row| {
-                Line::from(vec![Span::styled(
-                    pad_display_width(&row, input_width),
-                    Style::default().fg(palette.text_primary).bg(input_bg),
-                )])
-            })
+            .map(|row| render_input_row(&row, input_width, input_bg, theme))
             .collect::<Vec<_>>();
         while lines.len() < visible_rows {
             lines.push(Line::from(vec![Span::styled(
@@ -118,6 +113,36 @@ pub(crate) fn render_input_with_theme(
             input_inner,
         );
     }
+}
+
+fn render_input_row(row: &str, width: usize, input_bg: Color, theme: &Theme) -> Line<'static> {
+    let palette = &theme.palette;
+    let padded = pad_display_width(row, width);
+    let Some(command) = known_slash_command_token(row) else {
+        return Line::from(vec![Span::styled(
+            padded,
+            Style::default().fg(palette.text_primary).bg(input_bg),
+        )]);
+    };
+    let command_span = Span::styled(
+        command.token.to_owned(),
+        Style::default()
+            .fg(palette.accent_info)
+            .bg(input_bg)
+            .add_modifier(Modifier::BOLD),
+    );
+    let spans = vec![
+        Span::styled(
+            padded[..command.start].to_owned(),
+            Style::default().fg(palette.text_primary).bg(input_bg),
+        ),
+        command_span,
+        Span::styled(
+            padded[command.end..].to_owned(),
+            Style::default().fg(palette.text_primary).bg(input_bg),
+        ),
+    ];
+    Line::from(spans)
 }
 
 pub(crate) fn composer_cursor_origin(

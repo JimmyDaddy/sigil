@@ -443,6 +443,14 @@ impl AppState {
                     "Syntax source",
                     &render_syntax_theme_source(config_state),
                 ));
+                lines.push(render_config_value_row(
+                    config_state,
+                    ConfigField::AppearanceUsageCostCurrency,
+                ));
+                lines.push(render_config_readonly_row(
+                    "Cost source",
+                    &render_usage_cost_currency_source(config_state),
+                ));
                 let available = ThemeId::all()
                     .iter()
                     .map(|theme| theme.as_str())
@@ -1184,6 +1192,15 @@ impl AppState {
                             self.last_notice = Some(format!(
                                 "syntax theme -> {}",
                                 config_state.draft.appearance_syntax_theme.as_str()
+                            ));
+                            return Ok(None);
+                        }
+                        ConfigField::AppearanceUsageCostCurrency => {
+                            config_state.draft.cycle_appearance_usage_cost_currency();
+                            config_state.dirty = true;
+                            self.last_notice = Some(format!(
+                                "cost currency -> {}",
+                                config_state.draft.appearance_usage_cost_currency.as_str()
                             ));
                             return Ok(None);
                         }
@@ -2061,7 +2078,7 @@ impl AppState {
     pub(crate) fn mcp_server_runtime_status_label(&self, server_name: &str) -> Option<String> {
         self.mcp_server_statuses
             .get(server_name)
-            .map(McpServerRuntimeStatus::label)
+            .map(|status| status.label_for_server(Some(server_name)))
     }
 
     pub(crate) fn mcp_sidebar_lines(&self) -> Vec<String> {
@@ -2078,7 +2095,11 @@ impl AppState {
                     .get(&server.name)
                     .cloned()
                     .unwrap_or_else(|| initial_mcp_server_status(server));
-                format!("{}: {}", server.name, status.label())
+                format!(
+                    "{}: {}",
+                    server.name,
+                    status.label_for_server(Some(&server.name))
+                )
             })
             .collect()
     }
@@ -2096,7 +2117,7 @@ impl AppState {
             .get(&config.name)
             .cloned()
             .unwrap_or_else(|| initial_mcp_server_status(config))
-            .label()
+            .label_for_server(Some(&config.name))
     }
 
     fn render_code_intelligence_readiness_summary(
@@ -2131,6 +2152,7 @@ fn draft_appearance_config(config_state: &ConfigState) -> AppearanceConfig {
     let mut appearance = config_state.draft.base_root_config.appearance.clone();
     appearance.theme = config_state.draft.appearance_theme;
     appearance.syntax_theme = config_state.draft.appearance_syntax_theme;
+    appearance.usage_cost_currency = config_state.draft.appearance_usage_cost_currency;
     appearance
 }
 
@@ -2141,6 +2163,13 @@ fn render_syntax_theme_source(config_state: &ConfigState) -> String {
         format!("auto -> {}", resolved.display_label())
     } else {
         format!("manual -> {}", resolved.display_label())
+    }
+}
+
+fn render_usage_cost_currency_source(config_state: &ConfigState) -> String {
+    match config_state.draft.appearance_usage_cost_currency {
+        sigil_kernel::UsageCostCurrency::Auto => "auto -> provider balance currency".to_owned(),
+        currency => format!("manual -> {}", currency.display_label()),
     }
 }
 

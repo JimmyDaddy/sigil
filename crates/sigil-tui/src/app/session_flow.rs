@@ -1076,6 +1076,55 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 route.server_name,
                 task_route_status_label(route.status)
             ),
+            ControlEntry::CheckSpecRecorded(entry) => format!(
+                "[ctl] check spec {} source={} promotion={}",
+                truncate_session_view_text(&entry.trusted_check.check_spec.check_spec_id, 48),
+                check_discovery_source_label(entry.trusted_check.source),
+                check_promotion_label(&entry.trusted_check.promoted_by)
+            ),
+            ControlEntry::VerificationPolicyChanged(entry) => format!(
+                "[ctl] verification policy {} checks={} hash={}",
+                evidence_scope_label(&entry.scope),
+                entry.policy.required_checks.len(),
+                truncate_session_view_text(&entry.policy_hash, 16)
+            ),
+            ControlEntry::VerificationRecorded(entry) => format!(
+                "[ctl] verification receipt {} check={} status={} snapshot={} policy={} trust={}",
+                truncate_session_view_text(&entry.receipt.receipt.receipt_id, 48),
+                truncate_session_view_text(&entry.receipt.check_spec_id, 48),
+                receipt_status_label(entry.receipt.check_status),
+                truncate_session_view_text(&entry.receipt.binding.workspace_snapshot_id, 16),
+                truncate_session_view_text(
+                    entry.receipt.receipt.policy_hash.as_deref().unwrap_or("-"),
+                    16
+                ),
+                truncate_session_view_text(&entry.receipt.binding.workspace_trust_snapshot_id, 16)
+            ),
+            ControlEntry::ReadinessEvaluated(entry) => format!(
+                "[ctl] readiness {} run={} verification={} policy={} snapshot={} actions={} reasons={}",
+                evidence_scope_label(&entry.scope),
+                run_status_label(entry.evaluation.run_status),
+                verification_verdict_label(entry.evaluation.verification_verdict),
+                truncate_session_view_text(entry.policy_hash.as_deref().unwrap_or("-"), 16),
+                truncate_session_view_text(
+                    entry.workspace_snapshot_id.as_deref().unwrap_or("-"),
+                    16
+                ),
+                readiness_required_actions_label(&entry.evaluation.required_actions),
+                readiness_reasons_label(&entry.evaluation.reasons)
+            ),
+            ControlEntry::ChildVerificationReceiptLinked(entry) => format!(
+                "[ctl] verification child receipt {} child={} snapshot={}",
+                truncate_session_view_text(&entry.child_receipt_id, 48),
+                truncate_session_view_text(&entry.child_session_id, 48),
+                truncate_session_view_text(&entry.child_workspace_snapshot_id, 16)
+            ),
+            ControlEntry::WorkspaceTrustDecision(entry) => format!(
+                "[ctl] workspace trust {} trust={} snapshot={}",
+                truncate_session_view_text(&entry.workspace_id, 48),
+                workspace_trust_label(entry.trust),
+                truncate_session_view_text(&entry.workspace_trust_snapshot_id, 16)
+            ),
             ControlEntry::AgentProfileCaptured(entry) => format!(
                 "[ctl] agent profile {} trust={}",
                 entry.snapshot.profile_id.as_str(),
@@ -1365,6 +1414,202 @@ fn task_child_session_status_label(status: sigil_kernel::TaskChildSessionStatus)
         sigil_kernel::TaskChildSessionStatus::Cancelled => "cancelled",
         sigil_kernel::TaskChildSessionStatus::Interrupted => "interrupted",
         sigil_kernel::TaskChildSessionStatus::Unavailable => "unavailable",
+    }
+}
+
+fn run_status_label(status: sigil_kernel::RunStatus) -> &'static str {
+    match status {
+        sigil_kernel::RunStatus::Running => "running",
+        sigil_kernel::RunStatus::Completed => "completed",
+        sigil_kernel::RunStatus::Paused => "paused",
+        sigil_kernel::RunStatus::Blocked => "blocked",
+        sigil_kernel::RunStatus::Failed => "failed",
+        sigil_kernel::RunStatus::Cancelled => "cancelled",
+        sigil_kernel::RunStatus::Interrupted => "interrupted",
+    }
+}
+
+fn verification_verdict_label(status: sigil_kernel::VerificationVerdict) -> &'static str {
+    match status {
+        sigil_kernel::VerificationVerdict::NotEvaluated => "not_evaluated",
+        sigil_kernel::VerificationVerdict::NotApplicable => "not_applicable",
+        sigil_kernel::VerificationVerdict::Pending => "pending",
+        sigil_kernel::VerificationVerdict::Passed => "passed",
+        sigil_kernel::VerificationVerdict::Failed => "failed",
+        sigil_kernel::VerificationVerdict::Missing => "missing",
+        sigil_kernel::VerificationVerdict::Inconclusive => "inconclusive",
+        sigil_kernel::VerificationVerdict::Stale => "stale",
+        sigil_kernel::VerificationVerdict::Skipped => "skipped",
+    }
+}
+
+fn receipt_status_label(status: sigil_kernel::ReceiptStatus) -> &'static str {
+    match status {
+        sigil_kernel::ReceiptStatus::Succeeded => "succeeded",
+        sigil_kernel::ReceiptStatus::Failed => "failed",
+        sigil_kernel::ReceiptStatus::Skipped => "skipped",
+        sigil_kernel::ReceiptStatus::Inconclusive => "inconclusive",
+    }
+}
+
+fn readiness_required_actions_label(actions: &[sigil_kernel::RequiredAction]) -> String {
+    summarized_readiness_items(actions, required_action_label)
+}
+
+fn readiness_reasons_label(reasons: &[sigil_kernel::ReadinessReason]) -> String {
+    summarized_readiness_items(reasons, readiness_reason_label)
+}
+
+fn summarized_readiness_items<T>(items: &[T], labeler: fn(&T) -> String) -> String {
+    let Some(first) = items.first() else {
+        return "none".to_owned();
+    };
+    let mut label = labeler(first);
+    if items.len() > 1 {
+        label.push_str(&format!("+{}", items.len() - 1));
+    }
+    truncate_session_view_text(&label, 48)
+}
+
+fn required_action_label(action: &sigil_kernel::RequiredAction) -> String {
+    match action {
+        sigil_kernel::RequiredAction::RunCheck { check_spec_id } => {
+            format!("run_check:{check_spec_id}")
+        }
+        sigil_kernel::RequiredAction::ApproveCheckExecution { check_spec_id } => {
+            format!("approve_check:{check_spec_id}")
+        }
+        sigil_kernel::RequiredAction::TrustWorkspace => "trust_workspace".to_owned(),
+        sigil_kernel::RequiredAction::ResolveUnknownDirty => "resolve_unknown_dirty".to_owned(),
+        sigil_kernel::RequiredAction::ReRunNonWritingCheck { check_spec_id } => {
+            format!("rerun_non_writing:{check_spec_id}")
+        }
+        sigil_kernel::RequiredAction::ReviewVerificationFailure { receipt_id } => {
+            format!("review_failure:{receipt_id}")
+        }
+        sigil_kernel::RequiredAction::ProvideVerificationConfig => {
+            "provide_verification_config".to_owned()
+        }
+    }
+}
+
+fn readiness_reason_label(reason: &sigil_kernel::ReadinessReason) -> String {
+    match reason {
+        sigil_kernel::ReadinessReason::LegacyEvidenceUnavailable => "legacy_evidence".to_owned(),
+        sigil_kernel::ReadinessReason::NoVerificationRequired => {
+            "no_verification_required".to_owned()
+        }
+        sigil_kernel::ReadinessReason::FinalAssistantTextIgnored { event_id } => {
+            format!("final_text_ignored:{event_id}")
+        }
+        sigil_kernel::ReadinessReason::RecoveredToolError { event_id } => {
+            format!("recovered_tool_error:{event_id}")
+        }
+        sigil_kernel::ReadinessReason::WorkspaceTrustUnsatisfied => {
+            "workspace_trust_unsatisfied".to_owned()
+        }
+        sigil_kernel::ReadinessReason::PendingCheckReducedForTerminalRun { check_spec_id } => {
+            format!("pending_terminal:{check_spec_id}")
+        }
+        sigil_kernel::ReadinessReason::MissingRequiredCheck { check_spec_id } => {
+            format!("missing_check:{check_spec_id}")
+        }
+        sigil_kernel::ReadinessReason::VerificationPassed { receipt_id } => {
+            format!("verification_passed:{receipt_id}")
+        }
+        sigil_kernel::ReadinessReason::VerificationFailed { receipt_id } => {
+            format!("verification_failed:{receipt_id}")
+        }
+        sigil_kernel::ReadinessReason::VerificationSkipped { event_id } => {
+            format!("verification_skipped:{event_id}")
+        }
+        sigil_kernel::ReadinessReason::VerificationStale(cause) => {
+            format!(
+                "verification_stale:{}",
+                verification_stale_reason_label(&cause.reason)
+            )
+        }
+        sigil_kernel::ReadinessReason::WorkspaceUnknownDirty { event_id } => event_id
+            .as_deref()
+            .map(|event_id| format!("workspace_unknown_dirty:{event_id}"))
+            .unwrap_or_else(|| "workspace_unknown_dirty".to_owned()),
+        sigil_kernel::ReadinessReason::CheckMutatedVerificationScope { check_spec_id } => {
+            format!("check_mutated_scope:{check_spec_id}")
+        }
+        sigil_kernel::ReadinessReason::ReceiptScopeMismatch { receipt_id } => {
+            format!("receipt_scope_mismatch:{receipt_id}")
+        }
+        sigil_kernel::ReadinessReason::ReceiptSnapshotMismatch { receipt_id } => {
+            format!("receipt_snapshot_mismatch:{receipt_id}")
+        }
+    }
+}
+
+fn verification_stale_reason_label(reason: &sigil_kernel::VerificationStaleReason) -> String {
+    match reason {
+        sigil_kernel::VerificationStaleReason::WorkspaceChanged(event_id) => {
+            format!("workspace_changed:{event_id}")
+        }
+        sigil_kernel::VerificationStaleReason::CheckSpecChanged(event_id) => {
+            format!("check_spec_changed:{event_id}")
+        }
+        sigil_kernel::VerificationStaleReason::PolicyChanged(event_id) => {
+            format!("policy_changed:{event_id}")
+        }
+        sigil_kernel::VerificationStaleReason::EnvironmentChanged(event_id) => {
+            format!("environment_changed:{event_id}")
+        }
+        sigil_kernel::VerificationStaleReason::SandboxChanged(event_id) => {
+            format!("sandbox_changed:{event_id}")
+        }
+        sigil_kernel::VerificationStaleReason::TrustChanged(event_id) => {
+            format!("trust_changed:{event_id}")
+        }
+        sigil_kernel::VerificationStaleReason::UnknownDirty(event_id) => {
+            format!("unknown_dirty:{event_id}")
+        }
+    }
+}
+
+fn workspace_trust_label(trust: sigil_kernel::WorkspaceTrust) -> &'static str {
+    match trust {
+        sigil_kernel::WorkspaceTrust::Unknown => "unknown",
+        sigil_kernel::WorkspaceTrust::Trusted => "trusted",
+        sigil_kernel::WorkspaceTrust::Restricted => "restricted",
+        sigil_kernel::WorkspaceTrust::Denied => "denied",
+    }
+}
+
+fn check_discovery_source_label(source: sigil_kernel::CheckDiscoverySource) -> &'static str {
+    match source {
+        sigil_kernel::CheckDiscoverySource::SigilVerificationFile => "sigil_verification_file",
+        sigil_kernel::CheckDiscoverySource::UserExplicitConfig => "user_explicit_config",
+        sigil_kernel::CheckDiscoverySource::CiConfig => "ci_config",
+        sigil_kernel::CheckDiscoverySource::PackageScript => "package_script",
+        sigil_kernel::CheckDiscoverySource::Cargo => "cargo",
+        sigil_kernel::CheckDiscoverySource::Makefile => "makefile",
+        sigil_kernel::CheckDiscoverySource::ModelSuggested => "model_suggested",
+        sigil_kernel::CheckDiscoverySource::UserConfirmed => "user_confirmed",
+    }
+}
+
+fn check_promotion_label(promotion: &sigil_kernel::CheckPromotion) -> &'static str {
+    match promotion {
+        sigil_kernel::CheckPromotion::UserApproved { .. } => "user_approved",
+        sigil_kernel::CheckPromotion::WorkspaceTrusted { .. } => "workspace_trusted",
+        sigil_kernel::CheckPromotion::Sandboxed { .. } => "sandboxed",
+        sigil_kernel::CheckPromotion::GlobalPolicy { .. } => "global_policy",
+        sigil_kernel::CheckPromotion::ExplicitUserConfig { .. } => "explicit_user_config",
+    }
+}
+
+fn evidence_scope_label(scope: &sigil_kernel::EvidenceScope) -> String {
+    match scope {
+        sigil_kernel::EvidenceScope::Run(id) => format!("run:{id}"),
+        sigil_kernel::EvidenceScope::Task(id) => format!("task:{id}"),
+        sigil_kernel::EvidenceScope::Step(id) => format!("step:{id}"),
+        sigil_kernel::EvidenceScope::Agent(id) => format!("agent:{id}"),
+        sigil_kernel::EvidenceScope::Changeset(id) => format!("changeset:{id}"),
     }
 }
 

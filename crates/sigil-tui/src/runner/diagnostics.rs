@@ -84,10 +84,8 @@ async fn execute_changed_files_diagnostics(
         .to_string(),
     };
     let paths = diagnostics_paths_from_call(&call)?;
-    let tool_ctx = sigil_kernel::ToolContext {
-        workspace_root: options.workspace_root.clone(),
-        timeout_secs: options.tool_timeout_secs,
-    };
+    let tool_ctx =
+        sigil_kernel::ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs);
     let Some(spec) = tools.spec_for(&call.name) else {
         let mut result = ToolResult::error(
             call.id.clone(),

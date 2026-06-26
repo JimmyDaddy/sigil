@@ -7,9 +7,10 @@ use std::{
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    ChangeSetId, TerminalTaskId, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind,
-    ToolOperation, ToolPreviewCapability, ToolRegistry, ToolResultStatus, ToolSubjectKind,
-    ToolSubjectScope,
+    ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
+    JsonlSessionStore, MutationEventRecorder, SessionStreamRecord, TerminalTaskId, Tool,
+    ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability,
+    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -57,6 +58,16 @@ fn apply_changeset_tool() -> ApplyChangeSetTool {
         artifact_root: PathBuf::from("state/artifacts/changesets"),
         artifact_label_root: PathBuf::from("state/artifacts/changesets"),
     }
+}
+
+fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
+    let mut event_types = Vec::new();
+    for record in JsonlSessionStore::read_event_records(store.path())? {
+        if let SessionStreamRecord::Stored(event) = record {
+            event_types.push(event.event_type);
+        }
+    }
+    Ok(event_types)
 }
 
 #[test]
@@ -183,10 +194,7 @@ fn terminal_process_managers_reuse_relative_artifact_roots() -> Result<()> {
 fn write_file_permission_operation_classifies_create_overwrite_and_external() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("existing.txt"), "old")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     assert_eq!(
         WriteFileTool.permission_operation(&ctx, &json!({"path":"existing.txt"}))?,
@@ -214,10 +222,7 @@ async fn read_and_edit_file_tool_work() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("note.txt");
     fs::write(&file, "hello old")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let read = ReadFileTool
         .execute(ctx.clone(), "1".to_owned(), json!({ "path": "note.txt" }))
         .await?;
@@ -234,14 +239,82 @@ async fn read_and_edit_file_tool_work() -> Result<()> {
 }
 
 #[tokio::test]
+async fn write_file_records_controlled_mutation_events_when_session_store_is_available()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5)
+        .with_mutation_recorder(MutationEventRecorder::new(store.clone()));
+
+    let result = WriteFileTool
+        .execute(
+            ctx,
+            "write-call".to_owned(),
+            json!({ "path": "note.txt", "content": "hello\n" }),
+        )
+        .await?;
+
+    assert!(!result.is_error());
+    assert_eq!(fs::read_to_string(temp.path().join("note.txt"))?, "hello\n");
+    assert_eq!(
+        stored_event_types(&store)?,
+        vec![
+            DurableEventType::MutationPrepared.as_str(),
+            DurableEventType::MutationCommitted.as_str(),
+            DurableEventType::WriteCommitted.as_str(),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn edit_and_delete_file_record_controlled_mutation_events_when_session_store_is_available()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("note.txt"), "hello old\n")?;
+    fs::write(temp.path().join("doomed.txt"), "delete me\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5)
+        .with_mutation_recorder(MutationEventRecorder::new(store.clone()));
+
+    let edit = EditFileTool
+        .execute(
+            ctx.clone(),
+            "edit-call".to_owned(),
+            json!({ "path": "note.txt", "old_text": "old", "new_text": "new" }),
+        )
+        .await?;
+    let delete = DeleteFileTool
+        .execute(
+            ctx,
+            "delete-call".to_owned(),
+            json!({ "path": "doomed.txt" }),
+        )
+        .await?;
+
+    assert!(!edit.is_error());
+    assert!(!delete.is_error());
+    assert_eq!(
+        fs::read_to_string(temp.path().join("note.txt"))?,
+        "hello new\n"
+    );
+    assert!(!temp.path().join("doomed.txt").exists());
+    assert_eq!(
+        stored_event_types(&store)?
+            .into_iter()
+            .filter(|event_type| event_type == DurableEventType::WriteCommitted.as_str())
+            .count(),
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn write_file_preview_contains_diff() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("note.txt");
     fs::write(&file, "alpha\nbeta\n")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let preview = WriteFileTool
         .preview(
             ctx,
@@ -262,10 +335,7 @@ async fn write_file_preview_contains_diff() -> Result<()> {
 #[tokio::test]
 async fn write_file_preview_for_new_file_contains_create_diff() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let preview = WriteFileTool
         .preview(ctx, json!({ "path": "new-note.txt", "content": "hello\n" }))
         .await?
@@ -293,10 +363,7 @@ async fn write_file_preview_errors_for_unreadable_existing_file() -> Result<()> 
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("note.txt");
     fs::write(&file, [0xff_u8, 0xfe, 0xfd])?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let error = WriteFileTool
         .preview(
             ctx,
@@ -313,10 +380,7 @@ async fn edit_file_preview_contains_replacement() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("note.txt");
     fs::write(&file, "hello old\n")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let preview = EditFileTool
         .preview(
             ctx,
@@ -337,10 +401,7 @@ async fn edit_file_preview_contains_replacement() -> Result<()> {
 async fn delete_file_preview_contains_delete_diff() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("note.txt"), "alpha\nbeta\n")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let preview = DeleteFileTool
         .preview(ctx, json!({ "path": "note.txt" }))
@@ -363,10 +424,7 @@ async fn delete_file_execute_deletes_regular_file() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let file = temp.path().join("note.txt");
     fs::write(&file, "alpha\nbeta\n")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = DeleteFileTool
         .execute(ctx, "delete".to_owned(), json!({ "path": "note.txt" }))
@@ -387,10 +445,7 @@ async fn delete_file_execute_deletes_regular_file() -> Result<()> {
 #[tokio::test]
 async fn delete_file_errors_for_missing_file() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let error = DeleteFileTool
         .execute(ctx, "delete".to_owned(), json!({ "path": "missing.txt" }))
@@ -405,10 +460,7 @@ async fn delete_file_errors_for_missing_file() -> Result<()> {
 async fn delete_file_errors_for_directory_path() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir(temp.path().join("dir"))?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let error = DeleteFileTool
         .execute(ctx, "delete".to_owned(), json!({ "path": "dir" }))
@@ -488,10 +540,7 @@ fn register_builtin_tools_registers_multiple_tools() {
 fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::create_dir(temp.path().join("logs"))?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
@@ -578,10 +627,7 @@ fn terminal_tools_permission_subjects_and_access_are_conservative() -> Result<()
 fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("existing.txt"), "old")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
@@ -647,10 +693,7 @@ fn builtin_tools_expose_fine_grained_permission_operations() -> Result<()> {
 async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let shell = test_shell(temp.path())?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
@@ -716,10 +759,7 @@ async fn terminal_start_injects_scratch_dir_env() -> Result<()> {
     fs::create_dir(&workspace)?;
     let scratch_root = temp.path().join("cache").join("tmp");
     let shell = test_shell(&workspace)?;
-    let ctx = ToolContext {
-        workspace_root: workspace.clone(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.clone(), 5);
     let mut registry = ToolRegistry::new();
     register_builtin_tools_with_test_paths(&mut registry, &workspace, scratch_root.clone());
 
@@ -754,10 +794,7 @@ async fn terminal_start_injects_scratch_dir_env() -> Result<()> {
 async fn terminal_input_returns_structured_unsupported_without_echoing_input() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let shell = test_shell(temp.path())?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
@@ -864,10 +901,7 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
     fs::create_dir(&workspace)?;
     fs::create_dir(workspace.join("logs"))?;
     let shell = test_shell(&workspace)?;
-    let ctx = ToolContext {
-        workspace_root: workspace.clone(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.clone(), 5);
     let managers = Arc::new(TerminalProcessManagers::default());
     let manager = managers.manager_for(
         &workspace,
@@ -927,10 +961,7 @@ async fn terminal_input_permission_hooks_use_live_process_context() -> Result<()
 async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let shell = test_shell(temp.path())?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let mut registry = ToolRegistry::new();
     register_builtin_tools(&mut registry);
 
@@ -989,10 +1020,7 @@ async fn terminal_pty_tools_accept_input_resize_and_read_output() -> Result<()> 
 async fn read_file_supports_offset_limit_and_truncation_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("big.txt"), "one\ntwo\nthree\nfour\n")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = ReadFileTool
         .execute(
@@ -1018,10 +1046,7 @@ async fn list_glob_and_grep_report_limit_metadata() -> Result<()> {
     for index in 0..5 {
         fs::write(temp.path().join(format!("file-{index}.txt")), "needle\n")?;
     }
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let list = ListTool
         .execute(ctx.clone(), "ls".to_owned(), json!({ "limit": 2 }))
@@ -1056,10 +1081,7 @@ async fn list_glob_and_grep_report_limit_metadata() -> Result<()> {
 #[tokio::test]
 async fn bash_large_output_is_truncated_with_metadata() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = bash_tool(temp.path())
         .execute(
@@ -1084,10 +1106,7 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
         scratch_root: temp.path().join("cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
     };
-    let ctx = ToolContext {
-        workspace_root: workspace,
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace, 5);
 
     let result = tool
         .execute(
@@ -1115,10 +1134,7 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
     fs::create_dir(&workspace)?;
     let scratch_file = temp.path().join("scratch-file");
     fs::write(&scratch_file, "not a directory")?;
-    let ctx = ToolContext {
-        workspace_root: workspace,
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace, 5);
 
     let bash_error = BashTool {
         scratch_root: scratch_file.clone(),
@@ -1164,10 +1180,7 @@ fn read_file_reports_symlink_escape_as_external_subject() -> Result<()> {
     fs::write(&outside_file, "secret")?;
     symlink(&outside_file, workspace.path().join("leak.txt"))?;
     let expected = fs::canonicalize(&outside_file)?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let subjects = ReadFileTool.permission_subjects(&ctx, &json!({ "path": "leak.txt" }))?;
 
@@ -1188,10 +1201,7 @@ fn write_file_reports_existing_symlink_escape_as_external_subject() -> Result<()
     fs::write(&outside_file, "secret")?;
     symlink(&outside_file, workspace.path().join("leak.txt"))?;
     let expected = fs::canonicalize(&outside_file)?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let subjects = WriteFileTool.permission_subjects(&ctx, &json!({ "path": "leak.txt" }))?;
 
@@ -1211,10 +1221,7 @@ fn write_file_reports_symlink_parent_escape_for_new_file_as_external_subject() -
     let outside = tempfile::tempdir()?;
     symlink(outside.path(), workspace.path().join("outside-dir"))?;
     let expected = outside.path().canonicalize()?.join("new.txt");
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let subjects =
         WriteFileTool.permission_subjects(&ctx, &json!({ "path": "outside-dir/new.txt" }))?;
@@ -1237,10 +1244,7 @@ fn edit_file_reports_symlink_escape_as_external_subject() -> Result<()> {
     fs::write(&outside_file, "hello old")?;
     symlink(&outside_file, workspace.path().join("leak.txt"))?;
     let expected = fs::canonicalize(&outside_file)?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let subjects = EditFileTool.permission_subjects(&ctx, &json!({ "path": "leak.txt" }))?;
 
@@ -1262,10 +1266,7 @@ fn delete_file_reports_symlink_escape_as_external_subject() -> Result<()> {
     fs::write(&outside_file, "secret")?;
     symlink(&outside_file, workspace.path().join("leak.txt"))?;
     let expected = fs::canonicalize(&outside_file)?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let subjects = DeleteFileTool.permission_subjects(&ctx, &json!({ "path": "leak.txt" }))?;
 
@@ -1286,10 +1287,7 @@ fn list_and_grep_report_external_symlink_roots_as_external_subjects() -> Result<
     fs::write(outside.path().join("secret.txt"), "secret")?;
     symlink(outside.path(), workspace.path().join("outside-dir"))?;
     let expected = outside.path().canonicalize()?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let list_subjects = ListTool.permission_subjects(&ctx, &json!({ "path": "outside-dir" }))?;
     let grep_subjects = GrepTool
@@ -1316,10 +1314,7 @@ async fn list_recursive_does_not_traverse_external_symlink_children() -> Result<
     fs::write(outside.path().join("secret.txt"), "secret")?;
     fs::write(workspace.path().join("visible.txt"), "visible")?;
     symlink(outside.path(), workspace.path().join("outside-dir"))?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let result = ListTool
         .execute(
@@ -1342,10 +1337,7 @@ async fn glob_does_not_traverse_external_symlink_targets() -> Result<()> {
     fs::write(outside.path().join("secret.txt"), "secret")?;
     symlink(outside.path(), workspace.path().join("outside-dir"))?;
     fs::write(workspace.path().join("visible.txt"), "visible")?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let result = GlobTool
         .execute(ctx, "glob".to_owned(), json!({ "pattern": "**/*.txt" }))
@@ -1359,10 +1351,7 @@ async fn glob_does_not_traverse_external_symlink_targets() -> Result<()> {
 #[tokio::test]
 async fn bash_tool_timeout_surfaces_structured_error() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = bash_tool(temp.path())
         .execute(
@@ -1383,10 +1372,7 @@ async fn bash_tool_timeout_surfaces_structured_error() -> Result<()> {
 #[tokio::test]
 async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = bash_tool(temp.path())
         .execute(
@@ -1405,10 +1391,7 @@ async fn bash_tool_non_zero_exit_returns_error_result() -> Result<()> {
 #[test]
 fn bash_permission_access_allows_only_simple_readonly_commands() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     for command in [
         "pwd",
@@ -1456,10 +1439,7 @@ async fn bash_permission_subjects_include_external_paths_and_redirections() -> R
     let outside_file = outside.path().canonicalize()?.join("input.txt");
     fs::write(&outside_file, "needle")?;
     let outside_output = outside.path().canonicalize()?.join("out.txt");
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let subjects = bash_tool(workspace.path()).permission_subjects(
         &ctx,
@@ -1483,10 +1463,7 @@ async fn bash_permission_subjects_resolve_cd_relative_paths_against_external_cwd
     let outside = tempfile::tempdir()?;
     let outside_root = outside.path().canonicalize()?;
     let outside_child = outside_root.join("child.txt");
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let subjects = bash_tool(workspace.path()).permission_subjects(
         &ctx,
@@ -1509,10 +1486,7 @@ async fn grep_skips_non_utf8_files_without_panicking() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("valid.txt"), "needle\n")?;
     fs::write(temp.path().join("binary.bin"), [0xff_u8, 0xfe, 0xfd])?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = GrepTool
         .execute(ctx, "grep".to_owned(), json!({ "pattern": "needle" }))
@@ -1528,10 +1502,7 @@ async fn grep_skips_non_utf8_files_without_panicking() -> Result<()> {
 #[tokio::test]
 async fn write_file_execute_creates_missing_parent_directories() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = WriteFileTool
         .execute(
@@ -1552,10 +1523,7 @@ async fn write_file_execute_creates_missing_parent_directories() -> Result<()> {
 #[tokio::test]
 async fn edit_file_errors_for_missing_and_ambiguous_old_text() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     fs::write(temp.path().join("note.txt"), "repeat old repeat old")?;
 
     let missing = EditFileTool
@@ -1588,10 +1556,7 @@ async fn delete_file_rejects_symlink_target() -> Result<()> {
     let outside_file = outside.path().join("secret.txt");
     fs::write(&outside_file, "secret")?;
     symlink(&outside_file, workspace.path().join("linked.txt"))?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let error = DeleteFileTool
         .execute(
@@ -1651,10 +1616,7 @@ fn builtin_argument_helpers_validate_types_and_sizes() {
 #[tokio::test]
 async fn tool_permission_subjects_validate_required_paths() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     for (tool_name, result) in [
         (
@@ -1697,10 +1659,7 @@ async fn tool_permission_subjects_validate_required_paths() -> Result<()> {
 async fn edit_file_preview_surfaces_missing_and_ambiguous_matches() -> Result<()> {
     let temp = tempfile::tempdir()?;
     fs::write(temp.path().join("note.txt"), "old one old two")?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let missing = EditFileTool
         .preview(
@@ -1725,10 +1684,7 @@ async fn edit_file_preview_surfaces_missing_and_ambiguous_matches() -> Result<()
 #[tokio::test]
 async fn read_list_glob_grep_and_bash_surface_input_errors() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let read_error = ReadFileTool
         .execute(
@@ -1925,10 +1881,9 @@ async fn apply_changeset_tool_previews_and_applies_multi_file_changes() -> Resul
     let workspace = tempfile::tempdir()?;
     fs::write(workspace.path().join("note.txt"), "old\n")?;
     fs::write(workspace.path().join("doomed.txt"), "remove me\n")?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5)
+        .with_mutation_recorder(MutationEventRecorder::new(store.clone()));
     let args = json!({
         "id": "change-apply-1",
         "title": "Apply sample changes",
@@ -2001,6 +1956,22 @@ async fn apply_changeset_tool_previews_and_applies_multi_file_changes() -> Resul
         result.metadata.details["artifacts"]["reverse"]["sha256"],
         json!(super::sha256_hex(reverse_diff.as_bytes()))
     );
+    assert_eq!(
+        stored_event_types(&store)?,
+        vec![
+            DurableEventType::MutationBatchStarted.as_str(),
+            DurableEventType::MutationPrepared.as_str(),
+            DurableEventType::MutationCommitted.as_str(),
+            DurableEventType::WriteCommitted.as_str(),
+            DurableEventType::MutationPrepared.as_str(),
+            DurableEventType::MutationCommitted.as_str(),
+            DurableEventType::WriteCommitted.as_str(),
+            DurableEventType::MutationPrepared.as_str(),
+            DurableEventType::MutationCommitted.as_str(),
+            DurableEventType::WriteCommitted.as_str(),
+            DurableEventType::MutationBatchFinished.as_str(),
+        ]
+    );
     assert!(!result.to_model_content().contains("--- current/note.txt"));
     Ok(())
 }
@@ -2009,10 +1980,7 @@ async fn apply_changeset_tool_previews_and_applies_multi_file_changes() -> Resul
 async fn apply_changeset_hash_mismatch_does_not_write() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     fs::write(workspace.path().join("note.txt"), "original\n")?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
     let result = apply_changeset_tool()
         .execute(
             ctx,
@@ -2051,10 +2019,7 @@ async fn apply_changeset_hash_mismatch_does_not_write() -> Result<()> {
 #[tokio::test]
 async fn apply_changeset_rejects_empty_file_list() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
     let args = json!({ "id": "change-empty", "files": [] });
 
     let preview_error = apply_changeset_tool()
@@ -2086,10 +2051,7 @@ async fn apply_changeset_full_update_accepts_matching_mtime() -> Result<()> {
     fs::write(&file, "old\n")?;
     let before_mtime_ms = super::metadata_mtime_ms(&fs::metadata(&file)?)
         .expect("regular file metadata should include mtime");
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
     let args = json!({
         "id": "change-full-update",
         "summary": "Replace note contents",
@@ -2322,10 +2284,7 @@ async fn apply_changeset_validation_reports_conflict_kinds_without_writes() -> R
         for (path, content) in files {
             fs::write(workspace.path().join(path), content)?;
         }
-        let ctx = ToolContext {
-            workspace_root: workspace.path().to_path_buf(),
-            timeout_secs: 5,
-        };
+        let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
         let preview_error = apply_changeset_tool()
             .preview(ctx.clone(), args.clone())
             .await
@@ -2356,10 +2315,9 @@ async fn apply_changeset_validation_reports_conflict_kinds_without_writes() -> R
 async fn apply_changeset_first_apply_failure_reports_failed_without_artifacts() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     fs::write(workspace.path().join("blocked"), "not a directory\n")?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5)
+        .with_mutation_recorder(MutationEventRecorder::new(store.clone()));
 
     let result = apply_changeset_tool()
         .execute(
@@ -2387,6 +2345,70 @@ async fn apply_changeset_first_apply_failure_reports_failed_without_artifacts() 
         json!("failed")
     );
     assert!(result.metadata.details.get("artifacts").is_none());
+    assert!(
+        !stored_event_types(&store)?
+            .iter()
+            .any(|event_type| event_type == DurableEventType::MutationBatchFinished.as_str())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn apply_changeset_apply_stage_failure_records_failed_mutation_batch() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
+    let plan = super::ApplyChangeSetPlan {
+        change_set: ChangeSet {
+            id: ChangeSetId::new("change-apply-stage-failure")?,
+            title: "Apply stage failure".to_owned(),
+            summary: "Apply stage failure".to_owned(),
+            risk: ChangeSetRisk::Medium,
+            files: vec![ChangeSetFile {
+                path: "rename.txt".to_owned(),
+                previous_path: Some("old-name.txt".to_owned()),
+                action: ChangeSetFileAction::Rename,
+                risk: ChangeSetRisk::Medium,
+                before_hash: None,
+                after_hash: None,
+                diff_hash: None,
+                additions: 0,
+                deletions: 0,
+                validations: Vec::new(),
+            }],
+            validations: Vec::new(),
+        },
+        files: vec![super::PlannedChangeSetFile {
+            path: "rename.txt".to_owned(),
+            absolute_path: workspace.path().join("rename.txt"),
+            action: ChangeSetFileAction::Rename,
+            after_content: None,
+            preview_diff: String::new(),
+            reverse_diff: String::new(),
+            validations: Vec::new(),
+        }],
+        preview_diff: String::new(),
+        reverse_diff: String::new(),
+    };
+
+    let result = super::apply_changeset_plan(
+        workspace.path(),
+        &workspace.path().join("state/artifacts/changesets"),
+        PathBuf::from("state/artifacts/changesets"),
+        "apply".to_owned(),
+        Some(MutationEventRecorder::new(store.clone())),
+        plan,
+    )?;
+
+    assert!(result.is_error());
+    assert_eq!(
+        result.metadata.details["apply_result"]["status"],
+        json!("failed")
+    );
+    assert!(
+        stored_event_types(&store)?
+            .iter()
+            .any(|event_type| event_type == DurableEventType::MutationBatchFinished.as_str())
+    );
     Ok(())
 }
 
@@ -2394,10 +2416,7 @@ async fn apply_changeset_first_apply_failure_reports_failed_without_artifacts() 
 async fn apply_changeset_binary_existing_file_does_not_write() -> Result<()> {
     let workspace = tempfile::tempdir()?;
     fs::write(workspace.path().join("binary.txt"), b"a\0b")?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
     let result = apply_changeset_tool()
         .execute(
             ctx,
@@ -2423,10 +2442,7 @@ async fn apply_changeset_rejects_unreadable_text_and_directories() -> Result<()>
         [0xff_u8, 0xfe, 0xfd],
     )?;
     fs::create_dir(workspace.path().join("dir"))?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let invalid_utf8 = apply_changeset_tool()
         .execute(
@@ -2475,10 +2491,7 @@ async fn apply_changeset_rejects_symlink_escape_and_reports_artifact_failure() -
         outside.path().join("target.txt"),
         workspace.path().join("link.txt"),
     )?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5);
 
     let symlink_result = apply_changeset_tool()
         .execute(
@@ -2507,10 +2520,9 @@ async fn apply_changeset_rejects_symlink_escape_and_reports_artifact_failure() -
 #[tokio::test]
 async fn apply_changeset_partial_apply_reports_applied_and_skipped_files() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: workspace.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let store = JsonlSessionStore::new(workspace.path().join("session.jsonl"))?;
+    let ctx = ToolContext::new(workspace.path().to_path_buf(), 5)
+        .with_mutation_recorder(MutationEventRecorder::new(store.clone()));
     let result = apply_changeset_tool()
         .execute(
             ctx,
@@ -2556,16 +2568,18 @@ async fn apply_changeset_partial_apply_reports_applied_and_skipped_files() -> Re
     let reverse_diff = fs::read_to_string(workspace.path().join(reverse_path))?;
     assert!(reverse_diff.contains("rollback/blocked"));
     assert!(!reverse_diff.contains("after.txt"));
+    assert!(
+        stored_event_types(&store)?
+            .iter()
+            .any(|event_type| event_type == DurableEventType::MutationBatchFinished.as_str())
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn write_file_execute_creates_parent_dirs_and_reports_bytes() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
 
     let result = WriteFileTool
         .execute(
@@ -2587,10 +2601,7 @@ async fn write_file_execute_creates_parent_dirs_and_reports_bytes() -> Result<()
 #[tokio::test]
 async fn edit_file_execute_and_preview_reject_missing_and_ambiguous_matches() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let file = temp.path().join("note.txt");
     fs::write(&file, "hello old old\n")?;
 

@@ -249,10 +249,7 @@ fn code_intel_tools_expose_permission_subjects_for_file_scoped_calls() {
     fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
     let mut registry = ToolRegistry::new();
     register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 1,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
 
     for tool_name in ["code_definition", "code_references", "code_diagnostics"] {
         let args_json = if tool_name == "code_diagnostics" {
@@ -285,10 +282,7 @@ async fn code_symbols_tool_returns_bounded_json_envelope() {
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 1,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 1),
             ToolCall {
                 id: "call-code".to_owned(),
                 name: "code_symbols".to_owned(),
@@ -340,10 +334,7 @@ async fn code_symbols_tool_enforces_payload_byte_limit() {
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 1,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 1),
             ToolCall {
                 id: "call-code".to_owned(),
                 name: "code_symbols".to_owned(),
@@ -367,10 +358,7 @@ fn code_symbols_permission_subject_rejects_external_path() {
 
     let error = registry
         .permission_subjects(
-            &ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 1,
-            },
+            &ToolContext::new(temp.path().to_path_buf(), 1),
             &ToolCall {
                 id: "call-code".to_owned(),
                 name: "code_symbols".to_owned(),
@@ -409,10 +397,7 @@ async fn code_workspace_definition_references_and_diagnostics_tools_use_lsp() {
         &tooling_lsp_config(&script),
         temp.path().to_path_buf(),
     );
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 1,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
 
     let workspace = registry
         .execute(
@@ -627,10 +612,7 @@ async fn code_definition_tool_maps_timeout_error_kind() {
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 1,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 1),
             ToolCall {
                 id: "call-definition".to_owned(),
                 name: "code_definition".to_owned(),
@@ -659,10 +641,7 @@ async fn code_diagnostics_tool_maps_missing_files_to_not_found() {
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 1,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 1),
             ToolCall {
                 id: "call-diagnostics".to_owned(),
                 name: "code_diagnostics".to_owned(),
@@ -685,10 +664,7 @@ fn code_workspace_symbols_permission_subject_targets_workspace_root() {
 
     let subjects = registry
         .permission_subjects(
-            &ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 1,
-            },
+            &ToolContext::new(temp.path().to_path_buf(), 1),
             &ToolCall {
                 id: "call-workspace".to_owned(),
                 name: "code_workspace_symbols".to_owned(),
@@ -737,10 +713,7 @@ fn code_action_and_rename_permission_subjects_use_expected_scopes() {
     fs::write(temp.path().join("lib.rs"), "pub fn hello() {}\n").expect("source should write");
     let mut registry = ToolRegistry::new();
     register_code_intelligence_tools(&mut registry, &enabled_config(), temp.path().to_path_buf());
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 1,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
     let actions = registry
         .permission_subjects(
             &ctx,
@@ -819,10 +792,7 @@ async fn code_actions_tool_returns_lsp_action_summaries() {
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 1,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 1),
             ToolCall {
                 id: "actions".to_owned(),
                 name: "code_actions".to_owned(),
@@ -896,10 +866,7 @@ async fn code_rename_tool_previews_and_applies_workspace_edit() {
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         temp.path().to_path_buf(),
     );
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 1,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
     let call = ToolCall {
         id: "rename".to_owned(),
         name: "code_rename".to_owned(),
@@ -985,10 +952,7 @@ async fn code_action_tool_previews_and_applies_selected_edit() {
         &fake_tool_lsp_config(&server_script, &scenario_path, 250),
         temp.path().to_path_buf(),
     );
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 1,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 1);
     let call = ToolCall {
         id: "action".to_owned(),
         name: "code_action".to_owned(),
@@ -1072,10 +1036,7 @@ async fn code_workspace_symbols_tool_returns_lsp_results() {
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 1,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 1),
             ToolCall {
                 id: "call-workspace".to_owned(),
                 name: "code_workspace_symbols".to_owned(),

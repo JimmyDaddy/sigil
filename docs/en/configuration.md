@@ -20,15 +20,13 @@ This guide covers user-facing Sigil configuration. Most users should start with 
 The TUI and CLI resolve configuration in this order:
 
 1. `--config <path>`
-2. `sigil.toml` in the standard per-user config directory
+2. `sigil.toml` in the user-visible Sigil config directory
 
-Common per-user paths:
+Default user config path:
 
-- macOS: `~/Library/Application Support/sigil/sigil.toml`
-- Linux: `$XDG_CONFIG_HOME/sigil/sigil.toml` or `~/.config/sigil/sigil.toml`
-- Windows: `%APPDATA%\sigil\sigil.toml`
+- `~/.sigil/sigil.toml`
 
-Quick Setup writes the per-user config path. A workspace-root `sigil.toml` is not loaded by default; pass it explicitly with `--config <path>` if you need one for a local experiment.
+Quick Setup writes the per-user config path. On startup, if `~/.sigil/sigil.toml` does not exist but an older platform-specific user config exists, Sigil copies it to `~/.sigil/sigil.toml` and uses the new path. A workspace-root `sigil.toml` is not loaded by default; pass it explicitly with `--config <path>` if you need one for a local experiment.
 
 ## Minimal Path
 
@@ -86,6 +84,7 @@ scroll_sensitivity = 3
 [appearance]
 theme = "sigil_dark"
 syntax_theme = "auto"
+usage_cost_currency = "auto"
 
 [providers.deepseek]
 model = "deepseek-v4-flash"
@@ -142,12 +141,37 @@ tool_timeout_secs = 30
 - `tool_timeout_secs`: tool execution timeout.
 - `max_turns`: optional guard. It is disabled by default; when set, a run stops recoverably if the model keeps requesting tools without producing a final answer.
 
+## Verification
+
+```toml
+[verification]
+
+[[verification.checks]]
+id = "cargo-test"
+command = "cargo"
+args = ["test"]
+effect = "read_only"
+```
+
+`[verification]` is a file-only section for explicit user-approved checks. Current task runs materialize these entries into verification policy records before evaluating completion. Sigil also has kernel support for discovering repository-local candidate checks from `.sigil/verification.toml`, CI `run:` steps, `package.json`, `Cargo.toml`, and `Makefile`, but discovery never means execution. Repository-local candidates are untrusted data until they are promoted through a recorded workspace trust decision, explicit approval, a satisfying sandbox decision, or a global policy.
+
+Inside the TUI, `/trust-workspace` records a trust decision for the current workspace. That decision can promote repository-local verification candidates for future `/task` runs or `/task continue`, but it does not grant shell, plugin, MCP, or file-write permissions by itself.
+
+Each `[[verification.checks]]` entry defines a trusted check from user config:
+
+- `id`: stable check id used by verification policy and audit records.
+- `command`: executable command name.
+- `args`: optional argv list.
+- `cwd`: optional workspace-relative working directory.
+- `effect`: expected tool effect. Use `read_only` for ordinary build/test/lint checks that do not modify verification-scoped files. Mutating checks are treated as mutation evidence and must be followed by a non-writing verification run before the result can be `Passed`.
+
 ## Appearance
 
 ```toml
 [appearance]
 theme = "sigil_dark"
 syntax_theme = "auto"
+usage_cost_currency = "auto"
 
 [appearance.colors]
 surface_base = "#07080A"
@@ -158,6 +182,8 @@ markdown_code_bg = "#1C2129"
 `theme` controls the TUI color palette. Built-in values are `sigil_dark`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `nord`, and `high_contrast_dark`. The `/config` panel includes an `Appearance` section; pressing `Enter` on `Theme` cycles through the built-ins and previews the draft palette immediately with compare, syntax, page, shell, composer, tool-card, approval-modal, status, diff, and markdown samples. `Ctrl-S` saves the selection to `sigil.toml`.
 
 `syntax_theme` controls syntect/two-face syntax highlighting for markdown code blocks, tool markdown previews, and approval preview summaries. The default `auto` maps to the selected TUI theme. Explicit values are `catppuccin_mocha`, `catppuccin_latte`, `solarized_dark`, `solarized_light`, `gruvbox_dark`, `gruvbox_light`, `nord`, `one_half_dark`, `one_half_light`, and `monokai`.
+
+`usage_cost_currency` controls the TUI currency used for usage cost estimates. The default `auto` follows the provider balance currency when available and otherwise displays USD. Explicit values are `usd` and `cny`. This is display-only; provider pricing and session usage accounting remain USD-based estimates.
 
 `[appearance.colors]` can override stable semantic color tokens with `#RRGGBB` values. Unknown tokens or non-hex values are reported by appearance diagnostics instead of becoming provider-visible state. Overrides affect TUI rendering only; they are not written to session history, approval records, tool payloads, or provider-visible context.
 

@@ -972,6 +972,7 @@ fn root_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: CodeIntelligenceConfig::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: TaskConfig::default(),
         providers: Default::default(),

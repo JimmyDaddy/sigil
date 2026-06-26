@@ -1,6 +1,7 @@
 use sigil_kernel::UsageStats;
 
 const V4_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
+const COST_DECIMAL_SCALE: f64 = 1_000_000_000.0;
 
 #[derive(Debug, Clone, Copy)]
 struct ModelPricing {
@@ -30,12 +31,20 @@ pub fn enrich_usage_costs(model: &str, usage: UsageStats) -> UsageStats {
         * (pricing.input_cache_miss_per_million - pricing.input_cache_hit_per_million))
         / 1_000_000.0;
 
+    let input_cost = round_cost(input_cost);
+    let output_cost = round_cost(output_cost);
+    let cache_savings = round_cost(cache_savings);
+
     UsageStats {
         input_cost,
         output_cost,
         cache_savings,
         ..usage
     }
+}
+
+fn round_cost(value: f64) -> f64 {
+    (value * COST_DECIMAL_SCALE).round() / COST_DECIMAL_SCALE
 }
 
 fn pricing_for(model: &str) -> Option<ModelPricing> {

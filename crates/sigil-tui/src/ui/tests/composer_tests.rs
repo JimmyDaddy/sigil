@@ -8,6 +8,55 @@ use crate::{
 use super::*;
 
 #[test]
+fn composer_highlights_known_slash_command_token() -> anyhow::Result<()> {
+    let view_model = ComposerViewModel {
+        mode_label: "Build".to_owned(),
+        phase: RunPhase::Idle,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+        reasoning_effort_label: "max".to_owned(),
+        agent_rows: Vec::new(),
+        agent_panel_focused: false,
+        input: "/task fix typo".to_owned(),
+        input_rows: 1,
+        cursor_position: (14, 0),
+    };
+    let backend = TestBackend::new(72, 5);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_input(frame, frame.area(), &view_model))?;
+
+    let content = terminal.backend().buffer().content();
+    let width = 72usize;
+    let command_cell = &content[(3 * width) + 3];
+    let rest_cell = &content[(3 * width) + 9];
+    let theme = Theme::default();
+    assert_eq!(command_cell.symbol(), "/");
+    assert_eq!(command_cell.fg, theme.palette.accent_info);
+    assert!(command_cell.modifier.contains(Modifier::BOLD));
+    assert_eq!(rest_cell.symbol(), "f");
+    assert_eq!(rest_cell.fg, theme.palette.text_primary);
+    Ok(())
+}
+
+#[test]
+fn composer_input_row_highlights_slash_command_and_pads_tail() {
+    let theme = Theme::default();
+    let line = render_input_row("/task fix", 20, theme.palette.surface_input, &theme);
+
+    assert_eq!(line.spans[0].content.as_ref(), "");
+    assert_eq!(line.spans[1].content.as_ref(), "/task");
+    assert_eq!(line.spans[1].style.fg, Some(theme.palette.accent_info));
+    assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(line.spans[2].content.as_ref(), " fix           ");
+
+    let indented = render_input_row("  /task fix", 14, theme.palette.surface_input, &theme);
+    assert_eq!(indented.spans[0].content.as_ref(), "  ");
+    assert_eq!(indented.spans[1].content.as_ref(), "/task");
+    assert_eq!(indented.spans[2].content.as_ref(), " fix   ");
+}
+
+#[test]
 fn composer_input_aligns_with_header_after_gap() -> anyhow::Result<()> {
     let view_model = ComposerViewModel {
         mode_label: "Build".to_owned(),

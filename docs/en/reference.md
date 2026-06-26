@@ -38,6 +38,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/doctor` | Run local setup diagnostics inside the transcript |
 | `/new` | Start a fresh session with the current provider and model |
 | `/resume` | Select and restore a previous session |
+| `/trust-workspace` | Trust repository-local verification discovery for the current workspace |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
 | `/queue` | Focus queued input |
@@ -51,6 +52,8 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/quit` | Quit the TUI |
 
 Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
+
+`/trust-workspace` records a workspace trust decision in the session audit log. It allows repository-local verification candidates to be promoted for task readiness, but it does not grant shell, plugin, MCP, or file-write permissions by itself.
 
 `/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
 
@@ -72,13 +75,11 @@ Subcommands are for automation, diagnostics, scripts, and adapter preflight chec
 Sigil resolves config in this order:
 
 1. `--config <path>`
-2. `sigil.toml` in the standard per-user config directory
+2. `sigil.toml` in the user-visible Sigil config directory
 
-Common per-user paths:
+Default user config path:
 
-- macOS: `~/Library/Application Support/sigil/sigil.toml`
-- Linux: `$XDG_CONFIG_HOME/sigil/sigil.toml` or `~/.config/sigil/sigil.toml`
-- Windows: `%APPDATA%\sigil\sigil.toml`
+- `~/.sigil/sigil.toml`
 
 ## Important Paths
 
@@ -152,9 +153,10 @@ Gemini:
 | `[memory]` | Workspace memory loading |
 | `[compaction]` | Context compaction thresholds |
 | `[task]` | Planned task behavior and role settings |
+| `[verification]` | Explicit user-approved verification checks |
 | `[code_intelligence]` | LSP and code intelligence tools |
 | `[terminal]` | Mouse, OSC52 clipboard, and scroll behavior |
-| `[appearance]` | TUI theme and semantic color overrides |
+| `[appearance]` | TUI theme, usage cost currency, and semantic color overrides |
 | `[[mcp_servers]]` | stdio MCP server configuration |
 
 See [configuration.md](configuration.md) for examples.

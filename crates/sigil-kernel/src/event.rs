@@ -507,6 +507,48 @@ impl DurableDomainEvent {
             Self::Legacy(_) => DurableEventType::Legacy,
         }
     }
+
+    pub fn payload(&self) -> Option<&DomainPayload> {
+        match self {
+            Self::UserMessageRecorded(payload)
+            | Self::AssistantMessageRecorded(payload)
+            | Self::ToolResultRecorded(payload)
+            | Self::SessionEntryRecorded(payload)
+            | Self::RunStatusChanged(payload)
+            | Self::RunFinalized(payload)
+            | Self::ToolExecutionStarted(payload)
+            | Self::ToolExecutionFinished(payload)
+            | Self::ApprovalResolved(payload)
+            | Self::MutationPrepared(payload)
+            | Self::MutationCommitted(payload)
+            | Self::MutationReconciled(payload)
+            | Self::MutationBatchStarted(payload)
+            | Self::MutationBatchFinished(payload)
+            | Self::WriteCommitted(payload)
+            | Self::WorkspaceMutationDetected(payload)
+            | Self::CheckpointRestored(payload)
+            | Self::CommandFinished(payload)
+            | Self::CheckFinished(payload)
+            | Self::CheckSpecRecorded(payload)
+            | Self::DiagnosticRecorded(payload)
+            | Self::TodoChanged(payload)
+            | Self::VerificationRecorded(payload)
+            | Self::VerificationPolicyChanged(payload)
+            | Self::EnvironmentFingerprintRecorded(payload)
+            | Self::ReadinessEvaluated(payload)
+            | Self::TaskStatusChanged(payload)
+            | Self::ChildVerificationReceiptLinked(payload)
+            | Self::ChildChangesetMerged(payload)
+            | Self::AgentMergeApplied(payload)
+            | Self::WorkspaceTrustDecision(payload)
+            | Self::ContextSourceCaptured(payload)
+            | Self::EgressDecisionRecorded(payload)
+            | Self::ExtensionTrustDecision(payload)
+            | Self::SandboxDecisionRecorded(payload)
+            | Self::LogTailRecovered(payload) => Some(payload),
+            Self::Legacy(_) => None,
+        }
+    }
 }
 
 pub type DomainEvent = DurableDomainEvent;
@@ -659,31 +701,44 @@ pub fn projection_apply_decision(
     cursor: Option<&ProjectionCursor>,
     event: &StoredEvent,
 ) -> Result<ProjectionApplyDecision> {
+    projection_apply_decision_for_record(
+        cursor,
+        &event.session_id,
+        event.stream_sequence,
+        &event.event_id,
+        &event.record_checksum,
+    )
+}
+
+pub fn projection_apply_decision_for_record(
+    cursor: Option<&ProjectionCursor>,
+    session_id: &str,
+    stream_sequence: u64,
+    event_id: &str,
+    record_checksum: &str,
+) -> Result<ProjectionApplyDecision> {
     let Some(cursor) = cursor else {
         return Ok(ProjectionApplyDecision::Apply);
     };
-    if cursor.session_id != event.session_id {
+    if cursor.session_id != session_id {
         bail!("projection cursor session does not match event session");
     }
-    match event
-        .stream_sequence
-        .cmp(&cursor.last_applied_stream_sequence)
-    {
+    match stream_sequence.cmp(&cursor.last_applied_stream_sequence) {
         std::cmp::Ordering::Greater
-            if event.stream_sequence == cursor.last_applied_stream_sequence + 1 =>
+            if stream_sequence == cursor.last_applied_stream_sequence + 1 =>
         {
             Ok(ProjectionApplyDecision::Apply)
         }
         std::cmp::Ordering::Greater => bail!("projection sequence gap"),
         std::cmp::Ordering::Equal
-            if event.event_id == cursor.last_applied_event_id
-                && event.record_checksum == cursor.last_applied_record_checksum =>
+            if event_id == cursor.last_applied_event_id
+                && record_checksum == cursor.last_applied_record_checksum =>
         {
             Ok(ProjectionApplyDecision::IgnoreAlreadyApplied)
         }
         std::cmp::Ordering::Less
-            if event.event_id == cursor.last_applied_event_id
-                && event.record_checksum == cursor.last_applied_record_checksum =>
+            if event_id == cursor.last_applied_event_id
+                && record_checksum == cursor.last_applied_record_checksum =>
         {
             Ok(ProjectionApplyDecision::IgnoreAlreadyApplied)
         }
@@ -773,8 +828,7 @@ fn canonicalize_number(number: &serde_json::Number) -> Result<serde_json::Number
     if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
         return Ok(serde_json::Number::from(value as i64));
     }
-    serde_json::Number::from_f64(value)
-        .ok_or_else(|| anyhow::anyhow!("failed to canonicalize stored event number"))
+    Ok(number.clone())
 }
 
 /// Structured runtime events emitted by the agent loop for UI, logging, and orchestration.
@@ -1055,6 +1109,12 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskChildSessionDisplayName(_) => "task_child_session_display_name",
         ControlEntry::TaskSubagentApprovalRoute(_) => "task_subagent_approval_route",
         ControlEntry::TaskSubagentElicitationRoute(_) => "task_subagent_elicitation_route",
+        ControlEntry::CheckSpecRecorded(_) => "check_spec_recorded",
+        ControlEntry::VerificationPolicyChanged(_) => "verification_policy_changed",
+        ControlEntry::VerificationRecorded(_) => "verification_recorded",
+        ControlEntry::ReadinessEvaluated(_) => "readiness_evaluated",
+        ControlEntry::ChildVerificationReceiptLinked(_) => "child_verification_receipt_linked",
+        ControlEntry::WorkspaceTrustDecision(_) => "workspace_trust_decision",
         ControlEntry::AgentProfileCaptured(_) => "agent_profile_captured",
         ControlEntry::AgentProfileTrustDecision(_) => "agent_profile_trust_decision",
         ControlEntry::AgentProfilePolicyDecision(_) => "agent_profile_policy_decision",

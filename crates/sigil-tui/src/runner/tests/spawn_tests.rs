@@ -35,6 +35,7 @@ fn deepseek_root_config(workspace_root: &std::path::Path) -> RootConfig {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::from([(

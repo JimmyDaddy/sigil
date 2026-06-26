@@ -70,3 +70,30 @@ fn enrich_usage_costs_uses_pro_rates_and_preserves_unknown_models() {
     assert_eq!(unchanged.output_cost, 8.0);
     assert_eq!(unchanged.cache_savings, 9.0);
 }
+
+#[test]
+fn enrich_usage_costs_rounds_serialized_cost_estimates() {
+    let usage = enrich_usage_costs(
+        "deepseek-v4-pro",
+        UsageStats {
+            prompt_tokens: 20621,
+            completion_tokens: 1015,
+            cache_hit_tokens: 7296,
+            cache_miss_tokens: 13325,
+            input_cost: 0.0,
+            output_cost: 0.0,
+            cache_savings: 0.0,
+            system_fingerprint: None,
+        },
+    );
+
+    assert_eq!(usage.input_cost, 0.005822823);
+    assert_eq!(usage.output_cost, 0.00088305);
+    assert_eq!(usage.cache_savings, 0.003147312);
+
+    let serialized = serde_json::to_string(&usage).expect("usage should serialize");
+    assert!(serialized.contains(r#""input_cost":0.005822823"#));
+    assert!(serialized.contains(r#""output_cost":0.00088305"#));
+    assert!(serialized.contains(r#""cache_savings":0.003147312"#));
+    assert!(!serialized.contains("999999999"));
+}

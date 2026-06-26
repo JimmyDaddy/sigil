@@ -950,13 +950,15 @@ fn child_agent_transcript_reload_uses_tail_and_skips_unchanged_files() -> Result
     app.session_log_path = temp.path().join("parent.jsonl");
     sync_child_agent_for_transcript_tests(&mut app)?;
     let child_path = temp.path().join("children/task_1/step_1-child_1.jsonl");
-    let store = sigil_kernel::JsonlSessionStore::new(&child_path)?;
+    std::fs::create_dir_all(child_path.parent().expect("child path has parent"))?;
+    let mut child_log = String::new();
     for index in 0..1500 {
-        store.append(&SessionLogEntry::Assistant(ModelMessage::assistant(
-            Some(format!("child message {index}")),
-            Vec::new(),
-        )))?;
+        child_log.push_str(&serde_json::to_string(&SessionLogEntry::Assistant(
+            ModelMessage::assistant(Some(format!("child message {index}")), Vec::new()),
+        ))?);
+        child_log.push('\n');
     }
+    std::fs::write(&child_path, child_log)?;
 
     app.reload_active_agent_child_transcript();
     let rendered = transcript_plain(app.transcript_lines(16));
@@ -1811,6 +1813,41 @@ fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> 
     assert!(
         app.footer_status_line()
             .contains("spent CNY 1.0800 since opening / CNY 11.8800 total")
+    );
+    Ok(())
+}
+
+#[test]
+fn usage_display_prefers_configured_cost_currency_over_balance_currency() -> Result<()> {
+    let mut config = test_config();
+    config.appearance.usage_cost_currency = sigil_kernel::UsageCostCurrency::Cny;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.balance_snapshot = crate::provider_status::BalanceSnapshot {
+        total: Some(3.25),
+        currency: Some("USD".to_owned()),
+        available: true,
+        status: "USD 3.25".to_owned(),
+    };
+
+    app.handle(RunEvent::Usage(UsageStats {
+        prompt_tokens: 100,
+        completion_tokens: 40,
+        cache_hit_tokens: 75,
+        cache_miss_tokens: 25,
+        input_cost: 0.12,
+        output_cost: 0.03,
+        cache_savings: 0.45,
+        system_fingerprint: None,
+    }))?;
+
+    assert!(
+        app.usage_sidebar_lines()
+            .iter()
+            .any(|line| line == "total spent: CNY 1.0800")
+    );
+    assert!(
+        app.footer_status_line()
+            .contains("spent CNY 1.0800 since opening / CNY 1.0800 total")
     );
     Ok(())
 }

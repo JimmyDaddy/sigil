@@ -821,10 +821,7 @@ fn agent_tool_permission_defaults_allow_safe_coordination_tools() -> Result<()> 
     let config = root_config();
     let mut registry = ToolRegistry::new();
     register_agent_tools(&mut registry, &config)?;
-    let ctx = sigil_kernel::ToolContext {
-        workspace_root: std::env::temp_dir(),
-        timeout_secs: 30,
-    };
+    let ctx = sigil_kernel::ToolContext::new(std::env::temp_dir(), 30);
     let safe_spawn = ToolCall {
         id: "call-safe-spawn".to_owned(),
         name: SPAWN_AGENT_TOOL_NAME.to_owned(),
@@ -1057,10 +1054,7 @@ async fn spawn_agent_preview_contains_source_trust_mode_scope_budget() -> Result
     register_agent_tools(&mut registry, &config)?;
     let preview = registry
         .preview(
-            sigil_kernel::ToolContext {
-                workspace_root: std::env::temp_dir(),
-                timeout_secs: 30,
-            },
+            sigil_kernel::ToolContext::new(std::env::temp_dir(), 30),
             ToolCall {
                 id: "call-preview".to_owned(),
                 name: SPAWN_AGENT_TOOL_NAME.to_owned(),
@@ -2740,6 +2734,7 @@ fn root_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::from([(

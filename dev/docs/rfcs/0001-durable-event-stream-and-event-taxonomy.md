@@ -453,7 +453,29 @@ Required deterministic tests:
 - recovery-critical append uses stronger sync path
 - event-to-sync-class mapping covers approval, tool lifecycle, mutation, command/check, diagnostics, todo, verification, sandbox and trust events
 
-## 16. Open Questions
+## 16. Implementation Progress
+
+当前进度：
+
+- 已新增 `StoredEvent` envelope，包含 `schema_version`、`event_type`、`event_version`、`event_class`、`event_id`、`session_id`、`stream_sequence`、可空 `occurred_at`、causation/correlation、`record_checksum` 和 JSON payload。
+- 已实现 canonical checksum、event size / payload depth 限制、checksum mismatch 与 JSON parse failure 的区分。
+- 已实现 legacy / v2 / mixed JSONL 读取；legacy record 使用稳定 id 和 stream ordinal upcast，不重写旧日志。
+- 已实现 v2 append、session-scoped `stream_sequence`、legacy 后混合格式追加、middle corruption / sequence gap fail-closed。
+- 已实现 tail recovery quarantine 和 `LogTailRecovered` 审计路径，避免静默截断。
+- 已区分 durable、live runtime 和 protocol event 边界；流式 reasoning/text delta 不作为 durable 事实写入。
+- 已新增 `DomainEvent` / durable event type 解码和 reducer disposition 覆盖测试，kernel reducer 不直接消费任意字符串。
+- 已落地基础 projection cursor/idempotence 规则，并接入 session entry projection 的 replay / cursor 应用测试。
+- 已新增 `RunStatusChanged` / `RunFinalized` 基础 durable event，并在 agent terminal/max-turn 路径中记录。
+
+剩余实现：
+
+- 将更多真实 projection 从 durable replay 重建，包括 task status、agent graph、cost/token、verification summary 和 future SQLite projection。
+- 为所有 durable event owner 补齐强类型 payload struct 与 upcaster，逐步减少泛型 JSON payload 的 reducer 接触面。
+- 将 projection cursor 规则接入未来持久 projection store 的事务边界。
+- 明确并测试各平台更强 sync policy 的落地细节，特别是 recovery-critical append 与目录 fsync。
+- 在 protocol/server 阶段实现 durable cursor / `Last-Event-ID` replay；transient event replay 保持非承诺。
+
+## 17. Open Questions
 
 - Exact byte and nesting limits for events.
 - Whether `record_checksum` should later become a hash chain for stronger tamper-evidence.

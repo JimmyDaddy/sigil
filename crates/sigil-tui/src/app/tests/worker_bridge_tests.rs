@@ -132,6 +132,11 @@ fn plan_actions_map_to_worker_commands() {
             guidance: Some(ref guidance)
         } if task_id == "task_1" && guidance == "focus runtime"
     ));
+
+    assert!(matches!(
+        app.into_worker_command(AppAction::TrustWorkspace),
+        WorkerCommand::TrustWorkspace
+    ));
 }
 
 #[test]
@@ -1918,6 +1923,10 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
     assert!(matches!(
         app.into_worker_command(AppAction::CheckChangedFilesDiagnostics),
         WorkerCommand::CheckChangedFilesDiagnostics
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::TrustWorkspace),
+        WorkerCommand::TrustWorkspace
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::StartNewSession {

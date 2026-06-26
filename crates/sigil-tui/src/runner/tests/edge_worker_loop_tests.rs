@@ -514,10 +514,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         .worker_threads(2)
         .enable_all()
         .build()?;
-    let tool_context = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let tool_context = ToolContext::new(temp.path().to_path_buf(), 5);
     let task_id = "terminal-cancel-audit";
     let start = runtime.block_on(
         registry.execute(

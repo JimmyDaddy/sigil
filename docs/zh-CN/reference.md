@@ -38,6 +38,7 @@
 | `/doctor` | 在 transcript 中运行本地 setup diagnostics |
 | `/new` | 使用当前 provider 和 model 开始新 session |
 | `/resume` | 选择并恢复历史 session |
+| `/trust-workspace` | 信任当前 workspace 的仓库本地 verification discovery |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
 | `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
 | `/queue` | 聚焦 queued input |
@@ -51,6 +52,8 @@
 | `/quit` | 退出 TUI |
 
 Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。
+
+`/trust-workspace` 会把 workspace trust decision 记录进 session audit log。它允许仓库本地 verification 候选检查被提升为 task readiness 可用的检查，但不会单独授予 shell、plugin、MCP 或文件写入权限。
 
 `/model`、`/effort`、`/resume`、`/agent` 和 `/queue` 会展示候选项。使用 `Up/Down` 选择，`Tab` 接受，`Enter` 执行。`/agent rename` 会在输入新名字前展示 child agent 候选项。
 
@@ -72,13 +75,11 @@ Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应
 Sigil 按以下顺序解析 config：
 
 1. `--config <path>`
-2. 标准用户配置目录下的 `sigil.toml`
+2. 用户可见 Sigil 配置目录下的 `sigil.toml`
 
-常见用户级路径：
+默认用户配置路径：
 
-- macOS: `~/Library/Application Support/sigil/sigil.toml`
-- Linux: `$XDG_CONFIG_HOME/sigil/sigil.toml` 或 `~/.config/sigil/sigil.toml`
-- Windows: `%APPDATA%\sigil\sigil.toml`
+- `~/.sigil/sigil.toml`
 
 ## 重要路径
 
@@ -152,9 +153,10 @@ Gemini:
 | `[memory]` | Workspace memory loading |
 | `[compaction]` | Context compaction 阈值 |
 | `[task]` | Planned task 行为和 role settings |
+| `[verification]` | 显式用户批准的 verification checks |
 | `[code_intelligence]` | LSP 和 code intelligence tools |
 | `[terminal]` | Mouse、OSC52 clipboard 和 scroll 行为 |
-| `[appearance]` | TUI 主题和语义颜色覆盖 |
+| `[appearance]` | TUI 主题、usage cost currency 和语义颜色覆盖 |
 | `[[mcp_servers]]` | stdio MCP server 配置 |
 
 示例见 [configuration.md](configuration.md)。

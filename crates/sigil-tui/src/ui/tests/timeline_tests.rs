@@ -1,8 +1,10 @@
 use ratatui::{
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
+
+use crate::ui::theme::Theme;
 
 use super::*;
 
@@ -82,6 +84,27 @@ fn render_timeline_entry_lines_handles_empty_user_assistant_and_system_entries()
     assert!(render_timeline_entry_lines(&empty_user).is_empty());
     assert!(render_timeline_entry_lines(&empty_assistant).is_empty());
     assert_eq!(render_timeline_entry_lines(&empty_system).len(), 2);
+}
+
+#[test]
+fn render_timeline_entry_lines_highlights_indented_user_slash_command() {
+    let entry = TimelineEntry {
+        role: TimelineRole::User,
+        text: "  /task fix typo".to_owned(),
+    };
+
+    let lines = render_timeline_entry_lines(&entry);
+    let command_span = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "/task")
+        .expect("slash command span should render");
+
+    assert_eq!(
+        command_span.style.fg,
+        Some(Theme::default().palette.accent_info)
+    );
+    assert!(command_span.style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]
@@ -845,6 +868,53 @@ fn render_timeline_entry_lines_make_user_and_assistant_distinct() {
             .iter()
             .flat_map(|line| line.spans.iter())
             .any(|span| span.style.bg == Some(user_message_bg()))
+    );
+}
+
+#[test]
+fn render_timeline_entry_lines_highlights_user_slash_command_token() {
+    let theme = theme::Theme::default();
+    let user = TimelineEntry {
+        role: TimelineRole::User,
+        text: "/trust-workspace".to_owned(),
+    };
+    let lines = render_timeline_entry_lines_with_options(
+        &user,
+        &TimelineRenderOptions {
+            max_content_width: 80,
+            theme: theme.clone(),
+            ..TimelineRenderOptions::default()
+        },
+        0,
+    );
+
+    let command = lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .find(|span| span.content.as_ref() == "/trust-workspace")
+        .expect("slash command token should render as its own span");
+    assert_eq!(command.style.fg, Some(theme.palette.accent_info));
+    assert_eq!(command.style.bg, Some(user_message_bg()));
+    assert!(command.style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn user_bubble_body_spans_highlight_slash_command_after_padding() {
+    let theme = theme::Theme::default();
+    let spans = user_bubble_body_spans("  /task fix typo", 80, user_message_bg(), &theme.palette);
+
+    assert_eq!(spans[0].content.as_ref(), "  ");
+    let command = spans
+        .iter()
+        .find(|span| span.content.as_ref() == "/task")
+        .expect("slash command should be a standalone highlighted span");
+    assert_eq!(command.style.fg, Some(theme.palette.accent_info));
+    assert_eq!(command.style.bg, Some(user_message_bg()));
+    assert!(command.style.add_modifier.contains(Modifier::BOLD));
+    assert!(
+        spans
+            .iter()
+            .any(|span| span.content.as_ref().contains("fix typo"))
     );
 }
 

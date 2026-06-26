@@ -17,6 +17,7 @@ fn test_root_config() -> RootConfig {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
@@ -204,6 +205,7 @@ fn compaction_context_field_uses_short_fallback_label() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
@@ -234,6 +236,7 @@ fn config_rows_do_not_pre_pad_labels() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
@@ -268,6 +271,7 @@ fn api_key_display_uses_status_without_secret_length() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: Default::default(),
@@ -453,6 +457,7 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         &[
             ConfigField::AppearanceTheme,
             ConfigField::AppearanceSyntaxTheme,
+            ConfigField::AppearanceUsageCostCurrency,
             ConfigField::AppearanceColorGroup,
             ConfigField::AppearanceColorToken,
             ConfigField::AppearanceColorOverride,
@@ -491,6 +496,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     );
     assert_eq!(ConfigField::AppearanceTheme.label(), "theme");
     assert_eq!(ConfigField::AppearanceSyntaxTheme.label(), "syntax_theme");
+    assert_eq!(
+        ConfigField::AppearanceUsageCostCurrency.label(),
+        "usage_cost_currency"
+    );
     assert_eq!(ConfigField::AppearanceColorGroup.label(), "color_group");
     assert_eq!(ConfigField::AppearanceColorToken.label(), "color_token");
     assert_eq!(
@@ -511,6 +520,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::AppearanceTheme.action_label(), "Enter cycle");
     assert_eq!(
         ConfigField::AppearanceSyntaxTheme.action_label(),
+        "Enter cycle"
+    );
+    assert_eq!(
+        ConfigField::AppearanceUsageCostCurrency.action_label(),
         "Enter cycle"
     );
     assert_eq!(
@@ -627,6 +640,7 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
     let mut config = test_root_config();
     config.appearance.theme = sigil_kernel::ThemeId::SolarizedLight;
     config.appearance.syntax_theme = sigil_kernel::SyntaxThemeId::SolarizedDark;
+    config.appearance.usage_cost_currency = sigil_kernel::UsageCostCurrency::Usd;
     let mut state = ConfigState::from_root_config(&config);
 
     state.set_section(ConfigSection::Appearance);
@@ -644,6 +658,27 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
         state.field_text_value(ConfigField::AppearanceSyntaxTheme),
         None
     );
+    assert_eq!(
+        state.display_value(ConfigField::AppearanceUsageCostCurrency),
+        "usd"
+    );
+    assert_eq!(
+        state.field_text_value(ConfigField::AppearanceUsageCostCurrency),
+        None
+    );
+    assert!(
+        state
+            .field_text_value_mut(ConfigField::AppearanceUsageCostCurrency)
+            .is_none()
+    );
+    assert!(!config_field_accepts_char(
+        ConfigField::AppearanceUsageCostCurrency,
+        'u'
+    ));
+    assert_eq!(
+        ConfigField::AppearanceUsageCostCurrency.action_label(),
+        "Enter cycle"
+    );
     assert!(
         state
             .field_text_value_mut(ConfigField::AppearanceTheme)
@@ -656,12 +691,17 @@ fn appearance_theme_draft_roundtrips() -> anyhow::Result<()> {
 
     state.draft.appearance_theme = sigil_kernel::ThemeId::Nord;
     state.draft.cycle_appearance_syntax_theme();
+    state.draft.cycle_appearance_usage_cost_currency();
     let saved = state.draft.to_root_config()?;
 
     assert_eq!(saved.appearance.theme, sigil_kernel::ThemeId::Nord);
     assert_eq!(
         saved.appearance.syntax_theme,
         sigil_kernel::SyntaxThemeId::SolarizedLight
+    );
+    assert_eq!(
+        saved.appearance.usage_cost_currency,
+        sigil_kernel::UsageCostCurrency::Cny
     );
     Ok(())
 }
@@ -703,6 +743,14 @@ fn appearance_color_override_draft_tracks_tokens_and_empty_reset() -> anyhow::Re
     assert!(!config_field_accepts_char(
         ConfigField::AppearanceColorOverride,
         'g'
+    ));
+    assert!(!config_field_accepts_char(
+        ConfigField::AppearanceColorGroup,
+        's'
+    ));
+    assert!(!config_field_accepts_char(
+        ConfigField::AppearanceColorToken,
+        's'
     ));
 
     state.draft.cycle_appearance_color_token(false);

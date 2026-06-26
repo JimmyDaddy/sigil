@@ -1,9 +1,11 @@
 use std::{collections::BTreeMap, path::Path};
 
 use super::{
-    CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, McpServerConfig,
-    McpServerStartup, McpTrustClass, RootConfig, SyntaxThemeId, ThemeId, default_user_config_dir,
-    default_user_config_path, preferred_config_path, resolve_workspace_root,
+    CodeIntelStartup, CompactionConfig, CompactionThresholdStatus, ConfigPlatform, McpServerConfig,
+    McpServerStartup, McpTrustClass, RootConfig, SyntaxThemeId, ThemeId, UsageCostCurrency,
+    default_user_config_dir, default_user_config_path, legacy_user_config_dir_from_env,
+    preferred_config_path, preferred_config_path_for_known_paths, preferred_implicit_config_path,
+    resolve_workspace_root, user_home_dir_from_env,
 };
 use crate::{
     AgentConfig, AgentRole, ApprovalMode, SkillConfig, StorageRoot, TaskConfig, TaskMode,
@@ -146,6 +148,7 @@ fn root_config_save_roundtrips() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
@@ -179,6 +182,7 @@ fn root_config_save_handles_paths_without_parent() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),
@@ -213,6 +217,10 @@ model = "deepseek-v4-flash"
     assert_eq!(config.terminal, Default::default());
     assert_eq!(config.appearance.theme, ThemeId::SigilDark);
     assert_eq!(config.appearance.syntax_theme, SyntaxThemeId::Auto);
+    assert_eq!(
+        config.appearance.usage_cost_currency,
+        UsageCostCurrency::Auto
+    );
     assert!(config.appearance.colors.is_empty());
     assert_eq!(config.task.default_mode, TaskMode::Chat);
 }
@@ -228,6 +236,7 @@ model = "deepseek-v4-flash"
 [appearance]
 theme = "solarized_dark"
 syntax_theme = "solarized_dark"
+usage_cost_currency = "cny"
 
 [appearance.colors]
 surface_base = "#002b36"
@@ -238,6 +247,10 @@ accent_primary = "#b58900"
 
     assert_eq!(config.appearance.theme, ThemeId::SolarizedDark);
     assert_eq!(config.appearance.syntax_theme, SyntaxThemeId::SolarizedDark);
+    assert_eq!(
+        config.appearance.usage_cost_currency,
+        UsageCostCurrency::Cny
+    );
     assert_eq!(config.appearance.colors.len(), 2);
     assert_eq!(
         config.appearance.colors.get("surface_base"),
@@ -272,6 +285,166 @@ fn syntax_theme_ids_have_stable_labels_and_display_names() {
             ("monokai", "Monokai"),
         ]
     );
+}
+
+#[test]
+fn usage_cost_currency_helpers_are_stable() {
+    assert_eq!(
+        UsageCostCurrency::all(),
+        &[
+            UsageCostCurrency::Auto,
+            UsageCostCurrency::Usd,
+            UsageCostCurrency::Cny
+        ]
+    );
+    for (currency, id, label, next) in [
+        (
+            UsageCostCurrency::Auto,
+            "auto",
+            "Auto",
+            UsageCostCurrency::Usd,
+        ),
+        (UsageCostCurrency::Usd, "usd", "USD", UsageCostCurrency::Cny),
+        (
+            UsageCostCurrency::Cny,
+            "cny",
+            "CNY",
+            UsageCostCurrency::Auto,
+        ),
+    ] {
+        assert_eq!(currency.as_str(), id);
+        assert_eq!(currency.display_label(), label);
+        assert_eq!(currency.next(), next);
+    }
+}
+
+#[test]
+fn config_path_env_helpers_cover_all_platform_rules() {
+    assert!(matches!(
+        super::current_config_platform(),
+        ConfigPlatform::Windows | ConfigPlatform::Macos | ConfigPlatform::Other
+    ));
+    assert_eq!(
+        super::current_config_platform_from_os("windows"),
+        ConfigPlatform::Windows
+    );
+    assert_eq!(
+        super::current_config_platform_from_os("macos"),
+        ConfigPlatform::Macos
+    );
+    assert_eq!(
+        super::current_config_platform_from_os("linux"),
+        ConfigPlatform::Other
+    );
+    assert_eq!(
+        user_home_dir_from_env(
+            ConfigPlatform::Windows,
+            Some("/home/fallback".into()),
+            Some("C:/Users/Alice".into())
+        )
+        .expect("windows userprofile should win"),
+        Path::new("C:/Users/Alice")
+    );
+    assert_eq!(
+        user_home_dir_from_env(ConfigPlatform::Windows, Some("/home/fallback".into()), None)
+            .expect("windows HOME should be fallback"),
+        Path::new("/home/fallback")
+    );
+    assert!(user_home_dir_from_env(ConfigPlatform::Windows, None, None).is_err());
+    assert_eq!(
+        user_home_dir_from_env(ConfigPlatform::Macos, Some("/Users/alice".into()), None)
+            .expect("mac HOME should resolve"),
+        Path::new("/Users/alice")
+    );
+    assert!(user_home_dir_from_env(ConfigPlatform::Other, None, None).is_err());
+
+    assert_eq!(
+        legacy_user_config_dir_from_env(
+            ConfigPlatform::Windows,
+            None,
+            None,
+            Some("C:/Users/Alice/AppData/Roaming".into()),
+            None,
+        )
+        .expect("windows APPDATA should resolve"),
+        Path::new("C:/Users/Alice/AppData/Roaming").join("sigil")
+    );
+    assert!(
+        legacy_user_config_dir_from_env(ConfigPlatform::Windows, None, None, None, None).is_err()
+    );
+    assert_eq!(
+        legacy_user_config_dir_from_env(
+            ConfigPlatform::Macos,
+            Some("/Users/alice".into()),
+            None,
+            None,
+            None,
+        )
+        .expect("mac legacy path should resolve"),
+        Path::new("/Users/alice")
+            .join("Library")
+            .join("Application Support")
+            .join("sigil")
+    );
+    assert!(
+        legacy_user_config_dir_from_env(ConfigPlatform::Macos, None, None, None, None).is_err()
+    );
+    assert_eq!(
+        legacy_user_config_dir_from_env(
+            ConfigPlatform::Other,
+            Some("/home/alice".into()),
+            None,
+            None,
+            Some("/xdg".into()),
+        )
+        .expect("xdg path should win"),
+        Path::new("/xdg").join("sigil")
+    );
+    assert_eq!(
+        legacy_user_config_dir_from_env(
+            ConfigPlatform::Other,
+            Some("/home/alice".into()),
+            None,
+            None,
+            None,
+        )
+        .expect("other platform should fallback to home config"),
+        Path::new("/home/alice").join(".config").join("sigil")
+    );
+}
+
+#[test]
+fn preferred_config_path_known_paths_cover_explicit_missing_and_failure_edges() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let explicit = temp.path().join("explicit.toml");
+    let default_path = temp.path().join("home/.sigil/sigil.toml");
+    assert_eq!(
+        preferred_config_path_for_known_paths(Some(&explicit), default_path.clone(), None)
+            .expect("explicit path should win"),
+        explicit
+    );
+    assert_eq!(
+        preferred_config_path_for_known_paths(None, default_path.clone(), None)
+            .expect("missing legacy should use default path"),
+        default_path
+    );
+
+    let legacy = temp.path().join("legacy/sigil.toml");
+    std::fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
+    std::fs::write(&legacy, "legacy = true").expect("legacy config");
+    let blocking_parent = temp.path().join("blocked");
+    std::fs::write(&blocking_parent, "not a directory").expect("blocking file");
+    let blocked_default = blocking_parent.join("sigil.toml");
+    let error = preferred_config_path_for_known_paths(None, blocked_default, Some(legacy))
+        .expect_err("migration should report parent creation failure");
+    assert!(error.to_string().contains("failed to create migrated"));
+
+    let legacy_dir = temp.path().join("legacy-dir/sigil.toml");
+    std::fs::create_dir_all(&legacy_dir).expect("legacy config directory placeholder");
+    let default_path = temp.path().join("default/sigil.toml");
+    let error = preferred_config_path_for_known_paths(None, default_path, Some(legacy_dir))
+        .expect_err("migration should report copy failure");
+    assert!(error.to_string().contains("failed to migrate sigil config"));
 }
 
 #[test]
@@ -331,9 +504,11 @@ fn root_config_serializes_appearance_theme_and_colors() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: crate::AppearanceConfig {
             theme: ThemeId::Nord,
             syntax_theme: SyntaxThemeId::Nord,
+            usage_cost_currency: UsageCostCurrency::Usd,
             colors: crate::ThemeColorOverrides::new(colors),
         },
         task: Default::default(),
@@ -346,6 +521,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
     assert!(rendered.contains("[appearance]"));
     assert!(rendered.contains("theme = \"nord\""));
     assert!(rendered.contains("syntax_theme = \"nord\""));
+    assert!(rendered.contains("usage_cost_currency = \"usd\""));
     assert!(rendered.contains("[appearance.colors]"));
     assert!(rendered.contains("surface_base = \"#07080a\""));
     assert!(rendered.contains("text_primary = \"#ecf0f6\""));
@@ -574,6 +750,46 @@ report_missing = false
 }
 
 #[test]
+fn root_config_loads_verification_config_and_defaults_empty() {
+    let default_raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+"#;
+    let default_config: RootConfig =
+        toml::from_str(default_raw).expect("default verification config should parse");
+    assert!(default_config.verification.checks.is_empty());
+
+    let raw = r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[[verification.checks]]
+id = "cargo-test"
+command = "cargo"
+args = ["test", "-p", "sigil-kernel"]
+cwd = "."
+effect = "read_only"
+"#;
+
+    let config: RootConfig = toml::from_str(raw).expect("verification config should parse");
+
+    assert_eq!(config.verification.checks.len(), 1);
+    assert_eq!(config.verification.checks[0].id, "cargo-test");
+    assert_eq!(config.verification.checks[0].command, "cargo");
+    assert_eq!(
+        config.verification.checks[0].args,
+        vec![
+            "test".to_owned(),
+            "-p".to_owned(),
+            "sigil-kernel".to_owned()
+        ]
+    );
+    assert_eq!(config.verification.checks[0].effect.as_str(), "read_only");
+}
+
+#[test]
 fn resolve_workspace_root_uses_launch_cwd_for_default_dot() {
     let config_path = Path::new("/Users/example/.config/sigil/sigil.toml");
     let cwd = Path::new("/Users/example/work/project");
@@ -648,6 +864,56 @@ fn preferred_config_path_falls_back_to_user_config_path() {
 }
 
 #[test]
+fn preferred_implicit_config_path_migrates_legacy_config_to_visible_home_dir() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let default_path = temp.path().join(".sigil").join("sigil.toml");
+    let legacy_path = temp
+        .path()
+        .join("Library")
+        .join("Application Support")
+        .join("sigil")
+        .join("sigil.toml");
+    std::fs::create_dir_all(legacy_path.parent().expect("legacy parent should exist"))
+        .expect("legacy parent should be created");
+    std::fs::write(&legacy_path, "legacy = true\n").expect("legacy config should write");
+
+    let resolved = preferred_implicit_config_path(&default_path, &legacy_path)
+        .expect("legacy config should migrate");
+
+    assert_eq!(resolved, default_path);
+    assert_eq!(
+        std::fs::read_to_string(&default_path).expect("migrated config should exist"),
+        "legacy = true\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&legacy_path).expect("legacy config should remain"),
+        "legacy = true\n"
+    );
+}
+
+#[test]
+fn preferred_implicit_config_path_keeps_existing_visible_config() {
+    let temp = tempfile::tempdir().expect("tempdir should build");
+    let default_path = temp.path().join(".sigil").join("sigil.toml");
+    let legacy_path = temp.path().join("legacy").join("sigil.toml");
+    std::fs::create_dir_all(default_path.parent().expect("default parent should exist"))
+        .expect("default parent should be created");
+    std::fs::create_dir_all(legacy_path.parent().expect("legacy parent should exist"))
+        .expect("legacy parent should be created");
+    std::fs::write(&default_path, "new = true\n").expect("default config should write");
+    std::fs::write(&legacy_path, "legacy = true\n").expect("legacy config should write");
+
+    let resolved = preferred_implicit_config_path(&default_path, &legacy_path)
+        .expect("existing visible config should win");
+
+    assert_eq!(resolved, default_path);
+    assert_eq!(
+        std::fs::read_to_string(&default_path).expect("default config should remain"),
+        "new = true\n"
+    );
+}
+
+#[test]
 fn resolve_workspace_root_handles_blank_and_absolute_paths() {
     let config_path = Path::new("/Users/example/.config/sigil/sigil.toml");
     let cwd = Path::new("/Users/example/work/project");
@@ -669,13 +935,7 @@ fn config_default_user_paths_and_preferred_fallback_are_stable() {
     let config_path = default_user_config_path().expect("user config path should resolve");
     assert_eq!(config_path, config_dir.join("sigil.toml"));
 
-    if cfg!(target_os = "macos") {
-        assert!(config_dir.ends_with("Library/Application Support/sigil"));
-    } else if cfg!(target_os = "windows") {
-        assert!(config_dir.ends_with("sigil"));
-    } else {
-        assert!(config_dir.ends_with(".config/sigil"));
-    }
+    assert!(config_dir.ends_with(".sigil"));
 
     let temp = tempfile::tempdir().expect("tempdir should build");
     assert_eq!(
@@ -800,6 +1060,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),

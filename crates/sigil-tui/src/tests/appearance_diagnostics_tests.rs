@@ -22,6 +22,7 @@ fn appearance_doctor_checks_reports_invalid_override_as_appearance_colors() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -47,6 +48,7 @@ fn appearance_doctor_checks_reports_low_contrast_override() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -71,6 +73,7 @@ fn appearance_doctor_checks_groups_semantic_and_structural_warnings() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 

@@ -60,6 +60,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         compaction: sigil_kernel::CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: TaskConfig::default(),
         providers: BTreeMap::from([
@@ -915,10 +916,7 @@ while True:
 
     let activation = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             ToolCall {
                 id: "activate-lazy".to_owned(),
                 name: "mcp_activate_server".to_owned(),
@@ -1216,10 +1214,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     assert_eq!(spec.preview, ToolPreviewCapability::None);
 
     let missing_name = registry.permission_subjects(
-        &ToolContext {
-            workspace_root: std::env::current_dir()?,
-            timeout_secs: 5,
-        },
+        &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-missing-name".to_owned(),
             name: "mcp_activate_server".to_owned(),
@@ -1234,10 +1229,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     );
 
     let unknown_default = registry.permission_default_mode(
-        &ToolContext {
-            workspace_root: std::env::current_dir()?,
-            timeout_secs: 5,
-        },
+        &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-unknown-default".to_owned(),
             name: "mcp_activate_server".to_owned(),
@@ -1247,10 +1239,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     assert_eq!(unknown_default, None);
 
     let unknown_audit = registry.egress_audit(
-        &ToolContext {
-            workspace_root: std::env::current_dir()?,
-            timeout_secs: 5,
-        },
+        &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-unknown-audit".to_owned(),
             name: "mcp_activate_server".to_owned(),
@@ -1261,10 +1250,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
 
     let unknown = registry
         .execute(
-            ToolContext {
-                workspace_root: std::env::current_dir()?,
-                timeout_secs: 5,
-            },
+            ToolContext::new(std::env::current_dir()?, 5),
             ToolCall {
                 id: "activate-unknown".to_owned(),
                 name: "mcp_activate_server".to_owned(),
@@ -1277,10 +1263,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
 
     registry.register(Arc::new(ExistingMcpTool));
     let subjects = registry.permission_subjects(
-        &ToolContext {
-            workspace_root: std::env::current_dir()?,
-            timeout_secs: 5,
-        },
+        &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-lazy-subjects".to_owned(),
             name: "mcp_activate_server".to_owned(),
@@ -1299,10 +1282,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     );
 
     let default_mode = registry.permission_default_mode(
-        &ToolContext {
-            workspace_root: std::env::current_dir()?,
-            timeout_secs: 5,
-        },
+        &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-lazy-default".to_owned(),
             name: "mcp_activate_server".to_owned(),
@@ -1312,10 +1292,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
     assert_eq!(default_mode, Some(ApprovalMode::Ask));
 
     let audit = registry.egress_audit(
-        &ToolContext {
-            workspace_root: std::env::current_dir()?,
-            timeout_secs: 5,
-        },
+        &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "activate-lazy-audit".to_owned(),
             name: "mcp_activate_server".to_owned(),
@@ -1328,10 +1305,7 @@ async fn mcp_activate_server_tool_reports_unknown_and_already_ready_states() -> 
 
     let ready = registry
         .execute(
-            ToolContext {
-                workspace_root: std::env::current_dir()?,
-                timeout_secs: 5,
-            },
+            ToolContext::new(std::env::current_dir()?, 5),
             ToolCall {
                 id: "activate-lazy".to_owned(),
                 name: "mcp_activate_server".to_owned(),
@@ -1372,10 +1346,7 @@ fn mcp_activate_server_tool_respects_disabled_egress_logging() -> Result<()> {
     );
 
     let audit = registry.egress_audit(
-        &ToolContext {
-            workspace_root: std::env::current_dir()?,
-            timeout_secs: 5,
-        },
+        &ToolContext::new(std::env::current_dir()?, 5),
         &ToolCall {
             id: "quiet-audit".to_owned(),
             name: "mcp_activate_server".to_owned(),

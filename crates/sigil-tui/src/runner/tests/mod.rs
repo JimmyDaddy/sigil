@@ -8,3 +8,4 @@ mod elicitation_tests;
 mod event_bridge_tests;
 mod session_tests;
 mod spawn_tests;
+mod worker_loop_tests;

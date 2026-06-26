@@ -19,10 +19,13 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
-    ChangeSetValidationKind, ChangeSetValidationStatus, TerminalTaskEntry, TerminalTaskId, Tool,
-    ToolAccess, ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta,
-    ToolSpec, ToolSubject, ToolSubjectScope,
+    ChangeSetValidationKind, ChangeSetValidationStatus, CommittedFileMutation, FileType,
+    MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject,
+    TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffStats,
+    ToolErrorKind, ToolOperation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
+    delete_file_with_mutation, delete_file_with_mutation_in_batch, write_file_with_mutation,
+    write_file_with_mutation_in_batch,
 };
 use similar::TextDiff;
 use tokio::{process::Command, task, time::Duration};
@@ -641,13 +644,19 @@ impl Tool for WriteFileTool {
         let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
         let result_path = resolved.display().to_string();
         let bytes = content.len() as u64;
+        let workspace_root = ctx.workspace_root.clone();
+        let mutation_recorder = ctx.mutation_recorder.clone();
+        let path_for_write = path.clone();
+        let call_id_for_write = call_id.clone();
         run_blocking_io("write_file", move || {
-            if let Some(parent) = resolved.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            fs::write(&resolved, content.as_bytes())
-                .with_context(|| format!("failed to write {}", resolved.display()))?;
+            write_file_with_mutation(
+                mutation_recorder.as_ref(),
+                &workspace_root,
+                &call_id_for_write,
+                path_for_write,
+                resolved,
+                content.as_bytes(),
+            )?;
             Ok(())
         })
         .await?;
@@ -732,6 +741,10 @@ impl Tool for EditFileTool {
         let resolved = resolve_workspace_path(&ctx.workspace_root, &path)?;
         let result_path = resolved.display().to_string();
         let error_path = path.clone();
+        let workspace_root = ctx.workspace_root.clone();
+        let mutation_recorder = ctx.mutation_recorder.clone();
+        let path_for_write = path.clone();
+        let call_id_for_write = call_id.clone();
         run_blocking_io("edit_file", move || {
             let original = fs::read_to_string(&resolved)
                 .with_context(|| format!("failed to read {}", resolved.display()))?;
@@ -743,8 +756,14 @@ impl Tool for EditFileTool {
                 bail!("old_text is ambiguous in {}", error_path);
             }
             let updated = original.replacen(&old_text, &new_text, 1);
-            fs::write(&resolved, updated.as_bytes())
-                .with_context(|| format!("failed to edit {}", resolved.display()))?;
+            write_file_with_mutation(
+                mutation_recorder.as_ref(),
+                &workspace_root,
+                &call_id_for_write,
+                path_for_write,
+                resolved,
+                updated.as_bytes(),
+            )?;
             Ok(())
         })
         .await?;
@@ -828,10 +847,19 @@ impl Tool for DeleteFileTool {
         let path = required_string(&args, "path")?.to_owned();
         let target = resolve_delete_file_target(&ctx.workspace_root, &path)?;
         let result_path = target.path.display().to_string();
+        let workspace_root = ctx.workspace_root.clone();
+        let mutation_recorder = ctx.mutation_recorder.clone();
+        let path_for_delete = path.clone();
+        let call_id_for_delete = call_id.clone();
         let bytes = run_blocking_io("delete_file", move || {
             let metadata = validate_delete_file_target(&target.path, &target.display_path)?;
-            fs::remove_file(&target.path)
-                .with_context(|| format!("failed to delete {}", target.path.display()))?;
+            delete_file_with_mutation(
+                mutation_recorder.as_ref(),
+                &workspace_root,
+                &call_id_for_delete,
+                path_for_delete,
+                &target.path,
+            )?;
             Ok(metadata.len())
         })
         .await?;
@@ -954,12 +982,14 @@ impl Tool for ApplyChangeSetTool {
         let workspace_root = ctx.workspace_root.clone();
         let artifact_root = self.artifact_root.clone();
         let artifact_label_root = self.artifact_label_root.clone();
+        let mutation_recorder = ctx.mutation_recorder.clone();
         Ok(run_blocking_io("apply_changeset", move || {
             apply_changeset_plan(
                 &workspace_root,
                 &artifact_root,
                 artifact_label_root,
                 call_id,
+                mutation_recorder,
                 plan,
             )
         })
@@ -2303,13 +2333,32 @@ fn apply_changeset_plan(
     artifact_root: &Path,
     artifact_label_root: PathBuf,
     call_id: String,
+    mutation_recorder: Option<MutationEventRecorder>,
     plan: ApplyChangeSetPlan,
 ) -> Result<ToolResult> {
     let mut file_results = Vec::new();
     let mut changed_files = Vec::new();
     let mut applied_preview_diffs = Vec::new();
     let mut applied_reverse_diffs = Vec::new();
+    let mut committed_operations = Vec::new();
+    let mut failed_operations = Vec::new();
     let mut failed = false;
+    let batch_id: MutationBatchId = format!("changeset:{}", plan.change_set.id.as_str());
+    if let Some(recorder) = mutation_recorder.as_ref() {
+        let expected_subjects = plan
+            .files
+            .iter()
+            .map(|file| MutationSubject::File {
+                path: PathBuf::from(&file.path),
+                file_type: FileType::File,
+            })
+            .collect::<Vec<_>>();
+        recorder.append_batch_started(
+            &batch_id,
+            &format!("apply_changeset:{call_id}"),
+            &expected_subjects,
+        )?;
+    }
 
     for file in &plan.files {
         if failed {
@@ -2323,8 +2372,17 @@ fn apply_changeset_plan(
             continue;
         }
 
-        match apply_planned_changeset_file(file) {
-            Ok(()) => {
+        match apply_planned_changeset_file(
+            file,
+            mutation_recorder.as_ref(),
+            workspace_root,
+            &call_id,
+            Some(batch_id.clone()),
+        ) {
+            Ok(mutation) => {
+                if let Some(mutation) = mutation {
+                    committed_operations.push(mutation.operation_id);
+                }
                 changed_files.push(file.path.clone());
                 applied_preview_diffs.push(file.preview_diff.clone());
                 applied_reverse_diffs.push(file.reverse_diff.clone());
@@ -2338,6 +2396,11 @@ fn apply_changeset_plan(
             }
             Err(error) => {
                 failed = true;
+                failed_operations.push(format!(
+                    "apply_changeset:{}:{}",
+                    plan.change_set.id.as_str(),
+                    file.path
+                ));
                 file_results.push(ChangeSetFileResult {
                     path: file.path.clone(),
                     action: file.action,
@@ -2364,6 +2427,21 @@ fn apply_changeset_plan(
     } else {
         ChangeSetResultStatus::Applied
     };
+    if let Some(recorder) = mutation_recorder.as_ref() {
+        let batch_status = match status {
+            ChangeSetResultStatus::Applied => MutationBatchStatus::Applied,
+            ChangeSetResultStatus::PartiallyApplied => MutationBatchStatus::PartiallyApplied,
+            ChangeSetResultStatus::Failed | ChangeSetResultStatus::Cancelled => {
+                MutationBatchStatus::Failed
+            }
+        };
+        recorder.append_batch_finished(
+            &batch_id,
+            batch_status,
+            &committed_operations,
+            &failed_operations,
+        )?;
+    }
     let mut apply_result = ChangeSetResult {
         id: plan.change_set.id.clone(),
         status,
@@ -2442,27 +2520,39 @@ fn apply_changeset_plan(
     ))
 }
 
-fn apply_planned_changeset_file(file: &PlannedChangeSetFile) -> Result<()> {
+fn apply_planned_changeset_file(
+    file: &PlannedChangeSetFile,
+    mutation_recorder: Option<&MutationEventRecorder>,
+    workspace_root: &Path,
+    call_id: &str,
+    batch_id: Option<MutationBatchId>,
+) -> Result<Option<CommittedFileMutation>> {
     match file.action {
         ChangeSetFileAction::Create | ChangeSetFileAction::Update => {
             let content = file
                 .after_content
                 .as_ref()
                 .ok_or_else(|| anyhow!("missing proposed content for {}", file.path))?;
-            if let Some(parent) = file.absolute_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-            fs::write(&file.absolute_path, content.as_bytes())
-                .with_context(|| format!("failed to write {}", file.absolute_path.display()))?;
+            write_file_with_mutation_in_batch(
+                mutation_recorder,
+                workspace_root,
+                call_id,
+                batch_id,
+                PathBuf::from(&file.path),
+                file.absolute_path.clone(),
+                content.as_bytes(),
+            )
         }
-        ChangeSetFileAction::Delete => {
-            fs::remove_file(&file.absolute_path)
-                .with_context(|| format!("failed to delete {}", file.absolute_path.display()))?;
-        }
+        ChangeSetFileAction::Delete => delete_file_with_mutation_in_batch(
+            mutation_recorder,
+            workspace_root,
+            call_id,
+            batch_id,
+            PathBuf::from(&file.path),
+            file.absolute_path.clone(),
+        ),
         ChangeSetFileAction::Rename => bail!("rename is not supported by apply_changeset"),
     }
-    Ok(())
 }
 
 fn apply_changeset_error_result(

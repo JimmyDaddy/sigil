@@ -206,10 +206,7 @@ impl Tool for NamedRegistryTool {
 async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(RegistryFixtureTool));
-    let ctx = ToolContext {
-        workspace_root: std::env::temp_dir(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(std::env::temp_dir(), 5);
     let call = ToolCall {
         id: "call-1".to_owned(),
         name: "fixture".to_owned(),
@@ -356,10 +353,7 @@ fn tool_registry_drains_by_name_prefix_after_lock_poisoning() {
     let drained = registry.drain_by_name_prefix("mcp__poisoned__");
     let operation = registry
         .permission_operation(
-            &ToolContext {
-                workspace_root: std::env::temp_dir(),
-                timeout_secs: 5,
-            },
+            &ToolContext::new(std::env::temp_dir(), 5),
             &ToolCall {
                 id: "call-read".to_owned(),
                 name: "read_file".to_owned(),
@@ -392,10 +386,7 @@ async fn scoped_tool_registry_denies_matching_names_after_allow_scope() -> Resul
     assert!(
         scoped
             .execute(
-                ToolContext {
-                    workspace_root: std::env::temp_dir(),
-                    timeout_secs: 5,
-                },
+                ToolContext::new(std::env::temp_dir(), 5),
                 ToolCall {
                     id: "call-1".to_owned(),
                     name: "write_file".to_owned(),
@@ -418,10 +409,7 @@ async fn scoped_tool_registry_gates_all_tool_paths() -> Result<()> {
         ["read_file"],
         ["mcp__docs__"],
     ));
-    let ctx = ToolContext {
-        workspace_root: std::env::temp_dir(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(std::env::temp_dir(), 5);
     let blocked_call = ToolCall {
         id: "call-1".to_owned(),
         name: "fixture".to_owned(),
@@ -473,10 +461,7 @@ async fn scoped_tool_registry_prefix_allows_lazily_registered_tools() -> Result<
     assert!(scoped.spec_for("mcp__other__read").is_none());
     let result = scoped
         .execute(
-            ToolContext {
-                workspace_root: std::env::temp_dir(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(std::env::temp_dir(), 5),
             ToolCall {
                 id: "call-1".to_owned(),
                 name: "mcp__lazy__read".to_owned(),
@@ -492,10 +477,7 @@ async fn scoped_tool_registry_prefix_allows_lazily_registered_tools() -> Result<
 #[tokio::test]
 async fn tool_registry_surfaces_unknown_tool_and_invalid_json() {
     let registry = ToolRegistry::new();
-    let ctx = ToolContext {
-        workspace_root: std::env::temp_dir(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(std::env::temp_dir(), 5);
 
     let unknown_error = registry
         .execute(
@@ -764,10 +746,7 @@ fn bounded_diff_and_meta_helpers_cover_zero_budgets_and_empty_values() {
 async fn tool_registry_surfaces_errors_and_default_trait_hooks() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(std::sync::Arc::new(DefaultHookTool));
-    let ctx = ToolContext {
-        workspace_root: std::env::temp_dir(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(std::env::temp_dir(), 5);
     let call = crate::ToolCall {
         id: "call-1".to_owned(),
         name: "default_hooks".to_owned(),
@@ -819,10 +798,7 @@ async fn tool_registry_surfaces_errors_and_default_trait_hooks() -> Result<()> {
 async fn tool_registry_surfaces_unknown_and_invalid_args_for_all_public_hooks() -> Result<()> {
     let mut registry = ToolRegistry::new();
     registry.register(std::sync::Arc::new(DefaultHookTool));
-    let ctx = ToolContext {
-        workspace_root: std::env::temp_dir(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(std::env::temp_dir(), 5);
     let valid = crate::ToolCall {
         id: "call-1".to_owned(),
         name: "default_hooks".to_owned(),
@@ -907,4 +883,19 @@ async fn tool_registry_surfaces_unknown_and_invalid_args_for_all_public_hooks() 
 
     assert_eq!(registry.specs().len(), 1);
     Ok(())
+}
+
+#[test]
+fn tool_context_debug_redacts_mutation_recorder_details() {
+    let ctx = crate::ToolContext::new("/tmp/workspace", 45);
+    let rendered = format!("{ctx:?}");
+    assert!(rendered.contains("workspace_root"));
+    assert!(rendered.contains("timeout_secs"));
+    assert!(rendered.contains("mutation_recorder: false"));
+    assert_eq!(
+        ctx.workspace_root,
+        std::path::PathBuf::from("/tmp/workspace")
+    );
+    assert_eq!(ctx.timeout_secs, 45);
+    assert!(ctx.mutation_recorder.is_none());
 }

@@ -32,10 +32,13 @@ use crate::{
         ConversationInputStatusEntry, ConversationQueueProjection,
     },
     event::{
-        DurableEventType, EventClass, EventSyncClass, LegacyEvent, MAX_EVENT_BYTES, StoredEvent,
-        is_v2_stored_event_value, stable_event_hash, stable_event_uuid,
+        DomainEvent, DurableEventType, EventClass, EventSyncClass, LegacyEvent,
+        ProjectionApplyDecision, ProjectionCursor, StoredEvent, StoredEventDecode,
+        decode_stored_event, is_v2_stored_event_value, projection_apply_decision_for_record,
+        stable_event_hash, stable_event_uuid,
     },
     memory::{apply_memory_report, materialize_memory},
+    mutation::MutationEventRecorder,
     permission::{
         ApprovalMode, PathTrustZone, PermissionConfirmation, PermissionRisk, ToolOperation,
     },
@@ -55,6 +58,11 @@ use crate::{
     tool::{
         ToolAccess, ToolError, ToolErrorKind, ToolPreviewSnapshot, ToolResult, ToolResultMeta,
         ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    },
+    verification::{
+        CheckSpecRecordedEntry, ChildVerificationReceiptLinked, ReadinessEvaluatedEntry,
+        VerificationPolicyChangedEntry, VerificationRecordedEntry, VerificationStateProjection,
+        WorkspaceTrustDecisionEntry,
     },
 };
 
@@ -101,6 +109,53 @@ impl SessionStreamRecord {
             Self::Stored(event) => &event.session_id,
         }
     }
+
+    pub fn event_id(&self) -> &str {
+        match self {
+            Self::Legacy { event, .. } => &event.event_id,
+            Self::Stored(event) => &event.event_id,
+        }
+    }
+
+    pub fn record_checksum(&self) -> &str {
+        match self {
+            Self::Legacy { event, .. } => &event.raw_line_hash,
+            Self::Stored(event) => &event.record_checksum,
+        }
+    }
+
+    pub fn projection_cursor(&self, projection_schema_version: u16) -> ProjectionCursor {
+        ProjectionCursor {
+            session_id: self.session_id().to_owned(),
+            projection_schema_version,
+            last_applied_stream_sequence: self.stream_sequence(),
+            last_applied_event_id: self.event_id().to_owned(),
+            last_applied_record_checksum: self.record_checksum().to_owned(),
+        }
+    }
+
+    pub fn domain_event_record(&self) -> Result<Option<DomainEventRecord>> {
+        let domain_event = match self {
+            Self::Legacy { event, .. } => Some(DomainEvent::Legacy(event.clone())),
+            Self::Stored(event) => match decode_stored_event(event.clone())? {
+                StoredEventDecode::Known(event) => Some(event),
+                StoredEventDecode::UnknownNonCritical(_) => None,
+            },
+        };
+        Ok(domain_event.map(|event| DomainEventRecord {
+            event,
+            cursor: self.projection_cursor(SESSION_ENTRY_PROJECTION_SCHEMA_VERSION),
+        }))
+    }
+}
+
+pub const SESSION_ENTRY_PROJECTION_SCHEMA_VERSION: u16 = 1;
+
+/// One reducer-facing domain event plus the cursor position proving where it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DomainEventRecord {
+    pub event: DomainEvent,
+    pub cursor: ProjectionCursor,
 }
 
 /// Stable compaction metadata persisted in the append-only control plane.
@@ -192,6 +247,18 @@ pub enum ControlEntry {
     TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry),
     #[serde(alias = "TaskSubagentElicitationRoute")]
     TaskSubagentElicitationRoute(TaskSubagentElicitationRouteEntry),
+    #[serde(alias = "CheckSpecRecorded")]
+    CheckSpecRecorded(CheckSpecRecordedEntry),
+    #[serde(alias = "VerificationPolicyChanged")]
+    VerificationPolicyChanged(VerificationPolicyChangedEntry),
+    #[serde(alias = "VerificationRecorded")]
+    VerificationRecorded(VerificationRecordedEntry),
+    #[serde(alias = "ReadinessEvaluated")]
+    ReadinessEvaluated(ReadinessEvaluatedEntry),
+    #[serde(alias = "ChildVerificationReceiptLinked")]
+    ChildVerificationReceiptLinked(ChildVerificationReceiptLinked),
+    #[serde(alias = "WorkspaceTrustDecision")]
+    WorkspaceTrustDecision(WorkspaceTrustDecisionEntry),
     #[serde(alias = "AgentProfileCaptured")]
     AgentProfileCaptured(AgentProfileCapturedEntry),
     #[serde(alias = "AgentProfileTrustDecision")]
@@ -431,27 +498,15 @@ impl JsonlSessionStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("session log I/O lock poisoned"))?;
         let mut file = self.open_locked_file()?;
-        let event = if let Some(state) = append_state_for_fast_append_locked(&mut file, &self.path)?
-        {
-            append_event_with_state_locked(
-                &self.path,
-                &mut file,
-                state,
-                event_type,
-                event_class,
-                payload,
-            )?
-        } else {
-            let mut records = recover_tail_if_needed_locked(&mut file, &self.path)?;
-            append_event_locked(
-                &self.path,
-                &mut file,
-                &mut records,
-                event_type,
-                event_class,
-                payload,
-            )?
-        };
+        let mut records = recover_tail_if_needed_locked(&mut file, &self.path)?;
+        let event = append_event_locked(
+            &self.path,
+            &mut file,
+            &mut records,
+            event_type,
+            event_class,
+            payload,
+        )?;
         Ok(event)
     }
 
@@ -579,18 +634,50 @@ impl JsonlSessionStore {
 }
 
 fn session_entries_from_records(records: &[SessionStreamRecord]) -> Result<Vec<SessionLogEntry>> {
-    let mut entries = Vec::new();
+    let mut projection = SessionEntryProjection::default();
     for record in records {
-        match record {
-            SessionStreamRecord::Legacy { entry, .. } => entries.push(entry.as_ref().clone()),
-            SessionStreamRecord::Stored(event) => {
-                if let Some(entry) = session_entry_from_stored_event(event)? {
-                    entries.push(entry);
-                }
-            }
-        }
+        projection.apply_record(record)?;
     }
-    Ok(entries)
+    Ok(projection.entries)
+}
+
+#[derive(Default)]
+struct SessionEntryProjection {
+    entries: Vec<SessionLogEntry>,
+    cursor: Option<ProjectionCursor>,
+}
+
+impl SessionEntryProjection {
+    fn apply_record(&mut self, record: &SessionStreamRecord) -> Result<()> {
+        let cursor = record.projection_cursor(SESSION_ENTRY_PROJECTION_SCHEMA_VERSION);
+        let event = record.domain_event_record()?.map(|record| record.event);
+        self.apply_cursor_and_event(cursor, event.as_ref())
+    }
+
+    fn apply_cursor_and_event(
+        &mut self,
+        cursor: ProjectionCursor,
+        event: Option<&DomainEvent>,
+    ) -> Result<()> {
+        let last_applied_record_checksum = &cursor.last_applied_record_checksum;
+        match projection_apply_decision_for_record(
+            self.cursor.as_ref(),
+            &cursor.session_id,
+            cursor.last_applied_stream_sequence,
+            &cursor.last_applied_event_id,
+            last_applied_record_checksum,
+        )? {
+            ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+            ProjectionApplyDecision::Apply => {}
+        }
+        if let Some(event) = event
+            && let Some(entry) = session_entry_from_domain_event(event)?
+        {
+            self.entries.push(entry);
+        }
+        self.cursor = Some(cursor);
+        Ok(())
+    }
 }
 
 fn has_session_identity(entries: &[SessionLogEntry]) -> bool {
@@ -766,117 +853,6 @@ fn append_stored_event_to_locked_file(file: &mut File, event: &StoredEvent) -> R
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct StreamAppendState {
-    session_id: String,
-    next_sequence: u64,
-}
-
-fn append_state_for_fast_append_locked(
-    file: &mut File,
-    path: &Path,
-) -> Result<Option<StreamAppendState>> {
-    if read_tail_recovery_intent(path)?.is_some() {
-        return Ok(None);
-    }
-    let Some(line) = last_non_empty_line(file, path)? else {
-        let session_id = session_id_for_path(path);
-        return Ok(Some(StreamAppendState {
-            session_id,
-            next_sequence: 1,
-        }));
-    };
-    if !line_is_v2_stored_event(&line)? {
-        return Ok(None);
-    }
-    let Ok(event) = StoredEvent::from_json_str(&line) else {
-        return Ok(None);
-    };
-    Ok(Some(StreamAppendState {
-        session_id: event.session_id,
-        next_sequence: event.stream_sequence.saturating_add(1),
-    }))
-}
-
-fn last_non_empty_line(file: &mut File, path: &Path) -> Result<Option<String>> {
-    let mut position = file
-        .seek(SeekFrom::End(0))
-        .with_context(|| format!("failed to seek {}", path.display()))?;
-    if position == 0 {
-        return Ok(None);
-    }
-
-    let mut tail = Vec::new();
-    while position > 0 && tail.len() <= MAX_EVENT_BYTES {
-        let read_size = position.min(32 * 1024) as usize;
-        position = position.saturating_sub(read_size as u64);
-        file.seek(SeekFrom::Start(position))
-            .with_context(|| format!("failed to seek {}", path.display()))?;
-        let mut chunk = vec![0; read_size];
-        file.read_exact(&mut chunk)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        chunk.extend(tail);
-        tail = chunk;
-        if let Some(line) = complete_last_non_empty_line(&tail, position == 0)? {
-            return Ok(Some(line));
-        }
-        if position == 0 {
-            return Ok(None);
-        }
-    }
-
-    bail!("last session log record is too large in {}", path.display())
-}
-
-fn complete_last_non_empty_line(bytes: &[u8], at_file_start: bool) -> Result<Option<String>> {
-    let mut end = bytes.len();
-    while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-        end -= 1;
-    }
-    if end == 0 {
-        return Ok(None);
-    }
-    let start = bytes[..end]
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(0, |index| index + 1);
-    if start == 0 && !at_file_start {
-        return Ok(None);
-    }
-    let line = std::str::from_utf8(&bytes[start..end])
-        .context("failed to decode last session log record")?
-        .trim_end_matches('\r');
-    Ok((!line.trim().is_empty()).then(|| line.to_owned()))
-}
-
-fn append_event_with_state_locked(
-    path: &Path,
-    file: &mut File,
-    state: StreamAppendState,
-    event_type: DurableEventType,
-    event_class: EventClass,
-    payload: serde_json::Value,
-) -> Result<StoredEvent> {
-    if !event_type.appendable() {
-        bail!("{} cannot be appended as a v2 event", event_type.as_str());
-    }
-    let event_id_seed = event_id_seed(&state.session_id, state.next_sequence, event_type, &payload);
-    let event_id = stable_event_uuid("sigil-event", &event_id_seed);
-    let session_id = state.session_id;
-    let sequence = state.next_sequence;
-    let event = StoredEvent::new(
-        event_type,
-        event_class,
-        event_id,
-        session_id,
-        sequence,
-        payload,
-    )
-    .with_context(|| format!("failed to build stored event for {}", path.display()))?;
-    append_stored_event_to_locked_file(file, &event)?;
-    Ok(event)
-}
-
 fn event_id_seed(
     session_id: &str,
     stream_sequence: u64,
@@ -976,6 +952,14 @@ fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
         ControlEntry::TaskRun(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskPlan(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskStep(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::CheckSpecRecorded(_) => DurableEventType::CheckSpecRecorded,
+        ControlEntry::VerificationPolicyChanged(_) => DurableEventType::VerificationPolicyChanged,
+        ControlEntry::VerificationRecorded(_) => DurableEventType::VerificationRecorded,
+        ControlEntry::ReadinessEvaluated(_) => DurableEventType::ReadinessEvaluated,
+        ControlEntry::ChildVerificationReceiptLinked(_) => {
+            DurableEventType::ChildVerificationReceiptLinked
+        }
+        ControlEntry::WorkspaceTrustDecision(_) => DurableEventType::WorkspaceTrustDecision,
         ControlEntry::PrefixSnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::MemorySnapshotCaptured(_) => DurableEventType::ContextSourceCaptured,
         ControlEntry::SkillIndexCaptured(_) => DurableEventType::ContextSourceCaptured,
@@ -1003,6 +987,23 @@ fn session_entry_from_stored_event(event: &StoredEvent) -> Result<Option<Session
     };
     let entry = serde_json::from_value(value.clone())
         .context("failed to decode session entry from stored event payload")?;
+    Ok(Some(entry))
+}
+
+fn session_entry_from_domain_event(event: &DomainEvent) -> Result<Option<SessionLogEntry>> {
+    if let DomainEvent::Legacy(event) = event {
+        let entry = serde_json::from_value(event.payload.clone())
+            .context("failed to decode session entry from legacy domain event payload")?;
+        return Ok(Some(entry));
+    }
+    let payload = event
+        .payload()
+        .unwrap_or_else(|| unreachable!("non-legacy domain event must carry payload"));
+    let Some(value) = payload.payload.get("session_log_entry") else {
+        return Ok(None);
+    };
+    let entry = serde_json::from_value(value.clone())
+        .context("failed to decode session entry from domain event payload")?;
     Ok(Some(entry))
 }
 
@@ -1171,17 +1172,19 @@ struct TailCorruption {
 
 fn tail_corruption(path: &Path, content: &str) -> Result<Option<TailCorruption>> {
     let mut line_start = 0usize;
+    let mut physical_line = 1usize;
     let mut non_empty_lines = Vec::new();
     for segment in content.split_inclusive('\n') {
         let line_end = line_start + segment.len();
         let line = segment.trim_end_matches(['\n', '\r']);
         if !line.trim().is_empty() {
-            non_empty_lines.push((line_start, line_end, line.to_owned()));
+            non_empty_lines.push((physical_line, line_start, line_end, line.to_owned()));
         }
         line_start = line_end;
+        physical_line += 1;
     }
-    for (index, (start, _end, line)) in non_empty_lines.iter().enumerate() {
-        if record_line_is_valid(line) {
+    for (index, (physical_line, start, _end, line)) in non_empty_lines.iter().enumerate() {
+        if record_line_is_valid_or_fail_closed(*physical_line, line, path)? {
             continue;
         }
         if index + 1 == non_empty_lines.len() {
@@ -1195,11 +1198,17 @@ fn tail_corruption(path: &Path, content: &str) -> Result<Option<TailCorruption>>
     Ok(None)
 }
 
-fn record_line_is_valid(line: &str) -> bool {
-    if line_is_v2_stored_event(line).unwrap_or(false) {
-        return StoredEvent::from_json_str(line).is_ok();
+fn record_line_is_valid_or_fail_closed(
+    physical_line: usize,
+    line: &str,
+    path: &Path,
+) -> Result<bool> {
+    if line_is_v2_stored_event(line)? {
+        StoredEvent::from_json_str(line)
+            .with_context(|| stream_line_context("stored event", physical_line, path))?;
+        return Ok(true);
     }
-    serde_json::from_str::<SessionLogEntry>(line).is_ok()
+    Ok(serde_json::from_str::<SessionLogEntry>(line).is_ok())
 }
 
 fn append_tail_recovery_event_locked(
@@ -1377,6 +1386,41 @@ impl Session {
         self.append(SessionLogEntry::Control(control))
     }
 
+    /// Appends a durable domain event that does not project into provider-visible chat history.
+    ///
+    /// In-memory sessions without a backing store cannot persist durable-only events, so they return
+    /// `Ok(None)` instead of fabricating an in-memory fact that would disappear on resume.
+    pub fn append_durable_event(
+        &mut self,
+        event_type: DurableEventType,
+        event_class: EventClass,
+        payload: serde_json::Value,
+    ) -> Result<Option<StoredEvent>> {
+        self.store
+            .as_ref()
+            .map(|store| store.append_event(event_type, event_class, payload))
+            .transpose()
+    }
+
+    /// Returns a store-backed mutation recorder for tool contexts when this session is durable.
+    pub fn mutation_event_recorder(&self) -> Option<MutationEventRecorder> {
+        self.store.as_ref().cloned().map(MutationEventRecorder::new)
+    }
+
+    /// Reconciles prepared controlled mutations that were left without terminal commit events.
+    ///
+    /// This requires a workspace root and is therefore run by the agent before a new turn, rather
+    /// than during store-only session loading.
+    pub fn reconcile_prepared_mutations(
+        &mut self,
+        workspace_root: impl AsRef<Path>,
+    ) -> Result<Vec<StoredEvent>> {
+        let Some(recorder) = self.mutation_event_recorder() else {
+            return Ok(Vec::new());
+        };
+        recorder.reconcile_prepared_mutations(workspace_root)
+    }
+
     pub fn entries(&self) -> &[SessionLogEntry] {
         &self.entries
     }
@@ -1481,6 +1525,11 @@ impl Session {
     /// Returns a durable change set projection reconstructed from append-only control entries.
     pub fn changeset_projection(&self) -> ChangeSetProjection {
         ChangeSetProjection::from_entries(&self.entries)
+    }
+
+    /// Returns durable verification evidence reconstructed from append-only control entries.
+    pub fn verification_state_projection(&self) -> VerificationStateProjection {
+        VerificationStateProjection::from_entries(&self.entries)
     }
 
     /// Returns a durable terminal task projection reconstructed from append-only control entries.

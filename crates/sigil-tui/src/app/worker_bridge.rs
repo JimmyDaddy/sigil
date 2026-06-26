@@ -841,6 +841,10 @@ impl AppState {
             }
             AppAction::CompactNow => WorkerCommand::CompactNow,
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
+            AppAction::TrustWorkspace => {
+                let command = WorkerCommand::TrustWorkspace;
+                command
+            }
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
             }

@@ -9,27 +9,34 @@ use futures::{Stream, stream};
 use serde_json::{Value, json};
 
 use crate::{
-    Agent, AgentRunInput, AgentRunOptions, AutoApproveHandler, CompletionRequest, ControlEntry,
-    InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, PermissionConfig,
-    Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport,
-    RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry,
-    SessionRef, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus, TaskId, TaskPlanEntry,
-    TaskPlanStatus, TaskRouteStatus, TaskRunStatus, TaskStepId, TaskStepSpec, TaskStepStatus, Tool,
-    ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    Agent, AgentRunInput, AgentRunOptions, AutoApproveHandler, CandidateCheck, CheckCommand,
+    CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CompletionRequest, ControlEntry,
+    DurableEventType, EventClass, EvidenceScope, InteractionMode, JsonlSessionStore, MemoryConfig,
+    MessageRole, ModelMessage, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
+    ReasoningEffort, ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator,
+    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunStatus,
+    TaskStepId, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolApproval, ToolCall,
+    ToolCategory, ToolContext, ToolEffect, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, VerificationVerdict, VisibleCompletionState, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, write_file_with_mutation,
 };
 
 use super::{
-    StepRunOutput, child_status_from_output, planner_prompt, route_id_for_call,
-    step_status_from_outcome, step_terminal_reason, task_status_from_step_status,
+    StepRunOutput, child_status_from_output, durable_workspace_mutation_evidence, planner_prompt,
+    route_id_for_call, run_status_from_step_status, run_task_step_verification_checks,
+    step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
+    task_status_from_step_status, task_step_readiness,
 };
 
 struct PlannerProvider;
 struct NoPlanProvider;
 struct FailingProvider;
 struct ToolCallingProvider;
+struct MutatingToolProvider;
 struct RecoveringToolErrorProvider;
 struct RecoverableErrorTool;
+struct MutatingTool;
 struct ApprovalRequiredTool;
 struct DenyApprovalHandler;
 #[derive(Default)]
@@ -101,7 +108,7 @@ impl Provider for PlannerProvider {
         let tool_used = request
             .messages
             .iter()
-            .any(|message| matches!(message.role, MessageRole::Tool));
+            .any(|message| message.tool_call_id.as_deref() == Some("call-mutate-1"));
         if tool_used {
             return Ok(Box::pin(stream::iter(vec![
                 Ok(ProviderChunk::TextDelta("planned".to_owned())),
@@ -237,6 +244,50 @@ impl Provider for ToolCallingProvider {
 }
 
 #[async_trait]
+impl Provider for MutatingToolProvider {
+    fn name(&self) -> &str {
+        "mutating-tool"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| message.tool_call_id.as_deref() == Some("call-mutate-1"));
+        if tool_used {
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("mutation verified".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])));
+        }
+        let args = r#"{"path":"note.txt"}"#;
+        Ok(Box::pin(stream::iter(vec![
+            Ok(ProviderChunk::ToolCallStart {
+                id: "call-mutate-1".to_owned(),
+                name: "mutate_file".to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallArgsDelta {
+                id: "call-mutate-1".to_owned(),
+                delta: args.to_owned(),
+            }),
+            Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                id: "call-mutate-1".to_owned(),
+                name: "mutate_file".to_owned(),
+                args_json: args.to_owned(),
+            })),
+            Ok(ProviderChunk::Done),
+        ])))
+    }
+}
+
+#[async_trait]
 impl Provider for RecoveringToolErrorProvider {
     fn name(&self) -> &str {
         "recovering-tool-error"
@@ -304,6 +355,38 @@ impl Tool for RecoverableErrorTool {
             "recoverable_error",
             crate::ToolErrorKind::InvalidInput,
             "bad path",
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for MutatingTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "mutate_file".to_owned(),
+            description: "Mutate a test file".to_owned(),
+            input_schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+            category: ToolCategory::File,
+            access: ToolAccess::Write,
+            preview: ToolPreviewCapability::Optional,
+        }
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+        let path = args
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("note.txt")
+            .to_owned();
+        std::fs::write(ctx.workspace_root.join(&path), "new\n")?;
+        Ok(ToolResult::ok(
+            call_id,
+            "mutate_file",
+            "mutated",
+            ToolResultMeta {
+                changed_files: vec![path],
+                ..ToolResultMeta::default()
+            },
         ))
     }
 }
@@ -412,6 +495,14 @@ async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()
     assert_eq!(output.plan_version, 1);
     assert_eq!(output.steps.len(), 1);
     assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
+    assert_eq!(
+        output.steps[0].verification_verdict,
+        VerificationVerdict::NotApplicable
+    );
+    assert_eq!(
+        output.steps[0].visible_state,
+        VisibleCompletionState::Completed
+    );
     assert!(handler.events.iter().any(|event| {
         matches!(
             event,
@@ -450,6 +541,15 @@ async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()
                     && step.summary.as_deref() == Some("step complete")
         )
     }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness))
+                if readiness.evaluation.run_status == crate::RunStatus::Completed
+                    && readiness.evaluation.verification_verdict
+                        == VerificationVerdict::NotApplicable
+        )
+    }));
     assert!(!session.entries().iter().any(|entry| {
         matches!(
             entry,
@@ -469,6 +569,168 @@ async fn sequential_task_orchestrator_runs_plan_and_executor_step() -> Result<()
                 .content
                 .as_deref()
                 .is_some_and(|content| content.contains("Execute task step"))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn sequential_task_orchestrator_runs_configured_check_after_mutating_step() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("planner", "model").with_store(store);
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "rustc".to_owned(),
+            args: vec!["--version".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "rustc-version",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            trusted,
+            "event-config",
+        ),
+    ))?;
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MutatingTool));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(MutatingToolProvider, registry),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut options = options();
+    options.workspace_root = workspace.clone();
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "mutate and verify".to_owned(),
+            },
+            options.clone(),
+            options.clone(),
+            options.clone(),
+            options,
+            4,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
+    assert_eq!(
+        output.steps[0].verification_verdict,
+        VerificationVerdict::Passed
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("note.txt"))?,
+        "new\n"
+    );
+    assert!(
+        session
+            .verification_state_projection()
+            .receipts
+            .values()
+            .any(|entry| entry.receipt.check_status == crate::ReceiptStatus::Succeeded)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sequential_task_orchestrator_blocks_mutating_step_without_verification_config()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("planner", "model").with_store(store);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MutatingTool));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(MutatingToolProvider, registry),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut options = options();
+    options.workspace_root = workspace.clone();
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "mutate without verification config".to_owned(),
+            },
+            options.clone(),
+            options.clone(),
+            options.clone(),
+            options,
+            4,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Blocked);
+    assert_eq!(
+        output.steps[0].verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness))
+                if readiness.evaluation.run_status == crate::RunStatus::Blocked
+                    && readiness
+                        .evaluation
+                        .required_actions
+                        .contains(&crate::RequiredAction::ProvideVerificationConfig)
+        )
     }));
     Ok(())
 }
@@ -965,6 +1227,173 @@ async fn direct_child_session_keeps_skill_context_out_of_parent_history() -> Res
     let subagent_messages = format!("{:?}", requests[0].messages);
     assert!(subagent_messages.contains("SECRET_SKILL_BODY"));
     assert!(subagent_messages.contains("Apply the loaded skill"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_child_session_runs_configured_check_after_mutating_write() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("planner", "model").with_store(store);
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "rustc".to_owned(),
+            args: vec!["--version".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "rustc-version",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_skill".to_owned()),
+            trusted,
+            "event-config",
+        ),
+    ))?;
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MutatingTool));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(MutatingToolProvider, registry),
+    );
+    let mut options = options();
+    options.workspace_root = workspace.clone();
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_skill")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "invoke write skill".to_owned(),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("invoke_skill")?,
+                title: "invoke write skill".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentWrite,
+            },
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("write")]),
+            options.clone(),
+            options,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Completed);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Completed);
+    assert_eq!(
+        output.steps[0].verification_verdict,
+        VerificationVerdict::Passed
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("note.txt"))?,
+        "new\n"
+    );
+    assert!(
+        session
+            .verification_state_projection()
+            .receipts
+            .values()
+            .any(|entry| entry.receipt.check_status == crate::ReceiptStatus::Succeeded)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_child_session_blocks_mutating_write_without_verification_config() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("planner", "model").with_store(store);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MutatingTool));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(MutatingToolProvider, registry),
+    );
+    let mut options = options();
+    options.workspace_root = workspace;
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_skill")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "invoke write skill".to_owned(),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("invoke_skill")?,
+                title: "invoke write skill".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentWrite,
+            },
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("write")]),
+            options.clone(),
+            options,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Blocked);
+    assert_eq!(
+        output.steps[0].verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness))
+                if readiness.evaluation.run_status == crate::RunStatus::Blocked
+        )
+    }));
     Ok(())
 }
 
@@ -1755,6 +2184,883 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn task_step_readiness_marks_changed_files_unverified() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: Some("write note".to_owned()),
+        role: crate::AgentRole::Executor,
+    };
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            changed_files: vec!["note.txt".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+    let session = Session::new("deepseek", "deepseek-v4-flash");
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), "edited\n")?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert_eq!(
+        readiness.evaluation.visible_state,
+        VisibleCompletionState::CompletedUnverified
+    );
+    Ok(())
+}
+
+#[test]
+fn task_step_readiness_uses_recorded_check_specs_and_workspace_snapshot() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: Some("write note".to_owned()),
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), "edited\n")?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let candidate = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-discovery".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+    };
+    let trusted = candidate.promote(
+        "cargo-test",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            trusted,
+            "event-discovery",
+        ),
+    ))?;
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            changed_files: vec!["note.txt".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert!(readiness.workspace_snapshot_id.is_some());
+    assert!(readiness.evaluation.required_actions.iter().any(|action| {
+        matches!(
+            action,
+            crate::RequiredAction::RunCheck { check_spec_id } if check_spec_id == "cargo-test"
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: Some("write note".to_owned()),
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let note_path = workspace.join("note.txt");
+    std::fs::write(&note_path, "old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let recorder = session
+        .mutation_event_recorder()
+        .expect("store-backed session should create mutation recorder");
+    write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-1",
+        "note.txt",
+        &note_path,
+        b"new\n",
+    )?;
+
+    let mut options = options();
+    options.workspace_root = workspace;
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "rustc".to_owned(),
+            args: vec!["--version".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "rustc-version",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            trusted,
+            "event-config",
+        ),
+    ))?;
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            changed_files: vec!["note.txt".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+
+    let missing = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+    assert_eq!(
+        missing.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    let mut handler = RecordingEventHandler::default();
+    assert!(run_task_step_verification_checks(
+        &mut session,
+        &mut handler,
+        &request,
+        &step,
+        &options,
+        &missing,
+    )?);
+
+    let passed = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        passed.evaluation.verification_verdict,
+        VerificationVerdict::Passed
+    );
+    assert_eq!(
+        passed.evaluation.visible_state,
+        VisibleCompletionState::Verified
+    );
+    assert!(session.verification_state_projection().receipts.len() == 1);
+    Ok(())
+}
+
+#[test]
+fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "verify a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "verify".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    std::fs::write(workspace.join("note.txt"), "new\n")?;
+    let mut options = options();
+    options.workspace_root = workspace.clone();
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let mut handler = RecordingEventHandler::default();
+    let no_action = crate::ReadinessEvaluatedEntry {
+        scope: EvidenceScope::Step("task_1:step_1".to_owned()),
+        evaluation: crate::ReadinessEvaluation {
+            run_status: crate::RunStatus::Completed,
+            verification_verdict: VerificationVerdict::NotApplicable,
+            visible_state: VisibleCompletionState::Completed,
+            reasons: Vec::new(),
+            required_actions: Vec::new(),
+        },
+        policy_hash: None,
+        workspace_snapshot_id: None,
+    };
+    assert!(!run_task_step_verification_checks(
+        &mut session,
+        &mut handler,
+        &request,
+        &step,
+        &options,
+        &no_action,
+    )?);
+
+    let trust_only = crate::ReadinessEvaluatedEntry {
+        evaluation: crate::ReadinessEvaluation {
+            required_actions: vec![crate::RequiredAction::TrustWorkspace],
+            ..no_action.evaluation.clone()
+        },
+        ..no_action.clone()
+    };
+    assert!(!run_task_step_verification_checks(
+        &mut session,
+        &mut handler,
+        &request,
+        &step,
+        &options,
+        &trust_only,
+    )?);
+
+    let missing_spec = crate::ReadinessEvaluatedEntry {
+        evaluation: crate::ReadinessEvaluation {
+            required_actions: vec![crate::RequiredAction::RunCheck {
+                check_spec_id: "missing-check".to_owned(),
+            }],
+            ..no_action.evaluation.clone()
+        },
+        ..no_action.clone()
+    };
+    let error = run_task_step_verification_checks(
+        &mut session,
+        &mut handler,
+        &request,
+        &step,
+        &options,
+        &missing_spec,
+    )
+    .expect_err("missing trusted check should fail closed");
+    assert!(
+        error
+            .to_string()
+            .contains("missing trusted verification check spec")
+    );
+
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "false".to_owned(),
+            args: Vec::new(),
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "always-fails",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            trusted,
+            "event-config",
+        ),
+    ))?;
+    let mut policy = crate::VerificationPolicy::no_checks_required("task_step_default");
+    policy.required_checks = session
+        .verification_state_projection()
+        .check_specs_for_scopes(&[EvidenceScope::Task("task_1".to_owned())])
+        .into_iter()
+        .map(|entry| entry.trusted_check.check_spec.clone())
+        .collect();
+    policy.completion_criteria = crate::CompletionCriteria::AllRequiredChecks;
+    let policy_entry = crate::VerificationPolicyChangedEntry::new(
+        EvidenceScope::Task("task_1".to_owned()),
+        policy,
+        "event-policy",
+    )?;
+    let expected_policy_hash = policy_entry.policy_hash.clone();
+    session.append_control(ControlEntry::VerificationPolicyChanged(policy_entry))?;
+    let failed_check = crate::ReadinessEvaluatedEntry {
+        evaluation: crate::ReadinessEvaluation {
+            required_actions: vec![crate::RequiredAction::RunCheck {
+                check_spec_id: "always-fails".to_owned(),
+            }],
+            ..no_action.evaluation.clone()
+        },
+        ..no_action.clone()
+    };
+    assert!(run_task_step_verification_checks(
+        &mut session,
+        &mut handler,
+        &request,
+        &step,
+        &options,
+        &failed_check,
+    )?);
+    let receipts = session.verification_state_projection().receipts;
+    assert!(
+        receipts
+            .values()
+            .any(|entry| entry.receipt.check_status == crate::ReceiptStatus::Failed)
+    );
+    assert!(receipts.values().any(|entry| {
+        entry.receipt.receipt.policy_hash.as_deref() == Some(expected_policy_hash.as_str())
+    }));
+    Ok(())
+}
+
+#[test]
+fn task_step_status_blocks_when_readiness_requires_action() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), "edited\n")?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+    let session = Session::new("deepseek", "deepseek-v4-flash");
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            changed_files: vec!["note.txt".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        step_status_after_readiness(TaskStepStatus::Completed, &readiness),
+        TaskStepStatus::Blocked
+    );
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .iter()
+            .any(|action| matches!(action, crate::RequiredAction::ProvideVerificationConfig))
+    );
+    Ok(())
+}
+
+#[test]
+fn task_step_readiness_records_recovered_tool_error_reason() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "verify".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "verify".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), "unchanged\n")?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+    let session = Session::new("deepseek", "deepseek-v4-flash");
+    let output = StepRunOutput {
+        final_text: "recovered".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            tool_errors: vec![crate::ToolError {
+                kind: crate::ToolErrorKind::InvalidInput,
+                message: "bad path".to_owned(),
+                retryable: false,
+                details: Value::Null,
+            }],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert!(readiness.evaluation.reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            crate::ReadinessReason::RecoveredToolError { event_id }
+                if event_id.starts_with("task-step-recovered-tool-error:task_1:step_1:")
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn task_step_verification_config_does_not_block_read_only_step() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect implementation".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "inspect".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::SubagentRead,
+    };
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), "unchanged\n")?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let current_task_check = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand::shell("cargo test"),
+        source_event_id: "event-current".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+    }
+    .promote(
+        "cargo-test",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-current".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            current_task_check,
+            "event-current",
+        ),
+    ))?;
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome::default(),
+    };
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::NotApplicable
+    );
+    assert!(readiness.evaluation.required_actions.is_empty());
+    assert_eq!(
+        step_status_after_readiness(TaskStepStatus::Completed, &readiness),
+        TaskStepStatus::Completed
+    );
+    Ok(())
+}
+
+#[test]
+fn task_step_default_policy_uses_only_current_task_scope() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), "edited\n")?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let other_task_check = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand::shell("npm test"),
+        source_event_id: "event-other".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+    }
+    .promote(
+        "cargo-test",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-other".to_owned(),
+        },
+    )?;
+    let current_task_check = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand::shell("cargo test"),
+        source_event_id: "event-current".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+    }
+    .promote(
+        "cargo-test",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-current".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_2".to_owned()),
+            other_task_check,
+            "event-other",
+        ),
+    ))?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            current_task_check,
+            "event-current",
+        ),
+    ))?;
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            changed_files: vec!["note.txt".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .iter()
+            .any(|action| matches!(
+                action,
+                crate::RequiredAction::RunCheck { check_spec_id } if check_spec_id == "cargo-test"
+            ))
+    );
+    let policy = session
+        .verification_state_projection()
+        .check_specs_for_scopes(&[EvidenceScope::Task("task_1".to_owned())])
+        .into_iter()
+        .map(|entry| entry.trusted_check.check_spec.command.command.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(policy, vec!["cargo test".to_owned()]);
+    Ok(())
+}
+
+#[test]
+fn task_step_readiness_uses_projected_workspace_trust() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "verify".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "verify".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), "edited\n")?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let workspace_id = crate::stable_workspace_id(temp.path())?;
+    session.append_control(ControlEntry::WorkspaceTrustDecision(
+        WorkspaceTrustDecisionEntry {
+            workspace_id,
+            workspace_trust_snapshot_id: "trust-1".to_owned(),
+            trust: WorkspaceTrust::Restricted,
+            decided_by_event_id: Some("event-trust".to_owned()),
+            reason: Some("test restricted".to_owned()),
+        },
+    ))?;
+    let mut policy = crate::VerificationPolicy::no_checks_required("task_step_default");
+    policy.workspace_trust_requirement = crate::WorkspaceTrustRequirement::Trusted;
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        crate::VerificationPolicyChangedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            policy,
+            "event-policy",
+        )?,
+    ))?;
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome::default(),
+    };
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .iter()
+            .any(|action| matches!(action, crate::RequiredAction::TrustWorkspace))
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn task_step_readiness_carries_unknown_dirty_snapshot_evidence() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: None,
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    std::fs::write(outside.path().join("secret.txt"), "secret")?;
+    symlink(outside.path().join("secret.txt"), temp.path().join("leak"))?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+    let session = Session::new("deepseek", "deepseek-v4-flash");
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            changed_files: vec!["leak".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Inconclusive
+    );
+    assert!(readiness.evaluation.reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            crate::ReadinessReason::WorkspaceUnknownDirty {
+                event_id: Some(event_id)
+            } if event_id == "readiness-snapshot:task_1:step_1"
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let log_path = temp.path().join("session.jsonl");
+    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
+    std::fs::write(
+        &log_path,
+        format!("{}\n", serde_json::to_string(&legacy_entry)?),
+    )?;
+    let store = JsonlSessionStore::new(&log_path)?;
+    let committed = store.append_event(
+        DurableEventType::MutationCommitted,
+        EventClass::Critical,
+        json!({
+            "operation_id": "op-commit",
+            "workspace_id": "workspace-1",
+            "observed_after_hash": "sha256:new",
+            "workspace_revision": 2,
+            "workspace_snapshot_id": "snapshot-2",
+            "committed_subject": {
+                "file": {
+                    "path": "note.txt",
+                    "file_type": "file"
+                }
+            }
+        }),
+    )?;
+    let reconciled = store.append_event(
+        DurableEventType::MutationReconciled,
+        EventClass::Critical,
+        json!({
+            "operation_id": "op-reconcile",
+            "observed_state": "unknown",
+            "resolution": "mark_unknown_dirty",
+            "workspace_revision": 3,
+            "workspace_snapshot_id": "snapshot-unknown"
+        }),
+    )?;
+    let detected = store.append_event(
+        DurableEventType::WorkspaceMutationDetected,
+        EventClass::Critical,
+        json!({ "source": "bash" }),
+    )?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let evidence = durable_workspace_mutation_evidence(
+        &session,
+        &crate::VerificationScope::all_tracked("scope-main"),
+    );
+
+    assert_eq!(evidence.len(), 3);
+    assert_eq!(evidence[0].event_id, committed.event_id);
+    assert_eq!(
+        evidence[0].to_workspace_snapshot_id.as_deref(),
+        Some("snapshot-2")
+    );
+    assert!(!evidence[0].unknown_dirty);
+    assert_eq!(evidence[1].event_id, reconciled.event_id);
+    assert_eq!(evidence[1].tool_effect, ToolEffect::Unknown);
+    assert!(evidence[1].unknown_dirty);
+    assert_eq!(evidence[2].event_id, detected.event_id);
+    assert_eq!(evidence[2].source_event_type, "workspace_mutation_detected");
+    assert!(evidence[2].unknown_dirty);
+    Ok(())
+}
+
+#[test]
+fn durable_workspace_mutation_evidence_fails_closed_to_empty_on_unreadable_stream() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let log_path = temp.path().join("session.jsonl");
+    std::fs::write(&log_path, "{not-json}\n")?;
+    let store = JsonlSessionStore::new(&log_path)?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    assert!(
+        durable_workspace_mutation_evidence(
+            &session,
+            &crate::VerificationScope::all_tracked("scope-main"),
+        )
+        .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn run_status_from_step_status_covers_running_cancelled_and_interrupted() {
+    assert_eq!(
+        run_status_from_step_status(TaskStepStatus::Pending),
+        crate::RunStatus::Running
+    );
+    assert_eq!(
+        run_status_from_step_status(TaskStepStatus::Running),
+        crate::RunStatus::Running
+    );
+    assert_eq!(
+        run_status_from_step_status(TaskStepStatus::Cancelled),
+        crate::RunStatus::Cancelled
+    );
+    assert_eq!(
+        run_status_from_step_status(TaskStepStatus::Interrupted),
+        crate::RunStatus::Interrupted
+    );
+}
+
 fn boxed_agent<P>(provider: P, registry: ToolRegistry) -> Agent<Box<dyn Provider>>
 where
     P: Provider + 'static,
@@ -1837,7 +3143,7 @@ fn seed_single_step_task(session: &mut Session, role: crate::AgentRole) -> Resul
 
 fn options() -> AgentRunOptions {
     AgentRunOptions {
-        workspace_root: std::env::temp_dir(),
+        workspace_root: std::env::current_dir().expect("test cwd should resolve"),
         max_turns: Some(4),
         tool_timeout_secs: 5,
         reasoning_effort: Some(ReasoningEffort::Medium),

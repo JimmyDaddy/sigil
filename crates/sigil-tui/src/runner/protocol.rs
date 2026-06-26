@@ -110,6 +110,7 @@ pub enum WorkerCommand {
     },
     CompactNow,
     CheckChangedFilesDiagnostics,
+    TrustWorkspace,
     RefreshProviderBalance {
         request_id: u64,
         provider_config: DeepSeekProviderConfig,

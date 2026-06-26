@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
+    ffi::OsString,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -12,6 +14,7 @@ use crate::{
     permission::{ApprovalMode, PermissionConfig},
     provider::ReasoningEffort,
     task::AgentRole,
+    verification::VerificationConfig,
 };
 
 /// Root runtime configuration shared by the TUI, CLI, kernel, and adapters.
@@ -37,6 +40,8 @@ pub struct RootConfig {
     pub code_intelligence: CodeIntelligenceConfig,
     #[serde(default)]
     pub terminal: TerminalConfig,
+    #[serde(default, skip_serializing_if = "VerificationConfig::is_empty")]
+    pub verification: VerificationConfig,
     #[serde(default)]
     pub appearance: AppearanceConfig,
     #[serde(default)]
@@ -138,6 +143,8 @@ pub struct AppearanceConfig {
     pub theme: ThemeId,
     #[serde(default)]
     pub syntax_theme: SyntaxThemeId,
+    #[serde(default)]
+    pub usage_cost_currency: UsageCostCurrency,
     #[serde(default, skip_serializing_if = "ThemeColorOverrides::is_empty")]
     pub colors: ThemeColorOverrides,
 }
@@ -292,6 +299,48 @@ impl SyntaxThemeId {
     }
 }
 
+/// User preference for displaying provider usage cost estimates.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageCostCurrency {
+    #[default]
+    Auto,
+    Usd,
+    Cny,
+}
+
+impl UsageCostCurrency {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Usd, Self::Cny];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Usd => "usd",
+            Self::Cny => "cny",
+        }
+    }
+
+    pub fn display_label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Usd => "USD",
+            Self::Cny => "CNY",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|currency| *currency == self)
+            .expect("usage cost currency variants must be listed in ALL");
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
+
 /// Raw user-provided semantic color overrides.
 ///
 /// Values stay as strings here so the kernel remains independent from any terminal renderer.
@@ -402,45 +451,99 @@ impl RootConfig {
     }
 }
 
-/// Returns the standard per-user config directory for sigil.
+/// Returns the visible per-user config directory for sigil.
 ///
 /// # Errors
 ///
-/// Returns an error when the current platform does not expose a usable home or config directory.
+/// Returns an error when the current platform does not expose a usable home directory.
 pub fn default_user_config_dir() -> Result<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(app_data) = env::var_os("APPDATA") {
-            return Ok(PathBuf::from(app_data).join("sigil"));
-        }
-        Err(anyhow::anyhow!(
-            "missing APPDATA for sigil config directory"
-        ))
-    }
+    Ok(user_home_dir()?.join(".sigil"))
+}
 
-    #[cfg(target_os = "macos")]
-    {
-        let home = env::var_os("HOME")
-            .ok_or_else(|| anyhow::anyhow!("missing HOME for sigil config directory"))?;
-        Ok(PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("sigil"))
-    }
+fn user_home_dir() -> Result<PathBuf> {
+    user_home_dir_from_env(
+        current_config_platform(),
+        env::var_os("HOME"),
+        env::var_os("USERPROFILE"),
+    )
+}
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-    {
-        if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
-            return Ok(PathBuf::from(xdg).join("sigil"));
-        }
+fn legacy_user_config_dir() -> Result<PathBuf> {
+    legacy_user_config_dir_from_env(
+        current_config_platform(),
+        env::var_os("HOME"),
+        env::var_os("USERPROFILE"),
+        env::var_os("APPDATA"),
+        env::var_os("XDG_CONFIG_HOME"),
+    )
+}
 
-        let home = env::var_os("HOME")
-            .ok_or_else(|| anyhow::anyhow!("missing HOME for sigil config directory"))?;
-        Ok(PathBuf::from(home).join(".config").join("sigil"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum ConfigPlatform {
+    Windows,
+    Macos,
+    Other,
+}
+
+fn current_config_platform() -> ConfigPlatform {
+    current_config_platform_from_os(std::env::consts::OS)
+}
+
+fn current_config_platform_from_os(os: &str) -> ConfigPlatform {
+    match os {
+        "windows" => ConfigPlatform::Windows,
+        "macos" => ConfigPlatform::Macos,
+        _ => ConfigPlatform::Other,
     }
 }
 
-/// Returns the standard per-user config file path for sigil.
+fn user_home_dir_from_env(
+    platform: ConfigPlatform,
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+) -> Result<PathBuf> {
+    match platform {
+        ConfigPlatform::Windows => userprofile
+            .or(home)
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("missing home directory for sigil config directory")),
+        ConfigPlatform::Macos | ConfigPlatform::Other => home
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow::anyhow!("missing HOME for sigil config directory")),
+    }
+}
+
+fn legacy_user_config_dir_from_env(
+    platform: ConfigPlatform,
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    appdata: Option<OsString>,
+    xdg_config_home: Option<OsString>,
+) -> Result<PathBuf> {
+    match platform {
+        ConfigPlatform::Windows => appdata
+            .map(|app_data| PathBuf::from(app_data).join("sigil"))
+            .ok_or_else(|| anyhow::anyhow!("missing APPDATA for legacy sigil config directory")),
+        ConfigPlatform::Macos => home
+            .map(|home| {
+                PathBuf::from(home)
+                    .join("Library")
+                    .join("Application Support")
+                    .join("sigil")
+            })
+            .ok_or_else(|| anyhow::anyhow!("missing HOME for legacy sigil config directory")),
+        ConfigPlatform::Other => {
+            if let Some(xdg) = xdg_config_home {
+                return Ok(PathBuf::from(xdg).join("sigil"));
+            }
+            user_home_dir_from_env(ConfigPlatform::Other, home, userprofile)
+                .map(|home| home.join(".config").join("sigil"))
+        }
+    }
+}
+
+/// Returns the visible per-user config file path for sigil.
 ///
 /// # Errors
 ///
@@ -449,9 +552,17 @@ pub fn default_user_config_path() -> Result<PathBuf> {
     Ok(default_user_config_dir()?.join("sigil.toml"))
 }
 
+fn legacy_user_config_path() -> Option<PathBuf> {
+    legacy_user_config_dir()
+        .ok()
+        .map(|dir| dir.join("sigil.toml"))
+}
+
 /// Resolves the config path that entrypoints should prefer on startup.
 ///
-/// Explicit paths always win. Otherwise Sigil uses the standard per-user config file.
+/// Explicit paths always win. Otherwise Sigil uses `~/.sigil/sigil.toml`. If the new file does not
+/// exist yet and a legacy per-platform user config exists, Sigil copies the legacy file to the new
+/// path before returning it.
 ///
 /// Workspace-local `sigil.toml` files are intentionally not discovered implicitly because they
 /// often contain personal provider, permission, and MCP settings that should not be committed.
@@ -460,11 +571,60 @@ pub fn default_user_config_path() -> Result<PathBuf> {
 ///
 /// Returns an error when the implicit per-user config directory cannot be determined.
 pub fn preferred_config_path(explicit: Option<&Path>, _cwd: &Path) -> Result<PathBuf> {
+    let default_path = default_user_config_path()?;
+    preferred_config_path_for_known_paths(explicit, default_path, legacy_user_config_path())
+}
+
+fn preferred_config_path_for_known_paths(
+    explicit: Option<&Path>,
+    default_path: PathBuf,
+    legacy_path: Option<PathBuf>,
+) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return Ok(path.to_path_buf());
     }
 
-    default_user_config_path()
+    let Some(legacy_path) = legacy_path else {
+        return Ok(default_path);
+    };
+    preferred_implicit_config_path(&default_path, &legacy_path)
+}
+
+fn preferred_implicit_config_path(default_path: &Path, legacy_path: &Path) -> Result<PathBuf> {
+    if default_path.exists() || !legacy_path.exists() {
+        return Ok(default_path.to_path_buf());
+    }
+
+    if let Some(parent) = default_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create migrated sigil config directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    copy_file_without_overwrite(legacy_path, default_path).with_context(|| {
+        format!(
+            "failed to migrate sigil config from {} to {}",
+            legacy_path.display(),
+            default_path.display()
+        )
+    })?;
+    Ok(default_path.to_path_buf())
+}
+
+fn copy_file_without_overwrite(source: &Path, destination: &Path) -> Result<()> {
+    let mut source = fs::File::open(source)
+        .with_context(|| format!("failed to open legacy config {}", source.display()))?;
+    let mut destination_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .with_context(|| format!("failed to create migrated config {}", destination.display()))?;
+    io::copy(&mut source, &mut destination_file)
+        .with_context(|| format!("failed to copy config to {}", destination.display()))?;
+    Ok(())
 }
 
 /// Resolves the effective workspace root for one launch.

@@ -31,6 +31,7 @@ fn theme_resolve_applies_color_overrides() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SolarizedLight,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -46,11 +47,13 @@ fn theme_resolve_maps_auto_and_explicit_syntax_themes() {
     let auto = AppearanceConfig {
         theme: ThemeId::SolarizedLight,
         syntax_theme: SyntaxThemeId::Auto,
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::default(),
     };
     let explicit = AppearanceConfig {
         theme: ThemeId::SolarizedLight,
         syntax_theme: SyntaxThemeId::Nord,
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::default(),
     };
 
@@ -75,6 +78,7 @@ fn theme_resolve_rejects_unknown_override_token() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -90,6 +94,7 @@ fn theme_resolve_rejects_invalid_hex_override() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -196,6 +201,7 @@ fn theme_diagnostics_passes_builtin_themes() {
         let appearance = AppearanceConfig {
             theme: *theme_id,
             syntax_theme: Default::default(),
+            usage_cost_currency: Default::default(),
             colors: ThemeColorOverrides::default(),
         };
 
@@ -219,6 +225,7 @@ fn theme_diagnostics_reports_low_contrast_override() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -240,6 +247,7 @@ fn theme_diagnostics_reports_surface_pair_override() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -269,6 +277,7 @@ fn theme_diagnostics_reports_visible_foreground_overrides() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -302,6 +311,7 @@ fn theme_diagnostics_reports_semantic_similarity() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 
@@ -323,6 +333,7 @@ fn theme_diagnostics_reports_structural_cue_warning() {
     let appearance = AppearanceConfig {
         theme: ThemeId::SigilDark,
         syntax_theme: Default::default(),
+        usage_cost_currency: Default::default(),
         colors: ThemeColorOverrides::new(colors),
     };
 

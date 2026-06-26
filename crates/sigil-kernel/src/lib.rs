@@ -6,6 +6,7 @@ pub mod config;
 pub mod conversation_queue;
 pub mod event;
 pub mod memory;
+pub mod mutation;
 pub mod permission;
 pub mod plan;
 pub mod plugin;
@@ -18,6 +19,7 @@ pub mod task_orchestrator;
 pub mod terminal_task;
 pub mod time;
 pub mod tool;
+pub mod verification;
 
 pub use agent::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
@@ -51,8 +53,9 @@ pub use config::{
     LanguageServerConfig, McpServerConfig, McpServerPinnedIdentity, McpServerStartup,
     McpServerTrustPolicy, McpTrustClass, MemoryConfig, RoleModelConfig, RootConfig, SessionConfig,
     SkillConfig, StorageConfig, StorageRoot, SyntaxThemeId, TaskConfig, TaskMode,
-    ThemeColorOverrides, ThemeId, ToolAllowlistConfig, WorkspaceConfig, default_user_config_dir,
-    default_user_config_path, preferred_config_path, resolve_workspace_root,
+    ThemeColorOverrides, ThemeId, ToolAllowlistConfig, UsageCostCurrency, WorkspaceConfig,
+    default_user_config_dir, default_user_config_path, preferred_config_path,
+    resolve_workspace_root,
 };
 pub use conversation_queue::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
@@ -67,10 +70,18 @@ pub use event::{
     ProjectionCursor, PublicAssistantMessage, PublicControlEvent, PublicRunEvent,
     PublicRunEventKind, RECORD_CHECKSUM_PREFIX, ReducerDisposition, RunEvent,
     STORED_EVENT_SCHEMA_VERSION, SessionId, StoredEvent, StoredEventDecode, decode_stored_event,
-    is_transient_run_event, projection_apply_decision, reducer_disposition, stable_event_hash,
-    stable_event_uuid,
+    is_transient_run_event, projection_apply_decision, projection_apply_decision_for_record,
+    reducer_disposition, stable_event_hash, stable_event_uuid,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
+pub use mutation::{
+    CommittedFileMutation, MutationBatchId, MutationBatchStatus, MutationCommitted,
+    MutationCoordinator, MutationEventRecorder, MutationObservedState, MutationPrepared,
+    MutationReconciled, MutationResolution, MutationSubject, MutationSyncClass, OperationId,
+    PreparedFileMutation, SnapshotCoverage, bytes_hash, delete_file_with_mutation,
+    delete_file_with_mutation_in_batch, file_content_hash, write_file_with_mutation,
+    write_file_with_mutation_in_batch,
+};
 pub use permission::{
     ApprovalMode, EffectivePermissionPolicyCap, ExternalDirectoryConfig, ExternalDirectoryRule,
     InteractionMode, PathTrustZone, PermissionAccessConfig, PermissionConfig,
@@ -95,11 +106,11 @@ pub use provider::{
 };
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
-    CompactionPreview, CompactionRecord, ControlEntry, JsonlSessionStore, McpElicitationDecision,
-    McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry, SessionStreamRecord,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolEgressEntry,
-    ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit, latest_compaction_record,
-    session_stats_from_entries,
+    CompactionPreview, CompactionRecord, ControlEntry, DomainEventRecord, JsonlSessionStore,
+    McpElicitationDecision, McpElicitationEntry, MemorySnapshot, Session, SessionLogEntry,
+    SessionStreamRecord, ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision,
+    ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolSubjectAudit,
+    latest_compaction_record, session_stats_from_entries,
 };
 pub use skill::{
     SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillLoadState, SkillRunMode, SkillSource,
@@ -131,4 +142,24 @@ pub use tool::{
     ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolRegistry, ToolRegistryScope, ToolResult,
     ToolResultMeta, ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind,
     ToolSubjectScope,
+};
+pub use verification::{
+    ArtifactId, CandidateCheck, ChangesetId, CheckCommand, CheckDiscoverySource, CheckPromotion,
+    CheckSpec, CheckSpecId, CheckSpecRecordedEntry, ChildVerificationReceiptLinked,
+    CompletionCriteria, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DiscoveredCheck,
+    EnvironmentFingerprint, EvidenceReceipt, EvidenceScope, FileType, ReadinessEvaluatedEntry,
+    ReadinessEvaluation, ReadinessInput, ReadinessProjectionMode, ReadinessReason, ReceiptId,
+    ReceiptStatus, RedactionState, RequiredAction, RunStatus, SandboxDecisionId,
+    SandboxProfileHash, SandboxProfileRequirement, SnapshotEntryState, ToolCallId, ToolEffect,
+    TrustedCheckSpec, VerificationBinding, VerificationCheckConfig, VerificationCheckRunRequest,
+    VerificationConfig, VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceipt,
+    VerificationRecordedEntry, VerificationScope, VerificationScopeHash, VerificationSkipDecision,
+    VerificationStaleCause, VerificationStaleReason, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState, WorkspaceId, WorkspaceKnowledge,
+    WorkspaceMutationEvidence, WorkspaceRevision, WorkspaceSnapshotBuild, WorkspaceSnapshotEntry,
+    WorkspaceSnapshotId, WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WorkspaceTrustRequirement, WorkspaceTrustSnapshotId, build_workspace_snapshot,
+    build_workspace_snapshot_for_event, check_specs_from_user_config, default_scope_excludes,
+    discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
+    run_verification_check, stable_workspace_id,
 };

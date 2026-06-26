@@ -51,6 +51,7 @@ fn test_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
         providers: BTreeMap::new(),

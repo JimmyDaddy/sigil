@@ -378,7 +378,27 @@ Required deterministic tests:
 - workspace revision is not compared across worktrees
 - verification stale reason references invalidating event id
 
-## 16. Open Questions
+## 16. Implementation Progress
+
+当前进度：
+
+- 已新增 mutation domain 类型：`MutationPrepared`、`MutationCommitted`、`MutationReconciled`、`MutationBatchStarted`、`MutationBatchFinished`、`WriteCommitted`、`SnapshotCoverage`、`MutationSubject` 和 workspace revision/snapshot 绑定。
+- 已实现 `MutationCoordinator` / recorder 基础路径，受控文件 mutation 先 append prepare，再执行写入，最后 append commit/write receipt。
+- 已实现单文件 controlled write 的 workspace confinement、before hash、intended after hash、CAS 检查、temp file + atomic replace、file/parent sync 和 observed hash。
+- 已接入受控 `write_file`、`edit_file`、`delete_file` 与 `apply_changeset` 路径；legacy no-recorder 路径保留兼容。
+- 已实现多文件 changeset batch id、per-file prepare/commit、batch started/finished 和 apply-stage failure 的 failed batch evidence。
+- 已实现 load/reconcile helper：prepared without terminal event 可按当前文件 hash 归类为 not applied、committed、conflict 或 unknown dirty。
+- 已将 committed/reconciled mutation evidence 接入 RFC-0003 readiness，受控写入会使旧 verification stale 或 missing。
+
+剩余实现：
+
+- 实现 RFC-0002 unknown mutation detection：bash、persistent terminal、MCP、plugin 和外部进程执行前后 workspace snapshot，对未知或不可完整扫描范围产生 `WorkspaceMutationDetected` / `UnknownDirty`。
+- 将 write-capable `ToolExecutionStarted` 的 `ExecutionMutationProfile` 持久化，并在 load 时对未终止执行做 reconciliation。
+- 将 checkpoint restore 接入同一 prepare/commit/reconcile 协议，并追加 `CheckpointRestored`。
+- 完成通用 Artifact Store、sensitive snapshot 策略、retention / quota / deletion 审计；当前 snapshot coverage 只提供类型边界。
+- 扩展 directory-level mutation、大文件策略、权限拒绝和跨平台 file mode 细节。
+
+## 17. Open Questions
 
 - Exact location and retention policy for mutation artifacts.
 - Exact handling of very large files in snapshot manifests.

@@ -10,20 +10,24 @@ use sigil_kernel::{
     Agent, AgentDelegationRequirement, AgentInvocationMode, AgentProfileId,
     AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRunInput,
     AgentRunOptions, AgentRunResult, AgentThreadId, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentToolDelegate, ControlEntry, ConversationInputEditedEntry,
-    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    AgentThreadStatusChangedEntry, AgentToolDelegate, CheckDiscoverySource, CheckPromotion,
+    CompletionCriteria, ControlEntry, ConversationInputEditedEntry, ConversationInputKind,
+    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
     ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
-    ConversationQueueProjection, JsonlSessionStore, ModelMessage, PlanApprovalExpiry,
-    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, ProviderCapabilities,
-    ReasoningEffort, RootConfig, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest,
-    Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
+    ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, EvidenceScope,
+    JsonlSessionStore, ModelMessage, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
+    PlanApprovedEntry, ProviderCapabilities, ReasoningEffort, RootConfig, RunEvent,
+    SandboxProfileRequirement, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection,
     TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
     TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
     ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, default_user_config_dir,
-    plan_text_hash, plan_workspace_paths, saturating_elapsed,
+    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationScope, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WorkspaceTrustRequirement, default_user_config_dir, discover_candidate_checks_with_user_config,
+    plan_text_hash, plan_workspace_paths, saturating_elapsed, stable_workspace_id,
 };
 
 use crate::{
@@ -1449,6 +1453,33 @@ pub(super) fn run_worker_loop<P>(
                     }
                 }
             }
+            Ok(WorkerCommand::TrustWorkspace) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before trusting workspace".to_owned(),
+                    ));
+                    continue;
+                }
+                match trust_workspace(&options.workspace_root, &mut current_session) {
+                    Ok(TrustWorkspaceOutcome::AlreadyTrusted { workspace_id }) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "workspace already trusted: {workspace_id}"
+                        )));
+                    }
+                    Ok(TrustWorkspaceOutcome::Trusted { entry }) => {
+                        let _ = message_tx.send(WorkerMessage::Event(Box::new(RunEvent::Control(
+                            ControlEntry::WorkspaceTrustDecision(entry.clone()),
+                        ))));
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "workspace trusted: {}",
+                            entry.workspace_id
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
             Ok(WorkerCommand::RefreshProviderBalance {
                 request_id,
                 provider_config,
@@ -2038,6 +2069,13 @@ async fn run_task_orchestration(
         approval_rx,
         handler,
     } = request;
+    materialize_task_verification_config(
+        session,
+        handler,
+        &root_config,
+        &options.workspace_root,
+        &task_id,
+    )?;
     let TaskRoleRuntime {
         orchestrator,
         planner_options,
@@ -2083,6 +2121,13 @@ async fn continue_task_orchestration(
         approval_rx,
         handler,
     } = request;
+    materialize_task_verification_config(
+        session,
+        handler,
+        &root_config,
+        &options.workspace_root,
+        &task_id,
+    )?;
     let TaskRoleRuntime {
         orchestrator,
         executor_options,
@@ -2129,6 +2174,13 @@ async fn run_skill_child_orchestration(
         approval_rx,
         handler,
     } = request;
+    materialize_task_verification_config(
+        session,
+        handler,
+        &root_config,
+        &options.workspace_root,
+        &task_id,
+    )?;
     let child_role = skill_child_agent_role(&loaded.descriptor);
     let TaskRoleRuntime {
         orchestrator,
@@ -2175,6 +2227,145 @@ async fn run_skill_child_orchestration(
         .await
         .map(|output| output.status)
         .map_err(|error| format!("{error:#}"))
+}
+
+pub(super) fn materialize_task_verification_config(
+    session: &mut Session,
+    handler: &mut ChannelEventHandler,
+    root_config: &RootConfig,
+    workspace_root: &Path,
+    task_id: &TaskId,
+) -> std::result::Result<(), String> {
+    let scope = EvidenceScope::Task(task_id.as_str().to_owned());
+    let source_event_id = format!("config:verification:{}", task_id.as_str());
+    let projection = session.verification_state_projection();
+    let workspace_id = stable_workspace_id(workspace_root).map_err(|error| format!("{error:#}"))?;
+    let trust_entry = projection.workspace_trust.get(&workspace_id);
+    let workspace_trust_snapshot_id = trust_entry
+        .map(|entry| entry.workspace_trust_snapshot_id.clone())
+        .unwrap_or_else(|| format!("workspace-trust:unknown:{workspace_id}"));
+    let workspace_is_trusted =
+        trust_entry.is_some_and(|entry| entry.trust == WorkspaceTrust::Trusted);
+    let trust_event_id = trust_entry
+        .and_then(|entry| entry.decided_by_event_id.clone())
+        .unwrap_or_else(|| workspace_trust_snapshot_id.clone());
+    let discovered = discover_candidate_checks_with_user_config(
+        workspace_root,
+        workspace_trust_snapshot_id,
+        source_event_id.clone(),
+        &root_config.verification,
+    )
+    .map_err(|error| format!("{error:#}"))?;
+    let mut entries = Vec::new();
+    for candidate in discovered {
+        let source = candidate.candidate.source;
+        let candidate_source_event_id = candidate.candidate.source_event_id.clone();
+        let promotion = match source {
+            CheckDiscoverySource::UserExplicitConfig => CheckPromotion::ExplicitUserConfig {
+                config_event_id: source_event_id.clone(),
+            },
+            _ if workspace_is_trusted => CheckPromotion::WorkspaceTrusted {
+                trust_event_id: trust_event_id.clone(),
+            },
+            _ => continue,
+        };
+        let trusted = candidate
+            .promote(DEFAULT_TASK_VERIFICATION_SCOPE_HASH, promotion)
+            .map_err(|error| format!("{error:#}"))?;
+        entries.push(sigil_kernel::CheckSpecRecordedEntry::new(
+            scope.clone(),
+            trusted,
+            candidate_source_event_id,
+        ));
+    }
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let projection = session.verification_state_projection();
+    let mut controls = Vec::new();
+    for entry in &entries {
+        let check_id = entry.trusted_check.check_spec.check_spec_id.as_str();
+        let needs_append = projection
+            .check_spec(&scope, check_id)
+            .is_none_or(|current| {
+                current.trusted_check.check_spec.check_spec_hash
+                    != entry.trusted_check.check_spec.check_spec_hash
+            });
+        if needs_append {
+            controls.push(ControlEntry::CheckSpecRecorded(entry.clone()));
+        }
+    }
+
+    let required_checks = entries
+        .iter()
+        .map(|entry| entry.trusted_check.check_spec.clone())
+        .collect::<Vec<_>>();
+    let policy = VerificationPolicy {
+        required_checks,
+        completion_criteria: CompletionCriteria::AllRequiredChecks,
+        verification_scope: VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+        sandbox_profile: SandboxProfileRequirement::None,
+        workspace_trust_requirement: WorkspaceTrustRequirement::None,
+        allow_unverified_completion: false,
+        timeout_ms: None,
+    };
+    let policy_entry = VerificationPolicyChangedEntry::new(scope.clone(), policy, source_event_id)
+        .map_err(|error| format!("{error:#}"))?;
+    let needs_policy_append = projection
+        .latest_policy(&scope)
+        .is_none_or(|current| current.policy_hash != policy_entry.policy_hash);
+    if needs_policy_append {
+        controls.push(ControlEntry::VerificationPolicyChanged(policy_entry));
+    }
+
+    for control in controls {
+        session
+            .append_control(control.clone())
+            .map_err(|error| format!("{error:#}"))?;
+        handler
+            .handle(RunEvent::Control(control))
+            .map_err(|error| format!("{error:#}"))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TrustWorkspaceOutcome {
+    Trusted { entry: WorkspaceTrustDecisionEntry },
+    AlreadyTrusted { workspace_id: String },
+}
+
+pub(super) fn trust_workspace(
+    workspace_root: &Path,
+    current_session: &mut Option<Session>,
+) -> std::result::Result<TrustWorkspaceOutcome, String> {
+    let Some(session) = current_session.as_mut() else {
+        return Err("session state is unavailable".to_owned());
+    };
+    let workspace_id = stable_workspace_id(workspace_root).map_err(|error| format!("{error:#}"))?;
+    let projection = session.verification_state_projection();
+    if projection
+        .workspace_trust
+        .get(&workspace_id)
+        .is_some_and(|entry| entry.trust == WorkspaceTrust::Trusted)
+    {
+        return Ok(TrustWorkspaceOutcome::AlreadyTrusted { workspace_id });
+    }
+
+    let seed = format!("{}:{}", workspace_id, unix_time_ms());
+    let digest = Sha256::digest(seed.as_bytes());
+    let entry = WorkspaceTrustDecisionEntry {
+        workspace_id: workspace_id.clone(),
+        workspace_trust_snapshot_id: format!("workspace-trust:sha256:{digest:x}"),
+        trust: WorkspaceTrust::Trusted,
+        decided_by_event_id: None,
+        reason: Some("trusted by user through /trust-workspace".to_owned()),
+    };
+    session
+        .append_control(ControlEntry::WorkspaceTrustDecision(entry.clone()))
+        .map_err(|error| format!("failed to append workspace trust decision: {error:#}"))?;
+    Ok(TrustWorkspaceOutcome::Trusted { entry })
 }
 
 fn build_task_role_runtime(
@@ -3604,10 +3795,7 @@ pub(super) fn cancel_terminal_task(
         return Err(format!("terminal task {task_id} is not running"));
     }
 
-    let tool_context = ToolContext {
-        workspace_root: options.workspace_root.clone(),
-        timeout_secs: options.tool_timeout_secs,
-    };
+    let tool_context = ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs);
     let call = ToolCall {
         id: format!("tui-terminal-cancel-{task_id}"),
         name: "terminal_cancel".to_owned(),

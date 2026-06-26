@@ -9,6 +9,7 @@ use sigil_kernel::SyntaxThemeId;
 use crate::app::{TimelineEntry, TimelineRole};
 
 use super::{
+    command_text::known_slash_command_token,
     markdown::{
         MarkdownRenderOptions, MarkdownRenderState, render_code_line_spans_with_bg,
         render_inline_markdown_spans_with_palette, render_markdown_spans_with_palette,
@@ -198,19 +199,65 @@ fn user_bubble_content_line(
             .bg(bubble_bg)
             .add_modifier(Modifier::BOLD),
     )];
+    spans.extend(user_bubble_body_spans(
+        &padded,
+        content_width,
+        bubble_bg,
+        palette,
+    ));
+    spans.push(Span::styled("  ", Style::default().bg(bubble_bg)));
+    Line::from(spans)
+}
+
+fn user_bubble_body_spans(
+    padded: &str,
+    content_width: usize,
+    bubble_bg: Color,
+    palette: &ThemePalette,
+) -> Vec<Span<'static>> {
+    let body_style = Style::default()
+        .fg(palette.text_primary)
+        .add_modifier(Modifier::BOLD);
+    let Some(command) = known_slash_command_token(padded) else {
+        return spans_with_background(
+            render_inline_markdown_spans_with_palette(
+                padded,
+                body_style,
+                MarkdownRenderOptions::timeline(content_width),
+                palette,
+            ),
+            bubble_bg,
+        );
+    };
+
+    let mut spans = Vec::new();
+    if command.start > 0 {
+        let markdown_options = MarkdownRenderOptions::timeline(content_width);
+        spans.extend(spans_with_background(
+            render_inline_markdown_spans_with_palette(
+                &padded[..command.start],
+                body_style,
+                markdown_options,
+                palette,
+            ),
+            bubble_bg,
+        ));
+    }
+    let command_style = Style::default()
+        .fg(palette.accent_info)
+        .bg(bubble_bg)
+        .add_modifier(Modifier::BOLD);
+    spans.push(Span::styled(command.token.to_owned(), command_style));
     spans.extend(spans_with_background(
         render_inline_markdown_spans_with_palette(
-            &padded,
-            Style::default()
-                .fg(palette.text_primary)
-                .add_modifier(Modifier::BOLD),
+            &padded[command.end..],
+            body_style,
             MarkdownRenderOptions::timeline(content_width),
             palette,
         ),
         bubble_bg,
     ));
-    spans.push(Span::styled("  ", Style::default().bg(bubble_bg)));
-    Line::from(spans)
+    spans
 }
 
 fn render_assistant_entry_lines(

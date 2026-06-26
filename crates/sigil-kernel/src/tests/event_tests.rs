@@ -11,29 +11,37 @@ use crate::{
     AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
     AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultRecordedEntry,
     AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
-    AgentThreadTerminalStatus, AgentTrustState, ApprovalMode, BackgroundTaskHandle, ChangeSet,
-    ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CompactionRecord,
-    ControlEntry, ConversationInputEditedEntry, ConversationInputKind,
-    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
-    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
-    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
-    DurableEventType, EventClass, EventSyncClass, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
+    AgentThreadTerminalStatus, AgentTrustState, ApprovalMode, BackgroundTaskHandle, CandidateCheck,
+    ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
+    CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
+    ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, ControlEntry,
+    ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
+    ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
+    ConversationInputTarget, DurableDomainEvent, DurableEventType, EventClass, EventSyncClass,
+    EvidenceReceipt, EvidenceScope, LegacyEvent, MAX_EVENT_BYTES, MAX_PAYLOAD_DEPTH,
     McpElicitationDecision, McpElicitationEntry, MemoryLoadReport, MemorySnapshot, ModelMessage,
     PUBLIC_RUN_EVENT_SCHEMA_VERSION, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
     PlanApprovedEntry, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
     PluginTrustEntry, PrefixSnapshot, ProjectionApplyDecision, ProjectionCursor,
     ProviderContinuationState, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
-    ReasoningEffort, ReducerDisposition, ResponseHandle, RunEvent, SessionRef, SkillDescriptor,
-    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
-    StoredEventDecode, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus,
-    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus,
-    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolCall, ToolCategory, ToolEgressEntry, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, UsageStats, WorkspaceRootSnapshot,
-    decode_stored_event, is_transient_run_event, projection_apply_decision, reducer_disposition,
+    ReadinessEvaluatedEntry, ReadinessEvaluation, ReasoningEffort, ReceiptStatus, RedactionState,
+    ReducerDisposition, RequiredAction, ResponseHandle, RunEvent, RunStatus,
+    SandboxProfileRequirement, SessionRef, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
+    SkillRunMode, SkillSource, SkillTrustState, StoredEvent, StoredEventDecode,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
+    TaskStepEntry, TaskStepId, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolCall,
+    ToolCategory, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, VerificationBinding, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
+    VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceRootSnapshot,
+    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, decode_stored_event,
+    is_transient_run_event, projection_apply_decision, projection_apply_decision_for_record,
+    reducer_disposition,
 };
 
 #[test]
@@ -91,6 +99,31 @@ fn stored_event_checksum_normalizes_numeric_integer_forms() {
     assert_eq!(integer_event.record_checksum, float_event.record_checksum);
     assert!(
         StoredEvent::from_json_str(&float_event.to_json_line().expect("event serializes")).is_ok()
+    );
+}
+
+#[test]
+fn stored_event_checksum_accepts_usage_snapshot_float_fixture() {
+    let line = r#"{"schema_version":1,"event_type":"session_entry_recorded","event_version":1,"event_class":"non_critical","event_id":"2564cd0d-285c-5d88-9395-7fd7858fc242","session_id":"35181898-105b-554f-985d-209212d5f4b3","stream_sequence":64,"record_checksum":"sha256:jcs-v1:3f454890559a65234d6bf2315970303276284990bde7a7147789a113acc1c039","payload":{"session_log_entry":{"control":{"usage_snapshot":{"cache_hit_tokens":7296,"cache_miss_tokens":13325,"cache_savings":0.0031473119999999998,"completion_tokens":1015,"input_cost":0.005822823,"output_cost":0.0008830499999999999,"prompt_tokens":20621,"system_fingerprint":"fp_9954b31ca7_prod0820_fp8_kvcache_20260402"}}}}}"#;
+    let event_without_verification = StoredEvent::from_value(
+        serde_json::from_str(line).expect("usage snapshot fixture should parse"),
+    )
+    .expect("usage snapshot fixture envelope should deserialize");
+
+    assert_eq!(
+        event_without_verification
+            .compute_record_checksum()
+            .expect("fixture checksum should compute"),
+        event_without_verification.record_checksum
+    );
+    let parsed =
+        StoredEvent::from_json_str(line).expect("usage snapshot fixture checksum should verify");
+
+    assert_eq!(parsed.stream_sequence, 64);
+    assert_eq!(parsed.event_class, EventClass::NonCritical);
+    assert_eq!(
+        parsed.record_checksum,
+        "sha256:jcs-v1:3f454890559a65234d6bf2315970303276284990bde7a7147789a113acc1c039"
     );
 }
 
@@ -326,7 +359,35 @@ fn stored_event_decode_covers_every_known_domain_variant() {
             panic!("known event should decode to domain event");
         };
         assert_eq!(domain_event.event_type(), event_type);
+        assert_eq!(
+            domain_event
+                .payload()
+                .and_then(|payload| payload.payload.get("event_type"))
+                .and_then(|value| value.as_str()),
+            Some(event_type.as_str())
+        );
     }
+    assert!(
+        DurableDomainEvent::Legacy(LegacyEvent {
+            event_id: "event-legacy".to_owned(),
+            session_id: "session-legacy".to_owned(),
+            stream_sequence: 1,
+            raw_line_hash: "sha256:legacy".to_owned(),
+            payload: json!({ "legacy": true }),
+        })
+        .payload()
+        .is_none()
+    );
+    assert_eq!(
+        DurableDomainEvent::CheckFinished(crate::event::DomainPayload {
+            event_version: 1,
+            payload: json!({ "event_type": DurableEventType::CheckFinished.as_str() }),
+        })
+        .payload()
+        .and_then(|payload| payload.payload.get("event_type"))
+        .and_then(|value| value.as_str()),
+        Some(DurableEventType::CheckFinished.as_str())
+    );
 }
 
 #[test]
@@ -498,6 +559,17 @@ fn projection_cursor_apply_decision_fails_closed_on_conflicts() {
 
     assert_eq!(
         projection_apply_decision(Some(&cursor), &applied).expect("duplicate should be ignored"),
+        ProjectionApplyDecision::IgnoreAlreadyApplied
+    );
+    assert_eq!(
+        projection_apply_decision_for_record(
+            Some(&cursor),
+            "session-1",
+            6,
+            &cursor.last_applied_event_id,
+            &cursor.last_applied_record_checksum,
+        )
+        .expect("already-applied older record with matching identity should be ignored"),
         ProjectionApplyDecision::IgnoreAlreadyApplied
     );
 
@@ -1106,6 +1178,33 @@ fn public_control_event_kinds_cover_control_entry_variants() {
             "task_subagent_elicitation_route",
         ),
         (
+            ControlEntry::CheckSpecRecorded(event_check_spec_recorded_entry()),
+            "check_spec_recorded",
+        ),
+        (
+            ControlEntry::VerificationPolicyChanged(
+                event_verification_policy_changed_entry()
+                    .expect("sample verification policy should hash"),
+            ),
+            "verification_policy_changed",
+        ),
+        (
+            ControlEntry::VerificationRecorded(event_verification_recorded_entry()),
+            "verification_recorded",
+        ),
+        (
+            ControlEntry::ReadinessEvaluated(event_readiness_evaluated_entry()),
+            "readiness_evaluated",
+        ),
+        (
+            ControlEntry::ChildVerificationReceiptLinked(event_child_verification_receipt_linked()),
+            "child_verification_receipt_linked",
+        ),
+        (
+            ControlEntry::WorkspaceTrustDecision(event_workspace_trust_decision_entry()),
+            "workspace_trust_decision",
+        ),
+        (
             ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
                 snapshot: agent_profile_snapshot(),
             }),
@@ -1437,6 +1536,146 @@ fn tool_preview_snapshot() -> ToolPreviewSnapshot {
         Default::default(),
         Some("preview-hash".to_owned()),
     )
+}
+
+fn event_check_spec() -> CheckSpec {
+    CheckSpec::new(
+        "cargo-test",
+        CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: None,
+        },
+        ToolEffect::ReadOnly,
+        "scope-main",
+    )
+}
+
+fn event_verification_policy() -> VerificationPolicy {
+    VerificationPolicy {
+        required_checks: vec![event_check_spec()],
+        completion_criteria: CompletionCriteria::AllRequiredChecks,
+        verification_scope: VerificationScope::all_tracked("scope-main"),
+        sandbox_profile: SandboxProfileRequirement::None,
+        workspace_trust_requirement: WorkspaceTrustRequirement::None,
+        allow_unverified_completion: false,
+        timeout_ms: None,
+    }
+}
+
+fn event_check_spec_recorded_entry() -> CheckSpecRecordedEntry {
+    let candidate = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+    };
+    let trusted = candidate
+        .promote(
+            "cargo-test",
+            "scope-main",
+            ToolEffect::ReadOnly,
+            CheckPromotion::ExplicitUserConfig {
+                config_event_id: "event-config".to_owned(),
+            },
+        )
+        .expect("sample check should promote");
+    CheckSpecRecordedEntry::new(
+        EvidenceScope::Task("task-1".to_owned()),
+        trusted,
+        "event-config",
+    )
+}
+
+fn event_verification_policy_changed_entry() -> anyhow::Result<VerificationPolicyChangedEntry> {
+    VerificationPolicyChangedEntry::new(
+        EvidenceScope::Task("task-1".to_owned()),
+        event_verification_policy(),
+        "event-policy",
+    )
+}
+
+fn event_verification_recorded_entry() -> VerificationRecordedEntry {
+    let check = event_check_spec();
+    VerificationRecordedEntry {
+        receipt: VerificationReceipt {
+            receipt: EvidenceReceipt {
+                receipt_id: "receipt-1".to_owned(),
+                source_session_id: "session-1".to_owned(),
+                source_event_id: "event-check-finished".to_owned(),
+                source_event_type: DurableEventType::CheckFinished.as_str().to_owned(),
+                scope: EvidenceScope::Task("task-1".to_owned()),
+                producer_tool_call: Some("tool-call-1".to_owned()),
+                workspace_revision: Some(1),
+                workspace_snapshot_id: Some("snapshot-1".to_owned()),
+                policy_hash: Some("policy-hash".to_owned()),
+                changeset_id: None,
+                status: ReceiptStatus::Succeeded,
+                artifact_refs: Vec::new(),
+                redaction_state: RedactionState::None,
+                recorded_at_stream_sequence: 2,
+            },
+            binding: VerificationBinding {
+                workspace_id: "workspace-1".to_owned(),
+                workspace_snapshot_id: "snapshot-1".to_owned(),
+                verification_scope_hash: "scope-main".to_owned(),
+                check_spec_hash: check.check_spec_hash,
+                environment_fingerprint: "env-1".to_owned(),
+                sandbox_profile_hash: "sandbox-local".to_owned(),
+                workspace_trust_snapshot_id: "trust-1".to_owned(),
+                approval_event_id: None,
+                sandbox_decision_id: None,
+            },
+            check_spec_id: check.check_spec_id,
+            check_status: ReceiptStatus::Succeeded,
+            mutates_verification_scope: false,
+        },
+    }
+}
+
+fn event_readiness_evaluated_entry() -> ReadinessEvaluatedEntry {
+    ReadinessEvaluatedEntry {
+        scope: EvidenceScope::Task("task-1".to_owned()),
+        evaluation: ReadinessEvaluation {
+            run_status: RunStatus::Completed,
+            verification_verdict: VerificationVerdict::Missing,
+            visible_state: VisibleCompletionState::CompletedUnverified,
+            reasons: Vec::new(),
+            required_actions: vec![RequiredAction::RunCheck {
+                check_spec_id: "cargo-test".to_owned(),
+            }],
+        },
+        policy_hash: Some("policy-hash".to_owned()),
+        workspace_snapshot_id: Some("snapshot-1".to_owned()),
+    }
+}
+
+fn event_child_verification_receipt_linked() -> ChildVerificationReceiptLinked {
+    ChildVerificationReceiptLinked {
+        parent_session_id: "parent-session".to_owned(),
+        child_session_id: "child-session".to_owned(),
+        child_receipt_id: "child-receipt".to_owned(),
+        child_event_id: "child-event".to_owned(),
+        child_workspace_id: "child-workspace".to_owned(),
+        child_workspace_snapshot_id: "child-snapshot".to_owned(),
+        policy_hash: "policy-hash".to_owned(),
+        changeset_id: None,
+        merge_event_id: None,
+    }
+}
+
+fn event_workspace_trust_decision_entry() -> WorkspaceTrustDecisionEntry {
+    WorkspaceTrustDecisionEntry {
+        workspace_id: "workspace-1".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+        trust: WorkspaceTrust::Trusted,
+        decided_by_event_id: Some("event-trust".to_owned()),
+        reason: Some("user trusted workspace".to_owned()),
+    }
 }
 
 fn task_id() -> TaskId {

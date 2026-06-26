@@ -385,6 +385,7 @@ pub async fn build_tool_registry_with_mcp_handlers(
         sigil_mcp::McpToolRegistrationOptions::eager()?
             .with_capabilities(provider_capabilities)
             .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
+            .with_working_dir(workspace_root.clone())
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
             .with_elicitation_handler(Arc::clone(&elicitation_handler))
             .with_runtime_event_handler(Arc::clone(&runtime_event_handler)),
@@ -541,7 +542,8 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers(
         &servers,
         sigil_mcp::McpToolRegistrationOptions::lazy()?
             .with_capabilities(provider_capabilities)
-            .with_roots(vec![canonical_workspace_root(workspace_root)])
+            .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
+            .with_working_dir(workspace_root.clone())
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
             .with_elicitation_handler(elicitation_handler)
             .with_runtime_event_handler(runtime_event_handler),
@@ -630,7 +632,8 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers(
         &servers,
         sigil_mcp::McpToolRegistrationOptions::for_startup(server.startup)?
             .with_capabilities(provider_capabilities)
-            .with_roots(vec![canonical_workspace_root(workspace_root)])
+            .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
+            .with_working_dir(workspace_root.clone())
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
             .with_elicitation_handler(elicitation_handler)
             .with_runtime_event_handler(runtime_event_handler),

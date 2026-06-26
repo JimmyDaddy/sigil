@@ -15,17 +15,17 @@ use serde_json::{Value, json};
 
 use crate::{
     ApprovalHandler, ApprovalMode, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
-    CompactionConfig, CompletionRequest, ControlEntry, EventHandler, ExternalDirectoryConfig,
-    ExternalDirectoryRule, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
-    ModelMessage, PermissionConfig, PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission,
-    PlanApprovalScope, PlanApprovedEntry, Provider, ProviderCapabilities, ProviderChunk,
-    ProviderContinuationState, ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport,
-    ResponseHandle, RunEvent, Session, SessionLogEntry, TASK_PLAN_UPDATE_TOOL_NAME, TaskId,
-    TaskPlanStatus, TaskPlanUpdateContext, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
-    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
-    ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope,
-    UsageStats, plan_text_hash,
+    CompactionConfig, CompletionRequest, ControlEntry, DurableEventType, EventHandler,
+    ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode, JsonlSessionStore,
+    MemoryConfig, MessageRole, ModelMessage, PermissionConfig, PermissionDecision,
+    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, Provider,
+    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ReasoningArtifact,
+    ReasoningEffort, ReasoningStreamSupport, ResponseHandle, RunEvent, Session, SessionLogEntry,
+    SessionStreamRecord, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext,
+    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction,
+    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats, plan_text_hash,
 };
 
 use super::{
@@ -274,6 +274,9 @@ struct RunningSpawnAgentCategoryTool;
 struct RunningAgentCategoryTool;
 struct SideEffectTool;
 struct TerminalStartAuditTool;
+struct RecorderAwareEchoTool {
+    saw_recorder: Arc<AtomicBool>,
+}
 struct WriteTool {
     executed: Arc<AtomicBool>,
 }
@@ -310,6 +313,29 @@ impl Tool for EchoTool {
         call_id: String,
         args: serde_json::Value,
     ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "echo",
+            args["value"].as_str().unwrap_or_default(),
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for RecorderAwareEchoTool {
+    fn spec(&self) -> crate::ToolSpec {
+        EchoTool.spec()
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        call_id: String,
+        args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        self.saw_recorder
+            .store(ctx.mutation_recorder.is_some(), Ordering::SeqCst);
         Ok(ToolResult::ok(
             call_id,
             "echo",
@@ -1605,6 +1631,44 @@ async fn agent_runs_tool_then_answer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn agent_injects_mutation_recorder_into_tool_context_for_durable_sessions() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let saw_recorder = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(RecorderAwareEchoTool {
+        saw_recorder: Arc::clone(&saw_recorder),
+    }));
+    let agent = Agent::new(MockProvider, registry);
+    let mut session = Session::new("mock", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    let result = agent
+        .run(
+            &mut session,
+            "hi",
+            AgentRunOptions {
+                workspace_root: temp.path().to_path_buf(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(result.final_text, "done");
+    assert!(saw_recorder.load(Ordering::SeqCst));
+    Ok(())
+}
+
+#[tokio::test]
 async fn required_agent_delegation_blocks_direct_final_answer() -> Result<()> {
     let calls = Arc::new(AtomicUsize::new(0));
     let provider = NonDelegatingTextProvider {
@@ -1803,6 +1867,154 @@ async fn required_agent_delegation_accepts_terminal_agent_tool_result() -> Resul
                 .as_deref()
                 .is_some_and(|content| content.contains("done after terminal child result"))
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model").with_store(store.clone());
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("answer"),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::FinalAnswer
+    );
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let event_types = records
+        .iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event) => Some(event.event_type.as_str()),
+            SessionStreamRecord::Legacy { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(event_types.contains(&DurableEventType::RunStatusChanged.as_str()));
+    assert!(event_types.contains(&DurableEventType::RunFinalized.as_str()));
+    let finalized = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::RunFinalized.as_str() =>
+        {
+            Some(event)
+        }
+        _ => None,
+    });
+    let finalized = finalized.expect("run finalized event should be present");
+    assert_eq!(
+        finalized.payload.get("run_status").and_then(Value::as_str),
+        Some("completed")
+    );
+    assert_eq!(
+        finalized
+            .payload
+            .get("terminal_reason")
+            .and_then(Value::as_str),
+        Some("final_answer")
+    );
+    assert_eq!(
+        finalized
+            .payload
+            .get("final_message_id")
+            .and_then(Value::as_str),
+        output.result.final_message_id.as_deref()
+    );
+    let projected_entries = JsonlSessionStore::read_entries(&path)?;
+    assert_eq!(projected_entries.len(), session.entries().len());
+    assert_eq!(
+        serde_json::to_value(&projected_entries)?,
+        serde_json::to_value(session.entries())?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_max_turns_appends_run_lifecycle_durable_events() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    let agent = Agent::new(MockProvider, ToolRegistry::new());
+    let mut session = Session::new("mock", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("hi"),
+            AgentRunOptions {
+                workspace_root: std::env::temp_dir(),
+                max_turns: Some(0),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(
+        output.outcome.terminal_reason,
+        AgentRunTerminalReason::MaxTurns
+    );
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let finalized = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::RunFinalized.as_str() =>
+        {
+            Some(event)
+        }
+        _ => None,
+    });
+    let finalized = finalized.expect("run finalized event should be present");
+    assert_eq!(
+        finalized.payload.get("run_status").and_then(Value::as_str),
+        Some("interrupted")
+    );
+    assert_eq!(
+        finalized
+            .payload
+            .get("terminal_reason")
+            .and_then(Value::as_str),
+        Some("max_turns")
+    );
+    assert!(
+        finalized
+            .payload
+            .get("final_message_id")
+            .is_some_and(Value::is_null)
+    );
     Ok(())
 }
 
@@ -4121,9 +4333,12 @@ async fn agent_records_internal_error_when_tool_execution_fails() -> Result<()> 
 }
 
 #[tokio::test]
-async fn agent_wraps_provider_stream_errors_with_context() {
+async fn agent_wraps_provider_stream_errors_with_context() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
     let agent = Agent::new(StreamErrorProvider, ToolRegistry::new());
-    let mut session = Session::new("mock-stream-error", "mock-model");
+    let mut session = Session::new("mock-stream-error", "mock-model").with_store(store);
     let mut handler = crate::event::NoopEventHandler;
 
     let error = agent
@@ -4153,6 +4368,35 @@ async fn agent_wraps_provider_stream_errors_with_context() {
             .chain()
             .any(|cause| cause.to_string().contains("socket closed"))
     );
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let finalized = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::RunFinalized.as_str() =>
+        {
+            Some(event)
+        }
+        _ => None,
+    });
+    let finalized = finalized.expect("run finalized event should be present for provider error");
+    assert_eq!(
+        finalized.payload.get("run_status").and_then(Value::as_str),
+        Some("failed")
+    );
+    assert_eq!(
+        finalized
+            .payload
+            .get("terminal_reason")
+            .and_then(Value::as_str),
+        Some("provider_stream_error")
+    );
+    assert!(
+        finalized
+            .payload
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|error| error.contains("socket closed"))
+    );
+    Ok(())
 }
 
 #[derive(Clone)]

@@ -28,6 +28,7 @@ const MCP_OUTPUT_LIMIT_LINES: usize = 2_000;
 pub struct McpToolRegistrationOptions {
     pub provider_tool_name_max_chars: usize,
     pub roots: Vec<PathBuf>,
+    pub working_dir: Option<PathBuf>,
     pub secret_redactor: SecretRedactor,
     pub elicitation_handler: Arc<dyn McpElicitationHandler>,
     pub runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
@@ -47,6 +48,7 @@ impl McpToolRegistrationOptions {
         Ok(Self {
             provider_tool_name_max_chars: DEFAULT_PROVIDER_TOOL_NAME_MAX_CHARS,
             roots: default_mcp_roots()?,
+            working_dir: None,
             secret_redactor: SecretRedactor::empty(),
             elicitation_handler: unsupported_mcp_elicitation_handler(),
             runtime_event_handler: unsupported_mcp_runtime_event_handler(),
@@ -61,6 +63,11 @@ impl McpToolRegistrationOptions {
 
     pub fn with_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.roots = roots;
+        self
+    }
+
+    pub fn with_working_dir(mut self, working_dir: PathBuf) -> Self {
+        self.working_dir = Some(working_dir);
         self
     }
 
@@ -135,6 +142,7 @@ async fn register_mcp_tools_for_startup(
         let client = match McpClient::spawn(
             server.clone(),
             options.roots.clone(),
+            options.working_dir.clone(),
             options.secret_redactor.clone(),
             Arc::clone(&options.elicitation_handler),
             Arc::clone(&options.runtime_event_handler),
@@ -707,6 +715,7 @@ impl McpClient {
     async fn spawn(
         config: McpServerConfig,
         roots: Vec<PathBuf>,
+        working_dir: Option<PathBuf>,
         secret_redactor: SecretRedactor,
         elicitation_handler: Arc<dyn McpElicitationHandler>,
         runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
@@ -718,6 +727,9 @@ impl McpClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        if let Some(working_dir) = working_dir {
+            command.current_dir(working_dir);
+        }
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to spawn MCP server {}", config.name))?;

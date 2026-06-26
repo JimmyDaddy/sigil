@@ -304,10 +304,7 @@ while True:
     assert!(registry.spec_for("mcp__fake__resources_read").is_none());
 
     let subjects = registry.permission_subjects(
-        &ToolContext {
-            workspace_root: temp.path().to_path_buf(),
-            timeout_secs: 5,
-        },
+        &ToolContext::new(temp.path().to_path_buf(), 5),
         &sigil_kernel::ToolCall {
             id: "call-subject".to_owned(),
             name: "mcp__fake__echo".to_owned(),
@@ -324,10 +321,7 @@ while True:
     assert_eq!(subjects[1].scope, ToolSubjectScope::Unknown);
 
     let default_mode = registry.permission_default_mode(
-        &ToolContext {
-            workspace_root: temp.path().to_path_buf(),
-            timeout_secs: 5,
-        },
+        &ToolContext::new(temp.path().to_path_buf(), 5),
         &sigil_kernel::ToolCall {
             id: "call-default".to_owned(),
             name: "mcp__fake__echo".to_owned(),
@@ -338,10 +332,7 @@ while True:
 
     let egress = registry
         .egress_audit(
-            &ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            &ToolContext::new(temp.path().to_path_buf(), 5),
             &sigil_kernel::ToolCall {
                 id: "call-egress".to_owned(),
                 name: "mcp__fake__echo".to_owned(),
@@ -374,10 +365,7 @@ while True:
     )
     .await?;
     let quiet_egress = registry.egress_audit(
-        &ToolContext {
-            workspace_root: temp.path().to_path_buf(),
-            timeout_secs: 5,
-        },
+        &ToolContext::new(temp.path().to_path_buf(), 5),
         &sigil_kernel::ToolCall {
             id: "call-quiet-egress".to_owned(),
             name: "mcp__quiet__echo".to_owned(),
@@ -388,10 +376,7 @@ while True:
 
     let result = registry
         .execute(
-            sigil_kernel::ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            sigil_kernel::ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-1".to_owned(),
                 name: "mcp__fake__echo".to_owned(),
@@ -400,6 +385,80 @@ while True:
         )
         .await?;
     assert_eq!(result.content, "hello from mcp");
+    Ok(())
+}
+
+#[tokio::test]
+async fn registration_runs_mcp_process_from_configured_working_dir() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let script = temp.path().join("cwd_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+
+expected_cwd = os.path.realpath(sys.argv[1])
+if os.path.realpath(os.getcwd()) != expected_cwd:
+    sys.stderr.write(f"cwd mismatch: {os.getcwd()} != {expected_cwd}\n")
+    sys.stderr.flush()
+    sys.exit(2)
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"cwd","description":"cwd","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_options(
+        &mut registry,
+        &[McpServerConfig {
+            name: "cwd".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![
+                script.to_string_lossy().to_string(),
+                workspace.to_string_lossy().to_string(),
+            ],
+            startup_timeout_secs: 5,
+            ..McpServerConfig::default()
+        }],
+        McpToolRegistrationOptions::eager()?
+            .with_roots(vec![workspace.clone()])
+            .with_working_dir(workspace),
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__cwd__cwd").is_some());
     Ok(())
 }
 
@@ -481,10 +540,7 @@ while True:
     assert_eq!(read_spec.category, ToolCategory::Mcp);
     assert_eq!(read_spec.access, ToolAccess::Read);
 
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let subjects = registry.permission_subjects(
         &ctx,
         &sigil_kernel::ToolCall {
@@ -642,10 +698,7 @@ while True:
     )
     .await?;
 
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     for (tool_name, args_json, expected_message) in [
         (
             "mcp__invalid_docs__resources_list",
@@ -774,10 +827,7 @@ while True:
 
     let egress = registry
         .egress_audit(
-            &ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            &ToolContext::new(temp.path().to_path_buf(), 5),
             &sigil_kernel::ToolCall {
                 id: "call-secret-resource-egress".to_owned(),
                 name: "mcp__docs__resources_read".to_owned(),
@@ -793,10 +843,7 @@ while True:
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-secret-resource".to_owned(),
                 name: "mcp__docs__resources_read".to_owned(),
@@ -881,10 +928,7 @@ while True:
     assert_eq!(list_spec.access, ToolAccess::Read);
     assert!(registry.spec_for("mcp__prompts__prompts_get").is_some());
 
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let list = registry
         .execute(
             ctx.clone(),
@@ -969,10 +1013,7 @@ while True:
     )
     .await?;
     let quiet_egress = registry.egress_audit(
-        &ToolContext {
-            workspace_root: temp.path().to_path_buf(),
-            timeout_secs: 5,
-        },
+        &ToolContext::new(temp.path().to_path_buf(), 5),
         &sigil_kernel::ToolCall {
             id: "call-quiet-prompt-egress".to_owned(),
             name: "mcp__quiet_prompts__prompts_list".to_owned(),
@@ -1113,10 +1154,7 @@ while True:
     )
     .await?;
 
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let invalid = registry
         .execute(
             ctx.clone(),
@@ -1219,10 +1257,7 @@ while True:
     )
     .await?;
 
-    let ctx = ToolContext {
-        workspace_root: temp.path().to_path_buf(),
-        timeout_secs: 5,
-    };
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
     let list_error = registry
         .execute(
             ctx.clone(),
@@ -1350,10 +1385,7 @@ while True:
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-large-output".to_owned(),
                 name: "mcp__large__large".to_owned(),
@@ -1546,10 +1578,7 @@ async fn pinned_mcp_server_registers_when_identity_matches() -> Result<()> {
     assert!(registry.spec_for("mcp__pinned__echo").is_some());
     let egress = registry
         .egress_audit(
-            &ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            &ToolContext::new(temp.path().to_path_buf(), 5),
             &sigil_kernel::ToolCall {
                 id: "call-pin-egress".to_owned(),
                 name: "mcp__pinned__echo".to_owned(),
@@ -1701,10 +1730,7 @@ while True:
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-secret".to_owned(),
                 name: "mcp__fake__echo".to_owned(),
@@ -1715,10 +1741,7 @@ while True:
 
     let egress = registry
         .egress_audit(
-            &ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            &ToolContext::new(temp.path().to_path_buf(), 5),
             &sigil_kernel::ToolCall {
                 id: "call-secret-egress".to_owned(),
                 name: "mcp__fake__echo".to_owned(),
@@ -1825,10 +1848,7 @@ while True:
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-secret".to_owned(),
                 name: "mcp__fake__echo".to_owned(),
@@ -2015,10 +2035,7 @@ while True:
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-lazy".to_owned(),
                 name: "mcp__lazy__echo".to_owned(),
@@ -2308,10 +2325,7 @@ while True:
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-1".to_owned(),
                 name: "mcp__error_call__echo".to_owned(),
@@ -2388,10 +2402,7 @@ while True:
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-1".to_owned(),
                 name: "mcp__non_text__image".to_owned(),
@@ -3408,10 +3419,7 @@ while True:
 
     let error = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-missing-result".to_owned(),
                 name: "mcp__missing_result__echo".to_owned(),
@@ -3484,10 +3492,7 @@ while True:
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: temp.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(temp.path().to_path_buf(), 5),
             sigil_kernel::ToolCall {
                 id: "call-string-content".to_owned(),
                 name: "mcp__string_content__echo".to_owned(),

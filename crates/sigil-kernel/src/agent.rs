@@ -7,14 +7,14 @@ use std::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
     PlanApprovalExpiry,
     approval::{ApprovalHandler, AutoApproveHandler, ToolApproval},
     config::{CompactionConfig, MemoryConfig},
-    event::{EventHandler, RunEvent},
+    event::{DurableEventType, EventClass, EventHandler, RunEvent},
     permission::{
         ApprovalMode, InteractionMode, PermissionConfig, PermissionDecision,
         PermissionEvaluationContext, PermissionPolicy, PermissionRisk,
@@ -158,6 +158,16 @@ pub enum AgentRunTerminalReason {
     FinalAnswer,
     MaxTurns,
     DelegationUnsatisfied,
+}
+
+impl AgentRunTerminalReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::FinalAnswer => "final_answer",
+            Self::MaxTurns => "max_turns",
+            Self::DelegationUnsatisfied => "delegation_unsatisfied",
+        }
+    }
 }
 
 /// Runtime hook for model-visible agent-thread tools.
@@ -429,6 +439,8 @@ where
             agent_delegation,
         } = input;
 
+        session.reconcile_prepared_mutations(&options.workspace_root)?;
+
         if let Some(message) = persisted_user_message {
             session.append_user_message(ModelMessage::user(message))?;
         }
@@ -455,6 +467,13 @@ where
                 )))?;
                 outcome.terminal_reason = AgentRunTerminalReason::MaxTurns;
                 outcome.tool_calls = total_tool_calls;
+                append_run_lifecycle_events(
+                    session,
+                    "interrupted",
+                    outcome.terminal_reason,
+                    None,
+                    total_tool_calls,
+                )?;
                 return Ok(AgentRunOutput {
                     result: AgentRunResult {
                         final_text: String::new(),
@@ -480,7 +499,19 @@ where
                 &transient_context,
             )?;
 
-            let mut stream = self.provider.stream(request).await?;
+            let mut stream = match self.provider.stream(request).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    let error_message = format!("{error:#}");
+                    append_failed_run_lifecycle_events(
+                        session,
+                        "provider_request_error",
+                        total_tool_calls,
+                        &error_message,
+                    )?;
+                    return Err(error);
+                }
+            };
             let mut assistant_text = String::new();
             let mut reasoning_buffer = String::new();
             let mut reasoning_trace_buffer = String::new();
@@ -489,7 +520,20 @@ where
             let mut pending_states: Vec<ProviderContinuationState> = Vec::new();
 
             while let Some(chunk) = stream.next().await {
-                match chunk.context("provider stream failed")? {
+                let chunk = match chunk.context("provider stream failed") {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let error_message = format!("{error:#}");
+                        append_failed_run_lifecycle_events(
+                            session,
+                            "provider_stream_error",
+                            total_tool_calls,
+                            &error_message,
+                        )?;
+                        return Err(error);
+                    }
+                };
+                match chunk {
                     ProviderChunk::TextDelta(delta) => {
                         assistant_text.push_str(&delta);
                         handler.handle(RunEvent::TextDelta(delta))?;
@@ -580,10 +624,11 @@ where
                     handler.handle(RunEvent::Control(control))?;
                 }
 
-                let tool_ctx = ToolContext {
-                    workspace_root: options.workspace_root.clone(),
-                    timeout_secs: options.tool_timeout_secs,
-                };
+                let mut tool_ctx =
+                    ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs);
+                if let Some(recorder) = session.mutation_event_recorder() {
+                    tool_ctx = tool_ctx.with_mutation_recorder(recorder);
+                }
                 for mut call in completed_calls {
                     if call.name == TASK_PLAN_UPDATE_TOOL_NAME {
                         let Some(context) = task_plan_update.as_ref() else {
@@ -1167,6 +1212,13 @@ where
                 ))?;
                 outcome.terminal_reason = AgentRunTerminalReason::DelegationUnsatisfied;
                 outcome.tool_calls = total_tool_calls;
+                append_run_lifecycle_events(
+                    session,
+                    "blocked",
+                    outcome.terminal_reason,
+                    None,
+                    total_tool_calls,
+                )?;
                 return Ok(AgentRunOutput {
                     result: AgentRunResult {
                         final_text: String::new(),
@@ -1199,6 +1251,13 @@ where
             }
 
             outcome.tool_calls = total_tool_calls;
+            append_run_lifecycle_events(
+                session,
+                "completed",
+                outcome.terminal_reason,
+                Some(&final_message_id),
+                total_tool_calls,
+            )?;
             return Ok(AgentRunOutput {
                 result: AgentRunResult {
                     final_text: assistant_text,
@@ -1621,6 +1680,72 @@ fn append_tool_approval_audit(
         reason,
         preview_hash,
     }))
+}
+
+fn append_run_lifecycle_events(
+    session: &mut Session,
+    run_status: &'static str,
+    terminal_reason: AgentRunTerminalReason,
+    final_message_id: Option<&str>,
+    tool_calls: usize,
+) -> Result<()> {
+    append_run_lifecycle_event_payload(
+        session,
+        run_status,
+        terminal_reason.as_str(),
+        final_message_id,
+        tool_calls,
+        None,
+    )
+}
+
+fn append_failed_run_lifecycle_events(
+    session: &mut Session,
+    terminal_reason: &'static str,
+    tool_calls: usize,
+    error: &str,
+) -> Result<()> {
+    append_run_lifecycle_event_payload(
+        session,
+        "failed",
+        terminal_reason,
+        None,
+        tool_calls,
+        Some(error),
+    )
+}
+
+fn append_run_lifecycle_event_payload(
+    session: &mut Session,
+    run_status: &'static str,
+    terminal_reason: &'static str,
+    final_message_id: Option<&str>,
+    tool_calls: usize,
+    error: Option<&str>,
+) -> Result<()> {
+    session.append_durable_event(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        json!({
+            "run_status": run_status,
+            "terminal_reason": terminal_reason,
+            "final_message_id": final_message_id,
+            "tool_calls": tool_calls,
+            "error": error,
+        }),
+    )?;
+    session.append_durable_event(
+        DurableEventType::RunFinalized,
+        EventClass::Critical,
+        json!({
+            "run_status": run_status,
+            "terminal_reason": terminal_reason,
+            "final_message_id": final_message_id,
+            "tool_calls": tool_calls,
+            "error": error,
+        }),
+    )?;
+    Ok(())
 }
 
 fn append_tool_execution_audit(

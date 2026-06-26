@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, ops::Range};
 
 use sigil_kernel::{
     CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig, McpServerStartup, RootConfig,
+    UsageCostCurrency,
 };
 
 use crate::approval::ApprovalDiagnosticSummary;
@@ -60,13 +61,21 @@ impl TimelineTextSelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum UsageCostCurrency {
+pub(super) enum ResolvedUsageCostCurrency {
     Usd,
     Cny,
 }
 
-impl UsageCostCurrency {
-    pub(super) fn from_code(code: Option<&str>) -> Self {
+impl ResolvedUsageCostCurrency {
+    pub(super) fn from_config(config: UsageCostCurrency, balance_code: Option<&str>) -> Self {
+        match config {
+            UsageCostCurrency::Usd => Self::Usd,
+            UsageCostCurrency::Cny => Self::Cny,
+            UsageCostCurrency::Auto => Self::from_balance_code(balance_code),
+        }
+    }
+
+    fn from_balance_code(code: Option<&str>) -> Self {
         match code {
             Some(code) if code.eq_ignore_ascii_case("CNY") => Self::Cny,
             _ => Self::Usd,
@@ -122,7 +131,7 @@ pub(crate) enum McpServerRuntimeStatus {
 }
 
 impl McpServerRuntimeStatus {
-    pub(super) fn label(&self) -> String {
+    pub(super) fn label_for_server(&self, server_name: Option<&str>) -> String {
         match self {
             Self::Deferred => "deferred".to_owned(),
             Self::Activating => "activating".to_owned(),
@@ -132,9 +141,24 @@ impl McpServerRuntimeStatus {
             Self::Ready {
                 tool_count: Some(count),
             } => format!("ready {}", count_label(*count, "tool", "tools")),
-            Self::Failed { message } => format!("failed: {}", summarize_error(message)),
+            Self::Failed { message } => {
+                format!("failed: {}", summarize_mcp_failure(message, server_name))
+            }
         }
     }
+}
+
+fn summarize_mcp_failure(message: &str, server_name: Option<&str>) -> String {
+    let summary = summarize_error(message);
+    let Some(server_name) = server_name else {
+        return summary;
+    };
+    let direct_prefix = format!("MCP server {server_name} ");
+    if let Some(rest) = summary.strip_prefix(&direct_prefix) {
+        return rest.to_owned();
+    }
+    let spawn_fragment = format!("MCP server {server_name}");
+    summary.replace(&spawn_fragment, "MCP server")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,3 +183,7 @@ pub(crate) fn initial_mcp_server_status(server: &McpServerConfig) -> McpServerRu
         McpServerStartup::Lazy => McpServerRuntimeStatus::Deferred,
     }
 }
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[path = "tests/runtime_status_tests.rs"]
+mod tests;

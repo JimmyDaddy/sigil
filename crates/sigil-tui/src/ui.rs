@@ -1,4 +1,5 @@
 mod approval;
+mod command_text;
 mod composer;
 mod diff;
 mod geometry;

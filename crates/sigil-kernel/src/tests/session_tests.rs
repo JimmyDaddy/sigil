@@ -5,18 +5,26 @@ use fs2::FileExt;
 
 use crate::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfileSnapshot, AgentProfileSnapshotId,
-    AgentProfileSource, AgentProfileTrustEntry, AgentRole, AgentTrustState, ChangeSet, ChangeSetId,
-    ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CompactionRecord, DurableEventType,
-    EventClass, MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
-    MemoryLoadReport, MemorySnapshot, PluginCapability, PluginManifestSnapshot,
-    PluginTrustDecision, PluginTrustEntry, ProviderContinuationState, ResponseHandle, SessionRef,
-    SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry, SkillRunMode,
-    SkillSource, SkillTrustState, StoredEvent, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry,
-    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepStatus, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreview,
-    ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta, ToolSubjectAudit, ToolSubjectKind,
-    ToolSubjectScope, UsageStats, provider::ModelMessage, stable_event_hash,
+    AgentProfileSource, AgentProfileTrustEntry, AgentRole, AgentTrustState, CandidateCheck,
+    ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
+    CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
+    ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, DomainEvent,
+    DomainPayload, DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, LegacyEvent,
+    MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig, MemoryLoadReport,
+    MemorySnapshot, PluginCapability, PluginManifestSnapshot, PluginTrustDecision,
+    PluginTrustEntry, ProjectionCursor, ProviderContinuationState, ReadinessEvaluatedEntry,
+    ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction, ResponseHandle, RunStatus,
+    SandboxProfileRequirement, SessionRef, SessionStreamRecord, SkillDescriptor,
+    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
+    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot,
+    ToolResultMeta, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats,
+    VerificationBinding, VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceipt,
+    VerificationRecordedEntry, VerificationScope, VerificationStateProjection, VerificationVerdict,
+    VisibleCompletionState, WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
+    provider::ModelMessage, stable_event_hash,
 };
 
 use super::{
@@ -85,6 +93,154 @@ fn test_tool_approval(action: ToolApprovalAuditAction) -> SessionLogEntry {
     }))
 }
 
+fn sample_verification_policy() -> VerificationPolicy {
+    VerificationPolicy {
+        required_checks: vec![sample_check_spec()],
+        completion_criteria: CompletionCriteria::AllRequiredChecks,
+        verification_scope: VerificationScope::all_tracked("scope-main"),
+        sandbox_profile: SandboxProfileRequirement::None,
+        workspace_trust_requirement: WorkspaceTrustRequirement::None,
+        allow_unverified_completion: false,
+        timeout_ms: Some(60_000),
+    }
+}
+
+fn sample_check_spec() -> CheckSpec {
+    CheckSpec::new(
+        "cargo-test",
+        CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec![
+                "test".to_owned(),
+                "-p".to_owned(),
+                "sigil-kernel".to_owned(),
+            ],
+            cwd: None,
+        },
+        ToolEffect::ReadOnly,
+        "scope-main",
+    )
+}
+
+fn sample_check_spec_recorded_entry() -> CheckSpecRecordedEntry {
+    let candidate = CandidateCheck {
+        source: CheckDiscoverySource::Cargo,
+        command: CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec![
+                "test".to_owned(),
+                "-p".to_owned(),
+                "sigil-kernel".to_owned(),
+            ],
+            cwd: None,
+        },
+        source_event_id: "event-discovery".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+    };
+    let trusted = candidate
+        .promote(
+            "cargo-test",
+            "scope-main",
+            ToolEffect::ReadOnly,
+            CheckPromotion::UserApproved {
+                approval_event_id: "event-approval".to_owned(),
+            },
+        )
+        .expect("sample check promotes");
+    CheckSpecRecordedEntry::new(
+        EvidenceScope::Task("task-1".to_owned()),
+        trusted,
+        "event-discovery",
+    )
+}
+
+fn sample_verification_policy_changed_entry() -> Result<VerificationPolicyChangedEntry> {
+    VerificationPolicyChangedEntry::new(
+        EvidenceScope::Task("task-1".to_owned()),
+        sample_verification_policy(),
+        "event-policy",
+    )
+}
+
+fn sample_verification_recorded_entry() -> VerificationRecordedEntry {
+    let check = sample_check_spec();
+    VerificationRecordedEntry {
+        receipt: VerificationReceipt {
+            receipt: EvidenceReceipt {
+                receipt_id: "receipt-1".to_owned(),
+                source_session_id: "session-1".to_owned(),
+                source_event_id: "event-check-finished".to_owned(),
+                source_event_type: DurableEventType::CheckFinished.as_str().to_owned(),
+                scope: EvidenceScope::Task("task-1".to_owned()),
+                producer_tool_call: Some("tool-call-1".to_owned()),
+                workspace_revision: Some(1),
+                workspace_snapshot_id: Some("snapshot-1".to_owned()),
+                policy_hash: Some("policy-hash".to_owned()),
+                changeset_id: None,
+                status: ReceiptStatus::Succeeded,
+                artifact_refs: Vec::new(),
+                redaction_state: RedactionState::None,
+                recorded_at_stream_sequence: 2,
+            },
+            binding: VerificationBinding {
+                workspace_id: "workspace-1".to_owned(),
+                workspace_snapshot_id: "snapshot-1".to_owned(),
+                verification_scope_hash: "scope-main".to_owned(),
+                check_spec_hash: check.check_spec_hash,
+                environment_fingerprint: "env-1".to_owned(),
+                sandbox_profile_hash: "sandbox-local".to_owned(),
+                workspace_trust_snapshot_id: "trust-1".to_owned(),
+                approval_event_id: None,
+                sandbox_decision_id: None,
+            },
+            check_spec_id: check.check_spec_id,
+            check_status: ReceiptStatus::Succeeded,
+            mutates_verification_scope: false,
+        },
+    }
+}
+
+fn sample_readiness_evaluated_entry() -> ReadinessEvaluatedEntry {
+    ReadinessEvaluatedEntry {
+        scope: EvidenceScope::Task("task-1".to_owned()),
+        evaluation: ReadinessEvaluation {
+            run_status: RunStatus::Completed,
+            verification_verdict: VerificationVerdict::Missing,
+            visible_state: VisibleCompletionState::CompletedUnverified,
+            reasons: Vec::new(),
+            required_actions: vec![RequiredAction::RunCheck {
+                check_spec_id: "cargo-test".to_owned(),
+            }],
+        },
+        policy_hash: Some("policy-hash".to_owned()),
+        workspace_snapshot_id: Some("snapshot-1".to_owned()),
+    }
+}
+
+fn sample_child_verification_receipt_linked() -> ChildVerificationReceiptLinked {
+    ChildVerificationReceiptLinked {
+        parent_session_id: "parent-session".to_owned(),
+        child_session_id: "child-session".to_owned(),
+        child_receipt_id: "child-receipt".to_owned(),
+        child_event_id: "child-event".to_owned(),
+        child_workspace_id: "child-workspace".to_owned(),
+        child_workspace_snapshot_id: "child-snapshot".to_owned(),
+        policy_hash: "policy-hash".to_owned(),
+        changeset_id: Some("changeset-1".to_owned()),
+        merge_event_id: Some("merge-event".to_owned()),
+    }
+}
+
+fn sample_workspace_trust_decision_entry() -> WorkspaceTrustDecisionEntry {
+    WorkspaceTrustDecisionEntry {
+        workspace_id: "workspace-1".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+        trust: WorkspaceTrust::Trusted,
+        decided_by_event_id: Some("trust-event".to_owned()),
+        reason: Some("user trusted workspace".to_owned()),
+    }
+}
+
 fn test_task_id() -> TaskId {
     TaskId::new("task-1").expect("valid task id")
 }
@@ -126,6 +282,59 @@ fn jsonl_session_store_reads_legacy_v2_and_mixed_records() -> Result<()> {
 }
 
 #[test]
+fn session_stream_records_replay_to_domain_events_for_projection() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let legacy_entry = SessionLogEntry::User(ModelMessage::user("legacy"));
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&legacy_entry)?),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("v2".to_owned()),
+        Vec::new(),
+    )))?;
+    store.append_event(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        serde_json::json!({"call_id": "pure-durable"}),
+    )?;
+
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    let domain_events = records
+        .iter()
+        .map(SessionStreamRecord::domain_event_record)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    assert_eq!(domain_events.len(), 3);
+    assert!(matches!(domain_events[0].event, DomainEvent::Legacy(_)));
+    assert!(matches!(
+        domain_events[1].event,
+        DomainEvent::AssistantMessageRecorded(_)
+    ));
+    assert!(matches!(
+        domain_events[2].event,
+        DomainEvent::ToolExecutionStarted(_)
+    ));
+    assert_eq!(domain_events[0].cursor.last_applied_stream_sequence, 1);
+    assert_eq!(domain_events[1].cursor.last_applied_stream_sequence, 2);
+    assert_eq!(domain_events[2].cursor.last_applied_stream_sequence, 3);
+
+    let projected_entries = JsonlSessionStore::read_entries(&path)?;
+    assert_eq!(projected_entries.len(), 2);
+    assert!(matches!(projected_entries[0], SessionLogEntry::User(_)));
+    assert!(matches!(
+        projected_entries[1],
+        SessionLogEntry::Assistant(_)
+    ));
+    Ok(())
+}
+
+#[test]
 fn jsonl_session_store_append_writes_v2_session_entries() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
@@ -151,6 +360,113 @@ fn jsonl_session_store_append_writes_v2_session_entries() -> Result<()> {
     assert_eq!(entries.len(), 2);
     assert!(matches!(entries[0], SessionLogEntry::User(_)));
     assert!(matches!(entries[1], SessionLogEntry::Assistant(_)));
+    Ok(())
+}
+
+#[test]
+fn session_domain_event_helpers_cover_legacy_and_durable_only_events() -> Result<()> {
+    let legacy_entry = SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("legacy answer".to_owned()),
+        Vec::new(),
+    ));
+    let legacy = DomainEvent::Legacy(LegacyEvent {
+        event_id: "legacy-event".to_owned(),
+        session_id: "session-1".to_owned(),
+        stream_sequence: 1,
+        raw_line_hash: "sha256:legacy".to_owned(),
+        payload: serde_json::to_value(&legacy_entry)?,
+    });
+    let restored = super::session_entry_from_domain_event(&legacy)?;
+    match restored {
+        Some(SessionLogEntry::Assistant(message)) => {
+            assert_eq!(message.content.as_deref(), Some("legacy answer"));
+        }
+        other => panic!("expected legacy assistant entry, got {other:?}"),
+    }
+
+    let durable_only = DomainEvent::ToolExecutionStarted(DomainPayload {
+        event_version: 1,
+        payload: serde_json::json!({ "call_id": "call-1" }),
+    });
+    assert!(super::session_entry_from_domain_event(&durable_only)?.is_none());
+
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let durable = store.append_event(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        serde_json::json!({ "call_id": "call-1" }),
+    )?;
+    assert!(super::session_entry_from_stored_event(&durable)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn in_memory_session_durable_event_append_is_noop() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let appended = session.append_durable_event(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        serde_json::json!({ "call_id": "call-1" }),
+    )?;
+
+    assert!(appended.is_none());
+    assert!(session.entries().is_empty());
+    Ok(())
+}
+
+#[test]
+fn store_backed_session_appends_durable_only_event() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+
+    let appended = session.append_durable_event(
+        DurableEventType::RunStatusChanged,
+        EventClass::Critical,
+        serde_json::json!({ "status": "running" }),
+    )?;
+
+    assert_eq!(
+        appended.as_ref().map(|event| event.event_type.as_str()),
+        Some(DurableEventType::RunStatusChanged.as_str())
+    );
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    assert_eq!(records.len(), 1);
+    assert!(JsonlSessionStore::read_entries(store.path())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn session_entry_projection_applies_and_ignores_idempotent_cursor() -> Result<()> {
+    let mut projection = super::SessionEntryProjection::default();
+    let entry = SessionLogEntry::User(ModelMessage::user("hello"));
+    let cursor = ProjectionCursor {
+        session_id: "session-1".to_owned(),
+        projection_schema_version: super::SESSION_ENTRY_PROJECTION_SCHEMA_VERSION,
+        last_applied_stream_sequence: 1,
+        last_applied_event_id: "event-1".to_owned(),
+        last_applied_record_checksum: "sha256:event-1".to_owned(),
+    };
+    let event = DomainEvent::UserMessageRecorded(DomainPayload {
+        event_version: 1,
+        payload: serde_json::json!({ "session_log_entry": entry }),
+    });
+
+    projection.apply_cursor_and_event(cursor.clone(), Some(&event))?;
+    assert_eq!(projection.entries.len(), 1);
+    projection.apply_cursor_and_event(cursor, Some(&event))?;
+    assert_eq!(projection.entries.len(), 1);
+
+    let next_cursor = ProjectionCursor {
+        session_id: "session-1".to_owned(),
+        projection_schema_version: super::SESSION_ENTRY_PROJECTION_SCHEMA_VERSION,
+        last_applied_stream_sequence: 2,
+        last_applied_event_id: "event-2".to_owned(),
+        last_applied_record_checksum: "sha256:event-2".to_owned(),
+    };
+    projection.apply_cursor_and_event(next_cursor, None)?;
+    assert_eq!(projection.entries.len(), 1);
     Ok(())
 }
 
@@ -214,21 +530,6 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
         "session_id does not match stream session_id on line 5: session-b vs session-a"
     );
     assert_eq!(
-        super::complete_last_non_empty_line(b"prefix\nlast\r\n", false)?.as_deref(),
-        Some("last")
-    );
-    assert!(super::complete_last_non_empty_line(b"partial", false)?.is_none());
-    assert!(super::complete_last_non_empty_line(b"\n\r\n", true)?.is_none());
-    assert!(super::complete_last_non_empty_line(b"   \r\n", true)?.is_none());
-    assert!(
-        format!(
-            "{:#}",
-            super::complete_last_non_empty_line(&[0xff], true)
-                .expect_err("invalid utf-8 tail should fail")
-        )
-        .contains("failed to decode last session log record")
-    );
-    assert_eq!(
         super::session_entry_event_type(&user),
         DurableEventType::UserMessageRecorded
     );
@@ -268,21 +569,6 @@ fn session_private_helpers_cover_identity_messages_tail_and_event_mapping() -> R
         super::tool_execution_event_type(ToolExecutionStatus::Failed),
         DurableEventType::ToolExecutionFinished
     );
-
-    let temp = tempfile::tempdir()?;
-    let blank_path = temp.path().join("blank.jsonl");
-    fs::write(&blank_path, "\n   \r\n")?;
-    let mut blank_file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&blank_path)?;
-    let blank_state = super::append_state_for_fast_append_locked(&mut blank_file, &blank_path)?
-        .expect("blank logs can fast append from sequence one");
-    assert_eq!(
-        blank_state.session_id,
-        super::session_id_for_path(&blank_path)
-    );
-    assert_eq!(blank_state.next_sequence, 1);
 
     let mut expected_session_id = None;
     let stored = StoredEvent::new(
@@ -458,10 +744,16 @@ fn read_entries_skips_unknown_noncritical_session_log_entry_payload() -> Result<
         serde_json::json!({ "session_log_entry": entry }),
     )?;
     fs::write(&path, event.to_json_line()?)?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Assistant(ModelMessage::assistant(
+        Some("known event after ignored unknown".to_owned()),
+        Vec::new(),
+    )))?;
 
     let entries = JsonlSessionStore::read_entries(&path)?;
 
-    assert!(entries.is_empty());
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(entries[0], SessionLogEntry::Assistant(_)));
     Ok(())
 }
 
@@ -579,6 +871,42 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
                 reason: None,
             })),
             DurableEventType::TaskStatusChanged,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(
+                sample_check_spec_recorded_entry(),
+            )),
+            DurableEventType::CheckSpecRecorded,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(
+                sample_verification_policy_changed_entry()?,
+            )),
+            DurableEventType::VerificationPolicyChanged,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::VerificationRecorded(
+                sample_verification_recorded_entry(),
+            )),
+            DurableEventType::VerificationRecorded,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
+                sample_readiness_evaluated_entry(),
+            )),
+            DurableEventType::ReadinessEvaluated,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::ChildVerificationReceiptLinked(
+                sample_child_verification_receipt_linked(),
+            )),
+            DurableEventType::ChildVerificationReceiptLinked,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(
+                sample_workspace_trust_decision_entry(),
+            )),
+            DurableEventType::WorkspaceTrustDecision,
         ),
         (
             SessionLogEntry::Control(ControlEntry::ChangeSetApplied(ChangeSetResult {
@@ -1015,7 +1343,7 @@ fn append_event_recovers_invalid_v2_tail_before_append() -> Result<()> {
         EventClass::Critical,
         serde_json::json!({"call_id": "first"}),
     )?;
-    let mut invalid_tail = StoredEvent::new(
+    let invalid_tail = StoredEvent::new(
         DurableEventType::ToolExecutionFinished,
         EventClass::Critical,
         "event-invalid-tail".to_owned(),
@@ -1023,9 +1351,10 @@ fn append_event_recovers_invalid_v2_tail_before_append() -> Result<()> {
         2,
         serde_json::json!({"call_id": "bad"}),
     )?;
-    invalid_tail.record_checksum = "sha256:jcs-v1:wrong".to_owned();
+    let mut invalid_tail = serde_json::to_string(&invalid_tail)?;
+    invalid_tail.truncate(invalid_tail.len() - 1);
     let mut file = fs::OpenOptions::new().append(true).open(&path)?;
-    file.write_all(serde_json::to_string(&invalid_tail)?.as_bytes())?;
+    file.write_all(invalid_tail.as_bytes())?;
 
     let appended = store.append_event(
         DurableEventType::ToolExecutionFinished,
@@ -1050,7 +1379,7 @@ fn append_event_recovers_invalid_v2_tail_before_append() -> Result<()> {
 }
 
 #[test]
-fn append_event_rejects_oversized_last_record() -> Result<()> {
+fn append_event_recovers_oversized_tail_record() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
     let valid = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user("prefix")))?;
@@ -1060,15 +1389,25 @@ fn append_event_rejects_oversized_last_record() -> Result<()> {
     )?;
     let store = JsonlSessionStore::new(&path)?;
 
-    let error = store
-        .append_event(
-            DurableEventType::ToolExecutionStarted,
-            EventClass::Critical,
-            serde_json::json!({"call_id": "too-large"}),
-        )
-        .expect_err("oversized tail record should fail closed");
+    let appended = store.append_event(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        serde_json::json!({"call_id": "too-large"}),
+    )?;
 
-    assert!(format!("{error:#}").contains("last session log record is too large"));
+    let records = JsonlSessionStore::read_event_records(&path)?;
+    assert!(records.iter().any(|record| {
+        matches!(
+            record,
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::LogTailRecovered.as_str()
+        )
+    }));
+    assert_eq!(appended.stream_sequence, 3);
+    assert_eq!(
+        records.last().map(SessionStreamRecord::stream_sequence),
+        Some(3)
+    );
     Ok(())
 }
 
@@ -1286,6 +1625,63 @@ fn v2_stream_checksum_mismatch_fails_with_line_context() -> Result<()> {
 }
 
 #[test]
+fn writer_mode_loader_rejects_tail_unknown_critical_event() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let event = StoredEvent::new_raw(
+        "future_critical_event",
+        EventClass::Critical,
+        "event-future".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({"value": "must-not-recover"}),
+    )?;
+    fs::write(&path, event.to_json_line()?)?;
+    let before = fs::read_to_string(&path)?;
+    let store = JsonlSessionStore::new(&path)?;
+
+    let error = store
+        .read_event_records_writer()
+        .expect_err("unknown critical tail event should fail closed");
+
+    assert!(format!("{error:#}").contains("unknown critical event future_critical_event"));
+    assert_eq!(fs::read_to_string(&path)?, before);
+    assert!(!temp.path().join(".sigil-recovery").exists());
+    Ok(())
+}
+
+#[test]
+fn append_event_rejects_tail_checksum_mismatch_before_recovery() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let mut event = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({"call_id": "call-1"}),
+    )?;
+    event.record_checksum = "sha256:jcs-v1:wrong".to_owned();
+    fs::write(&path, format!("{}\n", serde_json::to_string(&event)?))?;
+    let before = fs::read_to_string(&path)?;
+    let store = JsonlSessionStore::new(&path)?;
+
+    let error = store
+        .append_event(
+            DurableEventType::ToolExecutionFinished,
+            EventClass::Critical,
+            serde_json::json!({"call_id": "call-1"}),
+        )
+        .expect_err("checksum mismatch tail event should fail closed before append");
+
+    assert!(format!("{error:#}").contains("checksum mismatch"));
+    assert_eq!(fs::read_to_string(&path)?, before);
+    assert!(!temp.path().join(".sigil-recovery").exists());
+    Ok(())
+}
+
+#[test]
 fn v2_stream_session_id_mismatch_fails_closed() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("session.jsonl");
@@ -1336,6 +1732,90 @@ fn writer_mode_loader_rejects_middle_corruption() -> Result<()> {
 
     assert!(error.to_string().contains("middle corruption"));
     assert!(!temp.path().join(".sigil-recovery").exists());
+    Ok(())
+}
+
+#[test]
+fn append_event_rejects_middle_corruption_before_append() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let first = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({"call_id": "call-1"}),
+    )?;
+    let third = StoredEvent::new(
+        DurableEventType::ToolExecutionFinished,
+        EventClass::Critical,
+        "event-3".to_owned(),
+        "session-1".to_owned(),
+        3,
+        serde_json::json!({"call_id": "call-1"}),
+    )?;
+    fs::write(
+        &path,
+        format!(
+            "{}not-json\n{}",
+            first.to_json_line()?,
+            third.to_json_line()?
+        ),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+
+    let error = store
+        .append_event(
+            DurableEventType::RunFinalized,
+            EventClass::Critical,
+            serde_json::json!({"run_status": "completed"}),
+        )
+        .expect_err("append should fail closed on middle corruption");
+
+    assert!(error.to_string().contains("middle corruption"));
+    let content = fs::read_to_string(&path)?;
+    assert!(!content.contains("run_finalized"));
+    Ok(())
+}
+
+#[test]
+fn append_event_rejects_sequence_gap_before_append() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let first = StoredEvent::new(
+        DurableEventType::ToolExecutionStarted,
+        EventClass::Critical,
+        "event-1".to_owned(),
+        "session-1".to_owned(),
+        1,
+        serde_json::json!({"call_id": "call-1"}),
+    )?;
+    let third = StoredEvent::new(
+        DurableEventType::ToolExecutionFinished,
+        EventClass::Critical,
+        "event-3".to_owned(),
+        "session-1".to_owned(),
+        3,
+        serde_json::json!({"call_id": "call-1"}),
+    )?;
+    fs::write(
+        &path,
+        format!("{}{}", first.to_json_line()?, third.to_json_line()?),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+
+    let error = store
+        .append_event(
+            DurableEventType::RunFinalized,
+            EventClass::Critical,
+            serde_json::json!({"run_status": "completed"}),
+        )
+        .expect_err("append should fail closed on stream sequence gap");
+
+    assert!(error.to_string().contains("stream_sequence"));
+    let content = fs::read_to_string(&path)?;
+    assert!(!content.contains("run_finalized"));
     Ok(())
 }
 
@@ -1622,6 +2102,177 @@ fn mcp_elicitation_control_entry_roundtrips_without_content_values() -> Result<(
                 && restored.content_field_names == vec!["path".to_owned(), "token".to_owned()]
                 && restored.required_field_names == vec!["token".to_owned()]
     ));
+    Ok(())
+}
+
+#[test]
+fn verification_control_entries_roundtrip_with_snake_case_payloads() -> Result<()> {
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(
+            sample_check_spec_recorded_entry(),
+        )),
+        SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(
+            sample_verification_policy_changed_entry()?,
+        )),
+        SessionLogEntry::Control(ControlEntry::VerificationRecorded(
+            sample_verification_recorded_entry(),
+        )),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
+            sample_readiness_evaluated_entry(),
+        )),
+        SessionLogEntry::Control(ControlEntry::ChildVerificationReceiptLinked(
+            sample_child_verification_receipt_linked(),
+        )),
+        SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(
+            sample_workspace_trust_decision_entry(),
+        )),
+    ];
+
+    for entry in entries {
+        let json = serde_json::to_string(&entry)?;
+        let decoded: SessionLogEntry = serde_json::from_str(&json)?;
+
+        match (entry, decoded) {
+            (
+                SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(expected)),
+                SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(restored)),
+            ) => assert_eq!(restored, expected),
+            (
+                SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(expected)),
+                SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(restored)),
+            ) => assert_eq!(restored, expected),
+            (
+                SessionLogEntry::Control(ControlEntry::VerificationRecorded(expected)),
+                SessionLogEntry::Control(ControlEntry::VerificationRecorded(restored)),
+            ) => assert_eq!(restored, expected),
+            (
+                SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(expected)),
+                SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(restored)),
+            ) => assert_eq!(restored, expected),
+            (
+                SessionLogEntry::Control(ControlEntry::ChildVerificationReceiptLinked(expected)),
+                SessionLogEntry::Control(ControlEntry::ChildVerificationReceiptLinked(restored)),
+            ) => assert_eq!(restored, expected),
+            (
+                SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(expected)),
+                SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(restored)),
+            ) => assert_eq!(restored, expected),
+            (_, decoded) => panic!("unexpected decoded verification entry: {decoded:?}"),
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn append_session_entry_event_writes_verification_durable_event_types() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let cases = vec![
+        (
+            SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(
+                sample_check_spec_recorded_entry(),
+            )),
+            DurableEventType::CheckSpecRecorded,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(
+                sample_verification_policy_changed_entry()?,
+            )),
+            DurableEventType::VerificationPolicyChanged,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::VerificationRecorded(
+                sample_verification_recorded_entry(),
+            )),
+            DurableEventType::VerificationRecorded,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(
+                sample_readiness_evaluated_entry(),
+            )),
+            DurableEventType::ReadinessEvaluated,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::ChildVerificationReceiptLinked(
+                sample_child_verification_receipt_linked(),
+            )),
+            DurableEventType::ChildVerificationReceiptLinked,
+        ),
+        (
+            SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(
+                sample_workspace_trust_decision_entry(),
+            )),
+            DurableEventType::WorkspaceTrustDecision,
+        ),
+    ];
+
+    for (entry, expected_event_type) in cases {
+        let stored = store.append_session_entry_event(&entry)?;
+
+        assert_eq!(stored.event_type, expected_event_type.as_str());
+        assert_eq!(stored.event_class, EventClass::Critical);
+    }
+    Ok(())
+}
+
+#[test]
+fn verification_state_projection_replays_control_entries() -> Result<()> {
+    let check_spec_entry = sample_check_spec_recorded_entry();
+    let policy_entry = sample_verification_policy_changed_entry()?;
+    let recorded_entry = sample_verification_recorded_entry();
+    let readiness_entry = sample_readiness_evaluated_entry();
+    let child_link = sample_child_verification_receipt_linked();
+    let trust_entry = sample_workspace_trust_decision_entry();
+    let scope = policy_entry.scope.clone();
+    let receipt_id = recorded_entry.receipt.receipt.receipt_id.clone();
+    let workspace_id = trust_entry.workspace_id.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "unrelated".to_owned(),
+            data: serde_json::json!({}),
+        }),
+        SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(check_spec_entry.clone())),
+        SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(
+            policy_entry.clone(),
+        )),
+        SessionLogEntry::Control(ControlEntry::VerificationRecorded(recorded_entry.clone())),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness_entry.clone())),
+        SessionLogEntry::Control(ControlEntry::ChildVerificationReceiptLinked(
+            child_link.clone(),
+        )),
+        SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(trust_entry.clone())),
+    ];
+
+    let projection = VerificationStateProjection::from_entries(&entries);
+
+    assert_eq!(
+        projection.check_spec(&check_spec_entry.scope, "cargo-test"),
+        Some(&check_spec_entry)
+    );
+    assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
+    assert_eq!(projection.receipt(&receipt_id), Some(&recorded_entry));
+    assert_eq!(projection.latest_readiness(&scope), Some(&readiness_entry));
+    assert_eq!(projection.child_receipt_links, vec![child_link]);
+    assert_eq!(
+        projection.workspace_trust.get(&workspace_id),
+        Some(&trust_entry)
+    );
+    Ok(())
+}
+
+#[test]
+fn session_exposes_verification_state_projection() -> Result<()> {
+    let policy_entry = sample_verification_policy_changed_entry()?;
+    let scope = policy_entry.scope.clone();
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        policy_entry.clone(),
+    ))?;
+
+    let projection = session.verification_state_projection();
+
+    assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
     Ok(())
 }
 

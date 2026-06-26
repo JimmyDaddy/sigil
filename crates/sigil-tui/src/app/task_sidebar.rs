@@ -1,6 +1,8 @@
 use sigil_kernel::{
-    SessionLogEntry, TaskPlanProjection, TaskRunProjection, TaskRunStatus, TaskStateProjection,
-    TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskProjection,
+    EvidenceScope, ReadinessEvaluatedEntry, RequiredAction, SessionLogEntry, TaskPlanProjection,
+    TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepId, TaskStepSpec,
+    TaskStepStatus, TerminalTaskProjection, VerificationStateProjection, VerificationVerdict,
+    VisibleCompletionState,
 };
 
 use crate::ui::{StatusKind, status_symbol};
@@ -28,6 +30,7 @@ pub(crate) struct TaskStripRow {
 pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let terminal_lines = terminal_task_sidebar_lines(entries);
     let projection = TaskStateProjection::from_entries(entries);
+    let verification_projection = VerificationStateProjection::from_entries(entries);
     let Some(task) = projection.latest_task() else {
         return terminal_lines;
     };
@@ -52,14 +55,17 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
                 "progress: {completed_steps}/{} done",
                 plan.steps.len()
             ));
-            step_lines = task_sidebar_focus_lines(task, plan_version, plan);
+            step_lines =
+                task_sidebar_focus_lines(task, plan_version, plan, &verification_projection);
         }
     }
     if let Some((plan_version, step_id)) = &task.current_step {
+        let readiness =
+            task_step_readiness_by_id(task, *plan_version, step_id, &verification_projection);
         let status = task
             .steps
             .get(&(*plan_version, step_id.clone()))
-            .map(|step| task_step_status_label(step.status))
+            .map(|step| task_step_display_label(step.status, readiness))
             .unwrap_or("running");
         lines.push(format!(
             "current: v{plan_version}:{} {status}",
@@ -70,15 +76,35 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
             lines.push(format!(
                 "last: v{plan_version}:{} {}",
                 step_id.as_str(),
-                task_step_status_label(status)
+                task_step_display_label(
+                    status,
+                    task_step_readiness_by_id(
+                        task,
+                        plan_version,
+                        &step_id,
+                        &verification_projection,
+                    ),
+                )
             ));
         }
     } else if let Some((plan_version, step_id, status)) = task_sidebar_last_problem_step(task) {
         lines.push(format!(
             "last: v{plan_version}:{} {}",
             step_id.as_str(),
-            task_step_status_label(status)
+            task_step_display_label(
+                status,
+                task_step_readiness_by_id(task, plan_version, &step_id, &verification_projection,),
+            )
         ));
+    }
+    if let Some(readiness) = task_sidebar_focus_readiness(task, &verification_projection) {
+        lines.push(format!(
+            "verification: {}",
+            verification_verdict_label(readiness.evaluation.verification_verdict)
+        ));
+        for action in readiness.evaluation.required_actions.iter().take(2) {
+            lines.push(format!("action: {}", required_action_label(action)));
+        }
     }
     if let Some(reason) = task
         .reason
@@ -103,6 +129,7 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
 
 pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripView> {
     let projection = TaskStateProjection::from_entries(entries);
+    let verification_projection = VerificationStateProjection::from_entries(entries);
     let task = projection.latest_task()?;
     let mut rows = Vec::new();
     let mut detail = task_run_status_label(task.status).to_owned();
@@ -124,7 +151,13 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             task_run_status_label(task.status),
             plan.steps.len()
         );
-        rows = task_strip_step_rows(task, plan_version, plan);
+        if let Some(readiness) = task_sidebar_focus_readiness(task, &verification_projection) {
+            detail.push_str(" · ");
+            detail.push_str(verification_verdict_label(
+                readiness.evaluation.verification_verdict,
+            ));
+        }
+        rows = task_strip_step_rows(task, plan_version, plan, &verification_projection);
     }
 
     if rows.is_empty() {
@@ -180,6 +213,7 @@ fn task_sidebar_focus_lines(
     task: &TaskRunProjection,
     plan_version: u32,
     plan: &TaskPlanProjection,
+    verification_projection: &VerificationStateProjection,
 ) -> Vec<String> {
     let focus_index = task_sidebar_focus_step_index(task, plan_version, plan);
     let mut selected_indices: Vec<usize> =
@@ -197,11 +231,12 @@ fn task_sidebar_focus_lines(
         .map(|index| {
             let step = &plan.steps[*index];
             let status = task_sidebar_step_status(task, plan_version, step);
-            let marker = task_sidebar_step_marker(status);
+            let readiness = task_step_readiness(task, step, verification_projection);
+            let marker = task_sidebar_step_marker(status, readiness);
             format!(
                 "{marker} {}. {} {} · {}",
                 index + 1,
-                task_step_status_label(status),
+                task_step_display_label(status, readiness),
                 step.step_id.as_str(),
                 step.title
             )
@@ -219,6 +254,7 @@ fn task_strip_step_rows(
     task: &TaskRunProjection,
     plan_version: u32,
     plan: &TaskPlanProjection,
+    verification_projection: &VerificationStateProjection,
 ) -> Vec<TaskStripRow> {
     let focus_index = task_sidebar_focus_step_index(task, plan_version, plan);
     let mut selected_indices: Vec<usize> =
@@ -236,12 +272,18 @@ fn task_strip_step_rows(
         .map(|index| {
             let step = &plan.steps[*index];
             let status = task_sidebar_step_status(task, plan_version, step);
+            let readiness = task_step_readiness(task, step, verification_projection);
+            let label = if task_step_needs_user_verification(readiness) {
+                format!("{}. needs check · {}", index + 1, step.title)
+            } else {
+                format!("{}. {}", index + 1, step.title)
+            };
             TaskStripRow {
-                kind: task_step_status_kind(status),
-                label: format!("{}. {}", index + 1, step.title),
+                kind: task_step_status_kind(status, readiness),
+                label,
                 detail: format!(
                     "{} · {}",
-                    task_step_status_label(status),
+                    task_step_display_label(status, readiness),
                     step.step_id.as_str()
                 ),
                 active: focus_index == Some(*index),
@@ -305,11 +347,20 @@ fn task_sidebar_hidden_step_summary(
     parts.join(", ")
 }
 
-fn task_sidebar_step_marker(status: TaskStepStatus) -> &'static str {
-    status_symbol(task_step_status_kind(status))
+fn task_sidebar_step_marker(
+    status: TaskStepStatus,
+    readiness: Option<&ReadinessEvaluatedEntry>,
+) -> &'static str {
+    status_symbol(task_step_status_kind(status, readiness))
 }
 
-fn task_step_status_kind(status: TaskStepStatus) -> StatusKind {
+fn task_step_status_kind(
+    status: TaskStepStatus,
+    readiness: Option<&ReadinessEvaluatedEntry>,
+) -> StatusKind {
+    if task_step_needs_user_verification(readiness) {
+        return StatusKind::Warning;
+    }
     match status {
         TaskStepStatus::Pending => StatusKind::Pending,
         TaskStepStatus::Running => StatusKind::Running,
@@ -378,6 +429,40 @@ fn task_sidebar_step_status(
         .unwrap_or(TaskStepStatus::Pending)
 }
 
+fn task_step_readiness<'a>(
+    task: &TaskRunProjection,
+    step: &TaskStepSpec,
+    verification_projection: &'a VerificationStateProjection,
+) -> Option<&'a ReadinessEvaluatedEntry> {
+    let scope = EvidenceScope::Step(format!(
+        "{}:{}",
+        task.task_id.as_str(),
+        step.step_id.as_str()
+    ));
+    verification_projection.latest_readiness(&scope)
+}
+
+fn task_step_readiness_by_id<'a>(
+    task: &TaskRunProjection,
+    _plan_version: u32,
+    step_id: &TaskStepId,
+    verification_projection: &'a VerificationStateProjection,
+) -> Option<&'a ReadinessEvaluatedEntry> {
+    let scope = EvidenceScope::Step(format!("{}:{}", task.task_id.as_str(), step_id.as_str()));
+    verification_projection.latest_readiness(&scope)
+}
+
+fn task_sidebar_focus_readiness<'a>(
+    task: &TaskRunProjection,
+    verification_projection: &'a VerificationStateProjection,
+) -> Option<&'a ReadinessEvaluatedEntry> {
+    if let Some((_, step_id)) = &task.current_step {
+        return task_step_readiness_by_id(task, 0, step_id, verification_projection);
+    }
+    let (plan_version, step_id, _) = task_sidebar_last_problem_step(task)?;
+    task_step_readiness_by_id(task, plan_version, &step_id, verification_projection)
+}
+
 fn task_sidebar_last_plan_step(
     task: &TaskRunProjection,
 ) -> Option<(u32, TaskStepId, TaskStepStatus)> {
@@ -424,6 +509,16 @@ pub(super) fn task_run_status_label(status: TaskRunStatus) -> &'static str {
     }
 }
 
+fn task_step_display_label(
+    status: TaskStepStatus,
+    readiness: Option<&ReadinessEvaluatedEntry>,
+) -> &'static str {
+    if task_step_needs_user_verification(readiness) {
+        return "needs check";
+    }
+    task_step_status_label(status)
+}
+
 fn task_step_status_label(status: TaskStepStatus) -> &'static str {
     match status {
         TaskStepStatus::Pending => "pending",
@@ -433,6 +528,50 @@ fn task_step_status_label(status: TaskStepStatus) -> &'static str {
         TaskStepStatus::Blocked => "blocked",
         TaskStepStatus::Cancelled => "cancelled",
         TaskStepStatus::Interrupted => "interrupted",
+    }
+}
+
+fn task_step_needs_user_verification(readiness: Option<&ReadinessEvaluatedEntry>) -> bool {
+    readiness.is_some_and(|entry| {
+        entry.evaluation.visible_state == VisibleCompletionState::NeedsUser
+            || matches!(
+                entry.evaluation.verification_verdict,
+                VerificationVerdict::Missing
+                    | VerificationVerdict::Stale
+                    | VerificationVerdict::Inconclusive
+            )
+    })
+}
+
+fn verification_verdict_label(verdict: VerificationVerdict) -> &'static str {
+    match verdict {
+        VerificationVerdict::NotEvaluated => "not evaluated",
+        VerificationVerdict::NotApplicable => "not applicable",
+        VerificationVerdict::Pending => "pending",
+        VerificationVerdict::Passed => "passed",
+        VerificationVerdict::Failed => "failed",
+        VerificationVerdict::Missing => "missing",
+        VerificationVerdict::Inconclusive => "inconclusive",
+        VerificationVerdict::Stale => "stale",
+        VerificationVerdict::Skipped => "skipped",
+    }
+}
+
+fn required_action_label(action: &RequiredAction) -> String {
+    match action {
+        RequiredAction::RunCheck { check_spec_id } => format!("run_check {check_spec_id}"),
+        RequiredAction::ApproveCheckExecution { check_spec_id } => {
+            format!("approve_check {check_spec_id}")
+        }
+        RequiredAction::TrustWorkspace => "trust_workspace".to_owned(),
+        RequiredAction::ResolveUnknownDirty => "resolve_unknown_dirty".to_owned(),
+        RequiredAction::ReRunNonWritingCheck { check_spec_id } => {
+            format!("rerun_non_writing_check {check_spec_id}")
+        }
+        RequiredAction::ReviewVerificationFailure { receipt_id } => {
+            format!("review_verification_failure {receipt_id}")
+        }
+        RequiredAction::ProvideVerificationConfig => "provide_verification_config".to_owned(),
     }
 }
 
@@ -448,3 +587,7 @@ pub(super) fn task_child_session_status_label(
         sigil_kernel::TaskChildSessionStatus::Unavailable => "unavailable",
     }
 }
+
+#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[path = "tests/task_sidebar_tests.rs"]
+mod tests;

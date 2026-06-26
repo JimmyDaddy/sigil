@@ -587,10 +587,7 @@ description: Needs review.
 
     let result = registry
         .execute(
-            ToolContext {
-                workspace_root: workspace.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(workspace.path().to_path_buf(), 5),
             tool_call("call-load-1", r#"{"id":"repo-review"}"#),
         )
         .await
@@ -619,10 +616,7 @@ description: Needs review.
 
     let denied = registry
         .execute(
-            ToolContext {
-                workspace_root: workspace.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(workspace.path().to_path_buf(), 5),
             tool_call("call-load-2", r#"{"id":"manual-only"}"#),
         )
         .await
@@ -844,10 +838,7 @@ description: Needs review.
 
     let untrusted = registry
         .execute(
-            ToolContext {
-                workspace_root: workspace.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(workspace.path().to_path_buf(), 5),
             tool_call("call-load-untrusted", r#"{"id":"needs-review"}"#),
         )
         .await
@@ -897,10 +888,7 @@ trust: trusted
 
     let escaped_result = tool
         .execute(
-            ToolContext {
-                workspace_root: workspace.path().to_path_buf(),
-                timeout_secs: 5,
-            },
+            ToolContext::new(workspace.path().to_path_buf(), 5),
             "call-load-escape".to_owned(),
             serde_json::from_str(r#"{"id":"safe"}"#).expect("args should parse"),
         )
