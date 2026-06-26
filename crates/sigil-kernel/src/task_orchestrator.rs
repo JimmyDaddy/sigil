@@ -11,8 +11,9 @@ use crate::{
     MutationReconciled, MutationResolution, Provider, ReadinessEvaluatedEntry, ReadinessInput,
     RequiredAction, RunEvent, RunStatus, Session, SessionStreamRecord, ToolApproval, ToolCall,
     ToolErrorKind, ToolSpec, VerificationCheckRunRequest, VerificationPolicy, VerificationScope,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationEvidence,
-    WorkspaceTrust, build_workspace_snapshot_for_event, evaluate_readiness, run_verification_check,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationEvidence, WorkspaceTrust, build_workspace_snapshot_for_event,
+    evaluate_readiness, run_verification_check,
     session::ControlEntry,
     stable_workspace_id,
     task::{
@@ -1312,6 +1313,22 @@ fn durable_workspace_mutation_evidence(
                     })
                 }
                 Some(DurableEventType::WorkspaceMutationDetected) => {
+                    if let Ok(payload) =
+                        serde_json::from_value::<WorkspaceMutationDetected>(event.payload.clone())
+                    {
+                        return Some(WorkspaceMutationEvidence {
+                            event_id: event.event_id,
+                            source_event_type: DurableEventType::WorkspaceMutationDetected
+                                .as_str()
+                                .to_owned(),
+                            scope_hash: payload.scope_hash,
+                            recorded_at_stream_sequence: event.stream_sequence,
+                            from_workspace_snapshot_id: payload.from_workspace_snapshot_id,
+                            to_workspace_snapshot_id: payload.to_workspace_snapshot_id,
+                            tool_effect: payload.tool_effect,
+                            unknown_dirty: payload.unknown_dirty,
+                        });
+                    }
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id,
                         source_event_type: DurableEventType::WorkspaceMutationDetected

@@ -150,6 +150,7 @@ impl SessionStreamRecord {
 }
 
 pub const SESSION_ENTRY_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const VERIFICATION_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 
 /// One reducer-facing domain event plus the cursor position proving where it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -1532,6 +1533,26 @@ impl Session {
         VerificationStateProjection::from_entries(&self.entries)
     }
 
+    /// Rebuilds verification state directly from the durable mixed-format event stream.
+    ///
+    /// This is the RFC-0001 replay path for verification projection. It preserves the existing
+    /// infallible `verification_state_projection` API while giving callers and tests a fail-closed
+    /// durable replay option.
+    pub fn try_verification_state_projection_from_durable(
+        &self,
+    ) -> Result<Option<VerificationStateProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = VerificationStateProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_verification_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
+    }
+
     /// Returns a durable terminal task projection reconstructed from append-only control entries.
     pub fn terminal_task_projection(&self) -> TerminalTaskProjection {
         TerminalTaskProjection::from_entries(&self.entries)
@@ -1775,6 +1796,32 @@ impl Session {
         }
         repair_orphan_tool_results(&projected_messages_with_record(&raw_messages, &record))
     }
+}
+
+fn apply_verification_projection_record(
+    projection: &mut VerificationStateProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(VERIFICATION_STATE_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
 }
 
 fn compaction_summary_message(record: &CompactionRecord) -> ModelMessage {

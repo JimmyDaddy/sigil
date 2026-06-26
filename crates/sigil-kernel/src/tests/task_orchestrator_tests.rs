@@ -18,7 +18,8 @@ use crate::{
     TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunStatus,
     TaskStepId, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolApproval, ToolCall,
     ToolCategory, ToolContext, ToolEffect, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, VerificationVerdict, VisibleCompletionState, WorkspaceTrust,
+    ToolResultMeta, ToolSpec, VerificationVerdict, VisibleCompletionState,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceTrust,
     WorkspaceTrustDecisionEntry, write_file_with_mutation,
 };
 
@@ -3000,6 +3001,24 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
         EventClass::Critical,
         json!({ "source": "bash" }),
     )?;
+    let precise_detected = store.append_event(
+        DurableEventType::WorkspaceMutationDetected,
+        EventClass::Critical,
+        serde_json::to_value(WorkspaceMutationDetected {
+            operation_id: "op-detected".to_owned(),
+            tool_call_id: Some("call-bash".to_owned()),
+            tool_name: "bash".to_owned(),
+            tool_effect: ToolEffect::Unknown,
+            workspace_id: "workspace-1".to_owned(),
+            scope_hash: "scope-main".to_owned(),
+            from_workspace_snapshot_id: Some("snapshot-before".to_owned()),
+            to_workspace_snapshot_id: Some("snapshot-after".to_owned()),
+            base_workspace_revision: 3,
+            workspace_revision: 4,
+            reason: WorkspaceMutationDetectionReason::SnapshotChanged,
+            unknown_dirty: false,
+        })?,
+    )?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
 
     let evidence = durable_workspace_mutation_evidence(
@@ -3007,7 +3026,7 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
         &crate::VerificationScope::all_tracked("scope-main"),
     );
 
-    assert_eq!(evidence.len(), 3);
+    assert_eq!(evidence.len(), 4);
     assert_eq!(evidence[0].event_id, committed.event_id);
     assert_eq!(
         evidence[0].to_workspace_snapshot_id.as_deref(),
@@ -3020,6 +3039,16 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
     assert_eq!(evidence[2].event_id, detected.event_id);
     assert_eq!(evidence[2].source_event_type, "workspace_mutation_detected");
     assert!(evidence[2].unknown_dirty);
+    assert_eq!(evidence[3].event_id, precise_detected.event_id);
+    assert_eq!(
+        evidence[3].from_workspace_snapshot_id.as_deref(),
+        Some("snapshot-before")
+    );
+    assert_eq!(
+        evidence[3].to_workspace_snapshot_id.as_deref(),
+        Some("snapshot-after")
+    );
+    assert!(!evidence[3].unknown_dirty);
     Ok(())
 }
 

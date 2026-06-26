@@ -2265,6 +2265,11 @@ fn session_exposes_verification_state_projection() -> Result<()> {
     let policy_entry = sample_verification_policy_changed_entry()?;
     let scope = policy_entry.scope.clone();
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    assert!(
+        session
+            .try_verification_state_projection_from_durable()?
+            .is_none()
+    );
 
     session.append_control(ControlEntry::VerificationPolicyChanged(
         policy_entry.clone(),
@@ -2273,6 +2278,95 @@ fn session_exposes_verification_state_projection() -> Result<()> {
     let projection = session.verification_state_projection();
 
     assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
+    Ok(())
+}
+
+#[test]
+fn verification_state_projection_replays_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let check_spec_entry = sample_check_spec_recorded_entry();
+    let policy_entry = sample_verification_policy_changed_entry()?;
+    let recorded_entry = sample_verification_recorded_entry();
+    let readiness_entry = sample_readiness_evaluated_entry();
+    let scope = policy_entry.scope.clone();
+    let receipt_id = recorded_entry.receipt.receipt.receipt_id.clone();
+    for entry in [
+        SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(check_spec_entry.clone())),
+        SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(
+            policy_entry.clone(),
+        )),
+        SessionLogEntry::Control(ControlEntry::VerificationRecorded(recorded_entry.clone())),
+        SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness_entry.clone())),
+    ] {
+        store.append_session_entry_event(&entry)?;
+    }
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_verification_state_projection_from_durable()?
+        .expect("durable session should replay verification projection");
+
+    assert_eq!(
+        projection.check_spec(&check_spec_entry.scope, "cargo-test"),
+        Some(&check_spec_entry)
+    );
+    assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
+    assert_eq!(projection.receipt(&receipt_id), Some(&recorded_entry));
+    assert_eq!(projection.latest_readiness(&scope), Some(&readiness_entry));
+    Ok(())
+}
+
+#[test]
+fn verification_projection_record_helper_ignores_idempotent_replay() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let policy_entry = sample_verification_policy_changed_entry()?;
+    let scope = policy_entry.scope.clone();
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::VerificationPolicyChanged(policy_entry.clone()),
+    ))?;
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let record = records
+        .first()
+        .expect("one durable record should be present");
+    let mut projection = VerificationStateProjection::default();
+    let mut cursor = None;
+
+    super::apply_verification_projection_record(&mut projection, &mut cursor, record)?;
+    super::apply_verification_projection_record(&mut projection, &mut cursor, record)?;
+
+    assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
+    assert!(cursor.is_some());
+    assert_eq!(projection.policies.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn verification_projection_record_helper_fails_closed_on_sequence_gap() -> Result<()> {
+    let event = StoredEvent::new(
+        DurableEventType::VerificationPolicyChanged,
+        EventClass::Critical,
+        "event-2".to_owned(),
+        "session-gap".to_owned(),
+        2,
+        serde_json::json!({}),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+    let mut projection = VerificationStateProjection::default();
+    let mut cursor = Some(ProjectionCursor {
+        session_id: "session-gap".to_owned(),
+        projection_schema_version: super::VERIFICATION_STATE_PROJECTION_SCHEMA_VERSION,
+        last_applied_stream_sequence: 0,
+        last_applied_event_id: "event-0".to_owned(),
+        last_applied_record_checksum: "sha256:0".to_owned(),
+    });
+
+    let error = super::apply_verification_projection_record(&mut projection, &mut cursor, &record)
+        .expect_err("projection should fail closed on sequence gaps");
+
+    assert!(error.to_string().contains("projection sequence gap"));
+    assert!(projection.policies.is_empty());
     Ok(())
 }
 

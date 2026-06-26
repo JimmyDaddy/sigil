@@ -2599,7 +2599,7 @@ fn workspace_snapshot_builder_records_deleted_git_paths_as_missing() {
         build_workspace_snapshot(temp.path(), "workspace-1", &scope, 1).expect("snapshot builds");
 
     assert!(snapshot.manifest.entries.iter().any(|entry| {
-        entry.normalized_path == PathBuf::from("deleted.rs")
+        entry.normalized_path == Path::new("deleted.rs")
             && entry.file_type == FileType::File
             && entry.state == SnapshotEntryState::Missing
     }));

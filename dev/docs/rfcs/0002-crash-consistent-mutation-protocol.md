@@ -389,10 +389,11 @@ Required deterministic tests:
 - 已实现多文件 changeset batch id、per-file prepare/commit、batch started/finished 和 apply-stage failure 的 failed batch evidence。
 - 已实现 load/reconcile helper：prepared without terminal event 可按当前文件 hash 归类为 not applied、committed、conflict 或 unknown dirty。
 - 已将 committed/reconciled mutation evidence 接入 RFC-0003 readiness，受控写入会使旧 verification stale 或 missing。
+- 已实现 unknown mutation detection MVP：`ToolRegistry` 会对 shell/MCP/custom 类未知副作用工具做执行前后 verification-scope workspace snapshot，比对变化后追加 typed `WorkspaceMutationDetected`；`target/**` 等默认构建产物不会污染验证范围。
 
 剩余实现：
 
-- 实现 RFC-0002 unknown mutation detection：bash、persistent terminal、MCP、plugin 和外部进程执行前后 workspace snapshot，对未知或不可完整扫描范围产生 `WorkspaceMutationDetected` / `UnknownDirty`。
+- 扩展 unknown mutation detection：persistent terminal 的长进程写入、MCP/plugin 外部进程生命周期、进程崩溃后未终止执行 reconciliation 仍需补齐。
 - 将 write-capable `ToolExecutionStarted` 的 `ExecutionMutationProfile` 持久化，并在 load 时对未终止执行做 reconciliation。
 - 将 checkpoint restore 接入同一 prepare/commit/reconcile 协议，并追加 `CheckpointRestored`。
 - 完成通用 Artifact Store、sensitive snapshot 策略、retention / quota / deletion 审计；当前 snapshot coverage 只提供类型边界。

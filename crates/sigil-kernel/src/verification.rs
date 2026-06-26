@@ -2464,7 +2464,7 @@ impl VerificationStateProjection {
             let SessionLogEntry::Control(control) = entry else {
                 continue;
             };
-            projection.apply_control(control);
+            projection.apply_control_entry(control);
         }
         projection
     }
@@ -2505,7 +2505,7 @@ impl VerificationStateProjection {
         selected.into_values().collect()
     }
 
-    fn apply_control(&mut self, control: &ControlEntry) {
+    pub fn apply_control_entry(&mut self, control: &ControlEntry) {
         match control {
             ControlEntry::CheckSpecRecorded(entry) => {
                 self.check_specs.insert(
@@ -2535,6 +2535,10 @@ impl VerificationStateProjection {
             }
             _ => {}
         }
+    }
+
+    pub fn apply_control(&mut self, control: &ControlEntry) {
+        self.apply_control_entry(control);
     }
 }
 

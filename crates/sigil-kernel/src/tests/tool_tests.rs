@@ -1,14 +1,16 @@
-use std::sync::Arc;
+use std::{fs, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 
 use crate::{
-    ApprovalMode, MessageRole, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget,
+    ApprovalMode, DurableEventType, JsonlSessionStore, MessageRole, MutationEventRecorder,
+    SessionStreamRecord, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget,
     ToolDiffStats, ToolEgressAudit, ToolErrorKind, ToolPreview, ToolPreviewCapability,
     ToolPreviewFile, ToolPreviewSnapshot, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope, provider::ToolCall,
+    ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope, VerificationScope,
+    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationScan, provider::ToolCall,
 };
 
 #[test]
@@ -202,6 +204,75 @@ impl Tool for NamedRegistryTool {
     }
 }
 
+struct MutatingShellFixtureTool {
+    path: &'static str,
+    content: &'static str,
+}
+
+struct RemovingWorkspaceShellFixtureTool;
+
+#[async_trait]
+impl Tool for RemovingWorkspaceShellFixtureTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "fixture_shell_remove_workspace".to_owned(),
+            description: "fixture shell removes workspace".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        fs::remove_dir_all(&ctx.workspace_root)?;
+        Ok(ToolResult::ok(
+            call_id,
+            "fixture_shell_remove_workspace",
+            "removed",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for MutatingShellFixtureTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "fixture_shell".to_owned(),
+            description: "fixture shell".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        let path = ctx.workspace_root.join(self.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, self.content)?;
+        Ok(ToolResult::ok(
+            call_id,
+            "fixture_shell",
+            "done",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
 #[tokio::test]
 async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()> {
     let mut registry = ToolRegistry::new();
@@ -233,6 +304,149 @@ async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()
         Some(ToolEgressAudit { redacted: true, .. })
     ));
     Ok(())
+}
+
+#[tokio::test]
+async fn tool_registry_records_unknown_workspace_mutation_for_shell_tool() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MutatingShellFixtureTool {
+        path: "note.txt",
+        content: "new",
+    }));
+    let ctx = ToolContext::new(&workspace, 5).with_mutation_recorder(recorder);
+
+    let result = registry
+        .execute(
+            ctx,
+            ToolCall {
+                id: "call-shell".to_owned(),
+                name: "fixture_shell".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+
+    assert_eq!(result.content, "done");
+    let events = JsonlSessionStore::read_event_records(store.path())?;
+    let detected = events
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(detected.len(), 1);
+    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
+    assert_eq!(payload.tool_call_id.as_deref(), Some("call-shell"));
+    assert_eq!(payload.tool_name, "fixture_shell");
+    assert!(!payload.unknown_dirty);
+    assert!(payload.from_workspace_snapshot_id.is_some());
+    assert!(payload.to_workspace_snapshot_id.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_registry_reports_unknown_mutation_scan_start_failure() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let missing_workspace = temp.path().join("missing-workspace");
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(MutatingShellFixtureTool {
+        path: "note.txt",
+        content: "new",
+    }));
+    let ctx = ToolContext::new(&missing_workspace, 5).with_mutation_recorder(recorder);
+
+    let error = registry
+        .execute(
+            ctx,
+            ToolCall {
+                id: "call-shell".to_owned(),
+                name: "fixture_shell".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await
+        .expect_err("missing workspace should fail before shell execution");
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed to start workspace mutation detection for fixture_shell")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn tool_registry_reports_unknown_mutation_scan_finish_failure() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(RemovingWorkspaceShellFixtureTool));
+    let ctx = ToolContext::new(&workspace, 5).with_mutation_recorder(recorder);
+
+    let error = registry
+        .execute(
+            ctx,
+            ToolCall {
+                id: "call-shell".to_owned(),
+                name: "fixture_shell_remove_workspace".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await
+        .expect_err("removed workspace should fail after shell execution");
+
+    assert!(error.to_string().contains(
+        "failed to finish workspace mutation detection for fixture_shell_remove_workspace"
+    ));
+    Ok(())
+}
+
+#[test]
+fn unknown_mutation_finish_is_noop_without_recorder() -> Result<()> {
+    let ctx = ToolContext::new(std::env::temp_dir(), 5);
+    let spec = MutatingShellFixtureTool {
+        path: "note.txt",
+        content: "new",
+    }
+    .spec();
+    let scope = VerificationScope::all_tracked("scope-main");
+    let scan = WorkspaceMutationScan {
+        workspace_id: "workspace-1".to_owned(),
+        scope_hash: "scope-main".to_owned(),
+        scope,
+        workspace_revision: 0,
+        workspace_snapshot_id: Some("snapshot-1".to_owned()),
+        workspace_knowledge: WorkspaceKnowledge::Clean(0),
+    };
+
+    super::finish_unknown_mutation_scan(&ctx, &spec, "call-shell", Some(scan))?;
+    Ok(())
+}
+
+#[test]
+fn unknown_mutation_finish_error_includes_tool_name_and_source() {
+    let spec = RemovingWorkspaceShellFixtureTool.spec();
+    let error = super::unknown_mutation_scan_finish_error(&spec, anyhow::anyhow!("scan failed"));
+
+    assert!(error.to_string().contains(
+        "failed to finish workspace mutation detection for fixture_shell_remove_workspace"
+    ));
+    assert!(format!("{error:#}").contains("scan failed"));
 }
 
 #[test]

@@ -5,7 +5,9 @@ use anyhow::Result;
 use crate::{
     DurableEventType, EventClass, JsonlSessionStore, ModelMessage, MutationBatchStatus,
     MutationEventRecorder, MutationObservedState, MutationReconciled, MutationResolution,
-    MutationSubject, SessionLogEntry, SessionStreamRecord, bytes_hash, delete_file_with_mutation,
+    MutationSubject, SessionLogEntry, SessionStreamRecord, ToolEffect, VerificationScope,
+    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
+    WorkspaceMutationScan, bytes_hash, delete_file_with_mutation,
     delete_file_with_mutation_in_batch, file_content_hash, write_file_with_mutation,
     write_file_with_mutation_in_batch,
 };
@@ -529,5 +531,191 @@ fn reconciliation_marks_unexpected_disk_state_as_conflict() -> Result<()> {
         MutationObservedState::AppliedDifferently
     );
     assert_eq!(payload.resolution, MutationResolution::MarkConflict);
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_scan_records_changed_snapshot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "old")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = VerificationScope::all_tracked("scope-main");
+    let before = recorder.capture_workspace_scan(&workspace, &scope)?;
+
+    fs::write(workspace.join("note.txt"), "new")?;
+    let event = recorder
+        .record_workspace_mutation_if_changed(
+            &before,
+            &workspace,
+            "call-shell",
+            "bash",
+            ToolEffect::Unknown,
+        )?
+        .expect("changed workspace should record mutation");
+    let payload: WorkspaceMutationDetected = serde_json::from_value(event.payload)?;
+
+    assert_eq!(payload.tool_call_id.as_deref(), Some("call-shell"));
+    assert_eq!(payload.tool_name, "bash");
+    assert_eq!(payload.scope_hash, "scope-main");
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::SnapshotChanged
+    );
+    assert!(!payload.unknown_dirty);
+    assert!(payload.from_workspace_snapshot_id.is_some());
+    assert!(payload.to_workspace_snapshot_id.is_some());
+    assert_ne!(
+        payload.from_workspace_snapshot_id,
+        payload.to_workspace_snapshot_id
+    );
+    assert_eq!(payload.base_workspace_revision, 0);
+    assert_eq!(payload.workspace_revision, 1);
+
+    let post_detection = recorder.capture_workspace_scan(&workspace, &scope)?;
+    assert_eq!(post_detection.workspace_revision, 1);
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_scan_ignores_excluded_build_artifacts() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "same")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = VerificationScope::all_tracked("scope-main");
+    let before = recorder.capture_workspace_scan(&workspace, &scope)?;
+
+    fs::create_dir_all(workspace.join("target/debug"))?;
+    fs::write(workspace.join("target/debug/generated"), "artifact")?;
+    let event = recorder.record_workspace_mutation_if_changed(
+        &before,
+        &workspace,
+        "call-build",
+        "bash",
+        ToolEffect::Unknown,
+    )?;
+
+    assert!(event.is_none());
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_scan_records_incomplete_snapshot_as_unknown_dirty() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = VerificationScope::all_tracked("scope-main");
+    let before = WorkspaceMutationScan {
+        workspace_id: "workspace-1".to_owned(),
+        scope_hash: "scope-main".to_owned(),
+        scope: scope.clone(),
+        workspace_revision: 3,
+        workspace_snapshot_id: None,
+        workspace_knowledge: WorkspaceKnowledge::UnknownDirty,
+    };
+    let after = WorkspaceMutationScan {
+        workspace_id: "workspace-1".to_owned(),
+        scope_hash: "scope-main".to_owned(),
+        scope,
+        workspace_revision: 3,
+        workspace_snapshot_id: Some("snapshot-after".to_owned()),
+        workspace_knowledge: WorkspaceKnowledge::Clean(3),
+    };
+
+    let event = recorder
+        .record_workspace_mutation_scan_result(
+            &before,
+            &after,
+            "call-shell",
+            "bash",
+            ToolEffect::Unknown,
+        )?
+        .expect("incomplete snapshot should record unknown dirty");
+    let payload: WorkspaceMutationDetected = serde_json::from_value(event.payload)?;
+
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::SnapshotIncompleteBefore
+    );
+    assert!(payload.unknown_dirty);
+    assert_eq!(payload.workspace_revision, 4);
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_scan_records_after_incomplete_snapshot_as_unknown_dirty() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = VerificationScope::all_tracked("scope-main");
+    let before = WorkspaceMutationScan {
+        workspace_id: "workspace-1".to_owned(),
+        scope_hash: "scope-main".to_owned(),
+        scope: scope.clone(),
+        workspace_revision: 7,
+        workspace_snapshot_id: Some("snapshot-before".to_owned()),
+        workspace_knowledge: WorkspaceKnowledge::Clean(7),
+    };
+    let after = WorkspaceMutationScan {
+        workspace_id: "workspace-1".to_owned(),
+        scope_hash: "scope-main".to_owned(),
+        scope,
+        workspace_revision: 7,
+        workspace_snapshot_id: None,
+        workspace_knowledge: WorkspaceKnowledge::UnknownDirty,
+    };
+
+    let event = recorder
+        .record_workspace_mutation_scan_result(
+            &before,
+            &after,
+            "call-shell",
+            "bash",
+            ToolEffect::Unknown,
+        )?
+        .expect("after incomplete snapshot should record unknown dirty");
+    let payload: WorkspaceMutationDetected = serde_json::from_value(event.payload)?;
+
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::SnapshotIncompleteAfter
+    );
+    assert!(payload.unknown_dirty);
+    assert_eq!(payload.workspace_revision, 8);
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_scan_unavailable_records_unknown_dirty() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+
+    let event = recorder.record_workspace_scan_unavailable(
+        &workspace,
+        "call-shell",
+        "bash",
+        ToolEffect::Unknown,
+    )?;
+    let payload: WorkspaceMutationDetected = serde_json::from_value(event.payload)?;
+
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::ScanUnavailable
+    );
+    assert!(payload.unknown_dirty);
+    assert!(payload.from_workspace_snapshot_id.is_none());
+    assert!(payload.to_workspace_snapshot_id.is_none());
     Ok(())
 }

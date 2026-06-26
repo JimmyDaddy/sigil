@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
-    mutation::MutationEventRecorder,
+    mutation::{MutationEventRecorder, WorkspaceMutationScan},
     permission::{ApprovalMode, ToolOperation, infer_tool_operation},
     provider::ModelMessage,
     session::ControlEntry,
+    verification::{DEFAULT_TASK_VERIFICATION_SCOPE_HASH, ToolEffect, VerificationScope},
 };
 
 /// JSON-schema-backed tool contract exposed to model providers and UI approvals.
@@ -1169,16 +1170,28 @@ impl ToolRegistry {
         ctx: ToolContext,
         call: crate::provider::ToolCall,
     ) -> Result<ToolResult> {
-        let tool = {
+        let (tool, spec) = {
             let tools = match self.tools.read() {
                 Ok(tools) => tools,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            self.allowed_tool(&tools, &call.name)?
+            let tool = self.allowed_tool(&tools, &call.name)?;
+            let spec = tool.spec();
+            (tool, spec)
         };
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
-        tool.execute(ctx, call.id, args).await
+        let mutation_scan = begin_unknown_mutation_scan(&ctx, &spec).map_err(|error| {
+            anyhow!(
+                "failed to start workspace mutation detection for {}: {error:#}",
+                spec.name
+            )
+        })?;
+        let call_id = call.id;
+        let result = tool.execute(ctx.clone(), call_id.clone(), args).await;
+        finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
+            .map_err(|error| unknown_mutation_scan_finish_error(&spec, error))?;
+        result
     }
 
     /// Builds a preview for a tool call by name.
@@ -1418,6 +1431,63 @@ impl ScopedToolRegistry {
     ) -> Result<Option<ToolEgressAudit>> {
         self.inner.egress_audit(ctx, call)
     }
+}
+
+fn begin_unknown_mutation_scan(
+    ctx: &ToolContext,
+    spec: &ToolSpec,
+) -> Result<Option<WorkspaceMutationScan>> {
+    if !tool_requires_unknown_mutation_scan(spec) {
+        return Ok(None);
+    }
+    let Some(recorder) = &ctx.mutation_recorder else {
+        return Ok(None);
+    };
+    let scope = VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    recorder
+        .capture_workspace_scan(&ctx.workspace_root, &scope)
+        .map(Some)
+}
+
+fn finish_unknown_mutation_scan(
+    ctx: &ToolContext,
+    spec: &ToolSpec,
+    call_id: &str,
+    scan: Option<WorkspaceMutationScan>,
+) -> Result<()> {
+    let Some(scan) = scan else {
+        return Ok(());
+    };
+    let Some(recorder) = &ctx.mutation_recorder else {
+        return Ok(());
+    };
+    recorder.record_workspace_mutation_if_changed(
+        &scan,
+        &ctx.workspace_root,
+        call_id.to_owned(),
+        spec.name.clone(),
+        unknown_mutation_tool_effect(spec),
+    )?;
+    Ok(())
+}
+
+fn unknown_mutation_scan_finish_error(spec: &ToolSpec, error: anyhow::Error) -> anyhow::Error {
+    let message = format!(
+        "failed to finish workspace mutation detection for {}: {error:#}",
+        spec.name
+    );
+    anyhow!(message)
+}
+
+fn tool_requires_unknown_mutation_scan(spec: &ToolSpec) -> bool {
+    matches!(
+        spec.category,
+        ToolCategory::Shell | ToolCategory::Mcp | ToolCategory::Custom
+    )
+}
+
+fn unknown_mutation_tool_effect(_spec: &ToolSpec) -> ToolEffect {
+    ToolEffect::Unknown
 }
 
 #[cfg(test)]

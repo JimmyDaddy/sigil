@@ -17,9 +17,10 @@ use sha2::{Digest, Sha256};
 use crate::{
     DurableEventType, EventClass, EventId, JsonlSessionStore, StoredEvent, stable_event_uuid,
     verification::{
-        FileType, SnapshotEntryState, VerificationScopeHash, WorkspaceId, WorkspaceRevision,
-        WorkspaceSnapshotEntry, WorkspaceSnapshotId, WorkspaceSnapshotManifestV1,
-        stable_workspace_id,
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH, FileType, SnapshotEntryState, ToolEffect,
+        VerificationScope, VerificationScopeHash, WorkspaceId, WorkspaceKnowledge,
+        WorkspaceRevision, WorkspaceSnapshotBuild, WorkspaceSnapshotEntry, WorkspaceSnapshotId,
+        WorkspaceSnapshotManifestV1, build_workspace_snapshot, stable_workspace_id,
     },
 };
 
@@ -106,6 +107,50 @@ pub struct MutationReconciled {
     pub workspace_revision: Option<WorkspaceRevision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_snapshot_id: Option<WorkspaceSnapshotId>,
+}
+
+/// Workspace snapshot captured before or after a tool with unknown side effects.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceMutationScan {
+    pub workspace_id: WorkspaceId,
+    pub scope_hash: VerificationScopeHash,
+    pub scope: VerificationScope,
+    pub workspace_revision: WorkspaceRevision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_snapshot_id: Option<WorkspaceSnapshotId>,
+    pub workspace_knowledge: WorkspaceKnowledge,
+}
+
+/// Why an unknown-effect execution produced workspace mutation evidence.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMutationDetectionReason {
+    SnapshotChanged,
+    SnapshotIncompleteBefore,
+    SnapshotIncompleteAfter,
+    ScanUnavailable,
+}
+
+/// Durable event payload for workspace mutations detected outside controlled file tools.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct WorkspaceMutationDetected {
+    pub operation_id: OperationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallId>,
+    pub tool_name: String,
+    pub tool_effect: ToolEffect,
+    pub workspace_id: WorkspaceId,
+    pub scope_hash: VerificationScopeHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_workspace_snapshot_id: Option<WorkspaceSnapshotId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_workspace_snapshot_id: Option<WorkspaceSnapshotId>,
+    pub base_workspace_revision: WorkspaceRevision,
+    pub workspace_revision: WorkspaceRevision,
+    pub reason: WorkspaceMutationDetectionReason,
+    pub unknown_dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,6 +262,18 @@ impl MutationEventRecorder {
             EventClass::Critical,
             serde_json::to_value(payload)
                 .context("failed to encode mutation reconciled payload")?,
+        )
+    }
+
+    pub fn append_workspace_mutation_detected(
+        &self,
+        payload: &WorkspaceMutationDetected,
+    ) -> Result<StoredEvent> {
+        self.store.append_event(
+            DurableEventType::WorkspaceMutationDetected,
+            EventClass::Critical,
+            serde_json::to_value(payload)
+                .context("failed to encode workspace mutation detected payload")?,
         )
     }
 
@@ -403,6 +460,133 @@ impl MutationEventRecorder {
                 "failed_operations": failed_operations,
             }),
         )
+    }
+
+    /// Captures the verification-scope workspace state before or after an unknown-effect tool.
+    ///
+    /// The snapshot id is content-bound when every entry is complete. Incomplete coverage is
+    /// preserved as `WorkspaceKnowledge::UnknownDirty` so verification can fail closed.
+    pub fn capture_workspace_scan(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        scope: &VerificationScope,
+    ) -> Result<WorkspaceMutationScan> {
+        let workspace_root = workspace_root.as_ref();
+        let workspace_id = stable_workspace_id(workspace_root)?;
+        let workspace_revision = latest_workspace_revision(&self.store, &workspace_id)?;
+        let snapshot = build_workspace_snapshot(
+            workspace_root,
+            workspace_id.clone(),
+            scope,
+            workspace_revision,
+        )?;
+        Ok(workspace_scan_from_snapshot(
+            workspace_id,
+            scope.clone(),
+            workspace_revision,
+            snapshot,
+        ))
+    }
+
+    /// Records a workspace mutation if the after-snapshot differs from the before-snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the after snapshot cannot be captured or if the durable mutation event
+    /// cannot be appended.
+    pub fn record_workspace_mutation_if_changed(
+        &self,
+        before: &WorkspaceMutationScan,
+        workspace_root: impl AsRef<Path>,
+        tool_call_id: impl Into<ToolCallId>,
+        tool_name: impl Into<String>,
+        tool_effect: ToolEffect,
+    ) -> Result<Option<StoredEvent>> {
+        let after = self.capture_workspace_scan(workspace_root, &before.scope)?;
+        self.record_workspace_mutation_scan_result(
+            before,
+            &after,
+            tool_call_id,
+            tool_name,
+            tool_effect,
+        )
+    }
+
+    pub fn record_workspace_mutation_scan_result(
+        &self,
+        before: &WorkspaceMutationScan,
+        after: &WorkspaceMutationScan,
+        tool_call_id: impl Into<ToolCallId>,
+        tool_name: impl Into<String>,
+        tool_effect: ToolEffect,
+    ) -> Result<Option<StoredEvent>> {
+        let reason = workspace_mutation_detection_reason(before, after);
+        let Some(reason) = reason else {
+            return Ok(None);
+        };
+        let tool_call_id = tool_call_id.into();
+        let tool_name = tool_name.into();
+        let workspace_revision = latest_workspace_revision(&self.store, &before.workspace_id)?
+            .max(before.workspace_revision)
+            .saturating_add(1);
+        let payload = WorkspaceMutationDetected {
+            operation_id: workspace_detection_operation_id(
+                &before.workspace_id,
+                &tool_call_id,
+                before.workspace_snapshot_id.as_deref(),
+                after.workspace_snapshot_id.as_deref(),
+                reason,
+            ),
+            tool_call_id: Some(tool_call_id),
+            tool_name,
+            tool_effect,
+            workspace_id: before.workspace_id.clone(),
+            scope_hash: before.scope_hash.clone(),
+            from_workspace_snapshot_id: before.workspace_snapshot_id.clone(),
+            to_workspace_snapshot_id: after.workspace_snapshot_id.clone(),
+            base_workspace_revision: before.workspace_revision,
+            workspace_revision,
+            reason,
+            unknown_dirty: before.workspace_knowledge.is_unknown_dirty()
+                || after.workspace_knowledge.is_unknown_dirty(),
+        };
+        self.append_workspace_mutation_detected(&payload).map(Some)
+    }
+
+    /// Records an unknown-dirty mutation when scan coverage is unavailable.
+    pub fn record_workspace_scan_unavailable(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        tool_call_id: impl Into<ToolCallId>,
+        tool_name: impl Into<String>,
+        tool_effect: ToolEffect,
+    ) -> Result<StoredEvent> {
+        let workspace_root = workspace_root.as_ref();
+        let workspace_id = stable_workspace_id(workspace_root)?;
+        let workspace_revision = latest_workspace_revision(&self.store, &workspace_id)?;
+        let tool_call_id = tool_call_id.into();
+        let tool_name = tool_name.into();
+        let payload = WorkspaceMutationDetected {
+            operation_id: workspace_detection_operation_id(
+                &workspace_id,
+                &tool_call_id,
+                None,
+                None,
+                WorkspaceMutationDetectionReason::ScanUnavailable,
+            ),
+            tool_call_id: Some(tool_call_id),
+            tool_name,
+            tool_effect,
+            workspace_id,
+            scope_hash: DEFAULT_TASK_VERIFICATION_SCOPE_HASH.to_owned(),
+            from_workspace_snapshot_id: None,
+            to_workspace_snapshot_id: None,
+            base_workspace_revision: workspace_revision,
+            workspace_revision: workspace_revision.saturating_add(1),
+            reason: WorkspaceMutationDetectionReason::ScanUnavailable,
+            unknown_dirty: true,
+        };
+        self.append_workspace_mutation_detected(&payload)
     }
 }
 
@@ -755,6 +939,12 @@ fn latest_workspace_revision(
             && payload.workspace_id == workspace_id
         {
             latest = latest.max(payload.base_workspace_revision);
+        } else if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str()
+            && let Ok(payload) =
+                serde_json::from_value::<WorkspaceMutationDetected>(event.payload.clone())
+            && payload.workspace_id == workspace_id
+        {
+            latest = latest.max(payload.workspace_revision);
         }
     }
     Ok(latest)
@@ -811,6 +1001,51 @@ fn normalize_relative_path(path: PathBuf) -> Result<PathBuf> {
         );
     }
     Ok(path.components().collect())
+}
+
+fn workspace_scan_from_snapshot(
+    workspace_id: WorkspaceId,
+    scope: VerificationScope,
+    workspace_revision: WorkspaceRevision,
+    snapshot: WorkspaceSnapshotBuild,
+) -> WorkspaceMutationScan {
+    WorkspaceMutationScan {
+        workspace_id,
+        scope_hash: scope.scope_hash.clone(),
+        scope,
+        workspace_revision,
+        workspace_snapshot_id: snapshot.workspace_snapshot_id,
+        workspace_knowledge: snapshot.workspace_knowledge,
+    }
+}
+
+fn workspace_mutation_detection_reason(
+    before: &WorkspaceMutationScan,
+    after: &WorkspaceMutationScan,
+) -> Option<WorkspaceMutationDetectionReason> {
+    if before.workspace_knowledge.is_unknown_dirty() {
+        return Some(WorkspaceMutationDetectionReason::SnapshotIncompleteBefore);
+    }
+    if after.workspace_knowledge.is_unknown_dirty() {
+        return Some(WorkspaceMutationDetectionReason::SnapshotIncompleteAfter);
+    }
+    (before.workspace_snapshot_id != after.workspace_snapshot_id)
+        .then_some(WorkspaceMutationDetectionReason::SnapshotChanged)
+}
+
+fn workspace_detection_operation_id(
+    workspace_id: &str,
+    tool_call_id: &str,
+    before_snapshot_id: Option<&str>,
+    after_snapshot_id: Option<&str>,
+    reason: WorkspaceMutationDetectionReason,
+) -> OperationId {
+    stable_event_uuid(
+        "sigil-workspace-mutation-detected",
+        &format!(
+            "{workspace_id}:{tool_call_id}:{before_snapshot_id:?}:{after_snapshot_id:?}:{reason:?}"
+        ),
+    )
 }
 
 #[cfg(test)]

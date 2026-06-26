@@ -465,11 +465,12 @@ Required deterministic tests:
 - 已区分 durable、live runtime 和 protocol event 边界；流式 reasoning/text delta 不作为 durable 事实写入。
 - 已新增 `DomainEvent` / durable event type 解码和 reducer disposition 覆盖测试，kernel reducer 不直接消费任意字符串。
 - 已落地基础 projection cursor/idempotence 规则，并接入 session entry projection 的 replay / cursor 应用测试。
+- 已新增 verification projection 的 durable replay API：`Session` 可从 mixed-format event stream 直接重建 `VerificationStateProjection`，并应用 projection cursor/idempotence 规则；原有 entries-based API 保持兼容。
 - 已新增 `RunStatusChanged` / `RunFinalized` 基础 durable event，并在 agent terminal/max-turn 路径中记录。
 
 剩余实现：
 
-- 将更多真实 projection 从 durable replay 重建，包括 task status、agent graph、cost/token、verification summary 和 future SQLite projection。
+- 将更多真实 projection 从 durable replay 重建，包括 task status、agent graph、cost/token 和 future SQLite projection。
 - 为所有 durable event owner 补齐强类型 payload struct 与 upcaster，逐步减少泛型 JSON payload 的 reducer 接触面。
 - 将 projection cursor 规则接入未来持久 projection store 的事务边界。
 - 明确并测试各平台更强 sync policy 的落地细节，特别是 recovery-critical append 与目录 fsync。
