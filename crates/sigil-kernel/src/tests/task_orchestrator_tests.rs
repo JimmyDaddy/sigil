@@ -1,4 +1,5 @@
 use std::{
+    path::PathBuf,
     pin::Pin,
     sync::{Arc, Mutex},
 };
@@ -10,24 +11,30 @@ use serde_json::{Value, json};
 
 use crate::{
     Agent, AgentRunInput, AgentRunOptions, AutoApproveHandler, CandidateCheck, CheckCommand,
-    CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CompletionRequest, ControlEntry,
-    DurableEventType, EventClass, EvidenceScope, InteractionMode, JsonlSessionStore, MemoryConfig,
-    MessageRole, ModelMessage, PermissionConfig, Provider, ProviderCapabilities, ProviderChunk,
-    ReasoningEffort, ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator,
-    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunStatus,
-    TaskStepId, TaskStepSpec, TaskStepStatus, Tool, ToolAccess, ToolApproval, ToolCall,
-    ToolCategory, ToolContext, ToolEffect, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, VerificationVerdict, VisibleCompletionState,
+    CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CheckpointRestored,
+    CompletionRequest, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType,
+    EventClass, EvidenceScope, ExecutionMutationProfile, FileType, InteractionMode,
+    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
+    MutationPrepared, MutationSubject, MutationSyncClass, PermissionConfig, Provider,
+    ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RunEvent,
+    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
+    SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus, TaskId, TaskPlanEntry,
+    TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepSpec,
+    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolEffect,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
     WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceTrust,
     WorkspaceTrustDecisionEntry, write_file_with_mutation,
 };
 
 use super::{
-    StepRunOutput, child_status_from_output, durable_workspace_mutation_evidence, planner_prompt,
-    route_id_for_call, run_status_from_step_status, run_task_step_verification_checks,
-    step_status_after_readiness, step_status_from_outcome, step_terminal_reason,
-    task_status_from_step_status, task_step_readiness,
+    StepRunOutput, child_status_from_output, durable_workspace_mutation_evidence,
+    latest_relevant_successful_verification_sequence, planner_prompt,
+    relevant_verification_receipts, route_id_for_call, run_status_from_step_status,
+    run_task_step_verification_checks, step_status_after_readiness, step_status_from_outcome,
+    step_terminal_reason, task_status_from_step_status, task_step_default_policy,
+    task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -2233,6 +2240,206 @@ fn task_step_readiness_marks_changed_files_unverified() -> Result<()> {
 }
 
 #[test]
+fn task_step_readiness_uses_durable_mutation_without_changed_files() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "run shell that edits a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: Some("write note through shell".to_owned()),
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    std::fs::write(workspace.join("note.txt"), "old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    let recorder = MutationEventRecorder::new(store);
+    let scope = crate::VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    let scan = recorder.capture_workspace_scan(&workspace, &scope)?;
+    std::fs::write(workspace.join("note.txt"), "new\n")?;
+    recorder
+        .record_workspace_mutation_if_changed(
+            &scan,
+            &workspace,
+            "call-shell",
+            "bash",
+            ToolEffect::Unknown,
+        )?
+        .expect("changed workspace should produce durable mutation evidence");
+
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            tool_call_ids: vec!["call-shell".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+    let mut options = options();
+    options.workspace_root = workspace;
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert_eq!(
+        readiness.evaluation.visible_state,
+        VisibleCompletionState::CompletedUnverified
+    );
+    Ok(())
+}
+
+#[test]
+fn task_step_readiness_uses_post_task_mutation_from_prior_tool_call() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "cancel a terminal that already wrote a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_2")?,
+        title: "cancel".to_owned(),
+        display_name: None,
+        detail: Some("cancel terminal".to_owned()),
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    std::fs::write(workspace.join("note.txt"), "old\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: request.task_id.clone(),
+        parent_session_ref: request.parent_session_ref.clone(),
+        objective: request.objective.clone(),
+        status: TaskRunStatus::Started,
+        reason: None,
+    }))?;
+    let recorder = MutationEventRecorder::new(store);
+    let scope = crate::VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    let scan = recorder.capture_workspace_scan(&workspace, &scope)?;
+    std::fs::write(workspace.join("note.txt"), "terminal wrote\n")?;
+    recorder
+        .record_workspace_mutation_if_changed(
+            &scan,
+            &workspace,
+            "call-terminal-start",
+            "terminal_start",
+            ToolEffect::Unknown,
+        )?
+        .expect("terminal mutation should be recorded after task start");
+
+    let output = StepRunOutput {
+        final_text: "cancelled".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            tool_call_ids: vec!["call-terminal-cancel".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+    let mut options = options();
+    options.workspace_root = workspace;
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .contains(&crate::RequiredAction::ProvideVerificationConfig)
+    );
+    Ok(())
+}
+
+#[test]
+fn task_step_readiness_treats_durable_mutation_replay_failure_as_unknown_dirty() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "finish after corrupt durable stream".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: Some("durable replay failed".to_owned()),
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    std::fs::write(workspace.join("note.txt"), "unchanged\n")?;
+    let log_path = temp.path().join("state/session.jsonl");
+    std::fs::create_dir_all(log_path.parent().expect("state path should have parent"))?;
+    std::fs::write(&log_path, "{not-json}\n")?;
+    let store = JsonlSessionStore::new(&log_path)?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let output = StepRunOutput {
+        final_text: "done".to_owned(),
+        outcome: crate::AgentRunOutcome {
+            tool_call_ids: vec!["call-shell".to_owned()],
+            ..crate::AgentRunOutcome::default()
+        },
+    };
+    let mut options = options();
+    options.workspace_root = workspace;
+
+    let readiness = task_step_readiness(
+        &session,
+        &request,
+        &step,
+        TaskStepStatus::Completed,
+        &output,
+        &options,
+    )?;
+
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Inconclusive
+    );
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .contains(&crate::RequiredAction::ResolveUnknownDirty)
+    );
+    assert!(readiness.evaluation.reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            crate::ReadinessReason::WorkspaceUnknownDirty {
+                event_id: Some(event_id)
+            } if event_id == "task-step-durable-mutation-replay-failed:task_1:step_1"
+        )
+    }));
+    Ok(())
+}
+
+#[test]
 fn task_step_readiness_uses_recorded_check_specs_and_workspace_snapshot() -> Result<()> {
     let request = SequentialTaskRequest {
         task_id: TaskId::new("task_1")?,
@@ -2324,6 +2531,7 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace)?;
+    let workspace = std::fs::canonicalize(workspace)?;
     let note_path = workspace.join("note.txt");
     std::fs::write(&note_path, "old\n")?;
     let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
@@ -2366,6 +2574,22 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
             trusted,
             "event-config",
         ),
+    ))?;
+    let mut policy = crate::VerificationPolicy::no_checks_required("task_step_default");
+    policy.required_checks = session
+        .verification_state_projection()
+        .check_specs_for_scopes(&[EvidenceScope::Task("task_1".to_owned())])
+        .into_iter()
+        .map(|entry| entry.trusted_check.check_spec.clone())
+        .collect();
+    policy.completion_criteria = crate::CompletionCriteria::AllRequiredChecks;
+    policy.timeout_ms = Some(60_000);
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        crate::VerificationPolicyChangedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            policy,
+            "event-policy",
+        )?,
     ))?;
     let output = StepRunOutput {
         final_text: "done".to_owned(),
@@ -2414,7 +2638,44 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
         passed.evaluation.visible_state,
         VisibleCompletionState::Verified
     );
-    assert!(session.verification_state_projection().receipts.len() == 1);
+    let projection = session.verification_state_projection();
+    assert!(projection.receipts.len() == 1);
+    let check_run_entries = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::VerificationCheckRun(entry)) => Some(entry),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        check_run_entries
+            .iter()
+            .map(|entry| entry.status)
+            .collect::<Vec<_>>(),
+        vec![
+            crate::VerificationCheckRunStatus::Queued,
+            crate::VerificationCheckRunStatus::Running,
+            crate::VerificationCheckRunStatus::Succeeded,
+        ]
+    );
+    assert!(
+        check_run_entries
+            .iter()
+            .all(|entry| entry.timeout_ms == Some(60_000))
+    );
+    assert_eq!(projection.check_runs.len(), 1);
+    let latest_run = projection
+        .check_runs
+        .values()
+        .next()
+        .expect("check run should project latest state");
+    assert_eq!(
+        latest_run.status,
+        crate::VerificationCheckRunStatus::Succeeded
+    );
+    assert_eq!(latest_run.timeout_ms, Some(60_000));
+    assert!(latest_run.receipt_id.is_some());
     Ok(())
 }
 
@@ -2559,7 +2820,8 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
         &options,
         &failed_check,
     )?);
-    let receipts = session.verification_state_projection().receipts;
+    let projection = session.verification_state_projection();
+    let receipts = &projection.receipts;
     assert!(
         receipts
             .values()
@@ -2567,6 +2829,68 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
     );
     assert!(receipts.values().any(|entry| {
         entry.receipt.receipt.policy_hash.as_deref() == Some(expected_policy_hash.as_str())
+    }));
+    assert!(projection.check_runs.values().any(|entry| {
+        entry.status == crate::VerificationCheckRunStatus::Failed
+            && entry.check_spec_id == "always-fails"
+            && entry.receipt_id.is_some()
+    }));
+
+    let spawn_error = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["--version".to_owned()],
+            cwd: Some(PathBuf::from("missing-cwd")),
+        },
+        source_event_id: "event-config-spawn-error".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "spawn-error",
+        "task_step_default",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config-spawn-error".to_owned(),
+        },
+    )?;
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            spawn_error,
+            "event-config-spawn-error",
+        ),
+    ))?;
+    let spawn_error_readiness = crate::ReadinessEvaluatedEntry {
+        evaluation: crate::ReadinessEvaluation {
+            required_actions: vec![crate::RequiredAction::RunCheck {
+                check_spec_id: "spawn-error".to_owned(),
+            }],
+            ..no_action.evaluation.clone()
+        },
+        ..no_action
+    };
+    let spawn_error = run_task_step_verification_checks(
+        &mut session,
+        &mut handler,
+        &request,
+        &step,
+        &options,
+        &spawn_error_readiness,
+    )
+    .expect_err("spawn failure should keep the task blocked");
+    assert!(spawn_error.to_string().contains("failed to spawn"));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::VerificationCheckRun(run))
+                if run.check_spec_id == "spawn-error"
+                    && run.status == crate::VerificationCheckRunStatus::Errored
+                    && run
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("failed to spawn"))
+        )
     }));
     Ok(())
 }
@@ -2968,6 +3292,26 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
         format!("{}\n", serde_json::to_string(&legacy_entry)?),
     )?;
     let store = JsonlSessionStore::new(&log_path)?;
+    store.append_event(
+        DurableEventType::MutationPrepared,
+        EventClass::Critical,
+        serde_json::to_value(MutationPrepared {
+            operation_id: "op-commit".to_owned(),
+            batch_id: None,
+            tool_call_id: Some("call-file".to_owned()),
+            causation_event_id: "event-tool-started".to_owned(),
+            subject: MutationSubject::File {
+                path: "note.txt".into(),
+                file_type: FileType::File,
+            },
+            before_hash: None,
+            intended_after_hash: None,
+            snapshot_coverage: SnapshotCoverage::NoPriorContent,
+            workspace_id: "workspace-1".to_owned(),
+            base_workspace_revision: 1,
+            sync_class: MutationSyncClass::RecoveryCritical,
+        })?,
+    )?;
     let committed = store.append_event(
         DurableEventType::MutationCommitted,
         EventClass::Critical,
@@ -2984,6 +3328,26 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
                 }
             }
         }),
+    )?;
+    store.append_event(
+        DurableEventType::MutationPrepared,
+        EventClass::Critical,
+        serde_json::to_value(MutationPrepared {
+            operation_id: "op-reconcile".to_owned(),
+            batch_id: None,
+            tool_call_id: Some("call-file".to_owned()),
+            causation_event_id: "event-tool-started".to_owned(),
+            subject: MutationSubject::File {
+                path: "note.txt".into(),
+                file_type: FileType::File,
+            },
+            before_hash: None,
+            intended_after_hash: Some("sha256:intended".to_owned()),
+            snapshot_coverage: SnapshotCoverage::Captured("artifact-before".to_owned()),
+            workspace_id: "workspace-1".to_owned(),
+            base_workspace_revision: 2,
+            sync_class: MutationSyncClass::RecoveryCritical,
+        })?,
     )?;
     let reconciled = store.append_event(
         DurableEventType::MutationReconciled,
@@ -3019,14 +3383,54 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
             unknown_dirty: false,
         })?,
     )?;
+    let restored = store.append_event(
+        DurableEventType::CheckpointRestored,
+        EventClass::Critical,
+        serde_json::to_value(CheckpointRestored {
+            operation_id: "op-restore".to_owned(),
+            batch_id: None,
+            tool_call_id: Some("call-restore".to_owned()),
+            restored_subject: MutationSubject::File {
+                path: "note.txt".into(),
+                file_type: FileType::File,
+            },
+            restored_from: SnapshotCoverage::Captured("artifact-before".to_owned()),
+            mutation_committed_event_id: "event-restore-commit".to_owned(),
+            workspace_revision: 5,
+            workspace_snapshot_id: "snapshot-restored".to_owned(),
+        })?,
+    )?;
+    let child_merge = store.append_event(
+        DurableEventType::ChildChangesetMerged,
+        EventClass::Critical,
+        json!({
+            "changeset_id": "changeset-1",
+            "parent_workspace_snapshot_before_id": "snapshot-parent-before",
+            "parent_workspace_snapshot_after_id": "snapshot-parent-after",
+        }),
+    )?;
+    let agent_merge_unknown = store.append_event(
+        DurableEventType::AgentMergeApplied,
+        EventClass::Critical,
+        json!({
+            "agent_thread_id": "agent-1"
+        }),
+    )?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
 
     let evidence = durable_workspace_mutation_evidence(
         &session,
+        &TaskId::new("task_1")?,
         &crate::VerificationScope::all_tracked("scope-main"),
-    );
+        &[
+            "call-file".to_owned(),
+            "call-bash".to_owned(),
+            "call-restore".to_owned(),
+        ],
+        0,
+    )?;
 
-    assert_eq!(evidence.len(), 4);
+    assert_eq!(evidence.len(), 7);
     assert_eq!(evidence[0].event_id, committed.event_id);
     assert_eq!(
         evidence[0].to_workspace_snapshot_id.as_deref(),
@@ -3049,24 +3453,377 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
         Some("snapshot-after")
     );
     assert!(!evidence[3].unknown_dirty);
+    assert_eq!(evidence[4].event_id, restored.event_id);
+    assert_eq!(evidence[4].source_event_type, "checkpoint_restored");
+    assert_eq!(
+        evidence[4].to_workspace_snapshot_id.as_deref(),
+        Some("snapshot-restored")
+    );
+    assert!(!evidence[4].unknown_dirty);
+    assert_eq!(evidence[5].event_id, child_merge.event_id);
+    assert_eq!(evidence[5].source_event_type, "child_changeset_merged");
+    assert_eq!(
+        evidence[5].from_workspace_snapshot_id.as_deref(),
+        Some("snapshot-parent-before")
+    );
+    assert_eq!(
+        evidence[5].to_workspace_snapshot_id.as_deref(),
+        Some("snapshot-parent-after")
+    );
+    assert!(!evidence[5].unknown_dirty);
+    assert_eq!(evidence[6].event_id, agent_merge_unknown.event_id);
+    assert_eq!(evidence[6].source_event_type, "agent_merge_applied");
+    assert!(evidence[6].unknown_dirty);
     Ok(())
 }
 
 #[test]
-fn durable_workspace_mutation_evidence_fails_closed_to_empty_on_unreadable_stream() -> Result<()> {
+fn durable_workspace_mutation_evidence_marks_open_execution_unknown_dirty() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let log_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&log_path)?;
+    let profile = test_execution_profile("call-shell", "bash", "snapshot-before", 7);
+    let started = store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+            call_id: "call-shell".to_owned(),
+            tool_name: "bash".to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta {
+                details: json!({ "execution_mutation_profile": profile }),
+                ..Default::default()
+            },
+            error: None,
+            model_content_hash: None,
+        })),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let evidence = durable_workspace_mutation_evidence(
+        &session,
+        &TaskId::new("task_1")?,
+        &crate::VerificationScope::all_tracked("scope-main"),
+        &["call-shell".to_owned()],
+        0,
+    )?;
+
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].event_id, started.event_id);
+    assert_eq!(evidence[0].source_event_type, "running_tool_execution");
+    assert_eq!(
+        evidence[0].from_workspace_snapshot_id.as_deref(),
+        Some("snapshot-before")
+    );
+    assert!(evidence[0].unknown_dirty);
+    Ok(())
+}
+
+#[test]
+fn durable_workspace_mutation_evidence_marks_running_terminal_task_unknown_dirty() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let log_path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&log_path)?;
+    let profile = test_execution_profile("call-terminal", "terminal_start", "snapshot-before", 11);
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+        Box::new(ToolExecutionEntry {
+            call_id: "call-terminal".to_owned(),
+            tool_name: "terminal_start".to_owned(),
+            status: ToolExecutionStatus::Started,
+            duration_ms: None,
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta {
+                details: json!({ "execution_mutation_profile": profile }),
+                ..Default::default()
+            },
+            error: None,
+            model_content_hash: None,
+        }),
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::ToolExecution(
+        Box::new(ToolExecutionEntry {
+            call_id: "call-terminal".to_owned(),
+            tool_name: "terminal_start".to_owned(),
+            status: ToolExecutionStatus::Completed,
+            duration_ms: Some(1),
+            subjects: Vec::new(),
+            changed_files: Vec::new(),
+            metadata: ToolResultMeta {
+                details: json!({ "task_id": "terminal-1" }),
+                ..Default::default()
+            },
+            error: None,
+            model_content_hash: None,
+        }),
+    )))?;
+    let terminal_running =
+        terminal_task_entry(temp.path(), "terminal-1", TerminalTaskStatus::Running, 20)?;
+    let terminal_event = store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::TerminalTask(terminal_running),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone());
+
+    let evidence = durable_workspace_mutation_evidence(
+        &session,
+        &TaskId::new("task_1")?,
+        &crate::VerificationScope::all_tracked("scope-main"),
+        &["call-terminal".to_owned()],
+        0,
+    )?;
+
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].event_id, terminal_event.event_id);
+    assert_eq!(evidence[0].source_event_type, "running_terminal_task");
+    assert_eq!(
+        evidence[0].from_workspace_snapshot_id.as_deref(),
+        Some("snapshot-before")
+    );
+    assert!(evidence[0].unknown_dirty);
+
+    let terminal_exited = terminal_task_entry(
+        temp.path(),
+        "terminal-1",
+        TerminalTaskStatus::Exited { exit_code: Some(0) },
+        30,
+    )?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TerminalTask(
+        terminal_exited,
+    )))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let clean = durable_workspace_mutation_evidence(
+        &session,
+        &TaskId::new("task_1")?,
+        &crate::VerificationScope::all_tracked("scope-main"),
+        &["call-terminal".to_owned()],
+        0,
+    )?;
+
+    assert!(clean.is_empty());
+    Ok(())
+}
+
+#[test]
+fn latest_relevant_successful_verification_sequence_ignores_unrelated_receipts() -> Result<()> {
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "cargo-test",
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )?;
+    let policy = crate::VerificationPolicy {
+        required_checks: vec![trusted.check_spec.clone()],
+        completion_criteria: crate::CompletionCriteria::AllRequiredChecks,
+        verification_scope: crate::VerificationScope::all_tracked(
+            DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        ),
+        sandbox_profile: crate::SandboxProfileRequirement::None,
+        workspace_trust_requirement: crate::WorkspaceTrustRequirement::None,
+        allow_unverified_completion: false,
+        timeout_ms: None,
+    };
+    let policy_hash = policy.stable_hash()?;
+    let relevant_scope = EvidenceScope::Task("task_1".to_owned());
+    let unrelated_scope = EvidenceScope::Task("task_other".to_owned());
+    let mut projection = crate::VerificationStateProjection::default();
+    projection.receipts.insert(
+        "receipt-unrelated".to_owned(),
+        crate::VerificationRecordedEntry {
+            receipt: task_test_verification_receipt(
+                &trusted.check_spec,
+                unrelated_scope,
+                Some(policy_hash.clone()),
+                90,
+            ),
+        },
+    );
+    projection.receipts.insert(
+        "receipt-wrong-policy".to_owned(),
+        crate::VerificationRecordedEntry {
+            receipt: task_test_verification_receipt(
+                &trusted.check_spec,
+                relevant_scope.clone(),
+                Some("other-policy".to_owned()),
+                95,
+            ),
+        },
+    );
+    projection.receipts.insert(
+        "receipt-relevant".to_owned(),
+        crate::VerificationRecordedEntry {
+            receipt: task_test_verification_receipt(
+                &trusted.check_spec,
+                relevant_scope.clone(),
+                Some(policy_hash.clone()),
+                42,
+            ),
+        },
+    );
+
+    let sequence = latest_relevant_successful_verification_sequence(
+        &projection,
+        std::slice::from_ref(&relevant_scope),
+        &policy,
+        &policy_hash,
+    );
+
+    assert_eq!(sequence, 42);
+    let receipts =
+        relevant_verification_receipts(&projection, &[relevant_scope], &policy, &policy_hash);
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].receipt.recorded_at_stream_sequence, 42);
+    Ok(())
+}
+
+#[test]
+fn task_step_default_policy_preserves_repo_check_trust_requirement() -> Result<()> {
+    let trusted = CandidateCheck {
+        source: CheckDiscoverySource::Cargo,
+        command: CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-discovery".to_owned(),
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+    }
+    .promote(
+        "cargo-test",
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+        ToolEffect::ReadOnly,
+        CheckPromotion::WorkspaceTrusted {
+            trust_event_id: "event-trust".to_owned(),
+        },
+    )?;
+    let mut session = Session::new("planner", "model");
+    let task_scope = EvidenceScope::Task("task_1".to_owned());
+    let step_scope = EvidenceScope::Step("task_1:step_1".to_owned());
+    session.append_control(ControlEntry::CheckSpecRecorded(
+        CheckSpecRecordedEntry::new(task_scope.clone(), trusted, "event-discovery"),
+    ))?;
+    let projection = session.verification_state_projection();
+
+    let policy = task_step_default_policy(&projection, &step_scope, &task_scope);
+
+    assert_eq!(
+        policy.workspace_trust_requirement,
+        crate::WorkspaceTrustRequirement::Trusted
+    );
+    Ok(())
+}
+
+fn task_test_verification_receipt(
+    check: &crate::CheckSpec,
+    scope: EvidenceScope,
+    policy_hash: Option<String>,
+    sequence: u64,
+) -> crate::VerificationReceipt {
+    crate::VerificationReceipt {
+        receipt: crate::EvidenceReceipt {
+            receipt_id: format!("receipt-{sequence}"),
+            source_session_id: "session-1".to_owned(),
+            source_event_id: format!("event-{sequence}"),
+            source_event_type: DurableEventType::CheckFinished.as_str().to_owned(),
+            scope,
+            producer_tool_call: None,
+            workspace_revision: Some(sequence),
+            workspace_snapshot_id: Some("snapshot-current".to_owned()),
+            policy_hash,
+            changeset_id: None,
+            status: crate::ReceiptStatus::Succeeded,
+            artifact_refs: Vec::new(),
+            redaction_state: crate::RedactionState::None,
+            recorded_at_stream_sequence: sequence,
+        },
+        binding: crate::VerificationBinding {
+            workspace_id: "workspace-1".to_owned(),
+            workspace_snapshot_id: "snapshot-current".to_owned(),
+            verification_scope_hash: DEFAULT_TASK_VERIFICATION_SCOPE_HASH.to_owned(),
+            check_spec_hash: check.check_spec_hash.clone(),
+            environment_fingerprint: "env".to_owned(),
+            sandbox_profile_hash: "sandbox".to_owned(),
+            workspace_trust_snapshot_id: "trust".to_owned(),
+            approval_event_id: None,
+            sandbox_decision_id: None,
+        },
+        check_spec_id: check.check_spec_id.clone(),
+        check_status: crate::ReceiptStatus::Succeeded,
+        failure_reason: None,
+        mutates_verification_scope: false,
+    }
+}
+
+fn test_execution_profile(
+    call_id: &str,
+    tool_name: &str,
+    snapshot_id: &str,
+    workspace_revision: u64,
+) -> ExecutionMutationProfile {
+    ExecutionMutationProfile {
+        tool_call_id: call_id.to_owned(),
+        tool_name: tool_name.to_owned(),
+        effect: ToolEffect::Unknown,
+        workspace_id: "workspace-1".to_owned(),
+        scan_scope_hash: "scope-main".to_owned(),
+        pre_execution_snapshot_id: Some(snapshot_id.to_owned()),
+        pre_execution_workspace_revision: workspace_revision,
+        workspace_knowledge: WorkspaceKnowledge::Clean(workspace_revision),
+    }
+}
+
+fn terminal_task_entry(
+    root: &std::path::Path,
+    task_id: &str,
+    status: TerminalTaskStatus,
+    updated_at_ms: u64,
+) -> Result<TerminalTaskEntry> {
+    Ok(TerminalTaskEntry {
+        handle: TerminalTaskHandle {
+            task_id: TerminalTaskId::new(task_id)?,
+            command: "sleep 60".to_owned(),
+            cwd: root.to_path_buf(),
+            shell: "zsh".to_owned(),
+            log_path: root.join(format!("{task_id}.log")),
+            created_at_ms: 1,
+        },
+        status,
+        output_preview: None,
+        output_hash: None,
+        output_truncated: false,
+        updated_at_ms,
+    })
+}
+
+#[test]
+fn durable_workspace_mutation_evidence_errors_on_unreadable_stream() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let log_path = temp.path().join("session.jsonl");
     std::fs::write(&log_path, "{not-json}\n")?;
     let store = JsonlSessionStore::new(&log_path)?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
 
-    assert!(
-        durable_workspace_mutation_evidence(
-            &session,
-            &crate::VerificationScope::all_tracked("scope-main"),
-        )
-        .is_empty()
-    );
+    let error = durable_workspace_mutation_evidence(
+        &session,
+        &TaskId::new("task_1")?,
+        &crate::VerificationScope::all_tracked("scope-main"),
+        &["call-shell".to_owned()],
+        0,
+    )
+    .expect_err("corrupt durable stream should not be treated as empty evidence");
+    assert!(error.to_string().contains("failed to parse"));
     Ok(())
 }
 

@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::{
+    mutation::MutationArtifactRetentionPolicy,
     permission::{ApprovalMode, PermissionConfig},
     provider::ReasoningEffort,
     task::AgentRole,
@@ -689,6 +690,8 @@ pub struct StorageConfig {
     pub cache_root: StorageRoot,
     #[serde(default = "default_project_assets_root")]
     pub project_assets_root: String,
+    #[serde(default)]
+    pub mutation_artifact_retention: MutationArtifactRetentionConfig,
 }
 
 impl Default for StorageConfig {
@@ -697,8 +700,61 @@ impl Default for StorageConfig {
             state_root: StorageRoot::Auto,
             cache_root: StorageRoot::Auto,
             project_assets_root: default_project_assets_root(),
+            mutation_artifact_retention: MutationArtifactRetentionConfig::default(),
         }
     }
+}
+
+pub const DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS: usize = 10_000;
+pub const DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_BYTES: u64 = 512 * 1024 * 1024;
+pub const DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// User-visible retention policy for controlled mutation artifacts.
+///
+/// This config describes the policy used by explicit maintenance paths. It does not make normal
+/// agent runs delete artifacts implicitly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct MutationArtifactRetentionConfig {
+    #[serde(default = "default_mutation_artifact_retention_max_artifacts")]
+    pub max_artifacts: Option<usize>,
+    #[serde(default = "default_mutation_artifact_retention_max_bytes")]
+    pub max_bytes: Option<u64>,
+    #[serde(default = "default_mutation_artifact_retention_expire_older_than_ms")]
+    pub expire_older_than_ms: Option<u64>,
+}
+
+impl Default for MutationArtifactRetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_artifacts: default_mutation_artifact_retention_max_artifacts(),
+            max_bytes: default_mutation_artifact_retention_max_bytes(),
+            expire_older_than_ms: default_mutation_artifact_retention_expire_older_than_ms(),
+        }
+    }
+}
+
+impl MutationArtifactRetentionConfig {
+    #[must_use]
+    pub fn to_policy(&self) -> MutationArtifactRetentionPolicy {
+        MutationArtifactRetentionPolicy {
+            max_artifacts: self.max_artifacts,
+            max_bytes: self.max_bytes,
+            expire_older_than_ms: self.expire_older_than_ms,
+        }
+    }
+}
+
+fn default_mutation_artifact_retention_max_artifacts() -> Option<usize> {
+    Some(DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS)
+}
+
+fn default_mutation_artifact_retention_max_bytes() -> Option<u64> {
+    Some(DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_BYTES)
+}
+
+fn default_mutation_artifact_retention_expire_older_than_ms() -> Option<u64> {
+    Some(DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS)
 }
 
 /// Storage root selector.

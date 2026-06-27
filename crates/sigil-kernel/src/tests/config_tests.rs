@@ -8,8 +8,8 @@ use super::{
     resolve_workspace_root, user_home_dir_from_env,
 };
 use crate::{
-    AgentConfig, AgentRole, ApprovalMode, SkillConfig, StorageRoot, TaskConfig, TaskMode,
-    WorkspaceConfig,
+    AgentConfig, AgentRole, ApprovalMode, SkillConfig, StorageConfig, StorageRoot, TaskConfig,
+    TaskMode, WorkspaceConfig,
 };
 
 #[test]
@@ -106,6 +106,56 @@ fn storage_root_toml_parses_auto_paths_and_rejects_empty_values() {
         error
             .to_string()
             .contains("storage root path cannot be empty")
+    );
+}
+
+#[test]
+fn storage_mutation_artifact_retention_has_user_visible_defaults_and_overrides() {
+    let config = StorageConfig::default();
+    assert_eq!(
+        config.mutation_artifact_retention.max_artifacts,
+        Some(crate::DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_ARTIFACTS)
+    );
+    assert_eq!(
+        config.mutation_artifact_retention.max_bytes,
+        Some(crate::DEFAULT_MUTATION_ARTIFACT_RETENTION_MAX_BYTES)
+    );
+    assert_eq!(
+        config.mutation_artifact_retention.expire_older_than_ms,
+        Some(crate::DEFAULT_MUTATION_ARTIFACT_RETENTION_EXPIRE_OLDER_THAN_MS)
+    );
+    let policy = config.mutation_artifact_retention.to_policy();
+    assert_eq!(
+        policy.max_artifacts,
+        config.mutation_artifact_retention.max_artifacts
+    );
+    assert_eq!(
+        policy.max_bytes,
+        config.mutation_artifact_retention.max_bytes
+    );
+    assert_eq!(
+        policy.expire_older_than_ms,
+        config.mutation_artifact_retention.expire_older_than_ms
+    );
+
+    let parsed: StorageConfig = toml::from_str(
+        r#"
+[mutation_artifact_retention]
+max_artifacts = 42
+max_bytes = 1048576
+expire_older_than_ms = 60000
+"#,
+    )
+    .expect("storage retention config should parse");
+
+    assert_eq!(parsed.mutation_artifact_retention.max_artifacts, Some(42));
+    assert_eq!(
+        parsed.mutation_artifact_retention.max_bytes,
+        Some(1_048_576)
+    );
+    assert_eq!(
+        parsed.mutation_artifact_retention.expire_older_than_ms,
+        Some(60_000)
     );
 }
 

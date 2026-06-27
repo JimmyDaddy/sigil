@@ -6,11 +6,12 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentRole, AgentRunOptions, ApprovalMode, InteractionMode, McpServerConfig, McpServerStartup,
-    PermissionEvaluationContext, Provider, ProviderCapabilities, ReasoningEffort, RoleModelConfig,
-    RootConfig, ScopedToolRegistry, SecretRedactor, SkillDescriptor, Tool, ToolAccess,
-    ToolAllowlistConfig, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
-    ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectKind, ToolSubjectScope, default_user_config_dir,
+    MutationEventRecorder, PermissionEvaluationContext, Provider, ProviderCapabilities,
+    ReasoningEffort, RoleModelConfig, RootConfig, ScopedToolRegistry, SecretRedactor,
+    SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
+    default_user_config_dir,
 };
 pub use sigil_mcp::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
@@ -522,6 +523,34 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers(
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
 ) -> Result<LazyMcpActivationResult> {
+    activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        elicitation_handler,
+        runtime_event_handler,
+        None,
+    )
+    .await
+}
+
+/// Activates lazy MCP servers while recording conservative external-process mutation evidence.
+///
+/// # Errors
+///
+/// Returns an error when a required lazy MCP server cannot be started, initialized, or queried.
+pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: Option<&str>,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+) -> Result<LazyMcpActivationResult> {
     let servers = root_config
         .mcp_servers
         .iter()
@@ -537,18 +566,18 @@ pub async fn activate_lazy_mcp_tools_detailed_with_mcp_handlers(
     }
 
     let before = registry.specs().len();
-    sigil_mcp::register_mcp_tools_with_options(
-        registry,
-        &servers,
-        sigil_mcp::McpToolRegistrationOptions::lazy()?
-            .with_capabilities(provider_capabilities)
-            .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
-            .with_working_dir(workspace_root.clone())
-            .with_secret_redactor(secret_redactor_for_root_config(root_config))
-            .with_elicitation_handler(elicitation_handler)
-            .with_runtime_event_handler(runtime_event_handler),
-    )
-    .await?;
+    let mut registration_options = sigil_mcp::McpToolRegistrationOptions::lazy()?
+        .with_capabilities(provider_capabilities)
+        .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
+        .with_working_dir(workspace_root.clone())
+        .with_secret_redactor(secret_redactor_for_root_config(root_config))
+        .with_elicitation_handler(elicitation_handler)
+        .with_runtime_event_handler(runtime_event_handler);
+    if let Some(recorder) = mutation_recorder {
+        registration_options =
+            registration_options.with_mutation_recorder(workspace_root.clone(), recorder);
+    }
+    sigil_mcp::register_mcp_tools_with_options(registry, &servers, registration_options).await?;
     Ok(LazyMcpActivationResult {
         matched_servers: servers.len(),
         added_tools: registry.specs().len().saturating_sub(before),
@@ -609,6 +638,34 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers(
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
 ) -> Result<McpRefreshResult> {
+    refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
+        registry,
+        root_config,
+        provider_capabilities,
+        workspace_root,
+        server_name,
+        elicitation_handler,
+        runtime_event_handler,
+        None,
+    )
+    .await
+}
+
+/// Refreshes one MCP server while recording conservative external-process mutation evidence.
+///
+/// # Errors
+///
+/// Returns an error when a required MCP server cannot be restarted, initialized, or queried.
+pub async fn refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
+    registry: &mut ToolRegistry,
+    root_config: &RootConfig,
+    provider_capabilities: &ProviderCapabilities,
+    workspace_root: PathBuf,
+    server_name: &str,
+    elicitation_handler: Arc<dyn McpElicitationHandler>,
+    runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
+) -> Result<McpRefreshResult> {
     let servers = root_config
         .mcp_servers
         .iter()
@@ -627,18 +684,20 @@ pub async fn refresh_mcp_server_tools_with_mcp_handlers(
     let removed = registry.drain_by_name_prefix(&prefix);
     let removed_tools = removed.len();
     let before = registry.specs().len();
-    if let Err(error) = sigil_mcp::register_mcp_tools_with_options(
-        registry,
-        &servers,
+    let mut registration_options =
         sigil_mcp::McpToolRegistrationOptions::for_startup(server.startup)?
             .with_capabilities(provider_capabilities)
             .with_roots(vec![canonical_workspace_root(workspace_root.clone())])
             .with_working_dir(workspace_root.clone())
             .with_secret_redactor(secret_redactor_for_root_config(root_config))
             .with_elicitation_handler(elicitation_handler)
-            .with_runtime_event_handler(runtime_event_handler),
-    )
-    .await
+            .with_runtime_event_handler(runtime_event_handler);
+    if let Some(recorder) = mutation_recorder {
+        registration_options =
+            registration_options.with_mutation_recorder(workspace_root.clone(), recorder);
+    }
+    if let Err(error) =
+        sigil_mcp::register_mcp_tools_with_options(registry, &servers, registration_options).await
     {
         for tool in removed {
             registry.register(tool);
@@ -752,7 +811,7 @@ impl Tool for McpActivateServerTool {
         }))
     }
 
-    async fn execute(&self, _ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
+    async fn execute(&self, ctx: ToolContext, call_id: String, args: Value) -> Result<ToolResult> {
         let server_name = required_server_name(&args)?;
         if self.lazy_server(server_name).is_none() {
             return Ok(ToolResult::error(
@@ -773,7 +832,7 @@ impl Tool for McpActivateServerTool {
         }
 
         let mut registry = self.registry.clone();
-        let result = activate_lazy_mcp_tools_detailed_with_mcp_handlers(
+        let result = activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder(
             &mut registry,
             &self.root_config,
             &self.provider_capabilities,
@@ -781,6 +840,7 @@ impl Tool for McpActivateServerTool {
             Some(server_name),
             Arc::clone(&self.elicitation_handler),
             Arc::clone(&self.runtime_event_handler),
+            ctx.mutation_recorder.clone(),
         )
         .await?;
         Ok(activation_result(

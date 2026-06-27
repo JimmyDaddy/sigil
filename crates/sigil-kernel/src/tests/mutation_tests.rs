@@ -1,14 +1,21 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 
 use crate::{
-    DurableEventType, EventClass, JsonlSessionStore, ModelMessage, MutationBatchStatus,
-    MutationEventRecorder, MutationObservedState, MutationReconciled, MutationResolution,
-    MutationSubject, SessionLogEntry, SessionStreamRecord, ToolEffect, VerificationScope,
-    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
-    WorkspaceMutationScan, bytes_hash, delete_file_with_mutation,
-    delete_file_with_mutation_in_batch, file_content_hash, write_file_with_mutation,
+    CheckpointRestored, DurableEventType, EventClass, JsonlSessionStore, ModelMessage,
+    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
+    MutationArtifactRetentionPolicy, MutationBatchStatus, MutationEventRecorder,
+    MutationObservedState, MutationPrepared, MutationReconciled, MutationResolution,
+    MutationSubject, SessionLogEntry, SessionStreamRecord, SnapshotCoverage, ToolEffect,
+    VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceMutationScan, bytes_hash,
+    create_directory_with_mutation, delete_directory_with_mutation, delete_file_with_mutation,
+    delete_file_with_mutation_in_batch, file_content_hash,
+    restore_file_from_snapshot_with_mutation, write_file_with_mutation,
     write_file_with_mutation_in_batch,
 };
 
@@ -20,6 +27,113 @@ fn stored_event_types(store: &JsonlSessionStore) -> Result<Vec<String>> {
         }
     }
     Ok(event_types)
+}
+
+fn artifact_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    if !root.exists() {
+        return Ok(files);
+    }
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        for entry in fs::read_dir(&path)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn first_prepared_payload(store: &JsonlSessionStore) -> Result<MutationPrepared> {
+    for record in JsonlSessionStore::read_event_records(store.path())? {
+        if let SessionStreamRecord::Stored(event) = record
+            && event.event_type == DurableEventType::MutationPrepared.as_str()
+        {
+            return serde_json::from_value(event.payload)
+                .map_err(|error| anyhow::anyhow!("failed to decode mutation prepared: {error}"));
+        }
+    }
+    anyhow::bail!("missing mutation prepared event")
+}
+
+fn checkpoint_restored_payloads(store: &JsonlSessionStore) -> Result<Vec<CheckpointRestored>> {
+    let mut payloads = Vec::new();
+    for record in JsonlSessionStore::read_event_records(store.path())? {
+        if let SessionStreamRecord::Stored(event) = record
+            && event.event_type == DurableEventType::CheckpointRestored.as_str()
+        {
+            payloads.push(serde_json::from_value(event.payload)?);
+        }
+    }
+    Ok(payloads)
+}
+
+fn artifact_lifecycle_payloads(
+    store: &JsonlSessionStore,
+) -> Result<Vec<MutationArtifactLifecycleRecorded>> {
+    let mut payloads = Vec::new();
+    for record in JsonlSessionStore::read_event_records(store.path())? {
+        if let SessionStreamRecord::Stored(event) = record
+            && event.event_type == DurableEventType::MutationArtifactLifecycleRecorded.as_str()
+        {
+            payloads.push(serde_json::from_value(event.payload)?);
+        }
+    }
+    Ok(payloads)
+}
+
+fn captured_artifact_id(
+    recorder: &MutationEventRecorder,
+    workspace: &Path,
+    file_name: &str,
+    old_content: &str,
+    new_content: &str,
+) -> Result<String> {
+    let target = workspace.join(file_name);
+    fs::write(&target, old_content)?;
+    let prepared = recorder
+        .coordinator(workspace, file_name, None)?
+        .prepare_file(file_name, &target, Some(bytes_hash(new_content.as_bytes())))?;
+    for record in JsonlSessionStore::read_event_records(recorder.store.path())? {
+        if let SessionStreamRecord::Stored(event) = record
+            && event.event_type == DurableEventType::MutationPrepared.as_str()
+        {
+            let payload = serde_json::from_value::<MutationPrepared>(event.payload)?;
+            if payload.operation_id != prepared.operation_id {
+                continue;
+            }
+            let SnapshotCoverage::Captured(artifact_id) = payload.snapshot_coverage else {
+                anyhow::bail!("expected captured artifact coverage");
+            };
+            return Ok(artifact_id);
+        }
+    }
+    anyhow::bail!("missing captured artifact payload")
+}
+
+fn set_artifact_created_at_ms(
+    artifact_root: &Path,
+    artifact_id: &str,
+    created_at_ms: u64,
+) -> Result<()> {
+    for path in artifact_files(artifact_root)?
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+    {
+        let mut value = serde_json::from_slice::<serde_json::Value>(&fs::read(&path)?)?;
+        if value.get("artifact_id").and_then(|value| value.as_str()) != Some(artifact_id) {
+            continue;
+        }
+        value["created_at_ms"] = serde_json::json!(created_at_ms);
+        fs::write(&path, serde_json::to_vec_pretty(&value)?)?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -53,9 +167,857 @@ fn controlled_write_records_prepare_commit_and_write_events() -> Result<()> {
         vec![
             DurableEventType::MutationPrepared.as_str(),
             DurableEventType::MutationCommitted.as_str(),
+            DurableEventType::MutationPrepared.as_str(),
+            DurableEventType::MutationCommitted.as_str(),
             DurableEventType::WriteCommitted.as_str(),
         ]
     );
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let directory_prepared = records.iter().find_map(|record| match record {
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::MutationPrepared.as_str() =>
+        {
+            serde_json::from_value::<MutationPrepared>(event.payload.clone()).ok()
+        }
+        _ => None,
+    });
+    assert!(matches!(
+        directory_prepared.map(|payload| payload.subject),
+        Some(MutationSubject::Directory { path }) if path == Path::new("src")
+    ));
+    Ok(())
+}
+
+#[test]
+fn controlled_mutation_rejects_subject_absolute_path_mismatch() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-1", None)?;
+    let outside = temp.path().join("outside.txt");
+
+    let error = coordinator
+        .prepare_file("note.txt", &outside, Some(bytes_hash(b"new\n")))
+        .expect_err("absolute path must match the relative mutation subject");
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not match workspace subject")
+    );
+    Ok(())
+}
+
+#[test]
+fn controlled_parent_directory_creation_handles_empty_and_escape_targets() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-parent", None)?;
+
+    assert!(
+        coordinator
+            .create_missing_parent_directories(Path::new(""))?
+            .is_empty()
+    );
+
+    let outside_target = temp.path().join("outside/file.txt");
+    let error = coordinator
+        .create_missing_parent_directories(&outside_target)
+        .expect_err("parent outside workspace should fail before mkdir");
+    assert!(error.to_string().contains("outside workspace"));
+    Ok(())
+}
+
+#[test]
+fn controlled_prepare_captures_existing_file_artifact() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    fs::write(&target, "old content")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-artifact", None)?;
+
+    coordinator.prepare_file("note.txt", &target, Some(bytes_hash(b"new content")))?;
+
+    let prepared = first_prepared_payload(&store)?;
+    let SnapshotCoverage::Captured(artifact_id) = prepared.snapshot_coverage else {
+        panic!("expected captured artifact coverage");
+    };
+    assert!(artifact_id.starts_with("mutation-artifact:sha256:"));
+    let files = artifact_files(&artifact_root)?;
+    let blob = files
+        .iter()
+        .find(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("blob")
+                && fs::read(path).is_ok_and(|bytes| bytes == b"old content")
+        })
+        .expect("captured old content blob should exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(fs::metadata(blob)?.permissions().mode() & 0o777, 0o600);
+    }
+    assert!(
+        files
+            .iter()
+            .any(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+    );
+    Ok(())
+}
+
+#[test]
+fn controlled_prepare_skips_sensitive_file_artifact() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join(".env");
+    fs::write(&target, "API_KEY=secret")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-sensitive", None)?;
+
+    coordinator.prepare_file(".env", &target, Some(bytes_hash(b"API_KEY=new")))?;
+
+    let prepared = first_prepared_payload(&store)?;
+    assert_eq!(
+        prepared.snapshot_coverage,
+        SnapshotCoverage::SkippedSensitive
+    );
+    assert!(artifact_files(&artifact_root)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn controlled_prepare_skips_common_secret_like_artifacts() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store, &artifact_root);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-secret-like", None)?;
+    for (file_name, old_content, new_content) in [
+        (
+            ".npmrc",
+            "//registry/:_authToken=old",
+            "//registry/:_authToken=new",
+        ),
+        ("api_token.txt", "old token", "new token"),
+        (
+            "service-account.json",
+            "{\"private_key\":\"old\"}",
+            "{\"private_key\":\"new\"}",
+        ),
+    ] {
+        let target = workspace.join(file_name);
+        fs::write(&target, old_content)?;
+        let prepared = coordinator.prepare_file(
+            file_name,
+            &target,
+            Some(bytes_hash(new_content.as_bytes())),
+        )?;
+        assert_eq!(
+            prepared.before_hash,
+            Some(bytes_hash(old_content.as_bytes()))
+        );
+    }
+
+    let prepared_events = JsonlSessionStore::read_event_records(coordinator.recorder.store.path())?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::MutationPrepared.as_str() =>
+            {
+                serde_json::from_value::<MutationPrepared>(event.payload).ok()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(prepared_events.len(), 3);
+    assert!(
+        prepared_events
+            .iter()
+            .all(|payload| payload.snapshot_coverage == SnapshotCoverage::SkippedSensitive)
+    );
+    assert!(artifact_files(&artifact_root)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn controlled_prepare_repairs_truncated_existing_artifact_blob() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    fs::write(&target, "old content")?;
+    let first_store = JsonlSessionStore::new(temp.path().join("first.jsonl"))?;
+    let first = MutationEventRecorder::with_artifact_root(first_store, &artifact_root);
+    first
+        .coordinator(&workspace, "tool-call-artifact", None)?
+        .prepare_file("note.txt", &target, Some(bytes_hash(b"new content")))?;
+    let blob = artifact_files(&artifact_root)?
+        .into_iter()
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("blob"))
+        .expect("first prepare should write blob");
+    fs::write(&blob, "truncated")?;
+
+    let second_store = JsonlSessionStore::new(temp.path().join("second.jsonl"))?;
+    let second = MutationEventRecorder::with_artifact_root(second_store, &artifact_root);
+    second
+        .coordinator(&workspace, "tool-call-artifact", None)?
+        .prepare_file("note.txt", &target, Some(bytes_hash(b"new content")))?;
+
+    assert_eq!(fs::read(&blob)?, b"old content");
+    Ok(())
+}
+
+#[test]
+fn mutation_artifact_expire_removes_content_and_records_lifecycle_event() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    fs::write(&target, "old content")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    recorder
+        .coordinator(&workspace, "tool-call-artifact", None)?
+        .prepare_file("note.txt", &target, Some(bytes_hash(b"new content")))?;
+    let prepared = first_prepared_payload(&store)?;
+    let SnapshotCoverage::Captured(artifact_id) = prepared.snapshot_coverage else {
+        panic!("expected captured artifact coverage");
+    };
+    assert_eq!(artifact_files(&artifact_root)?.len(), 2);
+
+    recorder.expire_mutation_artifact(&artifact_id, "retention policy")?;
+
+    assert!(artifact_files(&artifact_root)?.is_empty());
+    let payloads = artifact_lifecycle_payloads(&store)?;
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].artifact_id, artifact_id);
+    assert_eq!(payloads[0].status, MutationArtifactLifecycleStatus::Expired);
+    assert_eq!(payloads[0].reason, "retention policy");
+    assert_eq!(payloads[0].content_hash, Some(bytes_hash(b"old content")));
+    assert_eq!(payloads[0].size, Some("old content".len() as u64));
+    assert_eq!(payloads[0].operation_ids, vec![prepared.operation_id]);
+    assert_eq!(payloads[0].source_paths, vec![PathBuf::from("note.txt")]);
+    Ok(())
+}
+
+#[test]
+fn mutation_artifact_delete_records_unavailable_when_content_is_missing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder =
+        MutationEventRecorder::with_artifact_root(store.clone(), temp.path().join("artifacts"));
+
+    recorder
+        .delete_mutation_artifact("mutation-artifact:sha256:missing-content", "user cleanup")?;
+
+    let payloads = artifact_lifecycle_payloads(&store)?;
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(
+        payloads[0].artifact_id,
+        "mutation-artifact:sha256:missing-content"
+    );
+    assert_eq!(
+        payloads[0].status,
+        MutationArtifactLifecycleStatus::Unavailable
+    );
+    assert_eq!(payloads[0].reason, "user cleanup");
+    assert_eq!(payloads[0].content_hash, None);
+    assert!(payloads[0].operation_ids.is_empty());
+    assert!(payloads[0].source_paths.is_empty());
+
+    let bad_id_error = recorder
+        .delete_mutation_artifact("not-a-mutation-artifact", "user cleanup")
+        .expect_err("artifact lifecycle should reject unsupported ids");
+    assert!(
+        bad_id_error
+            .to_string()
+            .contains("unsupported mutation artifact id")
+    );
+    Ok(())
+}
+
+#[test]
+fn mutation_artifact_retention_preview_is_read_only() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let old_artifact =
+        captured_artifact_id(&recorder, &workspace, "old.txt", "old-one", "new-one")?;
+    let middle_artifact =
+        captured_artifact_id(&recorder, &workspace, "middle.txt", "old-two", "new-two")?;
+    let new_artifact =
+        captured_artifact_id(&recorder, &workspace, "new.txt", "old-three", "new-three")?;
+    set_artifact_created_at_ms(&artifact_root, &old_artifact, 1)?;
+    set_artifact_created_at_ms(&artifact_root, &middle_artifact, 20)?;
+    set_artifact_created_at_ms(&artifact_root, &new_artifact, 30)?;
+
+    let report = recorder.preview_artifact_retention_at(
+        &MutationArtifactRetentionPolicy {
+            max_artifacts: Some(1),
+            max_bytes: None,
+            expire_older_than_ms: Some(10),
+        },
+        15,
+    )?;
+
+    assert_eq!(report.scanned_artifacts, 3);
+    assert_eq!(report.expired_artifacts, 2);
+    assert_eq!(report.unavailable_artifacts, 0);
+    assert!(report.lifecycle_events.is_empty());
+    assert!(artifact_lifecycle_payloads(&store)?.is_empty());
+    assert_eq!(artifact_files(&artifact_root)?.len(), 6);
+
+    let bytes_report = recorder.preview_artifact_retention_at(
+        &MutationArtifactRetentionPolicy {
+            max_artifacts: None,
+            max_bytes: Some(8),
+            expire_older_than_ms: None,
+        },
+        30,
+    )?;
+    assert_eq!(bytes_report.scanned_artifacts, 3);
+    assert_eq!(bytes_report.expired_artifacts, 3);
+    assert_eq!(bytes_report.expired_bytes, bytes_report.scanned_bytes);
+    Ok(())
+}
+
+#[test]
+fn mutation_artifact_inventory_lists_metadata_without_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let artifact_id = captured_artifact_id(&recorder, &workspace, "note.txt", "old", "new")?;
+    set_artifact_created_at_ms(&artifact_root, &artifact_id, 42)?;
+
+    let inventory = recorder.list_mutation_artifacts()?;
+
+    assert_eq!(inventory.len(), 1);
+    assert_eq!(inventory[0].artifact_id, artifact_id);
+    assert_eq!(inventory[0].size, 3);
+    assert_eq!(inventory[0].created_at_ms, Some(42));
+    assert!(inventory[0].blob_available);
+    assert_eq!(inventory[0].operation_ids.len(), 1);
+    assert_eq!(inventory[0].source_paths, vec![PathBuf::from("note.txt")]);
+    assert!(artifact_lifecycle_payloads(&store)?.is_empty());
+    assert_eq!(artifact_files(&artifact_root)?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn mutation_artifact_retention_scanner_applies_age_and_quota() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let old_artifact =
+        captured_artifact_id(&recorder, &workspace, "old.txt", "old-one", "new-one")?;
+    let middle_artifact =
+        captured_artifact_id(&recorder, &workspace, "middle.txt", "old-two", "new-two")?;
+    let new_artifact =
+        captured_artifact_id(&recorder, &workspace, "new.txt", "old-three", "new-three")?;
+    set_artifact_created_at_ms(&artifact_root, &old_artifact, 1)?;
+    set_artifact_created_at_ms(&artifact_root, &middle_artifact, 20)?;
+    set_artifact_created_at_ms(&artifact_root, &new_artifact, 30)?;
+
+    let report = recorder.enforce_artifact_retention_at(
+        &MutationArtifactRetentionPolicy {
+            max_artifacts: Some(1),
+            max_bytes: None,
+            expire_older_than_ms: Some(10),
+        },
+        15,
+    )?;
+
+    assert_eq!(report.scanned_artifacts, 3);
+    assert_eq!(report.expired_artifacts, 2);
+    assert_eq!(report.unavailable_artifacts, 0);
+    assert_eq!(report.lifecycle_events.len(), 2);
+    let payloads = artifact_lifecycle_payloads(&store)?;
+    assert_eq!(payloads.len(), 2);
+    assert_eq!(payloads[0].artifact_id, old_artifact);
+    assert_eq!(payloads[0].status, MutationArtifactLifecycleStatus::Expired);
+    assert_eq!(payloads[0].reason, "retention age limit");
+    assert_eq!(payloads[1].artifact_id, middle_artifact);
+    assert_eq!(payloads[1].status, MutationArtifactLifecycleStatus::Expired);
+    assert_eq!(payloads[1].reason, "retention quota limit");
+    let new_digest = &new_artifact["mutation-artifact:sha256:".len()..];
+    let remaining = artifact_files(&artifact_root)?;
+    assert_eq!(remaining.len(), 2);
+    assert!(remaining.iter().all(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains(new_digest))
+    }));
+    Ok(())
+}
+
+#[test]
+fn mutation_artifact_retention_scanner_records_unavailable_content() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let artifact_id = captured_artifact_id(
+        &recorder,
+        &workspace,
+        "note.txt",
+        "old content",
+        "new content",
+    )?;
+    for path in artifact_files(&artifact_root)?
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("blob"))
+    {
+        fs::remove_file(path)?;
+    }
+
+    let report =
+        recorder.enforce_artifact_retention_at(&MutationArtifactRetentionPolicy::default(), 1)?;
+
+    assert_eq!(report.scanned_artifacts, 1);
+    assert_eq!(report.expired_artifacts, 0);
+    assert_eq!(report.unavailable_artifacts, 1);
+    assert_eq!(report.lifecycle_events.len(), 1);
+    assert!(artifact_files(&artifact_root)?.is_empty());
+    let payloads = artifact_lifecycle_payloads(&store)?;
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].artifact_id, artifact_id);
+    assert_eq!(
+        payloads[0].status,
+        MutationArtifactLifecycleStatus::Unavailable
+    );
+    assert_eq!(
+        payloads[0].reason,
+        "retention scan found unavailable content"
+    );
+    Ok(())
+}
+
+#[test]
+fn controlled_directory_create_and_delete_record_directory_subjects() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("empty-dir");
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+
+    let created = create_directory_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-dir-create",
+        "empty-dir",
+        &target,
+    )?
+    .expect("directory create should produce mutation evidence");
+    assert!(target.is_dir());
+    assert!(created.observed_after_hash.is_some());
+
+    let deleted = delete_directory_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-dir-delete",
+        "empty-dir",
+        &target,
+    )?
+    .expect("directory delete should produce mutation evidence");
+    assert!(!target.exists());
+    assert!(deleted.observed_after_hash.is_none());
+
+    let committed_subjects = JsonlSessionStore::read_event_records(store.path())?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::MutationCommitted.as_str() =>
+            {
+                serde_json::from_value::<crate::MutationCommitted>(event.payload)
+                    .ok()
+                    .map(|payload| payload.committed_subject)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        committed_subjects,
+        vec![
+            MutationSubject::Directory {
+                path: PathBuf::from("empty-dir")
+            },
+            MutationSubject::Directory {
+                path: PathBuf::from("empty-dir")
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn controlled_directory_delete_rejects_non_empty_before_prepare() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("non-empty-dir");
+    fs::create_dir(&target)?;
+    fs::write(target.join("child.txt"), "child\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+
+    let error = delete_directory_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-dir-delete",
+        "non-empty-dir",
+        &target,
+    )
+    .expect_err("recursive directory delete is outside controlled mutation MVP");
+
+    assert!(error.to_string().contains("non-empty directory delete"));
+    assert!(target.join("child.txt").exists());
+    let prepared_events = JsonlSessionStore::read_event_records(store.path())?
+        .into_iter()
+        .filter(|record| match record {
+            SessionStreamRecord::Stored(event) => {
+                event.event_type == DurableEventType::MutationPrepared.as_str()
+            }
+            SessionStreamRecord::Legacy { .. } => false,
+        })
+        .count();
+    assert_eq!(prepared_events, 0);
+    Ok(())
+}
+
+#[test]
+fn checkpoint_restore_captured_artifact_records_new_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    fs::write(&target, "old content")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+
+    let changed = write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-write",
+        "note.txt",
+        &target,
+        b"new content",
+    )?
+    .expect("write should produce mutation evidence");
+    let coverage = first_prepared_payload(&store)?.snapshot_coverage;
+    assert_eq!(fs::read_to_string(&target)?, "new content");
+
+    let restored = restore_file_from_snapshot_with_mutation(
+        &recorder,
+        &workspace,
+        "tool-call-restore",
+        "note.txt",
+        &target,
+        coverage.clone(),
+        changed.observed_after_hash.as_deref(),
+    )?;
+
+    assert_eq!(fs::read_to_string(&target)?, "old content");
+    assert_eq!(restored.restored_from, coverage);
+    assert_eq!(
+        stored_event_types(&store)?,
+        vec![
+            DurableEventType::MutationPrepared.as_str(),
+            DurableEventType::MutationCommitted.as_str(),
+            DurableEventType::WriteCommitted.as_str(),
+            DurableEventType::MutationPrepared.as_str(),
+            DurableEventType::MutationCommitted.as_str(),
+            DurableEventType::WriteCommitted.as_str(),
+            DurableEventType::CheckpointRestored.as_str(),
+        ]
+    );
+    let restored_payloads = checkpoint_restored_payloads(&store)?;
+    assert_eq!(restored_payloads.len(), 1);
+    assert_eq!(
+        restored_payloads[0].mutation_committed_event_id,
+        restored.committed.committed_event.event_id
+    );
+    assert_eq!(
+        restored_payloads[0].workspace_snapshot_id,
+        restored.committed.workspace_snapshot_id
+    );
+    Ok(())
+}
+
+#[test]
+fn checkpoint_restore_skipped_sensitive_snapshot_fails_without_writing() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join(".env");
+    fs::write(&target, "API_KEY=old")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let changed = write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-write",
+        ".env",
+        &target,
+        b"API_KEY=new",
+    )?
+    .expect("write should produce mutation evidence");
+    let coverage = first_prepared_payload(&store)?.snapshot_coverage;
+    assert_eq!(coverage, SnapshotCoverage::SkippedSensitive);
+
+    let error = restore_file_from_snapshot_with_mutation(
+        &recorder,
+        &workspace,
+        "tool-call-restore",
+        ".env",
+        &target,
+        coverage,
+        changed.observed_after_hash.as_deref(),
+    )
+    .expect_err("sensitive snapshot should not be restorable");
+
+    assert!(error.to_string().contains("skipped sensitive snapshot"));
+    assert_eq!(fs::read_to_string(&target)?, "API_KEY=new");
+    assert!(checkpoint_restored_payloads(&store)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn checkpoint_restore_no_prior_content_deletes_created_file() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("created.txt");
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+
+    let changed = write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-write",
+        "created.txt",
+        &target,
+        b"created content",
+    )?
+    .expect("write should produce mutation evidence");
+    let coverage = first_prepared_payload(&store)?.snapshot_coverage;
+    assert_eq!(coverage, SnapshotCoverage::NoPriorContent);
+    assert!(target.exists());
+
+    let restored = restore_file_from_snapshot_with_mutation(
+        &recorder,
+        &workspace,
+        "tool-call-restore",
+        "created.txt",
+        &target,
+        coverage.clone(),
+        changed.observed_after_hash.as_deref(),
+    )?;
+
+    assert!(!target.exists());
+    assert_eq!(restored.restored_from, coverage);
+    assert_eq!(checkpoint_restored_payloads(&store)?.len(), 1);
+
+    let missing_error = restore_file_from_snapshot_with_mutation(
+        &recorder,
+        &workspace,
+        "tool-call-restore-missing",
+        "created.txt",
+        &target,
+        SnapshotCoverage::NoPriorContent,
+        None,
+    )
+    .expect_err("absent target cannot be deleted again");
+    assert!(
+        missing_error
+            .to_string()
+            .contains("checkpoint restore target already absent")
+    );
+    Ok(())
+}
+
+#[test]
+fn checkpoint_restore_rejects_unsupported_unavailable_and_corrupt_artifacts() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    fs::write(&target, "old content")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let changed = write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-write",
+        "note.txt",
+        &target,
+        b"new content",
+    )?
+    .expect("write should produce mutation evidence");
+    let coverage = first_prepared_payload(&store)?.snapshot_coverage;
+
+    for unsupported in [SnapshotCoverage::Unsupported, SnapshotCoverage::Unavailable] {
+        let error = restore_file_from_snapshot_with_mutation(
+            &recorder,
+            &workspace,
+            "tool-call-restore",
+            "note.txt",
+            &target,
+            unsupported,
+            changed.observed_after_hash.as_deref(),
+        )
+        .expect_err("unsupported coverage should not restore");
+        assert!(error.to_string().contains("checkpoint restore snapshot"));
+    }
+
+    let SnapshotCoverage::Captured(ref artifact_id) = coverage else {
+        panic!("expected captured artifact coverage");
+    };
+    let digest = &artifact_id["mutation-artifact:sha256:".len()..];
+    for path in artifact_files(&artifact_root)?.into_iter().filter(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == format!("{digest}.blob"))
+    }) {
+        fs::write(path, "corrupt artifact content")?;
+    }
+    let error = restore_file_from_snapshot_with_mutation(
+        &recorder,
+        &workspace,
+        "tool-call-restore",
+        "note.txt",
+        &target,
+        coverage,
+        changed.observed_after_hash.as_deref(),
+    )
+    .expect_err("corrupt artifact content should fail checksum validation");
+    assert!(error.to_string().contains("mutation artifact not found"));
+    Ok(())
+}
+
+#[test]
+fn checkpoint_restore_rejects_current_hash_conflict_before_prepare() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    fs::write(&target, "old content")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let changed = write_file_with_mutation(
+        Some(&recorder),
+        &workspace,
+        "tool-call-write",
+        "note.txt",
+        &target,
+        b"new content",
+    )?
+    .expect("write should produce mutation evidence");
+    let coverage = first_prepared_payload(&store)?.snapshot_coverage;
+    fs::write(&target, "external edit")?;
+
+    let error = restore_file_from_snapshot_with_mutation(
+        &recorder,
+        &workspace,
+        "tool-call-restore",
+        "note.txt",
+        &target,
+        coverage,
+        changed.observed_after_hash.as_deref(),
+    )
+    .expect_err("restore should reject stale current hash");
+
+    assert!(
+        error
+            .to_string()
+            .contains("file changed before checkpoint restore")
+    );
+    assert_eq!(fs::read_to_string(&target)?, "external edit");
+    assert!(checkpoint_restored_payloads(&store)?.is_empty());
+    assert_eq!(
+        stored_event_types(&store)?,
+        vec![
+            DurableEventType::MutationPrepared.as_str(),
+            DurableEventType::MutationCommitted.as_str(),
+            DurableEventType::WriteCommitted.as_str(),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn checkpoint_restore_rejects_subject_absolute_path_mismatch_before_read() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let outside = temp.path().join("outside.txt");
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+
+    let error = restore_file_from_snapshot_with_mutation(
+        &recorder,
+        &workspace,
+        "tool-call-restore",
+        "note.txt",
+        &outside,
+        SnapshotCoverage::NoPriorContent,
+        None,
+    )
+    .expect_err("absolute path must match the relative restore subject");
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not match workspace subject")
+    );
+    assert!(stored_event_types(&store)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn legacy_workspace_session_artifacts_default_outside_workspace_sigil_dir() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let legacy_session = workspace.join(".sigil/sessions/session.jsonl");
+
+    let root = super::default_mutation_artifact_root(&legacy_session);
+
+    assert!(!root.starts_with(workspace.join(".sigil")));
+    assert!(root.ends_with(Path::new("artifacts").join("mutations")));
     Ok(())
 }
 
@@ -86,6 +1048,97 @@ fn no_recorder_paths_keep_legacy_write_and_delete_behavior() -> Result<()> {
     )?;
     assert!(delete.is_none());
     assert!(!target.exists());
+
+    let legacy_dir = workspace.join("legacy-dir");
+    let created_dir = create_directory_with_mutation(
+        None,
+        &workspace,
+        "tool-call-legacy-dir",
+        "legacy-dir",
+        &legacy_dir,
+    )?;
+    assert!(created_dir.is_none());
+    assert!(legacy_dir.is_dir());
+
+    let deleted_dir = delete_directory_with_mutation(
+        None,
+        &workspace,
+        "tool-call-legacy-dir",
+        "legacy-dir",
+        &legacy_dir,
+    )?;
+    assert!(deleted_dir.is_none());
+    assert!(!legacy_dir.exists());
+    Ok(())
+}
+
+#[test]
+fn controlled_directory_commits_reject_wrong_intent_and_blocking_parents() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-dir-errors", None)?;
+
+    let create = coordinator.prepare_directory(
+        "dir-create",
+        workspace.join("dir-create"),
+        Some("sha256:not-directory-present".to_owned()),
+    )?;
+    let create_error = coordinator
+        .commit_create_directory(&create)
+        .expect_err("directory create should reject wrong intended hash");
+    assert!(
+        create_error
+            .to_string()
+            .contains("directory create mutation must intend")
+    );
+    let delete_error = coordinator
+        .commit_delete_directory(&create)
+        .expect_err("directory delete should reject an intended hash");
+    assert!(
+        delete_error
+            .to_string()
+            .contains("directory delete mutation must not have")
+    );
+
+    fs::write(workspace.join("blocked"), "not a directory")?;
+    let parent_error = coordinator
+        .create_missing_parent_directories(&workspace.join("blocked/child.txt"))
+        .expect_err("file parent should block controlled mkdir");
+    assert!(
+        parent_error
+            .to_string()
+            .contains("parent path is not a directory")
+    );
+
+    let file_target = workspace.join("not-a-dir");
+    fs::write(&file_target, "file")?;
+    let prepare_error = coordinator
+        .prepare_directory("not-a-dir", &file_target, None)
+        .expect_err("directory prepare should reject file subjects");
+    assert!(
+        prepare_error
+            .to_string()
+            .contains("path is not a directory")
+    );
+
+    let race_target = workspace.join("race-dir");
+    let race = coordinator.prepare_directory(
+        "race-dir",
+        &race_target,
+        Some(super::directory_present_hash()),
+    )?;
+    fs::create_dir(&race_target)?;
+    let race_error = coordinator
+        .commit_create_directory(&race)
+        .expect_err("external mkdir should trip directory CAS");
+    assert!(
+        race_error
+            .to_string()
+            .contains("directory changed before controlled mutation commit")
+    );
     Ok(())
 }
 
@@ -311,7 +1364,7 @@ fn reconciliation_covers_terminal_not_applied_intended_and_conflict_states() -> 
 }
 
 #[test]
-fn reconciliation_skips_legacy_records_and_marks_non_file_subject_unknown() -> Result<()> {
+fn reconciliation_skips_legacy_records_and_marks_workspace_subject_unknown() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
@@ -324,11 +1377,13 @@ fn reconciliation_skips_legacy_records_and_marks_non_file_subject_unknown() -> R
     let store = JsonlSessionStore::new(store_path)?;
     let recorder = MutationEventRecorder::new(store.clone());
     recorder.append_prepared(&crate::MutationPrepared {
-        operation_id: "operation-directory".to_owned(),
+        operation_id: "operation-workspace".to_owned(),
         batch_id: None,
         tool_call_id: Some("tool-call".to_owned()),
         causation_event_id: "event-cause".to_owned(),
-        subject: MutationSubject::Directory { path: "src".into() },
+        subject: MutationSubject::Workspace {
+            scope_hash: "scope-main".to_owned(),
+        },
         before_hash: None,
         intended_after_hash: None,
         snapshot_coverage: crate::SnapshotCoverage::Unsupported,
@@ -341,9 +1396,39 @@ fn reconciliation_skips_legacy_records_and_marks_non_file_subject_unknown() -> R
 
     assert_eq!(reconciled.len(), 1);
     let payload: MutationReconciled = serde_json::from_value(reconciled[0].payload.clone())?;
-    assert_eq!(payload.operation_id, "operation-directory");
+    assert_eq!(payload.operation_id, "operation-workspace");
     assert_eq!(payload.observed_state, MutationObservedState::Unknown);
     assert_eq!(payload.resolution, MutationResolution::MarkUnknownDirty);
+    Ok(())
+}
+
+#[test]
+fn reconciliation_classifies_directory_prepared_without_commit() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let coordinator = recorder.coordinator(&workspace, "tool-call-dir", None)?;
+    let prepared = coordinator.prepare_directory(
+        "created-dir",
+        workspace.join("created-dir"),
+        Some(bytes_hash(b"sigil:directory:present:v1")),
+    )?;
+    fs::create_dir(workspace.join("created-dir"))?;
+
+    let reconciled = recorder.reconcile_prepared_mutations(&workspace)?;
+
+    assert_eq!(reconciled.len(), 1);
+    let payload: MutationReconciled = serde_json::from_value(reconciled[0].payload.clone())?;
+    assert_eq!(payload.operation_id, prepared.operation_id);
+    assert_eq!(
+        payload.observed_state,
+        MutationObservedState::AppliedAsIntended
+    );
+    assert_eq!(payload.resolution, MutationResolution::MarkCommitted);
+    assert!(payload.workspace_revision.is_some());
+    assert!(payload.workspace_snapshot_id.is_some());
     Ok(())
 }
 
@@ -634,6 +1719,69 @@ fn execution_mutation_profile_reconcile_skips_legacy_records() -> Result<()> {
 }
 
 #[test]
+fn execution_mutation_profile_reconcile_records_later_change_after_existing_detection() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "old")?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let scope = VerificationScope::all_tracked("scope-main");
+    let profile = recorder.execution_mutation_profile(
+        &workspace,
+        &scope,
+        "call-terminal-start",
+        "terminal_start",
+        ToolEffect::Unknown,
+    )?;
+    let before = WorkspaceMutationScan {
+        workspace_id: profile.workspace_id.clone(),
+        scope_hash: profile.scan_scope_hash.clone(),
+        scope: scope.clone(),
+        workspace_revision: profile.pre_execution_workspace_revision,
+        workspace_snapshot_id: profile.pre_execution_snapshot_id.clone(),
+        workspace_knowledge: profile.workspace_knowledge.clone(),
+    };
+
+    fs::write(workspace.join("note.txt"), "early")?;
+    let first = recorder
+        .record_workspace_mutation_if_changed(
+            &before,
+            &workspace,
+            "call-terminal-start",
+            "terminal_start",
+            ToolEffect::Unknown,
+        )?
+        .expect("first terminal mutation should be recorded");
+    fs::write(workspace.join("note.txt"), "late")?;
+
+    let second = recorder
+        .reconcile_execution_mutation_profile(&workspace, &profile)?
+        .expect("later terminal mutation should not be skipped by earlier detection");
+
+    let first_payload: WorkspaceMutationDetected = serde_json::from_value(first.payload)?;
+    let second_payload: WorkspaceMutationDetected = serde_json::from_value(second.payload)?;
+    assert_eq!(first_payload.tool_call_id, second_payload.tool_call_id);
+    assert_ne!(
+        first_payload.to_workspace_snapshot_id,
+        second_payload.to_workspace_snapshot_id
+    );
+    let detection_count = JsonlSessionStore::read_event_records(store.path())?
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str()
+            )
+        })
+        .count();
+    assert_eq!(detection_count, 2);
+    Ok(())
+}
+
+#[test]
 fn execution_mutation_profile_reconcile_records_scan_unavailable() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -664,6 +1812,12 @@ fn execution_mutation_profile_reconcile_records_scan_unavailable() -> Result<()>
     assert_eq!(payload.tool_call_id.as_deref(), Some("call-shell"));
     assert_eq!(payload.tool_name, "bash");
     assert!(payload.unknown_dirty);
+    assert!(
+        recorder
+            .reconcile_execution_mutation_profile(&workspace, &profile)?
+            .is_none(),
+        "same scan-unavailable evidence should not be duplicated"
+    );
     Ok(())
 }
 
@@ -801,6 +1955,33 @@ fn workspace_mutation_scan_unavailable_records_unknown_dirty() -> Result<()> {
     assert_eq!(
         payload.reason,
         WorkspaceMutationDetectionReason::ScanUnavailable
+    );
+    assert!(payload.unknown_dirty);
+    assert!(payload.from_workspace_snapshot_id.is_none());
+    assert!(payload.to_workspace_snapshot_id.is_none());
+    Ok(())
+}
+
+#[test]
+fn external_process_unknown_dirty_records_without_tool_call() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+
+    let event = recorder.record_external_process_unknown_dirty(
+        &workspace,
+        "mcp_server:docs",
+        ToolEffect::Unknown,
+    )?;
+    let payload: WorkspaceMutationDetected = serde_json::from_value(event.payload)?;
+
+    assert_eq!(payload.tool_call_id, None);
+    assert_eq!(payload.tool_name, "mcp_server:docs");
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::DeclaredWriteEffect
     );
     assert!(payload.unknown_dirty);
     assert!(payload.from_workspace_snapshot_id.is_none());

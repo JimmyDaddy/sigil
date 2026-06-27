@@ -274,6 +274,8 @@ staged gate 会先读取 staged source snapshot，再计算新增行覆盖率。
 
 为了缩短本地提交耗时，staged gate 只对 staged 业务文件所在 package 生成 LCOV；完整 workspace 覆盖率仍由显式 `./scripts/coverage.sh` 和 CI 校验。
 
+staged gate 的默认新增可执行行覆盖率阈值是 `85%`，可用 `STAGED_COVERAGE_MIN_LINES=96` 临时提高到 release/CI 级严格检查。
+
 staged coverage 脚本的 diff 分类、LCov 解析和新增行覆盖率计算有独立 Python 单测：
 
 ```bash

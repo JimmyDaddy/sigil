@@ -171,18 +171,19 @@ impl TerminalTaskProjection {
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
         let mut projection = Self::default();
         for entry in entries {
-            match entry {
-                SessionLogEntry::Control(ControlEntry::TerminalTask(task_entry)) => {
-                    projection.apply_entry(task_entry);
-                }
-                SessionLogEntry::User(_)
-                | SessionLogEntry::Assistant(_)
-                | SessionLogEntry::ToolResult(_)
-                | SessionLogEntry::Control(_) => {}
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(control);
             }
         }
         projection.refresh_active_task_ids();
         projection
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        if let ControlEntry::TerminalTask(task_entry) = control {
+            self.apply_entry(task_entry);
+            self.refresh_active_task_ids();
+        }
     }
 
     pub fn latest(&self) -> Option<&TerminalTaskSummary> {

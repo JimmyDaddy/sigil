@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
@@ -6,12 +9,15 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason,
-    ApprovalHandler, CompletionCriteria, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType,
-    EventHandler, EvidenceScope, JsonlSessionStore, ModelMessage, MutationCommitted,
+    ApprovalHandler, CheckPromotion, CheckpointRestored, CompletionCriteria,
+    DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventHandler, EvidenceScope,
+    ExecutionMutationProfile, JsonlSessionStore, ModelMessage, MutationCommitted, MutationPrepared,
     MutationReconciled, MutationResolution, Provider, ReadinessEvaluatedEntry, ReadinessInput,
-    RequiredAction, RunEvent, RunStatus, Session, SessionStreamRecord, ToolApproval, ToolCall,
-    ToolErrorKind, ToolSpec, VerificationCheckRunRequest, VerificationPolicy, VerificationScope,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry, SessionStreamRecord,
+    StoredEvent, ToolApproval, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResultMeta,
+    ToolSpec, VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
+    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationVerdict,
+    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
     WorkspaceMutationEvidence, WorkspaceTrust, build_workspace_snapshot_for_event,
     evaluate_readiness, run_verification_check,
     session::ControlEntry,
@@ -22,6 +28,7 @@ use crate::{
         TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
         TaskStepStatus, TaskSubagentApprovalRouteEntry, child_session_ref,
     },
+    verification_check_run_id,
 };
 
 type BoxedAgent = Agent<Box<dyn Provider>>;
@@ -1046,7 +1053,41 @@ where
             .iter()
             .find_map(|scope| projection.check_spec(scope, &check_id))
             .ok_or_else(|| anyhow!("missing trusted verification check spec {check_id}"))?;
-        let recorded = run_verification_check(
+        let check_spec = &check_entry.trusted_check.check_spec;
+        let run_id = verification_check_run_id(
+            &step_scope,
+            check_spec,
+            policy_hash.as_deref(),
+            readiness.workspace_snapshot_id.as_deref(),
+            session.next_stream_sequence_hint()?,
+        )?;
+        append_task_control(
+            session,
+            handler,
+            ControlEntry::VerificationCheckRun(
+                VerificationCheckRunEntry::new(
+                    run_id.clone(),
+                    step_scope.clone(),
+                    check_spec,
+                    VerificationCheckRunStatus::Queued,
+                )
+                .with_timeout_ms(policy.timeout_ms),
+            ),
+        )?;
+        append_task_control(
+            session,
+            handler,
+            ControlEntry::VerificationCheckRun(
+                VerificationCheckRunEntry::new(
+                    run_id.clone(),
+                    step_scope.clone(),
+                    check_spec,
+                    VerificationCheckRunStatus::Running,
+                )
+                .with_timeout_ms(policy.timeout_ms),
+            ),
+        )?;
+        let recorded = match run_verification_check(
             session,
             VerificationCheckRunRequest {
                 workspace_root: options.workspace_root.clone(),
@@ -1059,11 +1100,45 @@ where
                 workspace_trust_approval_event_id: None,
                 workspace_trust_sandbox_decision_id: None,
             },
-        )?;
+        ) {
+            Ok(recorded) => recorded,
+            Err(error) => {
+                append_task_control(
+                    session,
+                    handler,
+                    ControlEntry::VerificationCheckRun(
+                        VerificationCheckRunEntry::new(
+                            run_id,
+                            step_scope.clone(),
+                            check_spec,
+                            VerificationCheckRunStatus::Errored,
+                        )
+                        .with_timeout_ms(policy.timeout_ms)
+                        .with_error(error.to_string()),
+                    ),
+                )?;
+                return Err(error);
+            }
+        };
+        let recorded_receipt = recorded.receipt.clone();
         append_task_control(
             session,
             handler,
             ControlEntry::VerificationRecorded(recorded),
+        )?;
+        append_task_control(
+            session,
+            handler,
+            ControlEntry::VerificationCheckRun(
+                VerificationCheckRunEntry::new(
+                    run_id,
+                    step_scope.clone(),
+                    check_spec,
+                    VerificationCheckRunStatus::Running,
+                )
+                .with_timeout_ms(policy.timeout_ms)
+                .with_terminal_receipt(&recorded_receipt),
+            ),
         )?;
     }
     Ok(true)
@@ -1080,7 +1155,7 @@ fn task_step_readiness(
     let scope = task_step_evidence_scope(&request.task_id, &step.step_id);
     let task_scope = EvidenceScope::Task(request.task_id.as_str().to_owned());
     let projection = session.verification_state_projection();
-    let step_has_workspace_mutation = !output.outcome.changed_files.is_empty();
+    let source_stream_sequence = session.next_stream_sequence_hint().unwrap_or(1);
     let mut policy = projection
         .latest_policy(&scope)
         .map(|entry| entry.policy.clone())
@@ -1090,6 +1165,30 @@ fn task_step_readiness(
                 .map(|entry| entry.policy.clone())
         })
         .unwrap_or_else(|| task_step_default_policy(&projection, &scope, &task_scope));
+    let baseline_policy_hash = policy.stable_hash()?;
+    let latest_successful_verification_sequence = latest_relevant_successful_verification_sequence(
+        &projection,
+        &[scope.clone(), task_scope.clone()],
+        &policy,
+        &baseline_policy_hash,
+    );
+    let mut durable_mutation_evidence = match durable_workspace_mutation_evidence(
+        session,
+        &request.task_id,
+        &VerificationScope::all_tracked(task_step_verification_scope_hash()),
+        &output.outcome.tool_call_ids,
+        latest_successful_verification_sequence,
+    ) {
+        Ok(evidence) => evidence,
+        Err(_) => vec![durable_mutation_replay_failed_evidence(
+            request,
+            step,
+            task_step_verification_scope_hash(),
+            source_stream_sequence,
+        )],
+    };
+    let step_has_workspace_mutation =
+        !output.outcome.changed_files.is_empty() || !durable_mutation_evidence.is_empty();
     if !step_has_workspace_mutation {
         policy.required_checks.clear();
         policy.completion_criteria = CompletionCriteria::NoChecksRequired;
@@ -1103,7 +1202,6 @@ fn task_step_readiness(
         .get(&workspace_id)
         .map(|entry| entry.trust)
         .unwrap_or(WorkspaceTrust::Unknown);
-    let source_stream_sequence = (session.entries().len() as u64).saturating_add(1);
     if step_has_workspace_mutation {
         let snapshot_event_id = format!(
             "readiness-snapshot:{}:{}",
@@ -1141,16 +1239,15 @@ fn task_step_readiness(
             })
             .collect();
     }
-    input.verification_receipts = projection
-        .receipts
-        .values()
-        .map(|entry| entry.receipt.clone())
-        .collect();
+    input.verification_receipts = relevant_verification_receipts(
+        &projection,
+        &[scope.clone(), task_scope.clone()],
+        &input.policy,
+        &policy_hash,
+    );
     if step_has_workspace_mutation {
-        let mut mutation_evidence =
-            durable_workspace_mutation_evidence(session, &input.policy.verification_scope);
-        if mutation_evidence.is_empty() {
-            mutation_evidence.push(changed_files_mutation_evidence(
+        if durable_mutation_evidence.is_empty() {
+            durable_mutation_evidence.push(changed_files_mutation_evidence(
                 request,
                 step,
                 &input.policy.verification_scope.scope_hash,
@@ -1158,9 +1255,15 @@ fn task_step_readiness(
                 1,
             ));
         }
-        input.mutations.extend(mutation_evidence);
+        input.mutations.extend(durable_mutation_evidence);
     }
-    if step_has_workspace_mutation && !input.workspace_knowledge.is_unknown_dirty() {
+    if input
+        .mutations
+        .iter()
+        .any(|mutation| mutation.unknown_dirty)
+    {
+        input.workspace_knowledge = WorkspaceKnowledge::UnknownDirty;
+    } else if step_has_workspace_mutation && !input.workspace_knowledge.is_unknown_dirty() {
         let latest_mutation_sequence = input
             .mutations
             .iter()
@@ -1186,11 +1289,14 @@ async fn task_step_readiness_nonblocking(
     output: &StepRunOutput,
     options: &AgentRunOptions,
 ) -> Result<ReadinessEvaluatedEntry> {
-    let session_snapshot = Session::from_entries(
+    let mut session_snapshot = Session::from_entries(
         session.provider_name().to_owned(),
         session.model_name().to_owned(),
         session.entries().to_vec(),
     );
+    if let Some(store_path) = session.store_path() {
+        session_snapshot = session_snapshot.with_store(JsonlSessionStore::new(store_path)?);
+    }
     let request = request.clone();
     let step = step.clone();
     let output = output.clone();
@@ -1243,36 +1349,110 @@ fn task_step_default_policy(
     step_scope: &EvidenceScope,
     task_scope: &EvidenceScope,
 ) -> VerificationPolicy {
-    let checks = projection
+    let check_entries = projection
         .check_specs_for_scopes(&[step_scope.clone(), task_scope.clone()])
         .into_iter()
+        .collect::<Vec<_>>();
+    let checks = check_entries
+        .iter()
         .map(|entry| entry.trusted_check.check_spec.clone())
         .collect::<Vec<_>>();
     if checks.is_empty() {
         return VerificationPolicy::no_checks_required(task_step_verification_scope_hash());
     }
+    let workspace_trust_requirement = if check_entries.iter().any(|entry| {
+        matches!(
+            entry.trusted_check.promoted_by,
+            CheckPromotion::WorkspaceTrusted { .. }
+        )
+    }) {
+        crate::WorkspaceTrustRequirement::Trusted
+    } else {
+        crate::WorkspaceTrustRequirement::None
+    };
     VerificationPolicy {
         required_checks: checks,
         completion_criteria: CompletionCriteria::AllRequiredChecks,
         verification_scope: VerificationScope::all_tracked(task_step_verification_scope_hash()),
         sandbox_profile: crate::SandboxProfileRequirement::None,
-        workspace_trust_requirement: crate::WorkspaceTrustRequirement::None,
+        workspace_trust_requirement,
         allow_unverified_completion: false,
         timeout_ms: None,
     }
 }
 
+fn relevant_verification_receipts(
+    projection: &crate::VerificationStateProjection,
+    scopes: &[EvidenceScope],
+    policy: &VerificationPolicy,
+    policy_hash: &str,
+) -> Vec<VerificationReceipt> {
+    projection
+        .receipts
+        .values()
+        .filter(|entry| {
+            scopes
+                .iter()
+                .any(|scope| scope == &entry.receipt.receipt.scope)
+        })
+        .filter(|entry| entry.receipt.receipt.policy_hash.as_deref() == Some(policy_hash))
+        .filter(|entry| {
+            entry.receipt.binding.verification_scope_hash == policy.verification_scope.scope_hash
+        })
+        .filter(|entry| {
+            policy.required_checks.iter().any(|check| {
+                check.check_spec_id == entry.receipt.check_spec_id
+                    && check.check_spec_hash == entry.receipt.binding.check_spec_hash
+            })
+        })
+        .map(|entry| entry.receipt.clone())
+        .collect()
+}
+
+fn latest_relevant_successful_verification_sequence(
+    projection: &crate::VerificationStateProjection,
+    scopes: &[EvidenceScope],
+    policy: &VerificationPolicy,
+    policy_hash: &str,
+) -> u64 {
+    relevant_verification_receipts(projection, scopes, policy, policy_hash)
+        .into_iter()
+        .filter(|receipt| receipt.check_status == crate::ReceiptStatus::Succeeded)
+        .map(|receipt| receipt.receipt.recorded_at_stream_sequence)
+        .max()
+        .unwrap_or(0)
+}
+
 fn durable_workspace_mutation_evidence(
     session: &Session,
+    task_id: &TaskId,
     scope: &VerificationScope,
-) -> Vec<WorkspaceMutationEvidence> {
+    tool_call_ids: &[String],
+    latest_successful_verification_sequence: u64,
+) -> Result<Vec<WorkspaceMutationEvidence>> {
     let Some(path) = session.store_path() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let Ok(records) = JsonlSessionStore::read_event_records(path) else {
-        return Vec::new();
-    };
-    records
+    let records = JsonlSessionStore::read_event_records(path)?;
+    let baseline_sequence = latest_successful_verification_sequence.max(
+        task_started_stream_sequence(&records, task_id)
+            .unwrap_or(0)
+            .saturating_sub(1),
+    );
+    let mut prepared_tool_calls = BTreeMap::<String, Option<String>>::new();
+    for record in &records {
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
+        if DurableEventType::from_event_type(&event.event_type)
+            == Some(DurableEventType::MutationPrepared)
+            && let Ok(payload) = serde_json::from_value::<MutationPrepared>(event.payload.clone())
+        {
+            prepared_tool_calls.insert(payload.operation_id, payload.tool_call_id);
+        }
+    }
+    let running_evidence = running_execution_mutation_evidence(&records, scope);
+    let mut evidence = records
         .into_iter()
         .filter_map(|record| {
             let SessionStreamRecord::Stored(event) = record else {
@@ -1282,6 +1462,15 @@ fn durable_workspace_mutation_evidence(
                 Some(DurableEventType::MutationCommitted) => {
                     let payload =
                         serde_json::from_value::<MutationCommitted>(event.payload.clone()).ok()?;
+                    if !mutation_matches_tool_call(
+                        &payload.operation_id,
+                        &prepared_tool_calls,
+                        tool_call_ids,
+                        event.stream_sequence,
+                        baseline_sequence,
+                    ) {
+                        return None;
+                    }
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id,
                         source_event_type: DurableEventType::MutationCommitted.as_str().to_owned(),
@@ -1296,6 +1485,15 @@ fn durable_workspace_mutation_evidence(
                 Some(DurableEventType::MutationReconciled) => {
                     let payload =
                         serde_json::from_value::<MutationReconciled>(event.payload.clone()).ok()?;
+                    if !mutation_matches_tool_call(
+                        &payload.operation_id,
+                        &prepared_tool_calls,
+                        tool_call_ids,
+                        event.stream_sequence,
+                        baseline_sequence,
+                    ) {
+                        return None;
+                    }
                     let unknown_dirty = payload.resolution == MutationResolution::MarkUnknownDirty;
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id,
@@ -1312,10 +1510,40 @@ fn durable_workspace_mutation_evidence(
                         unknown_dirty,
                     })
                 }
+                Some(DurableEventType::CheckpointRestored) => {
+                    let payload =
+                        serde_json::from_value::<CheckpointRestored>(event.payload.clone()).ok()?;
+                    if !mutation_detection_matches_filter(
+                        payload.tool_call_id.as_deref(),
+                        tool_call_ids,
+                        event.stream_sequence,
+                        baseline_sequence,
+                    ) {
+                        return None;
+                    }
+                    Some(WorkspaceMutationEvidence {
+                        event_id: event.event_id,
+                        source_event_type: DurableEventType::CheckpointRestored.as_str().to_owned(),
+                        scope_hash: scope.scope_hash.clone(),
+                        recorded_at_stream_sequence: event.stream_sequence,
+                        from_workspace_snapshot_id: None,
+                        to_workspace_snapshot_id: Some(payload.workspace_snapshot_id),
+                        tool_effect: crate::ToolEffect::WorkspaceWrite,
+                        unknown_dirty: false,
+                    })
+                }
                 Some(DurableEventType::WorkspaceMutationDetected) => {
                     if let Ok(payload) =
                         serde_json::from_value::<WorkspaceMutationDetected>(event.payload.clone())
                     {
+                        if !mutation_detection_matches_filter(
+                            payload.tool_call_id.as_deref(),
+                            tool_call_ids,
+                            event.stream_sequence,
+                            baseline_sequence,
+                        ) {
+                            return None;
+                        }
                         return Some(WorkspaceMutationEvidence {
                             event_id: event.event_id,
                             source_event_type: DurableEventType::WorkspaceMutationDetected
@@ -1342,10 +1570,255 @@ fn durable_workspace_mutation_evidence(
                         unknown_dirty: true,
                     })
                 }
+                Some(DurableEventType::ChildChangesetMerged)
+                | Some(DurableEventType::AgentMergeApplied) => {
+                    if event.stream_sequence <= baseline_sequence {
+                        return None;
+                    }
+                    Some(merge_workspace_mutation_evidence(&event, scope))
+                }
                 _ => None,
             }
         })
-        .collect()
+        .collect::<Vec<_>>();
+    evidence.extend(running_evidence);
+    evidence.sort_by_key(|entry| entry.recorded_at_stream_sequence);
+    Ok(evidence)
+}
+
+#[derive(Debug, Clone)]
+struct RunningExecutionProfile {
+    profile: ExecutionMutationProfile,
+    event_id: String,
+    stream_sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveTerminalTask {
+    event_id: String,
+    stream_sequence: u64,
+}
+
+fn running_execution_mutation_evidence(
+    records: &[SessionStreamRecord],
+    scope: &VerificationScope,
+) -> Vec<WorkspaceMutationEvidence> {
+    let mut open_profiles = BTreeMap::<String, RunningExecutionProfile>::new();
+    let mut terminal_profiles = BTreeMap::<String, RunningExecutionProfile>::new();
+    let mut active_terminals = BTreeMap::<String, ActiveTerminalTask>::new();
+
+    for record in records {
+        let SessionStreamRecord::Stored(event) = record else {
+            continue;
+        };
+        let Some(entry) = session_entry_from_event(event) else {
+            continue;
+        };
+        match entry {
+            SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) => {
+                if execution.status == ToolExecutionStatus::Started {
+                    if let Some(profile) =
+                        execution_mutation_profile_from_metadata(&execution.metadata)
+                    {
+                        open_profiles.insert(
+                            execution.call_id.clone(),
+                            RunningExecutionProfile {
+                                profile,
+                                event_id: event.event_id.clone(),
+                                stream_sequence: event.stream_sequence,
+                            },
+                        );
+                    }
+                    continue;
+                }
+
+                if let Some(task_id) = terminal_task_id_from_tool_metadata(&execution.metadata)
+                    && let Some(profile) = open_profiles.get(&execution.call_id)
+                {
+                    terminal_profiles.insert(task_id, profile.clone());
+                }
+                open_profiles.remove(&execution.call_id);
+            }
+            SessionLogEntry::Control(ControlEntry::TerminalTask(entry)) => {
+                let task_id = entry.handle.task_id.as_str().to_owned();
+                if entry.status.is_active() {
+                    active_terminals.insert(
+                        task_id,
+                        ActiveTerminalTask {
+                            event_id: event.event_id.clone(),
+                            stream_sequence: event.stream_sequence,
+                        },
+                    );
+                } else {
+                    active_terminals.remove(&task_id);
+                }
+            }
+            SessionLogEntry::User(_)
+            | SessionLogEntry::Assistant(_)
+            | SessionLogEntry::ToolResult(_)
+            | SessionLogEntry::Control(_) => {}
+        }
+    }
+
+    let mut emitted_call_ids = BTreeSet::<String>::new();
+    let mut evidence = Vec::new();
+    for (call_id, running) in open_profiles {
+        if !running.profile.effect.may_mutate_workspace() {
+            continue;
+        }
+        emitted_call_ids.insert(call_id);
+        evidence.push(running_profile_evidence(
+            &running,
+            scope,
+            "running_tool_execution",
+        ));
+    }
+
+    for (task_id, active) in active_terminals {
+        let Some(running) = terminal_profiles.get(&task_id) else {
+            continue;
+        };
+        if emitted_call_ids.contains(&running.profile.tool_call_id)
+            || !running.profile.effect.may_mutate_workspace()
+        {
+            continue;
+        }
+        let mut terminal_running = running.clone();
+        terminal_running.event_id = active.event_id.clone();
+        terminal_running.stream_sequence = active.stream_sequence;
+        evidence.push(running_profile_evidence(
+            &terminal_running,
+            scope,
+            "running_terminal_task",
+        ));
+    }
+
+    evidence
+}
+
+fn running_profile_evidence(
+    running: &RunningExecutionProfile,
+    scope: &VerificationScope,
+    source_event_type: &str,
+) -> WorkspaceMutationEvidence {
+    let scope_hash = if running.profile.scan_scope_hash.is_empty() {
+        scope.scope_hash.clone()
+    } else {
+        running.profile.scan_scope_hash.clone()
+    };
+    WorkspaceMutationEvidence {
+        event_id: running.event_id.clone(),
+        source_event_type: source_event_type.to_owned(),
+        scope_hash,
+        recorded_at_stream_sequence: running.stream_sequence,
+        from_workspace_snapshot_id: running.profile.pre_execution_snapshot_id.clone(),
+        to_workspace_snapshot_id: None,
+        tool_effect: running.profile.effect,
+        unknown_dirty: true,
+    }
+}
+
+fn session_entry_from_event(event: &StoredEvent) -> Option<SessionLogEntry> {
+    event
+        .payload
+        .get("session_log_entry")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<SessionLogEntry>(value).ok())
+}
+
+fn execution_mutation_profile_from_metadata(
+    metadata: &ToolResultMeta,
+) -> Option<ExecutionMutationProfile> {
+    metadata
+        .details
+        .get("execution_mutation_profile")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn terminal_task_id_from_tool_metadata(metadata: &ToolResultMeta) -> Option<String> {
+    metadata
+        .details
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn merge_workspace_mutation_evidence(
+    event: &StoredEvent,
+    scope: &VerificationScope,
+) -> WorkspaceMutationEvidence {
+    let from_workspace_snapshot_id = first_payload_string(
+        &event.payload,
+        &[
+            "from_workspace_snapshot_id",
+            "parent_workspace_snapshot_before_id",
+            "before_workspace_snapshot_id",
+        ],
+    );
+    let to_workspace_snapshot_id = first_payload_string(
+        &event.payload,
+        &[
+            "to_workspace_snapshot_id",
+            "parent_workspace_snapshot_after_id",
+            "parent_workspace_snapshot_id",
+            "workspace_snapshot_id",
+        ],
+    );
+    WorkspaceMutationEvidence {
+        event_id: event.event_id.clone(),
+        source_event_type: event.event_type.clone(),
+        scope_hash: scope.scope_hash.clone(),
+        recorded_at_stream_sequence: event.stream_sequence,
+        from_workspace_snapshot_id,
+        unknown_dirty: to_workspace_snapshot_id.is_none(),
+        to_workspace_snapshot_id,
+        tool_effect: crate::ToolEffect::WorkspaceWrite,
+    }
+}
+
+fn first_payload_string(payload: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| payload.get(*key).and_then(|value| value.as_str()))
+        .map(str::to_owned)
+}
+
+fn mutation_matches_tool_call(
+    operation_id: &str,
+    prepared_tool_calls: &BTreeMap<String, Option<String>>,
+    tool_call_ids: &[String],
+    stream_sequence: u64,
+    baseline_sequence: u64,
+) -> bool {
+    prepared_tool_calls
+        .get(operation_id)
+        .and_then(|tool_call_id| tool_call_id.as_ref())
+        .is_some_and(|tool_call_id| tool_call_ids.contains(tool_call_id))
+        || stream_sequence > baseline_sequence
+}
+
+fn mutation_detection_matches_filter(
+    tool_call_id: Option<&str>,
+    tool_call_ids: &[String],
+    stream_sequence: u64,
+    baseline_sequence: u64,
+) -> bool {
+    tool_call_id.is_some_and(|call_id| tool_call_ids.iter().any(|current| current == call_id))
+        || stream_sequence > baseline_sequence
+}
+
+fn task_started_stream_sequence(records: &[SessionStreamRecord], task_id: &TaskId) -> Option<u64> {
+    records.iter().find_map(|record| {
+        let SessionStreamRecord::Stored(event) = record else {
+            return None;
+        };
+        let payload = event.payload.get("session_log_entry")?.clone();
+        let entry = serde_json::from_value::<crate::SessionLogEntry>(payload).ok()?;
+        let crate::SessionLogEntry::Control(ControlEntry::TaskRun(task)) = entry else {
+            return None;
+        };
+        (task.task_id == *task_id).then_some(event.stream_sequence)
+    })
 }
 
 fn changed_files_mutation_evidence(
@@ -1368,6 +1841,28 @@ fn changed_files_mutation_evidence(
         to_workspace_snapshot_id: None,
         tool_effect: crate::ToolEffect::WorkspaceWrite,
         unknown_dirty: false,
+    }
+}
+
+fn durable_mutation_replay_failed_evidence(
+    request: &SequentialTaskRequest,
+    step: &TaskStepSpec,
+    scope_hash: &str,
+    recorded_at_stream_sequence: u64,
+) -> WorkspaceMutationEvidence {
+    WorkspaceMutationEvidence {
+        event_id: format!(
+            "task-step-durable-mutation-replay-failed:{}:{}",
+            request.task_id.as_str(),
+            step.step_id.as_str()
+        ),
+        source_event_type: "durable_mutation_replay_failed".to_owned(),
+        scope_hash: scope_hash.to_owned(),
+        recorded_at_stream_sequence,
+        from_workspace_snapshot_id: None,
+        to_workspace_snapshot_id: None,
+        tool_effect: crate::ToolEffect::Unknown,
+        unknown_dirty: true,
     }
 }
 

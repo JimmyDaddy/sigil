@@ -325,6 +325,7 @@ pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub timeout_secs: u64,
     pub mutation_recorder: Option<MutationEventRecorder>,
+    execution_mutation_profile_recorded_call_ids: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for ToolContext {
@@ -333,6 +334,10 @@ impl std::fmt::Debug for ToolContext {
             .field("workspace_root", &self.workspace_root)
             .field("timeout_secs", &self.timeout_secs)
             .field("mutation_recorder", &self.mutation_recorder.is_some())
+            .field(
+                "execution_mutation_profile_recorded_call_ids",
+                &self.execution_mutation_profile_recorded_call_ids.len(),
+            )
             .finish()
     }
 }
@@ -344,6 +349,7 @@ impl ToolContext {
             workspace_root: workspace_root.into(),
             timeout_secs,
             mutation_recorder: None,
+            execution_mutation_profile_recorded_call_ids: BTreeSet::new(),
         }
     }
 
@@ -351,6 +357,22 @@ impl ToolContext {
     pub fn with_mutation_recorder(mut self, recorder: MutationEventRecorder) -> Self {
         self.mutation_recorder = Some(recorder);
         self
+    }
+
+    #[must_use]
+    pub(crate) fn with_execution_mutation_profile_recorded(
+        mut self,
+        call_id: impl Into<String>,
+    ) -> Self {
+        self.execution_mutation_profile_recorded_call_ids
+            .insert(call_id.into());
+        self
+    }
+
+    #[must_use]
+    fn execution_mutation_profile_recorded_for(&self, call_id: &str) -> bool {
+        self.execution_mutation_profile_recorded_call_ids
+            .contains(call_id)
     }
 }
 
@@ -1179,6 +1201,7 @@ impl ToolRegistry {
             let spec = tool.spec();
             (tool, spec)
         };
+        ensure_execution_mutation_profile_recorded(&ctx, &spec, &call.id)?;
         let args: Value = serde_json::from_str(&call.args_json)
             .map_err(|error| anyhow!("invalid tool args for {}: {error}", call.name))?;
         let mutation_scan = begin_unknown_mutation_scan(&ctx, &spec).map_err(|error| {
@@ -1192,6 +1215,45 @@ impl ToolRegistry {
         finish_unknown_mutation_scan(&ctx, &spec, &call_id, mutation_scan)
             .map_err(|error| unknown_mutation_scan_finish_error(&spec, error))?;
         result
+    }
+
+    /// Executes a tool call after the caller has persisted the corresponding started audit.
+    ///
+    /// Callers that execute unknown-side-effect tools with a mutation recorder must first append
+    /// `ToolExecutionStarted` carrying `ExecutionMutationProfile`; this wrapper marks that
+    /// precondition for the low-level registry guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is unknown, the JSON args are invalid, or the tool fails.
+    pub async fn execute_after_started_audit(
+        &self,
+        ctx: ToolContext,
+        call: crate::provider::ToolCall,
+    ) -> Result<ToolResult> {
+        let ctx = ctx.with_execution_mutation_profile_recorded(call.id.clone());
+        self.execute(ctx, call).await
+    }
+
+    /// Returns the mutation profile that must be persisted before executing this tool call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool is unknown or the workspace snapshot cannot be captured.
+    pub fn execution_mutation_profile(
+        &self,
+        ctx: &ToolContext,
+        call: &crate::provider::ToolCall,
+    ) -> Result<Option<ExecutionMutationProfile>> {
+        let spec = {
+            let tools = match self.tools.read() {
+                Ok(tools) => tools,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let tool = self.allowed_tool(&tools, &call.name)?;
+            tool.spec()
+        };
+        execution_mutation_profile_for_tool(ctx, &spec, &call.id)
     }
 
     /// Builds a preview for a tool call by name.
@@ -1449,6 +1511,23 @@ fn begin_unknown_mutation_scan(
         .map(Some)
 }
 
+fn ensure_execution_mutation_profile_recorded(
+    ctx: &ToolContext,
+    spec: &ToolSpec,
+    call_id: &str,
+) -> Result<()> {
+    if !tool_requires_unknown_mutation_scan(spec) || ctx.mutation_recorder.is_none() {
+        return Ok(());
+    }
+    if ctx.execution_mutation_profile_recorded_for(call_id) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "tool {} requires persisted ToolExecutionStarted execution mutation profile before execution",
+        spec.name
+    ))
+}
+
 pub(crate) fn execution_mutation_profile_for_tool(
     ctx: &ToolContext,
     spec: &ToolSpec,
@@ -1484,13 +1563,23 @@ fn finish_unknown_mutation_scan(
     let Some(recorder) = &ctx.mutation_recorder else {
         return Ok(());
     };
-    recorder.record_workspace_mutation_if_changed(
+    match recorder.record_workspace_mutation_if_changed(
         &scan,
         &ctx.workspace_root,
         call_id.to_owned(),
         spec.name.clone(),
         unknown_mutation_tool_effect(spec),
-    )?;
+    ) {
+        Ok(_) => {}
+        Err(_) => {
+            recorder.record_workspace_scan_unavailable_after(
+                &scan,
+                call_id.to_owned(),
+                spec.name.clone(),
+                unknown_mutation_tool_effect(spec),
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1503,10 +1592,11 @@ fn unknown_mutation_scan_finish_error(spec: &ToolSpec, error: anyhow::Error) -> 
 }
 
 fn tool_requires_unknown_mutation_scan(spec: &ToolSpec) -> bool {
-    matches!(
-        spec.category,
-        ToolCategory::Shell | ToolCategory::Mcp | ToolCategory::Custom
-    )
+    spec.access != ToolAccess::Read
+        && matches!(
+            spec.category,
+            ToolCategory::Shell | ToolCategory::Mcp | ToolCategory::Custom
+        )
 }
 
 fn unknown_mutation_tool_effect(_spec: &ToolSpec) -> ToolEffect {

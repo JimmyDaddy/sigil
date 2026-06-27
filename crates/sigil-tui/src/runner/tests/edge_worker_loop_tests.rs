@@ -11,20 +11,22 @@ use sigil_kernel::{
     Agent, AgentInvocationMode, AgentInvocationSource, AgentProfileId, AgentProfileSnapshotId,
     AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
     AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, ControlEntry, JsonlSessionStore, McpElicitationDecision,
-    McpElicitationEntry, ModelMessage, PlanApprovalPermission, Provider, ReasoningEffort,
-    RootConfig, Session, SessionLogEntry, SessionRef, TaskChildSessionEntry,
+    AgentThreadStatusChangedEntry, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    DurableEventType, JsonlSessionStore, McpElicitationDecision, McpElicitationEntry, ModelMessage,
+    MutationEventRecorder, PlanApprovalPermission, Provider, ReasoningEffort, RootConfig, Session,
+    SessionLogEntry, SessionRef, SessionStreamRecord, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry,
     TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext,
-    ToolExecutionStatus, ToolRegistry, WorkspaceRootSnapshot,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolCall, ToolContext, ToolEffect,
+    ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResultMeta, VerificationScope,
+    WorkspaceMutationDetected, WorkspaceRootSnapshot,
 };
 use sigil_runtime::McpRuntimeEventHandler;
 use tempfile::tempdir;
 
 use super::{
     super::{
-        WorkerCommand, WorkerMessage,
+        McpActivationStatus, WorkerCommand, WorkerMessage,
         elicitation_bridge::ChannelMcpElicitationHandler,
         mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
         worker_loop::append_cancelled_task_state,
@@ -33,7 +35,8 @@ use super::{
             append_mcp_elicitation_audits, approve_plan, cancel_terminal_task, close_agent_thread,
             next_task_id, partition_agent_result_continuations,
             pending_agent_result_continuations_from_session,
-            queued_background_ready_transient_context, resolve_continue_task, run_worker_loop,
+            queued_background_ready_transient_context, refresh_terminal_task_statuses,
+            resolve_continue_task, run_worker_loop,
         },
     },
     common::{PlannedProvider, StreamPlan, test_root_config},
@@ -514,6 +517,33 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         .worker_threads(2)
         .enable_all()
         .build()?;
+    let session_log_path = temp.path().join(".sigil/sessions/session-terminal.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store.clone());
+    let recorder = MutationEventRecorder::new(store);
+    let start_profile = recorder.execution_mutation_profile(
+        temp.path(),
+        &VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+        "call-terminal-start",
+        "terminal_start",
+        ToolEffect::Unknown,
+    )?;
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-terminal-start".to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        status: ToolExecutionStatus::Started,
+        duration_ms: None,
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta {
+            details: serde_json::json!({
+                "execution_mutation_profile": start_profile,
+            }),
+            ..ToolResultMeta::default()
+        },
+        error: None,
+        model_content_hash: None,
+    })))?;
     let tool_context = ToolContext::new(temp.path().to_path_buf(), 5);
     let task_id = "terminal-cancel-audit";
     let start = runtime.block_on(
@@ -524,7 +554,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
                 name: "terminal_start".to_owned(),
                 args_json: serde_json::json!({
                     "task_id": task_id,
-                    "command": "printf cancel-tail; sleep 5"
+                    "command": "printf terminal-mutated > terminal-mutated.txt; printf cancel-tail; sleep 5"
                 })
                 .to_string(),
             },
@@ -539,9 +569,17 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         "cancel-tail",
     ))?;
 
-    let session_log_path = temp.path().join(".sigil/sessions/session-terminal.jsonl");
-    let store = JsonlSessionStore::new(&session_log_path)?;
-    let mut session = Session::new("planned", "planned-model").with_store(store);
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-terminal-start".to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        status: ToolExecutionStatus::Completed,
+        duration_ms: Some(1),
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: start.metadata.clone(),
+        error: None,
+        model_content_hash: Some("terminal-start-result".to_owned()),
+    })))?;
     session.append_control(ControlEntry::TerminalTask(start_entry))?;
     let options = sigil_runtime::build_run_options(
         &root_config,
@@ -597,6 +635,167 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
                     && task.output_hash.is_some()
         )
     }));
+    let detected = JsonlSessionStore::read_event_records(&session_log_path)?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(detected.len(), 1);
+    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
+    assert_eq!(payload.tool_call_id.as_deref(), Some("call-terminal-start"));
+    assert_eq!(payload.tool_name, "terminal_start");
+    assert!(!payload.unknown_dirty);
+    assert!(payload.from_workspace_snapshot_id.is_some());
+    assert!(payload.to_workspace_snapshot_id.is_some());
+    Ok(())
+}
+
+#[test]
+fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -> Result<()> {
+    let temp = tempdir()?;
+    let root_config = test_root_config(temp.path(), "planned", "planned-model");
+    let provider = PlannedProvider::new(Vec::new());
+    let (message_tx, _message_rx) = mpsc::channel();
+    let elicitation_handler = Arc::new(ChannelMcpElicitationHandler::new(message_tx));
+    let (mcp_event_tx, _mcp_event_rx) = mpsc::channel();
+    let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
+    let registry = sigil_runtime::build_tool_registry_without_eager_mcp(
+        &root_config,
+        &provider.capabilities(),
+        temp.path().to_path_buf(),
+        elicitation_handler,
+        mcp_event_handler,
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let session_log_path = temp.path().join(".sigil/sessions/session-terminal.jsonl");
+    let store = JsonlSessionStore::new(&session_log_path)?;
+    let mut session = Session::new("planned", "planned-model").with_store(store.clone());
+    let recorder = MutationEventRecorder::new(store);
+    let start_profile = recorder.execution_mutation_profile(
+        temp.path(),
+        &VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+        "call-terminal-start",
+        "terminal_start",
+        ToolEffect::Unknown,
+    )?;
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-terminal-start".to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        status: ToolExecutionStatus::Started,
+        duration_ms: None,
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: ToolResultMeta {
+            details: serde_json::json!({
+                "execution_mutation_profile": start_profile,
+            }),
+            ..ToolResultMeta::default()
+        },
+        error: None,
+        model_content_hash: None,
+    })))?;
+
+    let tool_context = ToolContext::new(temp.path().to_path_buf(), 5);
+    let task_id = "terminal-natural-exit";
+    let start = runtime.block_on(
+        registry.execute(
+            tool_context.clone(),
+            ToolCall {
+                id: "call-terminal-start".to_owned(),
+                name: "terminal_start".to_owned(),
+                args_json: serde_json::json!({
+                    "task_id": task_id,
+                    "command": "printf terminal-mutated > terminal-natural.txt; printf natural-tail"
+                })
+                .to_string(),
+            },
+        ),
+    )?;
+    let start_entry = TerminalTaskEntry::from_tool_result_details(&start.metadata.details)?
+        .expect("terminal_start should return terminal metadata");
+    runtime.block_on(wait_for_terminal_output(
+        &registry,
+        tool_context,
+        task_id,
+        "natural-tail",
+    ))?;
+
+    session.append_control(ControlEntry::ToolExecution(Box::new(ToolExecutionEntry {
+        call_id: "call-terminal-start".to_owned(),
+        tool_name: "terminal_start".to_owned(),
+        status: ToolExecutionStatus::Completed,
+        duration_ms: Some(1),
+        subjects: Vec::new(),
+        changed_files: Vec::new(),
+        metadata: start.metadata.clone(),
+        error: None,
+        model_content_hash: Some("terminal-start-result".to_owned()),
+    })))?;
+    session.append_control(ControlEntry::TerminalTask(start_entry))?;
+
+    let options = sigil_runtime::build_run_options(
+        &root_config,
+        temp.path().to_path_buf(),
+        sigil_kernel::InteractionMode::Interactive,
+    );
+    let mut current_session = Some(session);
+    let mut updates = Vec::new();
+    for _ in 0..40 {
+        updates = refresh_terminal_task_statuses(
+            &runtime,
+            &registry,
+            &options,
+            &session_log_path,
+            &mut current_session,
+        )
+        .map_err(anyhow::Error::msg)?;
+        if !updates.is_empty() {
+            break;
+        }
+        runtime.block_on(tokio::time::sleep(Duration::from_millis(25)));
+    }
+
+    assert_eq!(updates.len(), 1);
+    let (entry, entries) = updates.remove(0);
+    assert!(matches!(
+        entry.status,
+        TerminalTaskStatus::Exited { exit_code: Some(0) }
+    ));
+    assert!(entries.iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TerminalTask(task))
+                if task.handle.task_id.as_str() == task_id
+                    && matches!(task.status, TerminalTaskStatus::Exited { exit_code: Some(0) })
+        )
+    }));
+    let detected = JsonlSessionStore::read_event_records(&session_log_path)?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(detected.len(), 1);
+    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
+    assert_eq!(payload.tool_call_id.as_deref(), Some("call-terminal-start"));
+    assert_eq!(payload.tool_name, "terminal_start");
+    assert!(!payload.unknown_dirty);
+    assert!(payload.from_workspace_snapshot_id.is_some());
+    assert!(payload.to_workspace_snapshot_id.is_some());
     Ok(())
 }
 
@@ -1033,6 +1232,73 @@ fn activate_lazy_mcp_reports_shared_agent_error_when_mutation_is_blocked() -> Re
         failure,
         WorkerMessage::RunFailed(ref error) if error == "cannot activate MCP while agent registry is shared"
     ));
+
+    worker.send_shutdown()?;
+    worker.join()
+}
+
+#[test]
+fn refresh_mcp_server_keeps_pending_intent_when_agent_registry_is_shared() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/shared-refresh.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let agent = Arc::new(Agent::new(
+        PlannedProvider::new(vec![StreamPlan::Pending]),
+        ToolRegistry::new(),
+    ));
+
+    let worker = spawn_loop_with_shared_agent(
+        root_config,
+        session_log_path,
+        workspace_root,
+        Arc::clone(&agent),
+    )?;
+
+    worker.send(WorkerCommand::RefreshMcpServer {
+        server_name: "missing".to_owned(),
+    })?;
+
+    let failure = worker.recv(Duration::from_secs(3))?;
+    assert!(matches!(
+        failure,
+        WorkerMessage::RunFailed(ref error) if error == "cannot refresh MCP while agent registry is shared"
+    ));
+
+    drop(agent);
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut saw_refreshing = false;
+    let mut saw_deferred = false;
+    while Instant::now() < deadline && !saw_deferred {
+        let Some(message) = worker.recv_optional(Duration::from_millis(250))? else {
+            continue;
+        };
+        match message {
+            WorkerMessage::McpActivationStatus {
+                server_name: Some(server_name),
+                status: McpActivationStatus::Refreshing,
+            } if server_name == "missing" => {
+                saw_refreshing = true;
+            }
+            WorkerMessage::McpActivationStatus {
+                server_name: Some(server_name),
+                status: McpActivationStatus::Deferred,
+            } if server_name == "missing" => {
+                saw_deferred = true;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_refreshing,
+        "pending refresh should retry when registry is free"
+    );
+    assert!(
+        saw_deferred,
+        "retried missing server should resolve as deferred"
+    );
 
     worker.send_shutdown()?;
     worker.join()

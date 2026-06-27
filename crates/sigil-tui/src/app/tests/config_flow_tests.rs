@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::MutationArtifactRetentionPreview;
 
 fn config_for_workspace(workspace_root: &Path) -> RootConfig {
     let mut config = test_config();
@@ -33,8 +34,243 @@ fn config_storage_section_shows_resolved_paths_readonly() {
     assert!(detail.contains("Session logs"));
     assert!(detail.contains("Input history"));
     assert!(detail.contains("Scratch"));
+    assert!(detail.contains("[artifact retention]"));
+    assert!(detail.contains("Max artifacts: 10000"));
+    assert!(detail.contains("Max bytes: 512 MiB"));
+    assert!(detail.contains("Expire older than: 30 days"));
+    assert!(detail.contains("Current artifacts: 0 (0 bytes)"));
+    assert!(detail.contains("Cleanup preview: expire 0, unavailable 0"));
+    assert!(detail.contains("Cleanup bytes: 0 bytes"));
+    assert!(detail.contains("i No mutation artifacts found"));
+    assert!(detail.contains("i footer clean/delete records mutation artifact lifecycle events"));
     assert!(detail.contains("SIGIL_STATE_HOME"));
     assert_eq!(app.config_selected_field_label(), None);
+}
+
+#[test]
+fn config_storage_footer_dispatches_mutation_artifact_cleanup() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.set_section(ConfigSection::Storage);
+    state.focus_footer(ConfigFooterAction::CleanMutationArtifacts);
+
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["save", "save+close", "clean", "delete", "close"]
+    );
+    assert_eq!(app.config_selected_field_label(), Some("clean_artifacts"));
+    assert!(
+        app.config_nav_lines()
+            .join("\n")
+            .contains("Storage: footer clean artifacts")
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(action, Some(AppAction::CleanMutationArtifacts)));
+    assert_eq!(app.last_notice(), Some("cleaning mutation artifacts"));
+    Ok(())
+}
+
+#[test]
+fn config_storage_footer_dispatches_selected_artifact_delete() -> Result<()> {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    std::fs::write(&target, "old")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let store = JsonlSessionStore::new(app.session_log_path.clone())?;
+    let recorder = sigil_kernel::MutationEventRecorder::new(store);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-delete", None)?;
+    let new_content = b"new";
+    let prepared = coordinator.prepare_file(
+        "note.txt",
+        target.clone(),
+        Some(sigil_kernel::bytes_hash(new_content)),
+    )?;
+    coordinator.commit_write(&prepared, new_content)?;
+
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.set_section(ConfigSection::Storage);
+    state.focus_footer(ConfigFooterAction::DeleteMutationArtifact);
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("> note.txt · 3 bytes · available · artifact:"));
+    assert_eq!(app.config_selected_field_label(), Some("delete_artifact"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::DeleteMutationArtifact { ref artifact_id })
+            if artifact_id.starts_with("mutation-artifact:sha256:")
+    ));
+    assert!(
+        app.last_notice()
+            .is_some_and(|notice| notice.starts_with("deleting mutation artifact artifact:"))
+    );
+    Ok(())
+}
+
+#[test]
+fn config_storage_section_shows_artifact_retention_overrides() {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let mut config = config_for_workspace(temp.path());
+    config.storage.mutation_artifact_retention.max_artifacts = Some(42);
+    config.storage.mutation_artifact_retention.max_bytes = Some(1024 * 1024);
+    config
+        .storage
+        .mutation_artifact_retention
+        .expire_older_than_ms = Some(60 * 60 * 1000);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Storage);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Max artifacts: 42"));
+    assert!(detail.contains("Max bytes: 1 MiB"));
+    assert!(detail.contains("Expire older than: 1 hour"));
+
+    app.mutation_artifact_retention_preview = MutationArtifactRetentionPreview::Pending;
+    let pending = app.config_detail_lines().join("\n");
+    assert!(pending.contains("Preview: pending"));
+
+    app.mutation_artifact_retention_preview =
+        MutationArtifactRetentionPreview::Unavailable("preview failed".to_owned());
+    let unavailable = app.config_detail_lines().join("\n");
+    assert!(unavailable.contains("Preview: unavailable"));
+    assert!(unavailable.contains("i preview failed"));
+
+    let action = app
+        .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+        .expect("storage down should be handled");
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("action save"));
+}
+
+#[test]
+fn config_storage_section_shows_artifact_retention_preview() -> Result<()> {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    std::fs::write(&target, "old")?;
+    let mut config = config_for_workspace(&workspace);
+    config.storage.mutation_artifact_retention.max_artifacts = Some(0);
+    config.storage.mutation_artifact_retention.max_bytes = None;
+    config
+        .storage
+        .mutation_artifact_retention
+        .expire_older_than_ms = None;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let store = JsonlSessionStore::new(app.session_log_path.clone())?;
+    let recorder = sigil_kernel::MutationEventRecorder::new(store);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-preview", None)?;
+    let new_content = b"new";
+    let prepared = coordinator.prepare_file(
+        "note.txt",
+        target.clone(),
+        Some(sigil_kernel::bytes_hash(new_content)),
+    )?;
+    coordinator.commit_write(&prepared, new_content)?;
+
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Storage);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Current artifacts: 1 (3 bytes)"));
+    assert!(detail.contains("Cleanup preview: expire 1, unavailable 0"));
+    assert!(detail.contains("Cleanup bytes: 3 bytes"));
+    assert!(detail.contains("[artifact list]"));
+    assert!(detail.contains("> note.txt · 3 bytes · available · artifact:"));
+    assert!(detail.contains("[selected artifact]"));
+    assert!(detail.contains("Selected: 1 of 1"));
+    assert!(detail.contains("Artifact: artifact:"));
+    assert!(detail.contains("Artifact id: mutation-artifact:sha256:"));
+    assert!(detail.contains("Size: 3 bytes"));
+    assert!(detail.contains("Availability: available"));
+    assert!(detail.contains("Operation 1:"));
+    assert!(detail.contains("Source 1: note.txt"));
+    Ok(())
+}
+
+#[test]
+fn config_storage_up_down_moves_artifact_selection() -> Result<()> {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let first = workspace.join("first.txt");
+    let second = workspace.join("second.txt");
+    std::fs::write(&first, "one")?;
+    std::fs::write(&second, "two")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let store = JsonlSessionStore::new(app.session_log_path.clone())?;
+    let recorder = sigil_kernel::MutationEventRecorder::new(store);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-select", None)?;
+    let new_content = b"new";
+    let first_prepared = coordinator.prepare_file(
+        "first.txt",
+        first.clone(),
+        Some(sigil_kernel::bytes_hash(new_content)),
+    )?;
+    coordinator.commit_write(&first_prepared, new_content)?;
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let second_prepared = coordinator.prepare_file(
+        "second.txt",
+        second.clone(),
+        Some(sigil_kernel::bytes_hash(new_content)),
+    )?;
+    coordinator.commit_write(&second_prepared, new_content)?;
+
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Storage);
+
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
+    assert_eq!(
+        app.config_state
+            .as_ref()
+            .expect("config state should exist")
+            .selected_storage_artifact_index,
+        0
+    );
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("artifact 2/2"));
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("- first.txt · 3 bytes · available · artifact:"));
+    assert!(detail.contains("> second.txt · 3 bytes · available · artifact:"));
+    assert!(detail.contains("Selected: 2 of 2"));
+    assert!(detail.contains("Source 1: second.txt"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
+
+    assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("action save"));
+    Ok(())
 }
 
 fn write_workspace_skill(workspace_root: &Path, id: &str, body: &str) -> Result<()> {
@@ -351,7 +587,7 @@ fn config_mcp_lifecycle_updates_from_worker_activation_status() -> Result<()> {
 }
 
 #[test]
-fn config_mcp_footer_activate_requires_saved_lazy_server() -> Result<()> {
+fn config_mcp_footer_activate_refreshes_saved_eager_server() -> Result<()> {
     let mut config = test_config();
     config.mcp_servers.push(sigil_kernel::McpServerConfig {
         name: "eager".to_owned(),
@@ -370,8 +606,15 @@ fn config_mcp_footer_activate_requires_saved_lazy_server() -> Result<()> {
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
-    assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("MCP server eager is eager"));
+    assert!(matches!(
+        action,
+        Some(AppAction::RefreshMcpServer { ref server_name }) if server_name == "eager"
+    ));
+    assert_eq!(app.last_notice(), Some("refreshing MCP eager"));
+    assert_eq!(
+        app.mcp_server_runtime_status_label("eager").as_deref(),
+        Some("refreshing")
+    );
 
     let state = app
         .config_state
@@ -384,6 +627,47 @@ fn config_mcp_footer_activate_requires_saved_lazy_server() -> Result<()> {
 
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("save config before activating MCP"));
+    Ok(())
+}
+
+#[test]
+fn config_mcp_footer_activate_refreshes_failed_lazy_server() -> Result<()> {
+    let mut config = test_config();
+    config.mcp_servers.push(sigil_kernel::McpServerConfig {
+        name: "filesystem".to_owned(),
+        command: "mcp-filesystem".to_owned(),
+        required: false,
+        startup: McpServerStartup::Lazy,
+        ..Default::default()
+    });
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Mcp);
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .focus_footer(ConfigFooterAction::ActivateMcp);
+    app.handle_worker_message(WorkerMessage::McpActivationStatus {
+        server_name: Some("filesystem".to_owned()),
+        status: McpActivationStatus::Failed {
+            error: "MCP server filesystem initialize timed out".to_owned(),
+        },
+    })?;
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::RefreshMcpServer { ref server_name }) if server_name == "filesystem"
+    ));
+    assert_eq!(app.last_notice(), Some("refreshing MCP filesystem"));
+    assert_eq!(
+        app.mcp_server_runtime_status_label("filesystem").as_deref(),
+        Some("refreshing")
+    );
     Ok(())
 }
 
@@ -497,12 +781,250 @@ fn config_permissions_step_uses_policy_summary_and_details() {
     assert!(detail.contains("[rules]"));
     assert!(detail.contains("- Rule overrides"));
     assert!(detail.contains("i All unmatched tools use the default mode above"));
+    assert!(detail.contains("[verification trust]"));
+    assert!(detail.contains("Workspace trust: unknown"));
+    assert!(detail.contains("User checks: 0 configured"));
     assert!(detail.contains("[details]"));
     assert!(detail.contains("selected: Default mode"));
     assert!(detail.contains("key: default_mode"));
     assert!(detail.contains("controls: Tab section"));
     assert!(!detail.lines().any(|line| line.starts_with("overrides:")));
     assert!(!detail.contains("subject="));
+    assert!(
+        app.config_nav_lines()
+            .join("\n")
+            .contains("Permissions: footer trust workspace")
+    );
+}
+
+#[test]
+fn config_permissions_footer_dispatches_workspace_trust() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.open_config_panel();
+    let state = app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist");
+    state.set_section(ConfigSection::Permissions);
+    state.focus_footer(ConfigFooterAction::TrustWorkspace);
+
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["save", "save+close", "trust", "close"]
+    );
+    assert_eq!(app.config_selected_field_label(), Some("trust_workspace"));
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(action, Some(AppAction::TrustWorkspace)));
+    assert_eq!(app.last_notice(), Some("trusting workspace"));
+    Ok(())
+}
+
+#[test]
+fn config_permissions_step_shows_repo_verification_trust_promotion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write Cargo.toml");
+    let config = config_for_workspace(temp.path());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Permissions);
+
+    let untrusted_detail = app.config_detail_lines().join("\n");
+
+    assert!(untrusted_detail.contains("Workspace trust: unknown"));
+    assert!(untrusted_detail.contains("Repo candidates: 1 require trust"));
+    assert!(untrusted_detail.contains("- cargo-test · cargo · cargo test"));
+    assert!(
+        untrusted_detail
+            .contains("effect=read_only · cwd=workspace · source=Cargo.toml · promotion=workspace-trust/approval/sandbox")
+    );
+    assert!(
+        untrusted_detail
+            .contains("i Use /trust-workspace to promote repo-local checks before /task continue")
+    );
+
+    let workspace_id = sigil_kernel::stable_workspace_id(temp.path()).expect("workspace id");
+    app.current_session_entries.push(SessionLogEntry::Control(
+        ControlEntry::WorkspaceTrustDecision(sigil_kernel::WorkspaceTrustDecisionEntry {
+            workspace_id,
+            workspace_trust_snapshot_id: "trust-1".to_owned(),
+            trust: sigil_kernel::WorkspaceTrust::Trusted,
+            decided_by_event_id: Some("event-trust".to_owned()),
+            reason: Some("test trusted workspace".to_owned()),
+        }),
+    ));
+
+    let trusted_detail = app.config_detail_lines().join("\n");
+
+    assert!(trusted_detail.contains("Workspace trust: trusted"));
+    assert!(trusted_detail.contains("Repo candidates: 1 require trust"));
+    assert!(trusted_detail.contains("effect=read_only · cwd=workspace"));
+    assert!(trusted_detail.contains("i Repo-local checks are promoted for future /task runs"));
+}
+
+#[test]
+fn config_permissions_step_handles_empty_and_many_repo_verification_candidates() {
+    let empty = tempfile::tempdir().expect("empty workspace");
+    let empty_config = config_for_workspace(empty.path());
+    let mut empty_app = AppState::from_root_config(Path::new("sigil.toml"), &empty_config);
+    empty_app.open_config_panel();
+    empty_app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Permissions);
+
+    let empty_detail = empty_app.config_detail_lines().join("\n");
+    assert!(empty_detail.contains("Repo candidates: 0 require trust"));
+    assert!(empty_detail.contains("i No repo-local verification checks discovered"));
+
+    let repo = tempfile::tempdir().expect("repo workspace");
+    std::fs::create_dir_all(repo.path().join(".sigil")).expect("sigil dir");
+    std::fs::write(
+        repo.path().join(".sigil/verification.toml"),
+        r#"
+            [[checks]]
+            id = "docs-check"
+            command = "cargo"
+            args = ["test", "-p", "sigil-kernel"]
+        "#,
+    )
+    .expect("verification file");
+    std::fs::create_dir_all(repo.path().join(".github/workflows")).expect("workflow dir");
+    std::fs::write(
+        repo.path().join(".github/workflows/ci.yml"),
+        "jobs:\n  test:\n    steps:\n      - run: \"cargo test --workspace\"\n      - run: 'npm test -- --runInBand'\n      - run: make test\n",
+    )
+    .expect("ci file");
+    std::fs::write(
+        repo.path().join("package.json"),
+        r#"{"scripts":{"test":"vitest","check":"tsc --noEmit","lint":"eslint .","build":"vite build"}}"#,
+    )
+    .expect("package file");
+    std::fs::write(
+        repo.path().join("Cargo.toml"),
+        "[workspace]\nmembers = []\n",
+    )
+    .expect("cargo file");
+    std::fs::write(repo.path().join("Makefile"), "test:\n\tcargo test\n").expect("makefile");
+    let repo_config = config_for_workspace(repo.path());
+    let mut repo_app = AppState::from_root_config(Path::new("sigil.toml"), &repo_config);
+    repo_app.open_config_panel();
+    repo_app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Permissions);
+
+    let repo_detail = repo_app.config_detail_lines().join("\n");
+    assert!(repo_detail.contains("Repo candidates: 10 require trust"));
+    assert!(
+        repo_detail.contains("- docs-check · .sigil/verification · cargo test -p sigil-kernel")
+    );
+    assert!(repo_detail.contains("... 7 more repo-local checks"));
+}
+
+#[test]
+fn config_permissions_step_reports_workspace_verification_discovery_error() {
+    let temp = tempfile::tempdir().expect("missing workspace parent");
+    let missing_workspace = temp.path().join("missing-workspace");
+    let config = config_for_workspace(&missing_workspace);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Permissions);
+
+    let detail = app.config_detail_lines().join("\n");
+
+    assert!(detail.contains("Workspace trust: unknown"));
+    assert!(detail.contains("Verification discovery unavailable:"));
+    assert!(detail.contains("failed to canonicalize"));
+
+    let malformed = tempfile::tempdir().expect("malformed workspace");
+    std::fs::create_dir_all(malformed.path().join(".sigil")).expect("sigil dir");
+    std::fs::write(
+        malformed.path().join(".sigil/verification.toml"),
+        "checks = ",
+    )
+    .expect("malformed verification config");
+    let malformed_config = config_for_workspace(malformed.path());
+    let mut malformed_app = AppState::from_root_config(Path::new("sigil.toml"), &malformed_config);
+    malformed_app.open_config_panel();
+    malformed_app
+        .config_state
+        .as_mut()
+        .expect("config state should still exist")
+        .set_section(ConfigSection::Permissions);
+
+    let malformed_detail = malformed_app.config_detail_lines().join("\n");
+    assert!(malformed_detail.contains("Repo candidates: unavailable"));
+    assert!(malformed_detail.contains("Verification discovery failed:"));
+}
+
+#[test]
+fn config_storage_preview_reports_unavailable_artifact_states() {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+
+    app.config_snapshot = None;
+    app.refresh_mutation_artifact_retention_preview();
+    assert!(matches!(
+        app.mutation_artifact_retention_preview,
+        MutationArtifactRetentionPreview::Unavailable(ref reason)
+            if reason == "config is unavailable"
+    ));
+
+    app.config_snapshot = Some(test_config());
+    let blocked_parent = temp.path().join("blocked-parent");
+    std::fs::write(&blocked_parent, "not a directory").expect("blocked parent file");
+    app.session_log_path = blocked_parent.join("session.jsonl");
+    app.refresh_mutation_artifact_retention_preview();
+    assert!(matches!(
+        app.mutation_artifact_retention_preview,
+        MutationArtifactRetentionPreview::Unavailable(ref reason)
+            if reason.contains("failed to open mutation artifact recorder")
+    ));
+
+    let artifact_file_root = temp.path().join("artifact-file-root");
+    std::fs::create_dir_all(artifact_file_root.join("artifacts")).expect("artifact parent");
+    std::fs::write(
+        artifact_file_root.join("artifacts/mutations"),
+        "not a directory",
+    )
+    .expect("artifact root file");
+    app.session_log_path = artifact_file_root.join("sessions/session.jsonl");
+    app.refresh_mutation_artifact_retention_preview();
+    assert!(matches!(
+        app.mutation_artifact_retention_preview,
+        MutationArtifactRetentionPreview::Unavailable(ref reason)
+            if reason.contains("failed to preview mutation artifacts")
+    ));
+}
+
+#[test]
+fn repo_verification_candidate_promotion_flags_mutating_checks() {
+    assert_eq!(
+        crate::app::config_flow::repo_check_promotion_requirement(
+            sigil_kernel::ToolEffect::WorkspaceWrite
+        ),
+        "workspace-trust/approval/sandbox+rerun-readonly-check"
+    );
+    assert_eq!(
+        crate::app::config_flow::repo_check_promotion_requirement(
+            sigil_kernel::ToolEffect::ReadOnly
+        ),
+        "workspace-trust/approval/sandbox"
+    );
 }
 
 #[test]
@@ -552,7 +1074,7 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     assert!(nav.contains("MCP: Ctrl-N add"));
     assert!(nav.contains("MCP: Ctrl-D drop"));
     assert!(nav.contains("MCP: PgUp/PgDn switch"));
-    assert!(nav.contains("MCP: footer activate lazy"));
+    assert!(nav.contains("MCP: footer activate/refresh"));
 }
 
 #[test]

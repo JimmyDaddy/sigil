@@ -66,6 +66,7 @@ pub enum DurableEventType {
     WriteCommitted,
     WorkspaceMutationDetected,
     CheckpointRestored,
+    MutationArtifactLifecycleRecorded,
     CommandFinished,
     CheckFinished,
     CheckSpecRecorded,
@@ -73,6 +74,7 @@ pub enum DurableEventType {
     TodoChanged,
     VerificationRecorded,
     VerificationPolicyChanged,
+    VerificationCheckRun,
     EnvironmentFingerprintRecorded,
     ReadinessEvaluated,
     TaskStatusChanged,
@@ -108,6 +110,7 @@ impl DurableEventType {
             Self::WriteCommitted => "write_committed",
             Self::WorkspaceMutationDetected => "workspace_mutation_detected",
             Self::CheckpointRestored => "checkpoint_restored",
+            Self::MutationArtifactLifecycleRecorded => "mutation_artifact_lifecycle_recorded",
             Self::CommandFinished => "command_finished",
             Self::CheckFinished => "check_finished",
             Self::CheckSpecRecorded => "check_spec_recorded",
@@ -115,6 +118,7 @@ impl DurableEventType {
             Self::TodoChanged => "todo_changed",
             Self::VerificationRecorded => "verification_recorded",
             Self::VerificationPolicyChanged => "verification_policy_changed",
+            Self::VerificationCheckRun => "verification_check_run",
             Self::EnvironmentFingerprintRecorded => "environment_fingerprint_recorded",
             Self::ReadinessEvaluated => "readiness_evaluated",
             Self::TaskStatusChanged => "task_status_changed",
@@ -150,6 +154,7 @@ impl DurableEventType {
             "write_committed" => Self::WriteCommitted,
             "workspace_mutation_detected" => Self::WorkspaceMutationDetected,
             "checkpoint_restored" => Self::CheckpointRestored,
+            "mutation_artifact_lifecycle_recorded" => Self::MutationArtifactLifecycleRecorded,
             "command_finished" => Self::CommandFinished,
             "check_finished" => Self::CheckFinished,
             "check_spec_recorded" => Self::CheckSpecRecorded,
@@ -157,6 +162,7 @@ impl DurableEventType {
             "todo_changed" => Self::TodoChanged,
             "verification_recorded" => Self::VerificationRecorded,
             "verification_policy_changed" => Self::VerificationPolicyChanged,
+            "verification_check_run" => Self::VerificationCheckRun,
             "environment_fingerprint_recorded" => Self::EnvironmentFingerprintRecorded,
             "readiness_evaluated" => Self::ReadinessEvaluated,
             "task_status_changed" => Self::TaskStatusChanged,
@@ -192,6 +198,19 @@ impl DurableEventType {
         Some(EventSyncClass::RecoveryCritical)
     }
 
+    pub fn expected_event_class(self) -> Option<EventClass> {
+        if self == Self::Legacy {
+            return None;
+        }
+        if matches!(
+            self,
+            Self::ContextSourceCaptured | Self::SessionEntryRecorded
+        ) {
+            return Some(EventClass::NonCritical);
+        }
+        Some(EventClass::Critical)
+    }
+
     pub fn appendable(self) -> bool {
         !matches!(self, Self::Legacy)
     }
@@ -216,6 +235,7 @@ pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
     DurableEventType::WriteCommitted,
     DurableEventType::WorkspaceMutationDetected,
     DurableEventType::CheckpointRestored,
+    DurableEventType::MutationArtifactLifecycleRecorded,
     DurableEventType::CommandFinished,
     DurableEventType::CheckFinished,
     DurableEventType::CheckSpecRecorded,
@@ -223,6 +243,7 @@ pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
     DurableEventType::TodoChanged,
     DurableEventType::VerificationRecorded,
     DurableEventType::VerificationPolicyChanged,
+    DurableEventType::VerificationCheckRun,
     DurableEventType::EnvironmentFingerprintRecorded,
     DurableEventType::ReadinessEvaluated,
     DurableEventType::TaskStatusChanged,
@@ -270,6 +291,17 @@ impl StoredEvent {
         stream_sequence: u64,
         payload: Value,
     ) -> Result<Self> {
+        let expected_class = event_type.expected_event_class().ok_or_else(|| {
+            anyhow::anyhow!("{} cannot be appended as a v2 event", event_type.as_str())
+        })?;
+        if event_class != expected_class {
+            bail!(
+                "{} event_class must be {:?}, got {:?}",
+                event_type.as_str(),
+                expected_class,
+                event_class
+            );
+        }
         Self::new_raw(
             event_type.as_str(),
             event_class,
@@ -439,6 +471,7 @@ pub enum DurableDomainEvent {
     WriteCommitted(DomainPayload),
     WorkspaceMutationDetected(DomainPayload),
     CheckpointRestored(DomainPayload),
+    MutationArtifactLifecycleRecorded(DomainPayload),
     CommandFinished(DomainPayload),
     CheckFinished(DomainPayload),
     CheckSpecRecorded(DomainPayload),
@@ -446,6 +479,7 @@ pub enum DurableDomainEvent {
     TodoChanged(DomainPayload),
     VerificationRecorded(DomainPayload),
     VerificationPolicyChanged(DomainPayload),
+    VerificationCheckRun(DomainPayload),
     EnvironmentFingerprintRecorded(DomainPayload),
     ReadinessEvaluated(DomainPayload),
     TaskStatusChanged(DomainPayload),
@@ -481,6 +515,9 @@ impl DurableDomainEvent {
             Self::WriteCommitted(_) => DurableEventType::WriteCommitted,
             Self::WorkspaceMutationDetected(_) => DurableEventType::WorkspaceMutationDetected,
             Self::CheckpointRestored(_) => DurableEventType::CheckpointRestored,
+            Self::MutationArtifactLifecycleRecorded(_) => {
+                DurableEventType::MutationArtifactLifecycleRecorded
+            }
             Self::CommandFinished(_) => DurableEventType::CommandFinished,
             Self::CheckFinished(_) => DurableEventType::CheckFinished,
             Self::CheckSpecRecorded(_) => DurableEventType::CheckSpecRecorded,
@@ -488,6 +525,7 @@ impl DurableDomainEvent {
             Self::TodoChanged(_) => DurableEventType::TodoChanged,
             Self::VerificationRecorded(_) => DurableEventType::VerificationRecorded,
             Self::VerificationPolicyChanged(_) => DurableEventType::VerificationPolicyChanged,
+            Self::VerificationCheckRun(_) => DurableEventType::VerificationCheckRun,
             Self::EnvironmentFingerprintRecorded(_) => {
                 DurableEventType::EnvironmentFingerprintRecorded
             }
@@ -527,6 +565,7 @@ impl DurableDomainEvent {
             | Self::WriteCommitted(payload)
             | Self::WorkspaceMutationDetected(payload)
             | Self::CheckpointRestored(payload)
+            | Self::MutationArtifactLifecycleRecorded(payload)
             | Self::CommandFinished(payload)
             | Self::CheckFinished(payload)
             | Self::CheckSpecRecorded(payload)
@@ -534,6 +573,7 @@ impl DurableDomainEvent {
             | Self::TodoChanged(payload)
             | Self::VerificationRecorded(payload)
             | Self::VerificationPolicyChanged(payload)
+            | Self::VerificationCheckRun(payload)
             | Self::EnvironmentFingerprintRecorded(payload)
             | Self::ReadinessEvaluated(payload)
             | Self::TaskStatusChanged(payload)
@@ -619,6 +659,9 @@ fn domain_event_from_payload(
             DurableDomainEvent::WorkspaceMutationDetected(payload)
         }
         DurableEventType::CheckpointRestored => DurableDomainEvent::CheckpointRestored(payload),
+        DurableEventType::MutationArtifactLifecycleRecorded => {
+            DurableDomainEvent::MutationArtifactLifecycleRecorded(payload)
+        }
         DurableEventType::CommandFinished => DurableDomainEvent::CommandFinished(payload),
         DurableEventType::CheckFinished => DurableDomainEvent::CheckFinished(payload),
         DurableEventType::CheckSpecRecorded => DurableDomainEvent::CheckSpecRecorded(payload),
@@ -628,6 +671,7 @@ fn domain_event_from_payload(
         DurableEventType::VerificationPolicyChanged => {
             DurableDomainEvent::VerificationPolicyChanged(payload)
         }
+        DurableEventType::VerificationCheckRun => DurableDomainEvent::VerificationCheckRun(payload),
         DurableEventType::EnvironmentFingerprintRecorded => {
             DurableDomainEvent::EnvironmentFingerprintRecorded(payload)
         }
@@ -1111,6 +1155,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskSubagentElicitationRoute(_) => "task_subagent_elicitation_route",
         ControlEntry::CheckSpecRecorded(_) => "check_spec_recorded",
         ControlEntry::VerificationPolicyChanged(_) => "verification_policy_changed",
+        ControlEntry::VerificationCheckRun(_) => "verification_check_run",
         ControlEntry::VerificationRecorded(_) => "verification_recorded",
         ControlEntry::ReadinessEvaluated(_) => "readiness_evaluated",
         ControlEntry::ChildVerificationReceiptLinked(_) => "child_verification_receipt_linked",

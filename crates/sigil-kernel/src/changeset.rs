@@ -252,20 +252,19 @@ impl ChangeSetProjection {
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
         let mut projection = Self::default();
         for entry in entries {
-            match entry {
-                SessionLogEntry::Control(ControlEntry::ChangeSetProposed(change_set)) => {
-                    projection.apply_proposed(change_set);
-                }
-                SessionLogEntry::Control(ControlEntry::ChangeSetApplied(result)) => {
-                    projection.apply_result(result);
-                }
-                SessionLogEntry::User(_)
-                | SessionLogEntry::Assistant(_)
-                | SessionLogEntry::ToolResult(_)
-                | SessionLogEntry::Control(_) => {}
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(control);
             }
         }
         projection
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        match control {
+            ControlEntry::ChangeSetProposed(change_set) => self.apply_proposed(change_set),
+            ControlEntry::ChangeSetApplied(result) => self.apply_result(result),
+            _ => {}
+        }
     }
 
     pub fn latest(&self) -> Option<&ChangeSetState> {

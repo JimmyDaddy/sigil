@@ -345,20 +345,19 @@ impl PluginStateProjection {
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
         let mut projection = Self::default();
         for entry in entries {
-            match entry {
-                SessionLogEntry::Control(ControlEntry::PluginManifestCaptured(snapshot)) => {
-                    projection.apply_manifest(snapshot);
-                }
-                SessionLogEntry::Control(ControlEntry::PluginTrustDecision(entry)) => {
-                    projection.apply_trust(entry);
-                }
-                SessionLogEntry::User(_)
-                | SessionLogEntry::Assistant(_)
-                | SessionLogEntry::ToolResult(_)
-                | SessionLogEntry::Control(_) => {}
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(control);
             }
         }
         projection
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        match control {
+            ControlEntry::PluginManifestCaptured(snapshot) => self.apply_manifest(snapshot),
+            ControlEntry::PluginTrustDecision(entry) => self.apply_trust(entry),
+            _ => {}
+        }
     }
 
     pub fn latest_manifest(&self) -> Option<&PluginManifestSnapshot> {

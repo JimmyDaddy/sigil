@@ -1,6 +1,6 @@
 # RFC-0001 Durable Event Stream and Event Taxonomy
 
-状态：Draft
+状态：RFC core semantics implemented / productization remains
 
 创建日期：2026-06-25
 
@@ -66,6 +66,7 @@ enum DurableDomainEvent {
     WriteCommitted(WriteCommitted),
     WorkspaceMutationDetected(WorkspaceMutationDetected),
     CheckpointRestored(CheckpointRestored),
+    MutationArtifactLifecycleRecorded(MutationArtifactLifecycleRecorded),
     CommandFinished(CommandFinished),
     CheckFinished(CheckFinished),
     CheckSpecRecorded(CheckSpecRecorded),
@@ -73,6 +74,7 @@ enum DurableDomainEvent {
     TodoChanged(TodoChanged),
     VerificationRecorded(VerificationRecorded),
     VerificationPolicyChanged(VerificationPolicyChanged),
+    VerificationCheckRun(VerificationCheckRun),
     EnvironmentFingerprintRecorded(EnvironmentFingerprintRecorded),
     ReadinessEvaluated(ReadinessEvaluated),
     TaskStatusChanged(TaskStatusChanged),
@@ -198,8 +200,8 @@ Rules:
 
 Limits:
 
-- Define a maximum event byte size.
-- Define a maximum payload nesting depth.
+- Current implementation uses a maximum event byte size of 1 MiB (`MAX_EVENT_BYTES`).
+- Current implementation uses a maximum payload nesting depth of 64 (`MAX_PAYLOAD_DEPTH`).
 - Reject oversized or over-nested events before append.
 
 ## 7. Legacy Log Upcast
@@ -302,10 +304,10 @@ Initial event-to-sync mapping:
 | `ApprovalResolved` | `RecoveryCritical` |
 | `MutationPrepared` / `MutationCommitted` / `MutationReconciled` | `RecoveryCritical` |
 | `MutationBatchStarted` / `MutationBatchFinished` | `RecoveryCritical` |
-| `WriteCommitted` / `WorkspaceMutationDetected` / `CheckpointRestored` | `RecoveryCritical` |
+| `WriteCommitted` / `WorkspaceMutationDetected` / `CheckpointRestored` / `MutationArtifactLifecycleRecorded` | `RecoveryCritical` |
 | `CommandFinished` / `CheckFinished` / `CheckSpecRecorded` | `RecoveryCritical` |
 | `DiagnosticRecorded` / `TodoChanged` | `RecoveryCritical` |
-| `VerificationRecorded` / `VerificationPolicyChanged` / `EnvironmentFingerprintRecorded` / `ReadinessEvaluated` | `RecoveryCritical` |
+| `VerificationRecorded` / `VerificationPolicyChanged` / `VerificationCheckRun` / `EnvironmentFingerprintRecorded` / `ReadinessEvaluated` | `RecoveryCritical` |
 | `TaskStatusChanged` / `RunStatusChanged` / `RunFinalized` | `RecoveryCritical` |
 | `ChildVerificationReceiptLinked` / `ChildChangesetMerged` / `AgentMergeApplied` | `RecoveryCritical` |
 | `WorkspaceTrustDecision` / `EgressDecisionRecorded` / `ExtensionTrustDecision` / `SandboxDecisionRecorded` | `RecoveryCritical` |
@@ -458,7 +460,8 @@ Required deterministic tests:
 当前进度：
 
 - 已新增 `StoredEvent` envelope，包含 `schema_version`、`event_type`、`event_version`、`event_class`、`event_id`、`session_id`、`stream_sequence`、可空 `occurred_at`、causation/correlation、`record_checksum` 和 JSON payload。
-- 已实现 canonical checksum、event size / payload depth 限制、checksum mismatch 与 JSON parse failure 的区分。
+- 已实现 canonical checksum、1 MiB event size / 64 层 payload depth 限制、checksum mismatch 与 JSON parse failure 的区分。
+- 已强制 known durable event 的 `event_class` 与事件语义匹配，避免 recovery-critical event 被错误追加为 non-critical。
 - 已实现 legacy / v2 / mixed JSONL 读取；legacy record 使用稳定 id 和 stream ordinal upcast，不重写旧日志。
 - 已实现 v2 append、session-scoped `stream_sequence`、legacy 后混合格式追加、middle corruption / sequence gap fail-closed。
 - 已实现 tail recovery quarantine 和 `LogTailRecovered` 审计路径，避免静默截断。
@@ -466,19 +469,33 @@ Required deterministic tests:
 - 已新增 `DomainEvent` / durable event type 解码和 reducer disposition 覆盖测试，kernel reducer 不直接消费任意字符串。
 - 已落地基础 projection cursor/idempotence 规则，并接入 session entry projection 的 replay / cursor 应用测试。
 - 已新增 verification projection 的 durable replay API：`Session` 可从 mixed-format event stream 直接重建 `VerificationStateProjection`，并应用 projection cursor/idempotence 规则；原有 entries-based API 保持兼容。
+- 已新增 `VerificationCheckRun` durable/control event，用于审计 check runner queued/running/terminal lifecycle；proof 仍只由 `VerificationRecorded` receipt 决定。
+- 已新增 task projection 的 durable replay API：`Session` 可从 mixed-format event stream 直接重建 `TaskStateProjection`，并应用 projection cursor/idempotence 规则；原有 entries-based API 保持兼容。
+- 已新增 agent thread projection 的 durable replay API：`Session` 可从 mixed-format event stream 直接重建 `AgentThreadStateProjection`，并应用 projection cursor/idempotence 规则；原有 entries-based API 保持兼容。
+- 已新增 changeset projection 的 durable replay API：`Session` 可从 mixed-format event stream 直接重建 `ChangeSetProjection`，用于 merge/review/changeset 审计链路。
+- 已新增 usage / cost projection 的 durable replay API：`Session` 可从 mixed-format event stream 直接重建 `SessionStats`，并应用 projection cursor/idempotence 规则；`CompactionApplied` 会继续使 `last_prompt_tokens` 失效。
+- 已新增 terminal task projection 的 durable replay API：`Session` 可从 mixed-format event stream 直接重建 `TerminalTaskProjection`，用于 active terminal / long-running process 状态恢复与审计。
+- 已新增 plan approval、skill 和 plugin projection 的 durable replay API：`Session` 可从 mixed-format event stream 重建 `PlanApprovalProjection`、`SkillStateProjection` 与 `PluginStateProjection`，支撑 workspace trust / extension context 审计。
+- 已新增 agent profile trust/policy、agent result continuation 和 conversation queue projection 的 durable replay API：`Session` 可从 mixed-format event stream 重建 profile trust/policy、child result continuation 与 queued user input 状态，进一步减少 resume 后对运行时 entries-only projection 的依赖。
+- 已新增 `MutationArtifactLifecycleRecorded` durable event，用于审计 RFC-0002 artifact 删除、过期和内容不可用状态。
+- 已将 `/task` readiness 的 durable replay bridge 接到 store-backed session snapshot，避免非阻塞 readiness 只从 in-memory legacy entries 判断 RFC-0002 mutation evidence。
+- 已将 foreground chat 和 `/task` synthetic readiness evidence 的 `source_stream_sequence` 切到 mixed-format durable stream 的 next sequence；durable-only events 不进入 `Session::entries()` 时，也不会低估后续 readiness / run-check ordering。
+- 已将 `/task` durable mutation replay failure 处理为 fail-closed unknown-dirty evidence，避免 corrupt/unreadable stream 被当作空 mutation evidence。
 - 已新增 `RunStatusChanged` / `RunFinalized` 基础 durable event，并在 agent terminal/max-turn 路径中记录。
+- 已加强 session append / tail recovery 的 sync 策略：recovery-critical event 写入会 sync session file；新建 session log、tail recovery quarantine/intent 创建和清理会同步父目录，降低目录项丢失造成的恢复不一致窗口。
+- 已将 session stream 健康诊断接入共享 doctor 面：CLI `sigil doctor` 与 TUI `/doctor` 会扫描当前 session log dir 中最近的 JSONL stream，使用 RFC-0001 reader 校验 checksum/sequence/session id，并展示 record、legacy/stored、last sequence 与 tail recovery 摘要；损坏流会作为 error 暴露而不是静默跳过。
 
-剩余实现：
+Productization remains：
 
-- 将更多真实 projection 从 durable replay 重建，包括 task status、agent graph、cost/token 和 future SQLite projection。
+- 将 projection cursor 规则接入未来持久 projection store 的事务边界，例如 SQLite/materialized view。
 - 为所有 durable event owner 补齐强类型 payload struct 与 upcaster，逐步减少泛型 JSON payload 的 reducer 接触面。
-- 将 projection cursor 规则接入未来持久 projection store 的事务边界。
-- 明确并测试各平台更强 sync policy 的落地细节，特别是 recovery-critical append 与目录 fsync。
 - 在 protocol/server 阶段实现 durable cursor / `Last-Event-ID` replay；transient event replay 保持非承诺。
+- 如果真实 session 中出现合理的大型 durable payload，再单独评估 1 MiB / 64 层 event limit 是否需要配置化；当前限制已作为 core guard 生效。
 
 ## 17. Open Questions
 
-- Exact byte and nesting limits for events.
+None for core semantics. Productization questions:
+
 - Whether `record_checksum` should later become a hash chain for stronger tamper-evidence.
-- Exact file locking backend per platform.
+- Whether additional platform-specific file locking or sync backends are needed beyond the current local JSONL implementation.
 - Whether old binaries need graceful failure messaging for sessions containing v2 lines.

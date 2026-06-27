@@ -14,11 +14,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sigil_kernel::{
     AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
     AgentProfileSnapshot, AgentProfileSource, AgentProfileTrustEntry, AgentTrustState,
-    AppearanceConfig, ApprovalMode, CodeIntelStartup, ControlEntry, JsonlSessionStore,
-    McpServerConfig, McpServerStartup, PluginCapability, PluginManifestSnapshot,
-    PluginStateProjection, PluginTrustDecision, PluginTrustEntry, RootConfig, SessionLogEntry,
-    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, SyntaxThemeId, ThemeId,
-    ToolRegistryScope, default_user_config_dir,
+    AppearanceConfig, ApprovalMode, CodeIntelStartup, ControlEntry, DiscoveredCheck,
+    JsonlSessionStore, McpServerConfig, McpServerStartup, MutationEventRecorder, PluginCapability,
+    PluginManifestSnapshot, PluginStateProjection, PluginTrustDecision, PluginTrustEntry,
+    RootConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState,
+    SyntaxThemeId, ThemeId, ToolEffect, ToolRegistryScope, VerificationStateProjection,
+    WorkspaceTrust, default_user_config_dir, discover_candidate_checks_with_user_config,
+    stable_workspace_id,
 };
 use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
 use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
@@ -31,7 +33,8 @@ use sigil_runtime::{
 };
 
 use super::{
-    AppAction, AppState, McpServerRuntimeStatus, code_intelligence_config_status,
+    AppAction, AppState, McpServerRuntimeStatus, MutationArtifactRetentionPreview,
+    code_intelligence_config_status,
     formatting::{format_token_count, persisted_root_config},
     initial_mcp_server_status, initial_mcp_server_statuses,
     modal_flow::{
@@ -166,11 +169,13 @@ impl AppState {
         lines.push(CONFIG_FIELD_NAV_HINT.to_owned());
         lines.push(CONFIG_EDIT_OR_TOGGLE_HINT.to_owned());
         lines.push(format!("{CONFIG_SAVE_HINT}  Esc close"));
-        if state.selected_section == ConfigSection::Mcp {
+        if state.selected_section == ConfigSection::Storage {
+            lines.push("Storage: footer clean artifacts".to_owned());
+        } else if state.selected_section == ConfigSection::Mcp {
             lines.push("MCP: Ctrl-N add".to_owned());
             lines.push("MCP: Ctrl-D drop".to_owned());
             lines.push("MCP: PgUp/PgDn switch".to_owned());
-            lines.push("MCP: footer activate lazy".to_owned());
+            lines.push("MCP: footer activate/refresh".to_owned());
         } else if state.selected_section == ConfigSection::Agents {
             lines.push("Agents: Up/Down select".to_owned());
             lines.push("Agents: PgUp/PgDn wrap".to_owned());
@@ -183,6 +188,8 @@ impl AppState {
             lines.push("Plugins: Up/Down select".to_owned());
             lines.push("Plugins: PgUp/PgDn wrap".to_owned());
             lines.push("Plugins: footer approve/deny".to_owned());
+        } else if state.selected_section == ConfigSection::Permissions {
+            lines.push("Permissions: footer trust workspace".to_owned());
         } else if state.selected_section == ConfigSection::Appearance {
             lines.push("Appearance: Enter cycle".to_owned());
             lines.push("Appearance: Backspace reset".to_owned());
@@ -306,9 +313,18 @@ impl AppState {
                     &paths.scratch_root.display().to_string(),
                 ));
                 lines.push(String::new());
+                lines.push("[artifact retention]".to_owned());
+                lines.extend(render_mutation_artifact_retention_summary(
+                    config_state,
+                    &self.mutation_artifact_retention_preview,
+                ));
+                lines.push(String::new());
                 lines.push("[details]".to_owned());
                 lines.push(render_config_hint_row(
                     "read-only; set [storage] roots or SIGIL_STATE_HOME/SIGIL_CACHE_HOME to override",
+                ));
+                lines.push(render_config_hint_row(
+                    "footer clean/delete records mutation artifact lifecycle events",
                 ));
             }
             ConfigSection::Permissions => {
@@ -320,6 +336,9 @@ impl AppState {
                 lines.push(String::new());
                 lines.push("[rules]".to_owned());
                 lines.extend(render_permission_rule_summary(config_state));
+                lines.push(String::new());
+                lines.push("[verification trust]".to_owned());
+                lines.extend(self.render_verification_trust_summary(config_state));
                 lines.extend(render_config_selection_details(config_state));
             }
             ConfigSection::Memory => {
@@ -736,6 +755,92 @@ impl AppState {
         lines
     }
 
+    fn render_verification_trust_summary(&self, config_state: &ConfigState) -> Vec<String> {
+        let projection = VerificationStateProjection::from_entries(&self.current_session_entries);
+        let (workspace_id, trust, trust_snapshot_id) =
+            match stable_workspace_id(&self.workspace_root) {
+                Ok(workspace_id) => {
+                    let trust_entry = projection.workspace_trust.get(&workspace_id);
+                    let trust = trust_entry
+                        .map(|entry| entry.trust)
+                        .unwrap_or(WorkspaceTrust::Unknown);
+                    let trust_snapshot_id = trust_entry
+                        .map(|entry| entry.workspace_trust_snapshot_id.clone())
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    (workspace_id, trust, trust_snapshot_id)
+                }
+                Err(error) => {
+                    return vec![
+                        render_config_readonly_row("Workspace trust", "unknown"),
+                        render_config_hint_row(&format!(
+                            "Verification discovery unavailable: {}",
+                            truncate_config_detail(&format!("{error:#}"), 72)
+                        )),
+                    ];
+                }
+            };
+        let user_check_count = config_state
+            .draft
+            .base_root_config
+            .verification
+            .checks
+            .len();
+        let mut lines = vec![
+            render_config_readonly_row("Workspace", &truncate_config_detail(&workspace_id, 48)),
+            render_config_readonly_row("Workspace trust", workspace_trust_label(trust)),
+            render_config_readonly_row("User checks", &format!("{user_check_count} configured")),
+        ];
+        match discover_candidate_checks_with_user_config(
+            &self.workspace_root,
+            trust_snapshot_id,
+            "config-preview",
+            &config_state.draft.base_root_config.verification,
+        ) {
+            Ok(discovered) => {
+                let repo_candidates = discovered
+                    .iter()
+                    .filter(|check| check.candidate.source.requires_trust_promotion())
+                    .collect::<Vec<_>>();
+                lines.push(render_config_readonly_row(
+                    "Repo candidates",
+                    &format!("{} require trust", repo_candidates.len()),
+                ));
+                if repo_candidates.is_empty() {
+                    lines.push(render_config_hint_row(
+                        "No repo-local verification checks discovered",
+                    ));
+                    return lines;
+                }
+                if trust == WorkspaceTrust::Trusted {
+                    lines.push(render_config_hint_row(
+                        "Repo-local checks are promoted for future /task runs",
+                    ));
+                } else {
+                    lines.push(render_config_hint_row(
+                        "Use /trust-workspace to promote repo-local checks before /task continue",
+                    ));
+                }
+                for check in repo_candidates.iter().take(3) {
+                    lines.extend(render_repo_verification_candidate_lines(check));
+                }
+                if repo_candidates.len() > 3 {
+                    lines.push(format!(
+                        "... {} more repo-local checks",
+                        repo_candidates.len() - 3
+                    ));
+                }
+            }
+            Err(error) => {
+                lines.push(render_config_readonly_row("Repo candidates", "unavailable"));
+                lines.push(render_config_hint_row(&format!(
+                    "Verification discovery failed: {}",
+                    truncate_config_detail(&format!("{error:#}"), 72)
+                )));
+            }
+        }
+        lines
+    }
+
     pub(super) fn handle_config_key_event(&mut self, key: KeyEvent) -> Result<Option<AppAction>> {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             self.config_state = None;
@@ -988,13 +1093,17 @@ impl AppState {
                 }
             }
             KeyCode::Up => {
+                let storage_artifact_count = self.mutation_artifact_inventory_count();
                 if let Some(config_state) = self.config_state.as_mut() {
                     if config_state.footer_selected {
                         if config_state.focus_last_field()
                             && let Some(field) = config_state.selected_field
                         {
-                            self.last_notice = config_collection_selection_notice(config_state)
-                                .or_else(|| Some(format!("config field {}", field.label())));
+                            self.last_notice = config_collection_selection_notice(
+                                config_state,
+                                storage_artifact_count,
+                            )
+                            .or_else(|| Some(format!("config field {}", field.label())));
                         } else {
                             config_state.footer_selected = false;
                             self.last_notice = Some(format!(
@@ -1003,9 +1112,16 @@ impl AppState {
                             ));
                         }
                     } else {
-                        match move_config_collection_selection(config_state, false) {
+                        match move_config_collection_selection(
+                            config_state,
+                            false,
+                            storage_artifact_count,
+                        ) {
                             Some(ConfigFieldMove::Moved) => {
-                                self.last_notice = config_collection_selection_notice(config_state);
+                                self.last_notice = config_collection_selection_notice(
+                                    config_state,
+                                    storage_artifact_count,
+                                );
                             }
                             Some(ConfigFieldMove::Boundary | ConfigFieldMove::Unavailable) => {}
                             None => {
@@ -1021,13 +1137,21 @@ impl AppState {
                 }
             }
             KeyCode::Down => {
+                let storage_artifact_count = self.mutation_artifact_inventory_count();
                 if let Some(config_state) = self.config_state.as_mut() {
                     if config_state.footer_selected {
                         return Ok(None);
                     }
-                    match move_config_collection_selection(config_state, true) {
+                    match move_config_collection_selection(
+                        config_state,
+                        true,
+                        storage_artifact_count,
+                    ) {
                         Some(ConfigFieldMove::Moved) => {
-                            self.last_notice = config_collection_selection_notice(config_state);
+                            self.last_notice = config_collection_selection_notice(
+                                config_state,
+                                storage_artifact_count,
+                            );
                         }
                         Some(ConfigFieldMove::Boundary | ConfigFieldMove::Unavailable) => {
                             let action = focus_first_config_footer_action(config_state);
@@ -1055,6 +1179,17 @@ impl AppState {
                     return match config_state.selected_footer_action {
                         ConfigFooterAction::Save => self.save_config_draft(),
                         ConfigFooterAction::SaveAndClose => self.save_config_draft_and_close(),
+                        ConfigFooterAction::CleanMutationArtifacts => {
+                            self.last_notice = Some("cleaning mutation artifacts".to_owned());
+                            Ok(Some(AppAction::CleanMutationArtifacts))
+                        }
+                        ConfigFooterAction::DeleteMutationArtifact => {
+                            self.delete_selected_mutation_artifact()
+                        }
+                        ConfigFooterAction::TrustWorkspace => {
+                            self.last_notice = Some("trusting workspace".to_owned());
+                            Ok(Some(AppAction::TrustWorkspace))
+                        }
                         ConfigFooterAction::ActivateMcp => self.activate_selected_mcp_server(),
                         ConfigFooterAction::TrustAgent => {
                             self.review_selected_agent(AgentTrustState::Trusted)
@@ -1396,8 +1531,80 @@ impl AppState {
         let (plugins, plugin_warnings) = self.discover_config_plugins();
         config_state.set_plugin_discovery(plugins, plugin_warnings);
         self.config_state = Some(config_state);
+        self.refresh_mutation_artifact_retention_preview();
         self.last_notice = Some("opened config".to_owned());
         self.push_event("mode", "config");
+    }
+
+    pub(super) fn refresh_mutation_artifact_retention_preview(&mut self) {
+        let Some(root_config) = self.config_snapshot.as_ref() else {
+            self.mutation_artifact_retention_preview =
+                MutationArtifactRetentionPreview::Unavailable("config is unavailable".to_owned());
+            return;
+        };
+        let store = match JsonlSessionStore::new(&self.session_log_path) {
+            Ok(store) => store,
+            Err(error) => {
+                self.mutation_artifact_retention_preview =
+                    MutationArtifactRetentionPreview::Unavailable(format!(
+                        "failed to open mutation artifact recorder: {error:#}"
+                    ));
+                return;
+            }
+        };
+        let recorder = MutationEventRecorder::new(store);
+        self.mutation_artifact_retention_preview = match recorder.preview_artifact_retention(
+            &root_config.storage.mutation_artifact_retention.to_policy(),
+        ) {
+            Ok(report) => match recorder.list_mutation_artifacts() {
+                Ok(artifacts) => {
+                    if let Some(config_state) = self.config_state.as_mut() {
+                        config_state.selected_storage_artifact_index = config_state
+                            .selected_storage_artifact_index
+                            .min(artifacts.len().saturating_sub(1));
+                    }
+                    MutationArtifactRetentionPreview::Ready { report, artifacts }
+                }
+                Err(error) => MutationArtifactRetentionPreview::Unavailable(format!(
+                    "failed to list mutation artifacts: {error:#}"
+                )),
+            },
+            Err(error) => MutationArtifactRetentionPreview::Unavailable(format!(
+                "failed to preview mutation artifacts: {error:#}"
+            )),
+        };
+    }
+
+    fn selected_mutation_artifact_id(&self) -> Option<String> {
+        let config_state = self.config_state.as_ref()?;
+        let MutationArtifactRetentionPreview::Ready { artifacts, .. } =
+            &self.mutation_artifact_retention_preview
+        else {
+            return None;
+        };
+        artifacts
+            .get(config_state.selected_storage_artifact_index)
+            .map(|artifact| artifact.artifact_id.clone())
+    }
+
+    fn mutation_artifact_inventory_count(&self) -> usize {
+        match &self.mutation_artifact_retention_preview {
+            MutationArtifactRetentionPreview::Ready { artifacts, .. } => artifacts.len(),
+            MutationArtifactRetentionPreview::Pending
+            | MutationArtifactRetentionPreview::Unavailable(_) => 0,
+        }
+    }
+
+    fn delete_selected_mutation_artifact(&mut self) -> Result<Option<AppAction>> {
+        let Some(artifact_id) = self.selected_mutation_artifact_id() else {
+            self.last_notice = Some("no mutation artifact selected".to_owned());
+            return Ok(None);
+        };
+        self.last_notice = Some(format!(
+            "deleting mutation artifact {}",
+            short_mutation_artifact_id(&artifact_id)
+        ));
+        Ok(Some(AppAction::DeleteMutationArtifact { artifact_id }))
     }
 
     fn apply_config_modal_outcome(&mut self, outcome: ModalOutcome) -> Result<Option<AppAction>> {
@@ -2010,23 +2217,29 @@ impl AppState {
             self.last_notice = Some("no MCP server selected".to_owned());
             return Ok(None);
         };
-        if server.startup != McpServerStartup::Lazy {
-            self.last_notice = Some(format!(
-                "MCP server {} is {}",
-                server.name,
-                server.startup.as_str()
-            ));
-            return Ok(None);
+        let server_name = server.name.clone();
+        let current_status = self
+            .mcp_server_statuses
+            .get(&server_name)
+            .cloned()
+            .unwrap_or_else(|| initial_mcp_server_status(server));
+        if server.startup == McpServerStartup::Lazy
+            && matches!(current_status, McpServerRuntimeStatus::Deferred)
+        {
+            self.mcp_server_statuses
+                .insert(server_name.clone(), McpServerRuntimeStatus::Activating);
+            self.last_notice = Some(format!("activating MCP {server_name}"));
+            self.push_event("mcp", format!("activate {server_name}"));
+            return Ok(Some(AppAction::ActivateLazyMcp {
+                server_name: Some(server_name),
+            }));
         }
 
-        let server_name = server.name.clone();
         self.mcp_server_statuses
-            .insert(server_name.clone(), McpServerRuntimeStatus::Activating);
-        self.last_notice = Some(format!("activating MCP {server_name}"));
-        self.push_event("mcp", format!("activate {server_name}"));
-        Ok(Some(AppAction::ActivateLazyMcp {
-            server_name: Some(server_name),
-        }))
+            .insert(server_name.clone(), McpServerRuntimeStatus::Refreshing);
+        self.last_notice = Some(format!("refreshing MCP {server_name}"));
+        self.push_event("mcp", format!("refresh {server_name}"));
+        Ok(Some(AppAction::RefreshMcpServer { server_name }))
     }
 
     pub(super) fn apply_runtime_config_snapshot(&mut self, root_config: &RootConfig) {
@@ -2059,6 +2272,7 @@ impl AppState {
         self.refresh_memory_summary();
         self.load_input_history();
         self.recompute_compaction_status(false);
+        self.refresh_mutation_artifact_retention_preview();
         self.refresh_usage_sidebar_cache();
         self.refresh_session_history();
         let (agents, agent_warnings) = self.discover_config_agents(root_config);
@@ -2307,16 +2521,51 @@ fn policy_override(target: bool, source: bool) -> Option<bool> {
 fn move_config_collection_selection(
     config_state: &mut ConfigState,
     forward: bool,
+    storage_artifact_count: usize,
 ) -> Option<ConfigFieldMove> {
     match config_state.selected_section {
         ConfigSection::Agents => Some(config_state.move_agent(forward)),
         ConfigSection::Skills => Some(config_state.move_skill(forward)),
         ConfigSection::Plugins => Some(config_state.move_plugin(forward)),
+        ConfigSection::Storage => Some(move_storage_artifact_selection(
+            config_state,
+            forward,
+            storage_artifact_count,
+        )),
         _ => None,
     }
 }
 
-fn config_collection_selection_notice(config_state: &ConfigState) -> Option<String> {
+fn move_storage_artifact_selection(
+    config_state: &mut ConfigState,
+    forward: bool,
+    artifact_count: usize,
+) -> ConfigFieldMove {
+    if artifact_count == 0 {
+        return ConfigFieldMove::Unavailable;
+    }
+    let current = config_state
+        .selected_storage_artifact_index
+        .min(artifact_count.saturating_sub(1));
+    let next = if forward {
+        if current + 1 >= artifact_count {
+            return ConfigFieldMove::Boundary;
+        }
+        current + 1
+    } else {
+        if current == 0 {
+            return ConfigFieldMove::Boundary;
+        }
+        current - 1
+    };
+    config_state.selected_storage_artifact_index = next;
+    ConfigFieldMove::Moved
+}
+
+fn config_collection_selection_notice(
+    config_state: &ConfigState,
+    storage_artifact_count: usize,
+) -> Option<String> {
     match config_state.selected_section {
         ConfigSection::Agents if config_state.selected_agent().is_some() => {
             Some(selected_agent_summary(config_state))
@@ -2328,6 +2577,11 @@ fn config_collection_selection_notice(config_state: &ConfigState) -> Option<Stri
             "plugin {}/{}",
             config_state.selected_plugin_index + 1,
             config_state.plugin_manifests.len()
+        )),
+        ConfigSection::Storage if storage_artifact_count > 0 => Some(format!(
+            "artifact {}/{}",
+            config_state.selected_storage_artifact_index + 1,
+            storage_artifact_count
         )),
         _ => None,
     }
@@ -3210,6 +3464,248 @@ fn render_permission_rule_summary(config_state: &ConfigState) -> Vec<String> {
     lines
 }
 
+fn render_mutation_artifact_retention_summary(
+    config_state: &ConfigState,
+    preview: &MutationArtifactRetentionPreview,
+) -> Vec<String> {
+    let retention = &config_state
+        .draft
+        .base_root_config
+        .storage
+        .mutation_artifact_retention;
+    let mut lines = vec![
+        render_config_readonly_row(
+            "Max artifacts",
+            &optional_count_summary(retention.max_artifacts),
+        ),
+        render_config_readonly_row("Max bytes", &optional_bytes_summary(retention.max_bytes)),
+        render_config_readonly_row(
+            "Expire older than",
+            &optional_duration_ms_summary(retention.expire_older_than_ms),
+        ),
+    ];
+    match preview {
+        MutationArtifactRetentionPreview::Pending => {
+            lines.push(render_config_readonly_row("Preview", "pending"));
+        }
+        MutationArtifactRetentionPreview::Ready { report, artifacts } => {
+            lines.push(render_config_readonly_row(
+                "Current artifacts",
+                &format!(
+                    "{} ({})",
+                    report.scanned_artifacts,
+                    optional_bytes_summary(Some(report.scanned_bytes))
+                ),
+            ));
+            lines.push(render_config_readonly_row(
+                "Cleanup preview",
+                &format!(
+                    "expire {}, unavailable {}",
+                    report.expired_artifacts, report.unavailable_artifacts
+                ),
+            ));
+            lines.push(render_config_readonly_row(
+                "Cleanup bytes",
+                &optional_bytes_summary(Some(report.expired_bytes)),
+            ));
+            lines.extend(render_mutation_artifact_inventory_summary(
+                artifacts,
+                config_state.selected_storage_artifact_index,
+            ));
+            lines.extend(render_selected_mutation_artifact_detail(
+                artifacts,
+                config_state.selected_storage_artifact_index,
+            ));
+        }
+        MutationArtifactRetentionPreview::Unavailable(error) => {
+            lines.push(render_config_readonly_row("Preview", "unavailable"));
+            lines.push(render_config_hint_row(&truncate_config_detail(error, 72)));
+        }
+    }
+    lines
+}
+
+fn render_mutation_artifact_inventory_summary(
+    artifacts: &[sigil_kernel::MutationArtifactInventoryItem],
+    selected_index: usize,
+) -> Vec<String> {
+    const MAX_ARTIFACT_ROWS: usize = 3;
+    if artifacts.is_empty() {
+        return vec![render_config_hint_row("No mutation artifacts found")];
+    }
+    let mut lines = vec!["[artifact list]".to_owned()];
+    lines.extend(
+        artifacts
+            .iter()
+            .enumerate()
+            .take(MAX_ARTIFACT_ROWS)
+            .map(|(index, artifact)| {
+                render_mutation_artifact_inventory_row(artifact, index == selected_index)
+            }),
+    );
+    let hidden = artifacts.len().saturating_sub(MAX_ARTIFACT_ROWS);
+    if hidden > 0 {
+        lines.push(format!("... {hidden} more mutation artifacts"));
+    }
+    lines
+}
+
+fn render_mutation_artifact_inventory_row(
+    artifact: &sigil_kernel::MutationArtifactInventoryItem,
+    selected: bool,
+) -> String {
+    let source = artifact_source_summary(artifact);
+    let status = if artifact.blob_available {
+        "available"
+    } else {
+        "unavailable"
+    };
+    let marker = if selected { ">" } else { "-" };
+    format!(
+        "{marker} {} · {} · {} · {}",
+        source,
+        optional_bytes_summary(Some(artifact.size)),
+        status,
+        short_mutation_artifact_id(&artifact.artifact_id)
+    )
+}
+
+fn render_selected_mutation_artifact_detail(
+    artifacts: &[sigil_kernel::MutationArtifactInventoryItem],
+    selected_index: usize,
+) -> Vec<String> {
+    let Some(artifact) = artifacts.get(selected_index.min(artifacts.len().saturating_sub(1)))
+    else {
+        return Vec::new();
+    };
+    let availability = if artifact.blob_available {
+        "available"
+    } else {
+        "unavailable"
+    };
+    let mut lines = vec![
+        String::new(),
+        "[selected artifact]".to_owned(),
+        render_config_readonly_row(
+            "Selected",
+            &format!(
+                "{} of {}",
+                selected_index.min(artifacts.len().saturating_sub(1)) + 1,
+                artifacts.len()
+            ),
+        ),
+        render_config_readonly_row(
+            "Artifact",
+            &short_mutation_artifact_id(&artifact.artifact_id),
+        ),
+        render_config_readonly_row("Size", &optional_bytes_summary(Some(artifact.size))),
+        render_config_readonly_row("Availability", availability),
+    ];
+    push_wrapped_readonly_rows(&mut lines, "Artifact id", &artifact.artifact_id);
+    if artifact.operation_ids.is_empty() {
+        lines.push(render_config_readonly_row("Operation count", "0"));
+    } else {
+        for (index, operation_id) in artifact.operation_ids.iter().take(3).enumerate() {
+            push_wrapped_readonly_rows(
+                &mut lines,
+                &format!("Operation {}", index + 1),
+                operation_id,
+            );
+        }
+        if artifact.operation_ids.len() > 3 {
+            lines.push(format!(
+                "... {} more artifact operations",
+                artifact.operation_ids.len() - 3
+            ));
+        }
+    }
+    if artifact.source_paths.is_empty() {
+        lines.push(render_config_readonly_row("Source count", "0"));
+    } else {
+        for (index, source_path) in artifact.source_paths.iter().take(3).enumerate() {
+            push_wrapped_readonly_rows(
+                &mut lines,
+                &format!("Source {}", index + 1),
+                &source_path.display().to_string(),
+            );
+        }
+        if artifact.source_paths.len() > 3 {
+            lines.push(format!(
+                "... {} more artifact sources",
+                artifact.source_paths.len() - 3
+            ));
+        }
+    }
+    lines
+}
+
+fn artifact_source_summary(artifact: &sigil_kernel::MutationArtifactInventoryItem) -> String {
+    let Some(first) = artifact.source_paths.first() else {
+        return "unknown source".to_owned();
+    };
+    let first = truncate_config_detail(&first.display().to_string(), 28);
+    let hidden = artifact.source_paths.len().saturating_sub(1);
+    if hidden == 0 {
+        first
+    } else {
+        format!("{first} +{hidden}")
+    }
+}
+
+fn short_mutation_artifact_id(artifact_id: &str) -> String {
+    let digest = artifact_id
+        .strip_prefix("mutation-artifact:sha256:")
+        .unwrap_or(artifact_id);
+    format!("artifact:{}", digest.chars().take(12).collect::<String>())
+}
+
+fn optional_count_summary(value: Option<usize>) -> String {
+    value
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unlimited".to_owned())
+}
+
+fn optional_bytes_summary(value: Option<u64>) -> String {
+    let Some(bytes) = value else {
+        return "unlimited".to_owned();
+    };
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    if bytes >= GIB && bytes % GIB == 0 {
+        return format!("{} GiB", bytes / GIB);
+    }
+    if bytes >= MIB && bytes % MIB == 0 {
+        return format!("{} MiB", bytes / MIB);
+    }
+    format!("{bytes} bytes")
+}
+
+fn optional_duration_ms_summary(value: Option<u64>) -> String {
+    let Some(ms) = value else {
+        return "never".to_owned();
+    };
+    const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+    const HOUR_MS: u64 = 60 * 60 * 1000;
+    const MINUTE_MS: u64 = 60 * 1000;
+    if ms >= DAY_MS && ms % DAY_MS == 0 {
+        let days = ms / DAY_MS;
+        return format!("{} {}", days, if days == 1 { "day" } else { "days" });
+    }
+    if ms >= HOUR_MS && ms % HOUR_MS == 0 {
+        let hours = ms / HOUR_MS;
+        return format!("{} {}", hours, if hours == 1 { "hour" } else { "hours" });
+    }
+    if ms >= MINUTE_MS && ms % MINUTE_MS == 0 {
+        let minutes = ms / MINUTE_MS;
+        return format!(
+            "{} {}",
+            minutes,
+            if minutes == 1 { "minute" } else { "minutes" }
+        );
+    }
+    format!("{ms} ms")
+}
+
 fn render_mcp_lifecycle_summary(config_state: &ConfigState, runtime_status: &str) -> Vec<String> {
     let config = config_state
         .draft
@@ -3278,6 +3774,80 @@ fn mcp_pin_summary(config: &McpServerConfig) -> &'static str {
     } else {
         "missing"
     }
+}
+
+fn workspace_trust_label(trust: WorkspaceTrust) -> &'static str {
+    match trust {
+        WorkspaceTrust::Unknown => "unknown",
+        WorkspaceTrust::Trusted => "trusted",
+        WorkspaceTrust::Restricted => "restricted",
+        WorkspaceTrust::Denied => "denied",
+    }
+}
+
+fn check_discovery_source_label(source: sigil_kernel::CheckDiscoverySource) -> &'static str {
+    match source {
+        sigil_kernel::CheckDiscoverySource::SigilVerificationFile => ".sigil/verification",
+        sigil_kernel::CheckDiscoverySource::UserExplicitConfig => "user config",
+        sigil_kernel::CheckDiscoverySource::CiConfig => "ci",
+        sigil_kernel::CheckDiscoverySource::PackageScript => "package",
+        sigil_kernel::CheckDiscoverySource::Cargo => "cargo",
+        sigil_kernel::CheckDiscoverySource::Makefile => "make",
+        sigil_kernel::CheckDiscoverySource::ModelSuggested => "model",
+        sigil_kernel::CheckDiscoverySource::UserConfirmed => "user confirmed",
+    }
+}
+
+fn render_repo_verification_candidate_lines(check: &DiscoveredCheck) -> Vec<String> {
+    let command = truncate_config_detail(
+        &command_with_args(
+            &check.candidate.command.command,
+            &check.candidate.command.args,
+        ),
+        48,
+    );
+    let cwd = check
+        .candidate
+        .command
+        .cwd
+        .as_ref()
+        .map(|path| truncate_config_detail(&path.display().to_string(), 32))
+        .unwrap_or_else(|| "workspace".to_owned());
+    let source_path = truncate_config_detail(&check.source_path.display().to_string(), 32);
+    vec![
+        format!(
+            "- {} · {} · {}",
+            check.suggested_check_spec_id,
+            check_discovery_source_label(check.candidate.source),
+            command
+        ),
+        format!(
+            "  effect={} · cwd={} · source={} · promotion={}",
+            check.effect.as_str(),
+            cwd,
+            source_path,
+            repo_check_promotion_requirement(check.effect)
+        ),
+    ]
+}
+
+pub(super) fn repo_check_promotion_requirement(effect: ToolEffect) -> &'static str {
+    if effect.may_mutate_workspace() {
+        "workspace-trust/approval/sandbox+rerun-readonly-check"
+    } else {
+        "workspace-trust/approval/sandbox"
+    }
+}
+
+fn truncate_config_detail(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    if max_chars <= 3 {
+        return value.chars().take(max_chars).collect();
+    }
+    let prefix = value.chars().take(max_chars - 3).collect::<String>();
+    format!("{prefix}...")
 }
 
 fn bool_summary(value: bool) -> &'static str {

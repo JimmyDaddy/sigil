@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -17,15 +18,17 @@ use crate::{
     ApprovalHandler, ApprovalMode, AutoApproveHandler, BackgroundTaskHandle, BackgroundTaskStatus,
     CompactionConfig, CompletionRequest, ControlEntry, DurableEventType, EventHandler,
     ExternalDirectoryConfig, ExternalDirectoryRule, InteractionMode, JsonlSessionStore,
-    MemoryConfig, MessageRole, ModelMessage, PermissionConfig, PermissionDecision,
-    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, Provider,
-    ProviderCapabilities, ProviderChunk, ProviderContinuationState, ReasoningArtifact,
-    ReasoningEffort, ReasoningStreamSupport, ResponseHandle, RunEvent, Session, SessionLogEntry,
-    SessionStreamRecord, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus, TaskPlanUpdateContext,
-    TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolApprovalAuditAction,
-    ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext, ToolEgressAudit, ToolErrorKind,
-    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolRegistry,
-    ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope, UsageStats, plan_text_hash,
+    MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder, PermissionConfig,
+    PermissionDecision, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
+    PlanApprovedEntry, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
+    ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle, RunEvent, Session,
+    SessionLogEntry, SessionStreamRecord, TASK_PLAN_UPDATE_TOOL_NAME, TaskId, TaskPlanStatus,
+    TaskPlanUpdateContext, TerminalTaskStatus, Tool, ToolAccess, ToolApproval,
+    ToolApprovalAuditAction, ToolApprovalUserDecision, ToolCall, ToolCategory, ToolContext,
+    ToolEgressAudit, ToolErrorKind, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSubject, ToolSubjectScope,
+    UsageStats, VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected,
+    plan_text_hash,
 };
 
 use super::{
@@ -34,6 +37,10 @@ use super::{
 
 struct MockProvider;
 struct TerminalToolProvider;
+struct TerminalCancelAfterExternalWriteProvider {
+    mutation_path: PathBuf,
+    calls: AtomicUsize,
+}
 struct NonDelegatingTextProvider {
     calls: Arc<AtomicUsize>,
 }
@@ -145,6 +152,64 @@ impl Provider for TerminalToolProvider {
 }
 
 #[async_trait]
+impl Provider for TerminalCancelAfterExternalWriteProvider {
+    fn name(&self) -> &str {
+        "mock-terminal-cancel"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        match self.calls.fetch_add(1, Ordering::SeqCst) {
+            0 => Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-terminal-start".to_owned(),
+                    name: "terminal_start".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-terminal-start".to_owned(),
+                    delta: r#"{"command":"sleep 5"}"#.to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-terminal-start".to_owned(),
+                    name: "terminal_start".to_owned(),
+                    args_json: r#"{"command":"sleep 5"}"#.to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ]))),
+            1 => {
+                std::fs::write(&self.mutation_path, "mutated\n")?;
+                Ok(Box::pin(stream::iter(vec![
+                    Ok(ProviderChunk::ToolCallStart {
+                        id: "call-terminal-cancel".to_owned(),
+                        name: "terminal_cancel".to_owned(),
+                    }),
+                    Ok(ProviderChunk::ToolCallArgsDelta {
+                        id: "call-terminal-cancel".to_owned(),
+                        delta: r#"{"task_id":"terminal-1"}"#.to_owned(),
+                    }),
+                    Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                        id: "call-terminal-cancel".to_owned(),
+                        name: "terminal_cancel".to_owned(),
+                        args_json: r#"{"task_id":"terminal-1"}"#.to_owned(),
+                    })),
+                    Ok(ProviderChunk::Done),
+                ])))
+            }
+            _ => Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ]))),
+        }
+    }
+}
+
+#[async_trait]
 impl Provider for NonDelegatingTextProvider {
     fn name(&self) -> &str {
         "mock-nondelegating"
@@ -218,6 +283,7 @@ impl Provider for CapturingTextProvider {
 struct ToolSideEffectProvider {
     captured: Arc<Mutex<Vec<CompletionRequest>>>,
 }
+struct WorkspaceMutationToolProvider;
 
 #[async_trait]
 impl Provider for ToolSideEffectProvider {
@@ -267,6 +333,50 @@ impl Provider for ToolSideEffectProvider {
     }
 }
 
+#[async_trait]
+impl Provider for WorkspaceMutationToolProvider {
+    fn name(&self) -> &str {
+        "mock-workspace-mutation"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        MockProvider.capabilities()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<ProviderChunk>> + Send>>> {
+        let tool_used = request
+            .messages
+            .iter()
+            .any(|message| matches!(message.role, MessageRole::Tool));
+        if tool_used {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::TextDelta("done".to_owned())),
+                Ok(ProviderChunk::Done),
+            ])))
+        } else {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ProviderChunk::ToolCallStart {
+                    id: "call-workspace-mutation".to_owned(),
+                    name: "workspace_mutation".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallArgsDelta {
+                    id: "call-workspace-mutation".to_owned(),
+                    delta: "{}".to_owned(),
+                }),
+                Ok(ProviderChunk::ToolCallComplete(ToolCall {
+                    id: "call-workspace-mutation".to_owned(),
+                    name: "workspace_mutation".to_owned(),
+                    args_json: "{}".to_owned(),
+                })),
+                Ok(ProviderChunk::Done),
+            ])))
+        }
+    }
+}
+
 struct EchoTool;
 struct AgentCategoryTool;
 struct FailingAgentCategoryTool;
@@ -274,6 +384,8 @@ struct RunningSpawnAgentCategoryTool;
 struct RunningAgentCategoryTool;
 struct SideEffectTool;
 struct TerminalStartAuditTool;
+struct TerminalCancelAuditTool;
+struct WorkspaceMutatingCustomTool;
 struct RecorderAwareEchoTool {
     saw_recorder: Arc<AtomicBool>,
 }
@@ -523,6 +635,38 @@ impl Tool for SideEffectTool {
 }
 
 #[async_trait]
+impl Tool for WorkspaceMutatingCustomTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "workspace_mutation".to_owned(),
+            description: "mutates the workspace through an execute-style custom tool".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Custom,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(Some(ApprovalMode::Allow))
+    }
+
+    async fn execute(&self, ctx: ToolContext, call_id: String, _args: Value) -> Result<ToolResult> {
+        std::fs::write(ctx.workspace_root.join("mutated.txt"), "new\n")?;
+        Ok(ToolResult::ok(
+            call_id,
+            "workspace_mutation",
+            "mutated workspace",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
+#[async_trait]
 impl Tool for TerminalStartAuditTool {
     fn spec(&self) -> crate::ToolSpec {
         crate::ToolSpec {
@@ -566,6 +710,58 @@ impl Tool for TerminalStartAuditTool {
                     "updated_at_ms": 20,
                     "output_preview": "running output",
                     "output_hash": "sha256:abc",
+                    "output_truncated": false
+                }),
+                ..ToolResultMeta::default()
+            },
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for TerminalCancelAuditTool {
+    fn spec(&self) -> crate::ToolSpec {
+        crate::ToolSpec {
+            name: "terminal_cancel".to_owned(),
+            description: "Cancel terminal task".to_owned(),
+            input_schema: json!({"type": "object"}),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Execute,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    fn permission_default_mode(
+        &self,
+        _ctx: &ToolContext,
+        _args: &Value,
+    ) -> Result<Option<ApprovalMode>> {
+        Ok(Some(ApprovalMode::Allow))
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "terminal_cancel",
+            "cancelled terminal task terminal-1",
+            ToolResultMeta {
+                details: json!({
+                    "task_id": "terminal-1",
+                    "status": "cancelled",
+                    "status_detail": { "state": "cancelled" },
+                    "command": "sleep 5",
+                    "cwd": ".",
+                    "shell": "sh",
+                    "log_path": ".sigil/terminal/terminal-1/output.log",
+                    "created_at_ms": 10,
+                    "updated_at_ms": 30,
+                    "output_preview": "cancelled output",
+                    "output_hash": "sha256:def",
                     "output_truncated": false
                 }),
                 ..ToolResultMeta::default()
@@ -1873,6 +2069,8 @@ async fn required_agent_delegation_accepts_terminal_agent_tool_result() -> Resul
 #[tokio::test]
 async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()> {
     let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
     let path = temp.path().join("session.jsonl");
     let store = JsonlSessionStore::new(&path)?;
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -1890,7 +2088,7 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
             &mut session,
             AgentRunInput::user("answer"),
             AgentRunOptions {
-                workspace_root: std::env::temp_dir(),
+                workspace_root: workspace,
                 max_turns: Some(2),
                 tool_timeout_secs: 5,
                 reasoning_effort: Some(ReasoningEffort::Medium),
@@ -1952,6 +2150,226 @@ async fn agent_final_answer_appends_run_lifecycle_durable_events() -> Result<()>
         serde_json::to_value(&projected_entries)?,
         serde_json::to_value(session.entries())?
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_final_answer_appends_not_applicable_readiness_for_read_only_run() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("answer"),
+            AgentRunOptions {
+                workspace_root: workspace,
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let readiness = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness)) => {
+                Some(readiness)
+            }
+            _ => None,
+        })
+        .next()
+        .expect("final answer should append readiness");
+    assert!(matches!(
+        &readiness.scope,
+        crate::EvidenceScope::Run(message_id)
+            if Some(message_id.as_str()) == output.result.final_message_id.as_deref()
+    ));
+    assert_eq!(readiness.evaluation.run_status, crate::RunStatus::Completed);
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::NotApplicable
+    );
+    assert_eq!(
+        readiness.evaluation.visible_state,
+        VisibleCompletionState::Completed
+    );
+    assert!(readiness.evaluation.required_actions.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_final_answer_appends_inconclusive_readiness_for_external_process_unknown_dirty()
+-> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    MutationEventRecorder::new(store.clone()).record_external_process_unknown_dirty(
+        &workspace,
+        "mcp_server:docs",
+        crate::ToolEffect::Unknown,
+    )?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let agent = Agent::new(
+        CapturingTextProvider {
+            captured: Arc::clone(&captured),
+        },
+        ToolRegistry::new(),
+    );
+    let mut session = Session::new("mock-capturing", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("answer"),
+            AgentRunOptions {
+                workspace_root: workspace,
+                max_turns: Some(2),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    let readiness = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness)) => {
+                Some(readiness)
+            }
+            _ => None,
+        })
+        .next()
+        .expect("final answer should append readiness");
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Inconclusive
+    );
+    assert_eq!(
+        readiness.evaluation.visible_state,
+        VisibleCompletionState::CompletedUnverified
+    );
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .iter()
+            .any(|action| { matches!(action, crate::RequiredAction::ResolveUnknownDirty) })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_final_answer_appends_missing_readiness_after_workspace_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace)?;
+    let store_path = temp.path().join("state/session.jsonl");
+    let store = JsonlSessionStore::new(&store_path)?;
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WorkspaceMutatingCustomTool));
+    let agent = Agent::new(WorkspaceMutationToolProvider, registry);
+    let mut session = Session::new("mock-workspace-mutation", "mock-model").with_store(store);
+    let mut handler = crate::event::NoopEventHandler;
+
+    let output = agent
+        .run_with_input(
+            &mut session,
+            AgentRunInput::user("mutate workspace"),
+            AgentRunOptions {
+                workspace_root: workspace.clone(),
+                max_turns: Some(4),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert_eq!(output.result.final_text, "done");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("mutated.txt"))?,
+        "new\n"
+    );
+    let readiness = session
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness)) => {
+                Some(readiness)
+            }
+            _ => None,
+        })
+        .next()
+        .expect("final answer should append readiness");
+    assert!(matches!(
+        &readiness.scope,
+        crate::EvidenceScope::Run(message_id)
+            if Some(message_id.as_str()) == output.result.final_message_id.as_deref()
+    ));
+    assert_eq!(readiness.evaluation.run_status, crate::RunStatus::Completed);
+    assert_eq!(
+        readiness.evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert_eq!(
+        readiness.evaluation.visible_state,
+        VisibleCompletionState::CompletedUnverified
+    );
+    assert!(
+        readiness
+            .evaluation
+            .required_actions
+            .iter()
+            .any(|action| { matches!(action, crate::RequiredAction::ProvideVerificationConfig) })
+    );
+    let detected = JsonlSessionStore::read_event_records(&store_path)?
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record,
+                SessionStreamRecord::Stored(event)
+                    if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str()
+            )
+        })
+        .count();
+    assert_eq!(detected, 1);
     Ok(())
 }
 
@@ -2278,6 +2696,73 @@ async fn agent_appends_terminal_task_control_from_terminal_tool_result() -> Resu
                     && task.output_hash.as_deref() == Some("sha256:abc")
         )
     }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_reconciles_terminal_start_mutation_when_terminal_cancel_finishes_task() -> Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(TerminalStartAuditTool));
+    registry.register(Arc::new(TerminalCancelAuditTool));
+    let agent = Agent::new(
+        TerminalCancelAfterExternalWriteProvider {
+            mutation_path: temp.path().join("terminal-mutated.txt"),
+            calls: AtomicUsize::new(0),
+        },
+        registry,
+    );
+    let mut session = Session::new("mock-terminal-cancel", "mock-model").with_store(store.clone());
+    let mut handler = crate::event::NoopEventHandler;
+
+    agent
+        .run(
+            &mut session,
+            "start then cancel terminal task",
+            AgentRunOptions {
+                workspace_root: temp.path().to_path_buf(),
+                max_turns: Some(6),
+                tool_timeout_secs: 5,
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                traffic_partition_key: None,
+                interaction_mode: InteractionMode::Interactive,
+                permission_config: PermissionConfig::default(),
+                permission_context: crate::PermissionEvaluationContext::default(),
+                memory_config: MemoryConfig { enabled: false },
+                compaction_config: CompactionConfig::default(),
+            },
+            &mut handler,
+        )
+        .await?;
+
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TerminalTask(task))
+                if task.handle.task_id.as_str() == "terminal-1"
+                    && matches!(task.status, TerminalTaskStatus::Cancelled)
+        )
+    }));
+    let detected = JsonlSessionStore::read_event_records(store.path())?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(detected.len(), 1);
+    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
+    assert_eq!(payload.tool_call_id.as_deref(), Some("call-terminal-start"));
+    assert_eq!(payload.tool_name, "terminal_start");
+    assert!(!payload.unknown_dirty);
+    assert!(payload.from_workspace_snapshot_id.is_some());
+    assert!(payload.to_workspace_snapshot_id.is_some());
     Ok(())
 }
 

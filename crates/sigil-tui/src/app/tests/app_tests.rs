@@ -1177,7 +1177,7 @@ fn task_sidebar_lines_surface_missing_verification_actions() -> Result<()> {
     assert!(lines.contains(&"status: paused".to_owned()));
     assert!(lines.contains(&"last: v1:fix-typo needs check".to_owned()));
     assert!(lines.contains(&"verification: missing".to_owned()));
-    assert!(lines.contains(&"action: run_check kernel-verification".to_owned()));
+    assert!(lines.contains(&"action: run check kernel-verification".to_owned()));
     assert!(lines.contains(&"△ 1. needs check fix-typo · Fix typo".to_owned()));
 
     let strip = app.task_strip_view().expect("task strip should render");

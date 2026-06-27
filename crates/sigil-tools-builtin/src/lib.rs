@@ -1975,7 +1975,7 @@ fn is_terminal_backend_unsupported(error: &anyhow::Error) -> bool {
 }
 
 fn terminal_read_details(read: &TerminalReadResult, limit_bytes: usize) -> Value {
-    json!({
+    let mut details = json!({
         "task_id": read.task_id.as_str(),
         "offset": read.offset,
         "next_offset": read.next_offset,
@@ -1983,7 +1983,13 @@ fn terminal_read_details(read: &TerminalReadResult, limit_bytes: usize) -> Value
         "total_bytes": read.total_bytes,
         "limit_bytes": limit_bytes,
         "truncated": read.truncated
-    })
+    });
+    if let Some(entry) = &read.latest_entry
+        && let Some(object) = details.as_object_mut()
+    {
+        object.insert("terminal_task".to_owned(), terminal_entry_details(entry));
+    }
+    details
 }
 
 fn parse_apply_changeset_args(args: &Value) -> Result<ApplyChangeSetArgs> {

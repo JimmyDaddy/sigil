@@ -631,6 +631,11 @@ impl AppState {
             }
             WorkerMessage::Notice(message) => {
                 self.last_notice = Some(message.clone());
+                if message.starts_with("mutation artifact cleanup:")
+                    || message.starts_with("mutation artifact deleted:")
+                {
+                    self.refresh_mutation_artifact_retention_preview();
+                }
                 if notice_is_timeline_worthy(&message) {
                     self.push_timeline(TimelineRole::Notice, message.clone());
                 }
@@ -725,12 +730,17 @@ impl AppState {
     }
 
     fn apply_mcp_list_changed(&mut self, notification: sigil_runtime::McpListChangedNotification) {
+        let server_name = notification.server_name.clone();
+        let capability = notification.kind.as_str().to_owned();
         self.apply_mcp_activation_status(
-            Some(notification.server_name),
+            Some(server_name.clone()),
             McpActivationStatus::Stale {
-                capability: notification.kind.as_str().to_owned(),
+                capability: capability.clone(),
             },
         );
+        self.last_notice = Some(format!(
+            "MCP {server_name} {capability} changed; refresh queued"
+        ));
     }
 
     pub fn shutdown_command() -> WorkerCommand {
@@ -841,9 +851,16 @@ impl AppState {
             }
             AppAction::CompactNow => WorkerCommand::CompactNow,
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
+            AppAction::CleanMutationArtifacts => WorkerCommand::CleanMutationArtifacts,
+            AppAction::DeleteMutationArtifact { artifact_id } => {
+                WorkerCommand::DeleteMutationArtifact { artifact_id }
+            }
             AppAction::TrustWorkspace => WorkerCommand::TrustWorkspace,
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
+            }
+            AppAction::RefreshMcpServer { server_name } => {
+                WorkerCommand::RefreshMcpServer { server_name }
             }
             AppAction::StartNewSession { session_log_path } => {
                 WorkerCommand::StartNewSession { session_log_path }

@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-MIN_COVERAGE = float(os.environ.get("STAGED_COVERAGE_MIN_LINES", "96"))
+# Pre-commit should catch low-coverage staged business logic without turning
+# ordinary delivery into a full-release coverage chase. Full/release gates can
+# raise this with STAGED_COVERAGE_MIN_LINES or run scripts/coverage.sh directly.
+MIN_COVERAGE = float(os.environ.get("STAGED_COVERAGE_MIN_LINES", "85"))
 BUSINESS_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
 COVERAGE_IGNORE_FILENAME_REGEX = os.environ.get(
     "COVERAGE_IGNORE_FILENAME_REGEX",

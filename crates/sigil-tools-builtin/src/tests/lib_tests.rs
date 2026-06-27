@@ -753,6 +753,62 @@ async fn terminal_tools_start_read_cancel_share_manager_and_bound_results() -> R
 #[serial]
 #[cfg_attr(coverage, ignore)]
 #[tokio::test]
+async fn terminal_tool_reports_status_in_read_metadata() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let shell = test_shell(temp.path())?;
+    let ctx = ToolContext::new(temp.path().to_path_buf(), 5);
+    let mut registry = ToolRegistry::new();
+    register_builtin_tools(&mut registry);
+
+    registry
+        .execute(
+            ctx.clone(),
+            tool_call(
+                "terminal_start",
+                json!({
+                    "task_id": "terminal-read-status",
+                    "command": "printf 0123456789",
+                    "shell": shell
+                }),
+            ),
+        )
+        .await?;
+
+    let mut latest = None;
+    for _ in 0..250 {
+        let read = registry
+            .execute(
+                ctx.clone(),
+                tool_call(
+                    "terminal_read",
+                    json!({ "task_id": "terminal-read-status", "limit_bytes": 10 }),
+                ),
+            )
+            .await?;
+        if read.metadata.details["terminal_task"]["status"] == "exited" {
+            latest = Some(read);
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    let read = latest.expect("terminal_read should eventually report terminal task status");
+
+    assert_eq!(read.content, "0123456789");
+    assert_eq!(
+        read.metadata.details["terminal_task"]["task_id"],
+        "terminal-read-status"
+    );
+    assert_eq!(read.metadata.details["terminal_task"]["status"], "exited");
+    assert_eq!(
+        read.metadata.details["terminal_task"]["status_detail"]["exit_code"],
+        0
+    );
+    Ok(())
+}
+
+#[serial]
+#[cfg_attr(coverage, ignore)]
+#[tokio::test]
 async fn terminal_start_injects_scratch_dir_env() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");

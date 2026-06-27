@@ -1,13 +1,14 @@
 use sigil_kernel::{
     AgentRole, ControlEntry, EvidenceScope, ModelMessage, ReadinessEvaluatedEntry,
-    ReadinessEvaluation, RequiredAction, RunStatus, SessionLogEntry, SessionRef, TaskId,
-    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepSpec, TaskStepStatus, VerificationVerdict, VisibleCompletionState,
+    ReadinessEvaluation, ReadinessReason, RequiredAction, RunStatus, SessionLogEntry, SessionRef,
+    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepSpec, TaskStepStatus, VerificationCheckRunEntry, VerificationCheckRunStatus,
+    VerificationStaleCause, VerificationStaleReason, VerificationVerdict, VisibleCompletionState,
 };
 
 use super::{
-    required_action_label, task_sidebar_lines, task_step_status_label, task_strip_view,
-    verification_verdict_label,
+    readiness_reason_summary, required_action_label, task_sidebar_lines, task_step_status_label,
+    task_strip_view, verification_stale_reason_compact_label, verification_verdict_label,
 };
 
 #[test]
@@ -41,31 +42,34 @@ fn verification_labels_cover_all_sidebar_variants() {
             RequiredAction::RunCheck {
                 check_spec_id: "check-a".to_owned(),
             },
-            "run_check check-a",
+            "run check check-a",
         ),
         (
             RequiredAction::ApproveCheckExecution {
                 check_spec_id: "check-a".to_owned(),
             },
-            "approve_check check-a",
+            "check approval check-a",
         ),
-        (RequiredAction::TrustWorkspace, "trust_workspace"),
-        (RequiredAction::ResolveUnknownDirty, "resolve_unknown_dirty"),
+        (RequiredAction::TrustWorkspace, "workspace trust required"),
+        (
+            RequiredAction::ResolveUnknownDirty,
+            "resolve unknown workspace change",
+        ),
         (
             RequiredAction::ReRunNonWritingCheck {
                 check_spec_id: "check-a".to_owned(),
             },
-            "rerun_non_writing_check check-a",
+            "rerun non-writing check check-a",
         ),
         (
             RequiredAction::ReviewVerificationFailure {
                 receipt_id: "receipt-a".to_owned(),
             },
-            "review_verification_failure receipt-a",
+            "review verification failure receipt-a",
         ),
         (
             RequiredAction::ProvideVerificationConfig,
-            "provide_verification_config",
+            "verification config required",
         ),
     ] {
         assert_eq!(required_action_label(&action), expected);
@@ -99,12 +103,120 @@ fn task_sidebar_projects_completed_task_with_verification_actions() {
     assert!(
         lines
             .iter()
-            .any(|line| line == "action: run_check docs-check")
+            .any(|line| line == "action: run check docs-check")
     );
 
     let strip = task_strip_view(&blocked_entries).expect("task strip should project");
     assert!(strip.detail.contains("missing"));
     assert_eq!(strip.rows[0].label, "1. needs check · Fix typo");
+}
+
+#[test]
+fn task_sidebar_compacts_multiple_verification_reasons() {
+    let entries = task_entries_with_custom_readiness_and_reasons(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Stale,
+        VisibleCompletionState::NeedsUser,
+        vec![RequiredAction::ResolveUnknownDirty],
+        vec![
+            ReadinessReason::VerificationStale(VerificationStaleCause {
+                reason: VerificationStaleReason::WorkspaceChanged("event-workspace".to_owned()),
+                from_workspace_snapshot_id: Some("snapshot-before".to_owned()),
+                to_workspace_snapshot_id: Some("snapshot-after".to_owned()),
+            }),
+            ReadinessReason::VerificationStale(VerificationStaleCause {
+                reason: VerificationStaleReason::PolicyChanged("event-policy".to_owned()),
+                from_workspace_snapshot_id: None,
+                to_workspace_snapshot_id: None,
+            }),
+            ReadinessReason::WorkspaceUnknownDirty {
+                event_id: Some("event-unknown".to_owned()),
+            },
+        ],
+    );
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(lines.iter().any(|line| line == "verification: stale"));
+    assert!(lines.iter().any(|line| {
+        line == "verification reason: stale workspace changed event-workspace +2 more"
+    }));
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert!(strip.detail.contains("stale workspace"));
+    assert!(strip.detail.contains("+2 more"));
+}
+
+#[test]
+fn task_sidebar_compact_labels_cover_verification_reason_edges() {
+    assert_eq!(
+        readiness_reason_summary(
+            &[
+                ReadinessReason::WorkspaceUnknownDirty { event_id: None },
+                ReadinessReason::CheckMutatedVerificationScope {
+                    check_spec_id: "long-check-that-changed-files".to_owned(),
+                },
+            ],
+            7,
+        ),
+        Some("unknown...".to_owned())
+    );
+    assert_eq!(
+        readiness_reason_summary(
+            &[ReadinessReason::CheckMutatedVerificationScope {
+                check_spec_id: "docs-check".to_owned(),
+            }],
+            48,
+        ),
+        Some("check changed files docs-check".to_owned())
+    );
+    let scope_mismatch = readiness_reason_summary(
+        &[ReadinessReason::ReceiptScopeMismatch {
+            receipt_id: "receipt-scope-mismatch".to_owned(),
+        }],
+        48,
+    )
+    .expect("scope mismatch should summarize");
+    assert!(scope_mismatch.starts_with("scope mismatch receipt-scope-mi"));
+    assert!(scope_mismatch.ends_with("..."));
+    let snapshot_mismatch = readiness_reason_summary(
+        &[ReadinessReason::ReceiptSnapshotMismatch {
+            receipt_id: "receipt-snapshot-mismatch".to_owned(),
+        }],
+        48,
+    )
+    .expect("snapshot mismatch should summarize");
+    assert!(snapshot_mismatch.starts_with("snapshot mismatch receipt-snap"));
+    assert!(snapshot_mismatch.ends_with("..."));
+    assert_eq!(
+        readiness_reason_summary(&[ReadinessReason::NoVerificationRequired], 48),
+        None
+    );
+
+    for (reason, expected) in [
+        (
+            VerificationStaleReason::CheckSpecChanged("event-check".to_owned()),
+            "check spec changed event-check",
+        ),
+        (
+            VerificationStaleReason::EnvironmentChanged("event-env".to_owned()),
+            "environment changed event-env",
+        ),
+        (
+            VerificationStaleReason::SandboxChanged("event-sandbox".to_owned()),
+            "sandbox changed event-sandbox",
+        ),
+        (
+            VerificationStaleReason::TrustChanged("event-trust".to_owned()),
+            "workspace trust changed event-trust",
+        ),
+        (
+            VerificationStaleReason::UnknownDirty("event-dirty".to_owned()),
+            "unknown workspace change event-dirty",
+        ),
+    ] {
+        assert_eq!(verification_stale_reason_compact_label(&reason), expected);
+    }
 }
 
 #[test]
@@ -144,6 +256,158 @@ fn task_sidebar_marks_non_user_state_missing_verification_as_needing_check() {
     assert_eq!(strip.rows[0].label, "1. needs check · Fix typo");
 }
 
+#[test]
+fn task_sidebar_explains_workspace_trust_required_action() {
+    let entries = task_entries_with_custom_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+        VisibleCompletionState::NeedsUser,
+        vec![RequiredAction::TrustWorkspace],
+    );
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(lines.iter().any(|line| line == "workspace trust: required"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "action: workspace trust required")
+    );
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert!(strip.detail.contains("workspace trust required"));
+}
+
+#[test]
+fn task_sidebar_explains_check_execution_approval_required_action() {
+    let entries = task_entries_with_custom_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+        VisibleCompletionState::NeedsUser,
+        vec![RequiredAction::ApproveCheckExecution {
+            check_spec_id: "repo-make-check".to_owned(),
+        }],
+    );
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "check approval: repo-make-check")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "action: check approval repo-make-check")
+    );
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert!(strip.detail.contains("check approval repo-make-check"));
+}
+
+#[test]
+fn task_sidebar_shows_latest_check_runner_state_for_required_action() {
+    let mut entries = task_entries_with_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+    );
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(verification_check_run(
+            "run-1",
+            VerificationCheckRunStatus::Queued,
+            None,
+        )),
+    ));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(verification_check_run(
+            "run-1",
+            VerificationCheckRunStatus::Running,
+            None,
+        )),
+    ));
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "check: docs-check running timeout=5000 ms")
+    );
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line == "action: run check docs-check")
+    );
+
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert!(strip.detail.contains("check running timeout=5000 ms"));
+}
+
+#[test]
+fn task_sidebar_shows_check_runner_failure_reason() {
+    let mut entries = task_entries_with_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+    );
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(verification_check_run(
+            "run-1",
+            VerificationCheckRunStatus::Errored,
+            Some("command timed out"),
+        )),
+    ));
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "check: docs-check errored timeout=5000 ms")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "check reason: command timed out")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "action: run check docs-check")
+    );
+}
+
+#[test]
+fn task_sidebar_keeps_retry_action_after_terminal_check_failure() {
+    let mut entries = task_entries_with_readiness(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Missing,
+    );
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(verification_check_run(
+            "run-1",
+            VerificationCheckRunStatus::Failed,
+            Some("tests failed"),
+        )),
+    ));
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "check: docs-check failed timeout=5000 ms")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "action: run check docs-check")
+    );
+}
+
 fn task_entries_with_readiness(
     run_status: TaskRunStatus,
     step_status: TaskStepStatus,
@@ -166,6 +430,24 @@ fn task_entries_with_custom_readiness(
     verdict: VerificationVerdict,
     visible_state: VisibleCompletionState,
     required_actions: Vec<RequiredAction>,
+) -> Vec<SessionLogEntry> {
+    task_entries_with_custom_readiness_and_reasons(
+        run_status,
+        step_status,
+        verdict,
+        visible_state,
+        required_actions,
+        Vec::new(),
+    )
+}
+
+fn task_entries_with_custom_readiness_and_reasons(
+    run_status: TaskRunStatus,
+    step_status: TaskStepStatus,
+    verdict: VerificationVerdict,
+    visible_state: VisibleCompletionState,
+    required_actions: Vec<RequiredAction>,
+    reasons: Vec<ReadinessReason>,
 ) -> Vec<SessionLogEntry> {
     let task_id = TaskId::new("task_1").expect("task id");
     let step_id = TaskStepId::new("fix_typo").expect("step id");
@@ -207,11 +489,29 @@ fn task_entries_with_custom_readiness(
                 run_status: RunStatus::Completed,
                 verification_verdict: verdict,
                 visible_state,
-                reasons: Vec::new(),
+                reasons,
                 required_actions,
             },
             policy_hash: None,
             workspace_snapshot_id: Some("snapshot-1".to_owned()),
         })),
     ]
+}
+
+fn verification_check_run(
+    run_id: &str,
+    status: VerificationCheckRunStatus,
+    reason: Option<&str>,
+) -> VerificationCheckRunEntry {
+    VerificationCheckRunEntry {
+        run_id: run_id.to_owned(),
+        scope: EvidenceScope::Step("task_1:fix_typo".to_owned()),
+        check_spec_id: "docs-check".to_owned(),
+        check_spec_hash: "docs-check-hash".to_owned(),
+        status,
+        receipt_id: None,
+        source_event_id: None,
+        timeout_ms: Some(5_000),
+        reason: reason.map(str::to_owned),
+    }
 }

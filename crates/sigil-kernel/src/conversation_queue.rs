@@ -152,76 +152,86 @@ pub struct ConversationQueueProjection {
 impl ConversationQueueProjection {
     #[must_use]
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
-        let mut indexed: BTreeMap<ConversationInputQueueId, ConversationQueueItemProjection> =
-            BTreeMap::new();
-        let mut order = Vec::new();
-        let mut paused = false;
+        let mut projection = Self::default();
 
         for entry in entries {
             let SessionLogEntry::Control(control) = entry else {
                 continue;
             };
-            match control {
-                ControlEntry::ConversationInputQueued(queued) => {
-                    if !indexed.contains_key(&queued.queue_id) {
-                        order.push(queued.queue_id.clone());
-                    }
-                    indexed.insert(
-                        queued.queue_id.clone(),
-                        ConversationQueueItemProjection {
-                            queued: queued.clone(),
-                            status: ConversationInputStatus::Queued,
-                            reason: None,
-                        },
-                    );
-                }
-                ControlEntry::ConversationInputEdited(edited) => {
-                    if let Some(item) = indexed.get_mut(&edited.queue_id) {
-                        item.queued.prompt_hash = edited.prompt_hash.clone();
-                        item.queued.prompt = edited.prompt.clone();
-                        item.queued.reasoning_effort = edited.reasoning_effort.clone();
-                    }
-                }
-                ControlEntry::ConversationInputReordered(reordered) => {
-                    if indexed.contains_key(&reordered.queue_id) {
-                        move_order_entry(
-                            &mut order,
-                            &reordered.queue_id,
-                            reordered.after_queue_id.as_ref(),
-                        );
-                    }
-                }
-                ControlEntry::ConversationInputQueueControl(control) => {
-                    paused = control.action == ConversationInputQueueControlAction::Pause;
-                }
-                ControlEntry::ConversationInputStatusChanged(status) => {
-                    if let Some(item) = indexed.get_mut(&status.queue_id) {
-                        item.status = status.status;
-                        item.reason = status.reason.clone();
-                    }
-                }
-                _ => {}
-            }
+            projection.apply_control_entry(control);
         }
 
-        let items = order
+        projection
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        let mut indexed = self
+            .items
+            .iter()
+            .map(|item| (item.queued.queue_id.clone(), item.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut order = self
+            .items
+            .iter()
+            .map(|item| item.queued.queue_id.clone())
+            .collect::<Vec<_>>();
+
+        match control {
+            ControlEntry::ConversationInputQueued(queued) => {
+                if !indexed.contains_key(&queued.queue_id) {
+                    order.push(queued.queue_id.clone());
+                }
+                indexed.insert(
+                    queued.queue_id.clone(),
+                    ConversationQueueItemProjection {
+                        queued: queued.clone(),
+                        status: ConversationInputStatus::Queued,
+                        reason: None,
+                    },
+                );
+            }
+            ControlEntry::ConversationInputEdited(edited) => {
+                if let Some(item) = indexed.get_mut(&edited.queue_id) {
+                    item.queued.prompt_hash = edited.prompt_hash.clone();
+                    item.queued.prompt = edited.prompt.clone();
+                    item.queued.reasoning_effort = edited.reasoning_effort.clone();
+                }
+            }
+            ControlEntry::ConversationInputReordered(reordered) => {
+                if indexed.contains_key(&reordered.queue_id) {
+                    move_order_entry(
+                        &mut order,
+                        &reordered.queue_id,
+                        reordered.after_queue_id.as_ref(),
+                    );
+                }
+            }
+            ControlEntry::ConversationInputQueueControl(control) => {
+                self.paused = control.action == ConversationInputQueueControlAction::Pause;
+            }
+            ControlEntry::ConversationInputStatusChanged(status) => {
+                if let Some(item) = indexed.get_mut(&status.queue_id) {
+                    item.status = status.status;
+                    item.reason = status.reason.clone();
+                }
+            }
+            _ => return,
+        }
+
+        self.items = order
             .into_iter()
             .filter_map(|queue_id| indexed.remove(&queue_id))
             .filter(|item| !item.status.is_terminal())
-            .collect::<Vec<_>>();
-        let next_dispatchable = items
+            .collect();
+        self.next_dispatchable = self
+            .items
             .iter()
-            .filter(|_| !paused)
+            .filter(|_| !self.paused)
             .find(|item| {
                 item.status == ConversationInputStatus::Queued
                     && item.queued.target == ConversationInputTarget::MainThread
             })
             .map(|item| item.queued.queue_id.clone());
-        Self {
-            items,
-            paused,
-            next_dispatchable,
-        }
     }
 }
 

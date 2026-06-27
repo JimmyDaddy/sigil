@@ -331,11 +331,11 @@ fn agent_detail_helpers_cover_labels_sources_and_selection_notices() {
     );
     assert!(config_field_help_text(&state, ConfigField::SkillId).contains("Selected agent"));
     assert!(matches!(
-        move_config_collection_selection(&mut state, true),
+        move_config_collection_selection(&mut state, true, 0),
         Some(ConfigFieldMove::Moved)
     ));
     assert!(
-        config_collection_selection_notice(&state)
+        config_collection_selection_notice(&state, 0)
             .expect("agent notice")
             .starts_with("agent ")
     );
@@ -350,7 +350,7 @@ fn agent_detail_helpers_cover_labels_sources_and_selection_notices() {
         "agent"
     );
     assert!(config_field_help_text(&state, ConfigField::SkillId).contains("child-session agent"));
-    assert!(config_collection_selection_notice(&state).is_none());
+    assert!(config_collection_selection_notice(&state, 0).is_none());
 
     assert_eq!(policy_override(true, true), None);
     assert_eq!(policy_override(false, true), Some(false));

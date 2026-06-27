@@ -266,6 +266,25 @@ fn render_verification_control_entries_for_audit_view() -> Result<()> {
     ));
     assert!(policy.contains("[ctl] verification policy task:task-1 checks=0 hash=sha256:"));
 
+    let check_run = render_session_log_entry(&SessionLogEntry::Control(
+        ControlEntry::VerificationCheckRun(sigil_kernel::VerificationCheckRunEntry {
+            run_id: "run-1".to_owned(),
+            scope: sigil_kernel::EvidenceScope::Step("task-1:step-1".to_owned()),
+            check_spec_id: "cargo-test".to_owned(),
+            check_spec_hash: "check-hash".to_owned(),
+            status: sigil_kernel::VerificationCheckRunStatus::Succeeded,
+            receipt_id: Some("receipt-1".to_owned()),
+            source_event_id: Some("event-check-finished".to_owned()),
+            timeout_ms: Some(60_000),
+            reason: None,
+        }),
+    ));
+    assert!(
+        check_run.contains(
+            "[ctl] verification check run run-1 check=cargo-test status=succeeded timeout=60000ms receipt=receipt-1 reason=-"
+        )
+    );
+
     let receipt = render_session_log_entry(&SessionLogEntry::Control(
         ControlEntry::VerificationRecorded(sigil_kernel::VerificationRecordedEntry {
             receipt: sigil_kernel::VerificationReceipt {
@@ -300,6 +319,7 @@ fn render_verification_control_entries_for_audit_view() -> Result<()> {
                 },
                 check_spec_id: "cargo-test".to_owned(),
                 check_status: sigil_kernel::ReceiptStatus::Succeeded,
+                failure_reason: None,
                 mutates_verification_scope: false,
             },
         }),
@@ -330,7 +350,7 @@ fn render_verification_control_entries_for_audit_view() -> Result<()> {
     ));
     assert!(
         readiness.contains(
-            "[ctl] readiness step:task-1:step-1 run=completed verification=missing policy=policy-hash snapshot=snapshot-1 actions=run_check:cargo-test reasons=missing_check:cargo-test"
+            "[ctl] readiness step:task-1:step-1 run=completed verification=missing policy=policy-hash snapshot=snapshot-1 actions=run check cargo-test reasons=missing_check:cargo-test"
         )
     );
 
@@ -360,7 +380,9 @@ fn render_verification_control_entries_for_audit_view() -> Result<()> {
             reason: Some("user trusted workspace".to_owned()),
         }),
     ));
-    assert!(trust.contains("[ctl] workspace trust workspace-1 trust=trusted snapshot=trust-1"));
+    assert!(trust.contains(
+        "[ctl] workspace trust workspace-1 trust=trusted snapshot=trust-1 by=trust-event reason=user trusted workspace"
+    ));
     Ok(())
 }
 
@@ -409,6 +431,23 @@ fn verification_audit_label_helpers_cover_all_variants() {
     ] {
         assert_eq!(receipt_status_label(status), label);
     }
+    for (status, label) in [
+        (sigil_kernel::VerificationCheckRunStatus::Queued, "queued"),
+        (sigil_kernel::VerificationCheckRunStatus::Running, "running"),
+        (
+            sigil_kernel::VerificationCheckRunStatus::Succeeded,
+            "succeeded",
+        ),
+        (sigil_kernel::VerificationCheckRunStatus::Failed, "failed"),
+        (sigil_kernel::VerificationCheckRunStatus::Skipped, "skipped"),
+        (
+            sigil_kernel::VerificationCheckRunStatus::Inconclusive,
+            "inconclusive",
+        ),
+        (sigil_kernel::VerificationCheckRunStatus::Errored, "errored"),
+    ] {
+        assert_eq!(verification_check_run_status_label(status), label);
+    }
 
     assert_eq!(
         readiness_required_actions_label(&[
@@ -417,34 +456,34 @@ fn verification_audit_label_helpers_cover_all_variants() {
             },
             sigil_kernel::RequiredAction::TrustWorkspace,
         ]),
-        "approve_check:check-a+1"
+        "check approval check-a+1"
     );
     for (action, expected) in [
         (
             sigil_kernel::RequiredAction::RunCheck {
                 check_spec_id: "check-a".to_owned(),
             },
-            "run_check:check-a",
+            "run check check-a",
         ),
         (
             sigil_kernel::RequiredAction::ReRunNonWritingCheck {
                 check_spec_id: "check-a".to_owned(),
             },
-            "rerun_non_writing:check-a",
+            "rerun non-writing check check-a",
         ),
         (
             sigil_kernel::RequiredAction::ReviewVerificationFailure {
                 receipt_id: "receipt-a".to_owned(),
             },
-            "review_failure:receipt-a",
+            "review verification failure receipt-a",
         ),
         (
             sigil_kernel::RequiredAction::ResolveUnknownDirty,
-            "resolve_unknown_dirty",
+            "resolve unknown workspace change",
         ),
         (
             sigil_kernel::RequiredAction::ProvideVerificationConfig,
-            "provide_verification_config",
+            "verification config required",
         ),
     ] {
         assert_eq!(required_action_label(&action), expected);

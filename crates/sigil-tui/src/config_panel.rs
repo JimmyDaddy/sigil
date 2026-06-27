@@ -456,6 +456,9 @@ impl ConfigField {
 pub(crate) enum ConfigFooterAction {
     Save,
     SaveAndClose,
+    CleanMutationArtifacts,
+    DeleteMutationArtifact,
+    TrustWorkspace,
     ActivateMcp,
     TrustAgent,
     BlockAgent,
@@ -471,6 +474,19 @@ pub(crate) enum ConfigFooterAction {
 
 impl ConfigFooterAction {
     const DEFAULT_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
+    const STORAGE_ORDER: [Self; 5] = [
+        Self::Save,
+        Self::SaveAndClose,
+        Self::CleanMutationArtifacts,
+        Self::DeleteMutationArtifact,
+        Self::Close,
+    ];
+    const PERMISSIONS_ORDER: [Self; 4] = [
+        Self::Save,
+        Self::SaveAndClose,
+        Self::TrustWorkspace,
+        Self::Close,
+    ];
     const MCP_ORDER: [Self; 4] = [
         Self::Save,
         Self::SaveAndClose,
@@ -491,12 +507,12 @@ impl ConfigFooterAction {
     pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
             ConfigSection::Mcp => &Self::MCP_ORDER,
+            ConfigSection::Storage => &Self::STORAGE_ORDER,
+            ConfigSection::Permissions => &Self::PERMISSIONS_ORDER,
             ConfigSection::Agents => &Self::AGENTS_ORDER,
             ConfigSection::Skills => &Self::SKILLS_ORDER,
             ConfigSection::Plugins => &Self::PLUGINS_ORDER,
             ConfigSection::Provider
-            | ConfigSection::Storage
-            | ConfigSection::Permissions
             | ConfigSection::Memory
             | ConfigSection::Compaction
             | ConfigSection::CodeIntelligence
@@ -513,6 +529,9 @@ impl ConfigFooterAction {
         match self {
             Self::Save => "save",
             Self::SaveAndClose => "save+close",
+            Self::CleanMutationArtifacts => "clean",
+            Self::DeleteMutationArtifact => "delete",
+            Self::TrustWorkspace => "trust",
             Self::ActivateMcp => "activate",
             Self::TrustAgent => "trust",
             Self::BlockAgent => "block",
@@ -531,6 +550,9 @@ impl ConfigFooterAction {
         match self {
             Self::Save => "save",
             Self::SaveAndClose => "save_and_close",
+            Self::CleanMutationArtifacts => "clean_artifacts",
+            Self::DeleteMutationArtifact => "delete_artifact",
+            Self::TrustWorkspace => "trust_workspace",
             Self::ActivateMcp => "activate_mcp",
             Self::TrustAgent => "trust_agent",
             Self::BlockAgent => "block_agent",
@@ -1221,6 +1243,7 @@ pub(crate) struct ConfigState {
     pub(crate) selected_agent_index: usize,
     pub(crate) selected_skill_index: usize,
     pub(crate) selected_plugin_index: usize,
+    pub(crate) selected_storage_artifact_index: usize,
     pub(crate) agent_profiles: Vec<ResolvedAgentProfile>,
     pub(crate) agent_warnings: Vec<String>,
     pub(crate) skill_descriptors: Vec<SkillDescriptor>,
@@ -1246,6 +1269,7 @@ impl ConfigState {
             selected_agent_index: 0,
             selected_skill_index: 0,
             selected_plugin_index: 0,
+            selected_storage_artifact_index: 0,
             agent_profiles: Vec::new(),
             agent_warnings: Vec::new(),
             skill_descriptors: Vec::new(),

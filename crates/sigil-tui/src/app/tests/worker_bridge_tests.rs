@@ -1,5 +1,5 @@
 use super::*;
-use crate::approval::PendingApproval;
+use crate::{app::MutationArtifactRetentionPreview, approval::PendingApproval};
 
 #[test]
 fn normal_input_creates_user_and_running_state() -> Result<()> {
@@ -84,6 +84,14 @@ fn activate_lazy_mcp_action_maps_to_worker_command() {
             server_name: Some(ref server_name)
         } if server_name == "filesystem"
     ));
+
+    let command = app.into_worker_command(AppAction::RefreshMcpServer {
+        server_name: "filesystem".to_owned(),
+    });
+    assert!(matches!(
+        command,
+        WorkerCommand::RefreshMcpServer { ref server_name } if server_name == "filesystem"
+    ));
 }
 
 #[test]
@@ -133,6 +141,17 @@ fn plan_actions_map_to_worker_commands() {
         } if task_id == "task_1" && guidance == "focus runtime"
     ));
 
+    assert!(matches!(
+        app.into_worker_command(AppAction::CleanMutationArtifacts),
+        WorkerCommand::CleanMutationArtifacts
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::DeleteMutationArtifact {
+            artifact_id: "mutation-artifact:sha256:abc".to_owned(),
+        }),
+        WorkerCommand::DeleteMutationArtifact { ref artifact_id }
+            if artifact_id == "mutation-artifact:sha256:abc"
+    ));
     assert!(matches!(
         app.into_worker_command(AppAction::TrustWorkspace),
         WorkerCommand::TrustWorkspace
@@ -965,6 +984,19 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
             .iter()
             .any(|event| event.label == "worker" && event.detail == "worker note")
     );
+    app.mutation_artifact_retention_preview = MutationArtifactRetentionPreview::Pending;
+    app.handle_worker_message(WorkerMessage::Notice(
+        "mutation artifact cleanup: expired=0 deleted=0".to_owned(),
+    ))?;
+    assert_eq!(
+        app.last_notice(),
+        Some("mutation artifact cleanup: expired=0 deleted=0")
+    );
+    assert!(matches!(
+        app.mutation_artifact_retention_preview,
+        MutationArtifactRetentionPreview::Ready { .. }
+            | MutationArtifactRetentionPreview::Unavailable(_)
+    ));
     app.handle_worker_message(WorkerMessage::Notice("worker failed hard".to_owned()))?;
     assert!(
         app.timeline
@@ -1925,6 +1957,17 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         WorkerCommand::CheckChangedFilesDiagnostics
     ));
     assert!(matches!(
+        app.into_worker_command(AppAction::CleanMutationArtifacts),
+        WorkerCommand::CleanMutationArtifacts
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::DeleteMutationArtifact {
+            artifact_id: "mutation-artifact:sha256:def".to_owned(),
+        }),
+        WorkerCommand::DeleteMutationArtifact { ref artifact_id }
+            if artifact_id == "mutation-artifact:sha256:def"
+    ));
+    assert!(matches!(
         app.into_worker_command(AppAction::TrustWorkspace),
         WorkerCommand::TrustWorkspace
     ));
@@ -2190,6 +2233,10 @@ fn mcp_list_changed_marks_server_stale_until_refresh_status_arrives() -> Result<
     assert_eq!(
         app.mcp_server_runtime_status_label("filesystem").as_deref(),
         Some("stale prompts")
+    );
+    assert_eq!(
+        app.last_notice(),
+        Some("MCP filesystem prompts changed; refresh queued")
     );
     app.handle_worker_message(WorkerMessage::McpActivationStatus {
         server_name: Some("filesystem".to_owned()),

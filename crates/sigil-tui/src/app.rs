@@ -31,9 +31,9 @@ use ratatui::text::Line;
 use sigil_kernel::{
     AgentThreadId, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
     ConversationInputKind, ConversationInputQueueId, ConversationInputTarget, MemoryConfig,
-    PlanApprovalPermission, ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig,
-    SessionLogEntry, SessionStats, StorageConfig, ToolPreviewSnapshot, plan_text_hash,
-    resolve_workspace_root,
+    MutationArtifactInventoryItem, MutationArtifactRetentionReport, PlanApprovalPermission,
+    ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig, SessionLogEntry,
+    SessionStats, StorageConfig, ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
 };
 use sigil_runtime::{SigilPaths, resolve_sigil_paths};
 use uuid::Uuid;
@@ -214,6 +214,16 @@ struct ComposerPasteSpan {
     line_count: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum MutationArtifactRetentionPreview {
+    Pending,
+    Ready {
+        report: MutationArtifactRetentionReport,
+        artifacts: Vec<MutationArtifactInventoryItem>,
+    },
+    Unavailable(String),
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub config_path: PathBuf,
@@ -227,6 +237,7 @@ pub struct AppState {
     pub memory_enabled: bool,
     pub memory_document_count: usize,
     pub memory_last_status: String,
+    mutation_artifact_retention_preview: MutationArtifactRetentionPreview,
     pub compaction_status: String,
     pub code_intelligence_status: String,
     pub code_intelligence_server_lines: BTreeMap<String, String>,
@@ -403,9 +414,16 @@ pub enum AppAction {
     },
     CompactNow,
     CheckChangedFilesDiagnostics,
+    CleanMutationArtifacts,
+    DeleteMutationArtifact {
+        artifact_id: String,
+    },
     TrustWorkspace,
     ActivateLazyMcp {
         server_name: Option<String>,
+    },
+    RefreshMcpServer {
+        server_name: String,
     },
     StartNewSession {
         session_log_path: PathBuf,
@@ -458,6 +476,7 @@ impl AppState {
             memory_enabled: root_config.memory.enabled,
             memory_document_count: 0,
             memory_last_status: "pending".to_owned(),
+            mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
             compaction_status: initial_compaction_status,
             code_intelligence_status: initial_code_intelligence_status,
             code_intelligence_server_lines: BTreeMap::new(),
@@ -594,6 +613,7 @@ impl AppState {
             memory_enabled: true,
             memory_document_count: 0,
             memory_last_status: "pending".to_owned(),
+            mutation_artifact_retention_preview: MutationArtifactRetentionPreview::Pending,
             compaction_status: CompactionThresholdStatus::NotAvailable.as_str().to_owned(),
             code_intelligence_status: "off".to_owned(),
             code_intelligence_server_lines: BTreeMap::new(),

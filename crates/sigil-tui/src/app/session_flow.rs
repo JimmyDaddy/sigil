@@ -1088,6 +1088,18 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 entry.policy.required_checks.len(),
                 truncate_session_view_text(&entry.policy_hash, 16)
             ),
+            ControlEntry::VerificationCheckRun(entry) => format!(
+                "[ctl] verification check run {} check={} status={} timeout={} receipt={} reason={}",
+                truncate_session_view_text(&entry.run_id, 48),
+                truncate_session_view_text(&entry.check_spec_id, 48),
+                verification_check_run_status_label(entry.status),
+                entry
+                    .timeout_ms
+                    .map(|value| format!("{value}ms"))
+                    .unwrap_or_else(|| "-".to_owned()),
+                truncate_session_view_text(entry.receipt_id.as_deref().unwrap_or("-"), 48),
+                truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
+            ),
             ControlEntry::VerificationRecorded(entry) => format!(
                 "[ctl] verification receipt {} check={} status={} snapshot={} policy={} trust={}",
                 truncate_session_view_text(&entry.receipt.receipt.receipt_id, 48),
@@ -1120,10 +1132,12 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 truncate_session_view_text(&entry.child_workspace_snapshot_id, 16)
             ),
             ControlEntry::WorkspaceTrustDecision(entry) => format!(
-                "[ctl] workspace trust {} trust={} snapshot={}",
+                "[ctl] workspace trust {} trust={} snapshot={} by={} reason={}",
                 truncate_session_view_text(&entry.workspace_id, 48),
                 workspace_trust_label(entry.trust),
-                truncate_session_view_text(&entry.workspace_trust_snapshot_id, 16)
+                truncate_session_view_text(&entry.workspace_trust_snapshot_id, 16),
+                truncate_session_view_text(entry.decided_by_event_id.as_deref().unwrap_or("-"), 48),
+                truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
             ),
             ControlEntry::AgentProfileCaptured(entry) => format!(
                 "[ctl] agent profile {} trust={}",
@@ -1452,6 +1466,20 @@ fn receipt_status_label(status: sigil_kernel::ReceiptStatus) -> &'static str {
     }
 }
 
+fn verification_check_run_status_label(
+    status: sigil_kernel::VerificationCheckRunStatus,
+) -> &'static str {
+    match status {
+        sigil_kernel::VerificationCheckRunStatus::Queued => "queued",
+        sigil_kernel::VerificationCheckRunStatus::Running => "running",
+        sigil_kernel::VerificationCheckRunStatus::Succeeded => "succeeded",
+        sigil_kernel::VerificationCheckRunStatus::Failed => "failed",
+        sigil_kernel::VerificationCheckRunStatus::Skipped => "skipped",
+        sigil_kernel::VerificationCheckRunStatus::Inconclusive => "inconclusive",
+        sigil_kernel::VerificationCheckRunStatus::Errored => "errored",
+    }
+}
+
 fn readiness_required_actions_label(actions: &[sigil_kernel::RequiredAction]) -> String {
     summarized_readiness_items(actions, required_action_label)
 }
@@ -1474,21 +1502,23 @@ fn summarized_readiness_items<T>(items: &[T], labeler: fn(&T) -> String) -> Stri
 fn required_action_label(action: &sigil_kernel::RequiredAction) -> String {
     match action {
         sigil_kernel::RequiredAction::RunCheck { check_spec_id } => {
-            format!("run_check:{check_spec_id}")
+            format!("run check {check_spec_id}")
         }
         sigil_kernel::RequiredAction::ApproveCheckExecution { check_spec_id } => {
-            format!("approve_check:{check_spec_id}")
+            format!("check approval {check_spec_id}")
         }
-        sigil_kernel::RequiredAction::TrustWorkspace => "trust_workspace".to_owned(),
-        sigil_kernel::RequiredAction::ResolveUnknownDirty => "resolve_unknown_dirty".to_owned(),
+        sigil_kernel::RequiredAction::TrustWorkspace => "workspace trust required".to_owned(),
+        sigil_kernel::RequiredAction::ResolveUnknownDirty => {
+            "resolve unknown workspace change".to_owned()
+        }
         sigil_kernel::RequiredAction::ReRunNonWritingCheck { check_spec_id } => {
-            format!("rerun_non_writing:{check_spec_id}")
+            format!("rerun non-writing check {check_spec_id}")
         }
         sigil_kernel::RequiredAction::ReviewVerificationFailure { receipt_id } => {
-            format!("review_failure:{receipt_id}")
+            format!("review verification failure {receipt_id}")
         }
         sigil_kernel::RequiredAction::ProvideVerificationConfig => {
-            "provide_verification_config".to_owned()
+            "verification config required".to_owned()
         }
     }
 }

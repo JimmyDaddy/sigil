@@ -145,6 +145,8 @@ pub struct TerminalReadResult {
     pub offset: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_entry: Option<TerminalTaskEntry>,
     pub content: String,
     pub returned_bytes: u64,
     pub total_bytes: u64,
@@ -372,7 +374,10 @@ impl TerminalProcessManager {
         let task = self.managed_task(task_id).await?;
         let entry = task.summary.lock().await.clone();
         let path = self.stored_artifact_path(&entry.handle.log_path)?;
-        read_terminal_output_log(task_id.clone(), &path, offset, limit_bytes.max(1)).await
+        let mut read =
+            read_terminal_output_log(task_id.clone(), &path, offset, limit_bytes.max(1)).await?;
+        read.latest_entry = Some(entry);
+        Ok(read)
     }
 
     /// Sends input to a PTY-backed terminal task.
@@ -1253,6 +1258,7 @@ async fn read_terminal_output_log(
         task_id,
         offset: start,
         next_offset: (next_offset < total_bytes).then_some(next_offset),
+        latest_entry: None,
         content: String::from_utf8_lossy(&buffer).to_string(),
         returned_bytes,
         total_bytes,

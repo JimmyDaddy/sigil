@@ -86,12 +86,17 @@ impl PlanApprovalProjection {
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
         let mut projection = Self::default();
         for entry in entries {
-            let SessionLogEntry::Control(ControlEntry::PlanApproved(entry)) = entry else {
-                continue;
-            };
-            projection.apply_approval(entry);
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(control);
+            }
         }
         projection
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        if let ControlEntry::PlanApproved(entry) = control {
+            self.apply_approval(entry);
+        }
     }
 
     fn apply_approval(&mut self, entry: &PlanApprovedEntry) {

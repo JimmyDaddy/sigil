@@ -29,6 +29,7 @@ pub(crate) fn test_config() -> RootConfig {
                 storage_root.join("cache").display().to_string(),
             ),
             project_assets_root: ".sigil".to_owned(),
+            ..Default::default()
         },
         session: SessionConfig::default(),
         agent: AgentConfig {

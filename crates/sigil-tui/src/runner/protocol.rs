@@ -110,6 +110,10 @@ pub enum WorkerCommand {
     },
     CompactNow,
     CheckChangedFilesDiagnostics,
+    CleanMutationArtifacts,
+    DeleteMutationArtifact {
+        artifact_id: String,
+    },
     TrustWorkspace,
     RefreshProviderBalance {
         request_id: u64,
@@ -124,6 +128,9 @@ pub enum WorkerCommand {
     },
     ActivateLazyMcp {
         server_name: Option<String>,
+    },
+    RefreshMcpServer {
+        server_name: String,
     },
     StartNewSession {
         session_log_path: PathBuf,

@@ -211,6 +211,36 @@ struct MutatingShellFixtureTool {
 
 struct RemovingWorkspaceShellFixtureTool;
 
+struct ReadOnlyShellFixtureTool;
+
+#[async_trait]
+impl Tool for ReadOnlyShellFixtureTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "fixture_shell_read".to_owned(),
+            description: "fixture shell read".to_owned(),
+            input_schema: json!({"type":"object"}),
+            category: ToolCategory::Shell,
+            access: ToolAccess::Read,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: serde_json::Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            "fixture_shell_read",
+            "read",
+            ToolResultMeta::default(),
+        ))
+    }
+}
+
 #[async_trait]
 impl Tool for RemovingWorkspaceShellFixtureTool {
     fn spec(&self) -> ToolSpec {
@@ -307,6 +337,38 @@ async fn tool_registry_executes_registered_tool_and_exposes_hooks() -> Result<()
 }
 
 #[tokio::test]
+async fn tool_registry_allows_read_only_shell_without_started_audit_marker() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(ReadOnlyShellFixtureTool));
+    let ctx = ToolContext::new(&workspace, 5).with_mutation_recorder(recorder);
+
+    let result = registry
+        .execute(
+            ctx,
+            ToolCall {
+                id: "call-read".to_owned(),
+                name: "fixture_shell_read".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await?;
+
+    assert_eq!(result.content, "read");
+    let events = JsonlSessionStore::read_event_records(store.path())?;
+    assert!(events.into_iter().all(|record| !matches!(
+        record,
+        SessionStreamRecord::Stored(event)
+            if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str()
+    )));
+    Ok(())
+}
+
+#[tokio::test]
 async fn tool_registry_records_unknown_workspace_mutation_for_shell_tool() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -320,8 +382,23 @@ async fn tool_registry_records_unknown_workspace_mutation_for_shell_tool() -> Re
     }));
     let ctx = ToolContext::new(&workspace, 5).with_mutation_recorder(recorder);
 
-    let result = registry
+    let error = registry
         .execute(
+            ctx.clone(),
+            ToolCall {
+                id: "call-shell".to_owned(),
+                name: "fixture_shell".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+        )
+        .await
+        .expect_err("bare execution should require a started audit marker");
+    assert!(error.to_string().contains(
+        "requires persisted ToolExecutionStarted execution mutation profile before execution"
+    ));
+
+    let result = registry
+        .execute_after_started_audit(
             ctx,
             ToolCall {
                 id: "call-shell".to_owned(),
@@ -368,7 +445,7 @@ async fn tool_registry_reports_unknown_mutation_scan_start_failure() -> Result<(
     let ctx = ToolContext::new(&missing_workspace, 5).with_mutation_recorder(recorder);
 
     let error = registry
-        .execute(
+        .execute_after_started_audit(
             ctx,
             ToolCall {
                 id: "call-shell".to_owned(),
@@ -388,18 +465,18 @@ async fn tool_registry_reports_unknown_mutation_scan_start_failure() -> Result<(
 }
 
 #[tokio::test]
-async fn tool_registry_reports_unknown_mutation_scan_finish_failure() -> Result<()> {
+async fn tool_registry_records_unknown_dirty_when_post_scan_is_unavailable() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace)?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
-    let recorder = MutationEventRecorder::new(store);
+    let recorder = MutationEventRecorder::new(store.clone());
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(RemovingWorkspaceShellFixtureTool));
     let ctx = ToolContext::new(&workspace, 5).with_mutation_recorder(recorder);
 
-    let error = registry
-        .execute(
+    let result = registry
+        .execute_after_started_audit(
             ctx,
             ToolCall {
                 id: "call-shell".to_owned(),
@@ -407,12 +484,32 @@ async fn tool_registry_reports_unknown_mutation_scan_finish_failure() -> Result<
                 args_json: "{}".to_owned(),
             },
         )
-        .await
-        .expect_err("removed workspace should fail after shell execution");
+        .await?;
 
-    assert!(error.to_string().contains(
-        "failed to finish workspace mutation detection for fixture_shell_remove_workspace"
-    ));
+    assert_eq!(result.content, "removed");
+    let events = JsonlSessionStore::read_event_records(store.path())?;
+    let detected = events
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(detected.len(), 1);
+    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
+    assert_eq!(payload.tool_call_id.as_deref(), Some("call-shell"));
+    assert_eq!(payload.tool_name, "fixture_shell_remove_workspace");
+    assert_eq!(
+        payload.reason,
+        crate::WorkspaceMutationDetectionReason::ScanUnavailable
+    );
+    assert!(payload.unknown_dirty);
+    assert!(payload.from_workspace_snapshot_id.is_some());
+    assert!(payload.to_workspace_snapshot_id.is_none());
     Ok(())
 }
 

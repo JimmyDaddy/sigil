@@ -1,8 +1,8 @@
 use sigil_kernel::{
     EvidenceScope, ReadinessEvaluatedEntry, RequiredAction, SessionLogEntry, TaskPlanProjection,
     TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepId, TaskStepSpec,
-    TaskStepStatus, TerminalTaskProjection, VerificationStateProjection, VerificationVerdict,
-    VisibleCompletionState,
+    TaskStepStatus, TerminalTaskProjection, VerificationCheckRunEntry, VerificationCheckRunStatus,
+    VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
 };
 
 use crate::ui::{StatusKind, status_symbol};
@@ -97,13 +97,40 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
             )
         ));
     }
-    if let Some(readiness) = task_sidebar_focus_readiness(task, &verification_projection) {
+    if let Some((scope, readiness)) =
+        task_sidebar_focus_readiness_with_scope(task, &verification_projection)
+    {
         lines.push(format!(
             "verification: {}",
             verification_verdict_label(readiness.evaluation.verification_verdict)
         ));
+        if let Some(summary) = readiness_reason_summary(&readiness.evaluation.reasons, 48) {
+            lines.push(format!("verification reason: {summary}"));
+        }
         for action in readiness.evaluation.required_actions.iter().take(2) {
-            lines.push(format!("action: {}", required_action_label(action)));
+            lines.extend(required_action_context_lines(action));
+            if let Some(run) = latest_check_run_for_action(entries, &scope, action) {
+                let mut check_line = format!(
+                    "check: {} {}",
+                    truncate_session_view_text(&run.check_spec_id, 32),
+                    check_run_status_label(run.status)
+                );
+                if let Some(timeout_ms) = run.timeout_ms {
+                    check_line.push_str(&format!(" timeout={timeout_ms} ms"));
+                }
+                lines.push(check_line);
+                if let Some(reason) = run.reason.as_ref().filter(|value| !value.trim().is_empty()) {
+                    lines.push(format!(
+                        "check reason: {}",
+                        truncate_session_view_text(reason, 48)
+                    ));
+                }
+                if !check_run_status_blocks_action(run.status) {
+                    lines.push(format!("action: {}", required_action_label(action)));
+                }
+            } else {
+                lines.push(format!("action: {}", required_action_label(action)));
+            }
         }
     }
     if let Some(reason) = task
@@ -151,11 +178,35 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             task_run_status_label(task.status),
             plan.steps.len()
         );
-        if let Some(readiness) = task_sidebar_focus_readiness(task, &verification_projection) {
+        if let Some((scope, readiness)) =
+            task_sidebar_focus_readiness_with_scope(task, &verification_projection)
+        {
             detail.push_str(" · ");
             detail.push_str(verification_verdict_label(
                 readiness.evaluation.verification_verdict,
             ));
+            if let Some(reason_summary) =
+                readiness_reason_summary(&readiness.evaluation.reasons, 32)
+            {
+                detail.push_str(" · ");
+                detail.push_str(&reason_summary);
+            }
+            if let Some(run) = latest_check_run_for_actions(
+                entries,
+                &scope,
+                &readiness.evaluation.required_actions,
+            ) {
+                detail.push_str(" · check ");
+                detail.push_str(check_run_status_label(run.status));
+                if let Some(timeout_ms) = run.timeout_ms {
+                    detail.push_str(&format!(" timeout={timeout_ms} ms"));
+                }
+            } else if let Some(action_context) =
+                required_action_context_summary(&readiness.evaluation.required_actions)
+            {
+                detail.push_str(" · ");
+                detail.push_str(&action_context);
+            }
         }
         rows = task_strip_step_rows(task, plan_version, plan, &verification_projection);
     }
@@ -452,15 +503,20 @@ fn task_step_readiness_by_id<'a>(
     verification_projection.latest_readiness(&scope)
 }
 
-fn task_sidebar_focus_readiness<'a>(
+fn task_sidebar_focus_readiness_with_scope<'a>(
     task: &TaskRunProjection,
     verification_projection: &'a VerificationStateProjection,
-) -> Option<&'a ReadinessEvaluatedEntry> {
+) -> Option<(EvidenceScope, &'a ReadinessEvaluatedEntry)> {
     if let Some((_, step_id)) = &task.current_step {
-        return task_step_readiness_by_id(task, 0, step_id, verification_projection);
+        let scope = task_step_scope(task, step_id);
+        return verification_projection
+            .latest_readiness(&scope)
+            .map(|readiness| (scope, readiness));
     }
     let (plan_version, step_id, _) = task_sidebar_last_problem_step(task)?;
+    let scope = task_step_scope(task, &step_id);
     task_step_readiness_by_id(task, plan_version, &step_id, verification_projection)
+        .map(|readiness| (scope, readiness))
 }
 
 fn task_sidebar_last_plan_step(
@@ -557,22 +613,223 @@ fn verification_verdict_label(verdict: VerificationVerdict) -> &'static str {
     }
 }
 
+fn required_action_context_lines(action: &RequiredAction) -> Vec<String> {
+    match action {
+        RequiredAction::ApproveCheckExecution { check_spec_id } => {
+            vec![format!(
+                "check approval: {}",
+                truncate_session_view_text(check_spec_id, 32)
+            )]
+        }
+        RequiredAction::TrustWorkspace => vec!["workspace trust: required".to_owned()],
+        _ => Vec::new(),
+    }
+}
+
+fn required_action_context_summary(actions: &[RequiredAction]) -> Option<String> {
+    actions.iter().find_map(|action| match action {
+        RequiredAction::ApproveCheckExecution { check_spec_id } => Some(format!(
+            "check approval {}",
+            truncate_session_view_text(check_spec_id, 24)
+        )),
+        RequiredAction::TrustWorkspace => Some("workspace trust required".to_owned()),
+        _ => None,
+    })
+}
+
+fn readiness_reason_summary(
+    reasons: &[sigil_kernel::ReadinessReason],
+    max_chars: usize,
+) -> Option<String> {
+    let labels = reasons
+        .iter()
+        .filter_map(readiness_reason_compact_label)
+        .collect::<Vec<_>>();
+    let first = labels.first()?;
+    if labels.len() > 1 {
+        return Some(compact_first_with_more_suffix(
+            first,
+            labels.len() - 1,
+            max_chars,
+        ));
+    }
+    Some(truncate_session_view_text(first, max_chars))
+}
+
+fn compact_first_with_more_suffix(first: &str, remaining: usize, max_chars: usize) -> String {
+    let suffix = format!(" +{remaining} more");
+    let normalized = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() + suffix.chars().count() <= max_chars {
+        return format!("{normalized}{suffix}");
+    }
+    let suffix_len = suffix.chars().count();
+    let ellipsis_len = 3;
+    let Some(prefix_len) = max_chars.checked_sub(suffix_len + ellipsis_len) else {
+        return truncate_session_view_text(&format!("{normalized}{suffix}"), max_chars);
+    };
+    if prefix_len == 0 {
+        return truncate_session_view_text(&format!("{normalized}{suffix}"), max_chars);
+    }
+    let prefix = normalized.chars().take(prefix_len).collect::<String>();
+    format!("{prefix}...{suffix}")
+}
+
+fn readiness_reason_compact_label(reason: &sigil_kernel::ReadinessReason) -> Option<String> {
+    match reason {
+        sigil_kernel::ReadinessReason::VerificationStale(cause) => Some(format!(
+            "stale {}",
+            verification_stale_reason_compact_label(&cause.reason)
+        )),
+        sigil_kernel::ReadinessReason::WorkspaceUnknownDirty { event_id } => {
+            let event = event_id
+                .as_deref()
+                .map(|value| format!(" {}", truncate_session_view_text(value, 16)))
+                .unwrap_or_default();
+            Some(format!("unknown workspace change{event}"))
+        }
+        sigil_kernel::ReadinessReason::CheckMutatedVerificationScope { check_spec_id } => {
+            Some(format!(
+                "check changed files {}",
+                truncate_session_view_text(check_spec_id, 16)
+            ))
+        }
+        sigil_kernel::ReadinessReason::ReceiptScopeMismatch { receipt_id } => Some(format!(
+            "scope mismatch {}",
+            truncate_session_view_text(receipt_id, 16)
+        )),
+        sigil_kernel::ReadinessReason::ReceiptSnapshotMismatch { receipt_id } => Some(format!(
+            "snapshot mismatch {}",
+            truncate_session_view_text(receipt_id, 16)
+        )),
+        _ => None,
+    }
+}
+
+fn verification_stale_reason_compact_label(
+    reason: &sigil_kernel::VerificationStaleReason,
+) -> String {
+    match reason {
+        sigil_kernel::VerificationStaleReason::WorkspaceChanged(event_id) => {
+            format!(
+                "workspace changed {}",
+                truncate_session_view_text(event_id, 16)
+            )
+        }
+        sigil_kernel::VerificationStaleReason::CheckSpecChanged(event_id) => {
+            format!(
+                "check spec changed {}",
+                truncate_session_view_text(event_id, 16)
+            )
+        }
+        sigil_kernel::VerificationStaleReason::PolicyChanged(event_id) => {
+            format!(
+                "policy changed {}",
+                truncate_session_view_text(event_id, 16)
+            )
+        }
+        sigil_kernel::VerificationStaleReason::EnvironmentChanged(event_id) => {
+            format!(
+                "environment changed {}",
+                truncate_session_view_text(event_id, 16)
+            )
+        }
+        sigil_kernel::VerificationStaleReason::SandboxChanged(event_id) => {
+            format!(
+                "sandbox changed {}",
+                truncate_session_view_text(event_id, 16)
+            )
+        }
+        sigil_kernel::VerificationStaleReason::TrustChanged(event_id) => {
+            format!(
+                "workspace trust changed {}",
+                truncate_session_view_text(event_id, 16)
+            )
+        }
+        sigil_kernel::VerificationStaleReason::UnknownDirty(event_id) => {
+            format!(
+                "unknown workspace change {}",
+                truncate_session_view_text(event_id, 16)
+            )
+        }
+    }
+}
+
 fn required_action_label(action: &RequiredAction) -> String {
     match action {
-        RequiredAction::RunCheck { check_spec_id } => format!("run_check {check_spec_id}"),
+        RequiredAction::RunCheck { check_spec_id } => format!("run check {check_spec_id}"),
         RequiredAction::ApproveCheckExecution { check_spec_id } => {
-            format!("approve_check {check_spec_id}")
+            format!("check approval {check_spec_id}")
         }
-        RequiredAction::TrustWorkspace => "trust_workspace".to_owned(),
-        RequiredAction::ResolveUnknownDirty => "resolve_unknown_dirty".to_owned(),
+        RequiredAction::TrustWorkspace => "workspace trust required".to_owned(),
+        RequiredAction::ResolveUnknownDirty => "resolve unknown workspace change".to_owned(),
         RequiredAction::ReRunNonWritingCheck { check_spec_id } => {
-            format!("rerun_non_writing_check {check_spec_id}")
+            format!("rerun non-writing check {check_spec_id}")
         }
         RequiredAction::ReviewVerificationFailure { receipt_id } => {
-            format!("review_verification_failure {receipt_id}")
+            format!("review verification failure {receipt_id}")
         }
-        RequiredAction::ProvideVerificationConfig => "provide_verification_config".to_owned(),
+        RequiredAction::ProvideVerificationConfig => "verification config required".to_owned(),
     }
+}
+
+fn latest_check_run_for_actions<'a>(
+    entries: &'a [SessionLogEntry],
+    scope: &EvidenceScope,
+    actions: &[RequiredAction],
+) -> Option<&'a VerificationCheckRunEntry> {
+    actions
+        .iter()
+        .find_map(|action| latest_check_run_for_action(entries, scope, action))
+}
+
+fn latest_check_run_for_action<'a>(
+    entries: &'a [SessionLogEntry],
+    scope: &EvidenceScope,
+    action: &RequiredAction,
+) -> Option<&'a VerificationCheckRunEntry> {
+    let check_spec_id = required_action_check_spec_id(action)?;
+    entries.iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(sigil_kernel::ControlEntry::VerificationCheckRun(run)) = entry
+        else {
+            return None;
+        };
+        (run.scope == *scope && run.check_spec_id == check_spec_id).then_some(run)
+    })
+}
+
+fn required_action_check_spec_id(action: &RequiredAction) -> Option<&str> {
+    match action {
+        RequiredAction::RunCheck { check_spec_id }
+        | RequiredAction::ApproveCheckExecution { check_spec_id }
+        | RequiredAction::ReRunNonWritingCheck { check_spec_id } => Some(check_spec_id),
+        RequiredAction::TrustWorkspace
+        | RequiredAction::ResolveUnknownDirty
+        | RequiredAction::ReviewVerificationFailure { .. }
+        | RequiredAction::ProvideVerificationConfig => None,
+    }
+}
+
+fn check_run_status_label(status: VerificationCheckRunStatus) -> &'static str {
+    match status {
+        VerificationCheckRunStatus::Queued => "queued",
+        VerificationCheckRunStatus::Running => "running",
+        VerificationCheckRunStatus::Succeeded => "succeeded",
+        VerificationCheckRunStatus::Failed => "failed",
+        VerificationCheckRunStatus::Skipped => "skipped",
+        VerificationCheckRunStatus::Inconclusive => "inconclusive",
+        VerificationCheckRunStatus::Errored => "errored",
+    }
+}
+
+fn check_run_status_blocks_action(status: VerificationCheckRunStatus) -> bool {
+    matches!(
+        status,
+        VerificationCheckRunStatus::Queued | VerificationCheckRunStatus::Running
+    )
+}
+
+fn task_step_scope(task: &TaskRunProjection, step_id: &TaskStepId) -> EvidenceScope {
+    EvidenceScope::Step(format!("{}:{}", task.task_id.as_str(), step_id.as_str()))
 }
 
 pub(super) fn task_child_session_status_label(

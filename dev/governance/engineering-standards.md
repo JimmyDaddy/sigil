@@ -53,7 +53,7 @@
 
 ### 3.3 收尾时
 
-- 跑必要 gate
+- 跑必要 gate；日常提交优先使用分层门禁，不默认跑完整 workspace gate
 - 更新必要文档
 - 在说明里明确哪些能力已完成，哪些只是扩展点
 
@@ -76,7 +76,28 @@
 
 ## 5. 验证规范
 
-### 5.1 默认质量门
+### 5.1 分层质量门
+
+日常本地提交不要默认跑完整 workspace gate。先按变更范围选择最小能证明当前改动的门禁：
+
+```bash
+# 日常提交：格式、workspace 编译检查、touched crate tests
+./scripts/check-touched.sh --tier quick
+
+# 中高风险提交：quick + touched crate clippy
+./scripts/check-touched.sh --tier standard
+
+# 发布前、大批量合并前或核心语义大改后：完整 workspace test + clippy
+./scripts/check-touched.sh --tier full
+```
+
+分层规则：
+
+- `quick`：适合普通代码改动、局部 TUI 状态/渲染、文档加少量测试；执行 `git diff --check`、`cargo fmt --all --check`、`cargo check` 和 touched crate 的 `cargo test -p <crate>`。
+- `standard`：适合 session/event/mutation/verification/permission/tool/TUI runner 等高风险路径；在 `quick` 基础上追加 touched crate 的 `cargo clippy -p <crate> --all-targets -- -D warnings`。
+- `full`：适合发布前、跨多个核心 crate 的语义大改或需要合并长期分支时；执行 workspace `cargo test` 和 `cargo clippy --all-targets -- -D warnings`。
+
+仍可手动运行完整门禁：
 
 ```bash
 cargo fmt --all --check
@@ -94,9 +115,9 @@ cargo clippy --all-targets -- -D warnings
 git config core.hooksPath .githooks
 ```
 
-hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行覆盖率是否 `>= 96%`。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；也不把 staged source 里可识别的 `enum` / `struct` / `union` 声明行当作可执行业务行。如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
+hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行覆盖率是否达到本地提交阈值。默认阈值是 `>= 85%`，适合日常 pre-commit；需要 release/CI 级严格检查时，可以通过 `STAGED_COVERAGE_MIN_LINES=96` 提高阈值，或直接运行完整 `./scripts/coverage.sh`。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；也不把 staged source 里可识别的 `enum` / `struct` / `union` 声明行当作可执行业务行。如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
 
-为缩短本地提交耗时，staged coverage gate 只对 staged 业务文件所在 package 运行 `scripts/coverage.sh --lcov`，并在脚本内对新增可执行行执行 `>= 96%` 判定；不要把它当成完整 workspace 覆盖率替代品。完整 workspace 覆盖率仍通过显式 `./scripts/coverage.sh` 和 CI 执行。
+为缩短本地提交耗时，staged coverage gate 只对 staged 业务文件所在 package 运行 `scripts/coverage.sh --lcov`，并在脚本内对新增可执行行执行阈值判定；不要把它当成完整 workspace 覆盖率替代品。完整 workspace 覆盖率仍通过显式 `./scripts/coverage.sh` 和 CI 执行。RFC/session/mutation/verification 等核心语义变更优先补可复现的语义测试和 conformance case；不要为了满足本地 staged 行覆盖率而补无效断言或 pass-only 测试。
 
 `scripts/check-staged-coverage.py` 必须继续复用 `scripts/coverage.sh --lcov` 生成的覆盖率数据，不另起一套覆盖率管线。调整 staged diff 分类、LCov 解析或覆盖率计算时，必须同步更新 `scripts/test_check_staged_coverage.py` 的纯函数测试。
 

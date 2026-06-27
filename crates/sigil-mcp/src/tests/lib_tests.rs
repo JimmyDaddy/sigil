@@ -7,9 +7,10 @@ use std::{
 use anyhow::Result;
 use serde_json::{Value, json};
 use sigil_kernel::{
-    ApprovalMode, McpServerConfig, McpServerStartup, McpServerTrustPolicy, McpTrustClass,
-    ProviderCapabilities, ReasoningStreamSupport, SecretRedactor, ToolAccess, ToolCategory,
-    ToolContext, ToolErrorKind, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    ApprovalMode, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
+    McpServerTrustPolicy, McpTrustClass, MutationEventRecorder, ProviderCapabilities,
+    ReasoningStreamSupport, SecretRedactor, ToolAccess, ToolCategory, ToolContext, ToolErrorKind,
+    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope, WorkspaceMutationDetected,
 };
 use tokio::{
     io::BufReader,
@@ -385,6 +386,175 @@ while True:
         )
         .await?;
     assert_eq!(result.content, "hello from mcp");
+    Ok(())
+}
+
+#[tokio::test]
+async fn registration_with_mutation_recorder_records_mcp_lifecycle_unknown_dirty() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let script = temp.path().join("lifecycle_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\r\n", b"\n"):
+            break
+        key, value = line.decode().split(":", 1)
+        headers[key.lower()] = value.strip()
+    length = int(headers["content-length"])
+    body = sys.stdin.buffer.read(length)
+    return json.loads(body.decode())
+
+def write_message(obj):
+    body = json.dumps(obj).encode()
+    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode())
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "initialize":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"capabilities":{}}})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        write_message({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object"}}]}})
+"#,
+    )?;
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_options(
+        &mut registry,
+        &[McpServerConfig {
+            name: "lifecycle".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![script.to_string_lossy().to_string()],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                trust_class: McpTrustClass::ThirdParty,
+                approval_default: ApprovalMode::Allow,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        McpToolRegistrationOptions::eager()?
+            .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store.clone())),
+    )
+    .await?;
+
+    assert!(registry.spec_for("mcp__lifecycle__echo").is_some());
+    let detected = JsonlSessionStore::read_event_records(session_store.path())?
+        .into_iter()
+        .filter_map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(detected.len(), 1);
+    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
+    assert_eq!(payload.tool_call_id, None);
+    assert_eq!(payload.tool_name, "mcp_server:lifecycle");
+    assert!(payload.unknown_dirty);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_lifecycle_mutation_failure_adds_server_context() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let store_path = temp.path().join("session.jsonl");
+    let session_store = JsonlSessionStore::new(&store_path)?;
+    fs::create_dir(&store_path)?;
+    let options = McpToolRegistrationOptions::eager()?
+        .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store));
+
+    let error = super::record_mcp_server_lifecycle_unknown_dirty(&options, "filesystem")
+        .expect_err("directory-backed session path should fail mutation evidence append");
+
+    assert!(
+        format!("{error:#}")
+            .contains("failed to record MCP server filesystem lifecycle mutation evidence")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_startup_failure_with_recorder_records_unknown_dirty() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    let side_effect = workspace.join("mcp-started.txt");
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let script = temp.path().join("crashing_mcp_server.py");
+    write_fake_server_script(
+        &script,
+        r#"#!/usr/bin/env python3
+import pathlib, sys
+
+pathlib.Path(sys.argv[1]).write_text("started", encoding="utf-8")
+sys.exit(7)
+"#,
+    )?;
+
+    let mut registry = ToolRegistry::new();
+    register_mcp_tools_with_options(
+        &mut registry,
+        &[McpServerConfig {
+            name: "crashy".to_owned(),
+            command: "python3".to_owned(),
+            args: vec![
+                script.to_string_lossy().to_string(),
+                side_effect.to_string_lossy().to_string(),
+            ],
+            startup_timeout_secs: 5,
+            trust: McpServerTrustPolicy {
+                trust_class: McpTrustClass::ThirdParty,
+                approval_default: ApprovalMode::Allow,
+                ..McpServerTrustPolicy::default()
+            },
+            ..McpServerConfig::default()
+        }],
+        McpToolRegistrationOptions::eager()?
+            .with_mutation_recorder(workspace, MutationEventRecorder::new(session_store.clone())),
+    )
+    .await
+    .expect_err("startup failure should still surface");
+
+    assert!(registry.specs().is_empty());
+    assert!(side_effect.exists());
+    let detected = JsonlSessionStore::read_event_records(session_store.path())?
+        .into_iter()
+        .filter_map(|record| match record {
+            sigil_kernel::SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(detected.len(), 1);
+    let payload: WorkspaceMutationDetected = serde_json::from_value(detected[0].payload.clone())?;
+    assert_eq!(payload.tool_call_id, None);
+    assert_eq!(payload.tool_name, "mcp_server:crashy");
+    assert!(payload.unknown_dirty);
     Ok(())
 }
 

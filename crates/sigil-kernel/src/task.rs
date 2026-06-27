@@ -543,7 +543,7 @@ impl TaskStateProjection {
             let SessionLogEntry::Control(control) = entry else {
                 continue;
             };
-            projection.apply_control(control);
+            projection.apply_control_entry(control);
         }
         projection
     }
@@ -569,7 +569,7 @@ impl TaskStateProjection {
         })
     }
 
-    fn apply_control(&mut self, control: &ControlEntry) {
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
         match control {
             ControlEntry::TaskRun(entry) => self.apply_run(entry),
             ControlEntry::TaskPlan(entry) => self.apply_plan(entry),

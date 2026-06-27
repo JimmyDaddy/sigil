@@ -513,6 +513,53 @@ fn activate_lazy_mcp_reports_notice_when_no_lazy_servers_match() -> Result<()> {
 }
 
 #[test]
+fn refresh_mcp_server_reports_deferred_for_unknown_server() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp.path().join(".sigil/sessions/session-worker.jsonl");
+    let root_config = test_root_config(&workspace_root, "planned", "planned-model");
+    let provider = PlannedProvider::new(Vec::new());
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::RefreshMcpServer {
+        server_name: "missing".to_owned(),
+    })?;
+    let refreshing = worker.recv()?;
+    assert!(matches!(
+        refreshing,
+        WorkerMessage::McpActivationStatus {
+            server_name: Some(ref server_name),
+            status: McpActivationStatus::Refreshing,
+        } if server_name == "missing"
+    ));
+    let status = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::McpActivationStatus {
+                status: McpActivationStatus::Deferred,
+                ..
+            }
+        )
+    })?;
+    assert!(matches!(
+        status,
+        WorkerMessage::McpActivationStatus {
+            server_name: Some(ref server_name),
+            status: McpActivationStatus::Deferred,
+        } if server_name == "missing"
+    ));
+    let notice = worker.recv_until(|message| matches!(message, WorkerMessage::Notice(_)))?;
+
+    assert!(matches!(
+        notice,
+        WorkerMessage::Notice(ref text) if text == "MCP refresh skipped for unknown server missing"
+    ));
+
+    Ok(())
+}
+
+#[test]
 fn activate_lazy_mcp_is_rejected_while_run_is_active() -> Result<()> {
     let temp = tempdir()?;
     let workspace_root = temp.path().to_path_buf();

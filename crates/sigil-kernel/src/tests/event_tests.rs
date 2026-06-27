@@ -36,7 +36,8 @@ use crate::{
     TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolCall,
     ToolCategory, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
     ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, VerificationBinding, VerificationPolicy,
+    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, VerificationBinding,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
     VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
     VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceRootSnapshot,
     WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, decode_stored_event,
@@ -69,6 +70,21 @@ fn stored_event_checksum_is_canonical_and_roundtrips() {
     assert_eq!(parsed.record_checksum, event.record_checksum);
     assert!(parsed.record_checksum.starts_with("sha256:jcs-v1:"));
     assert_eq!(parsed, event);
+}
+
+#[test]
+fn stored_event_new_rejects_non_appendable_legacy_event_type() {
+    let error = StoredEvent::new(
+        DurableEventType::Legacy,
+        EventClass::NonCritical,
+        "event-legacy".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({}),
+    )
+    .expect_err("legacy envelopes are replay-only and cannot be appended");
+
+    assert!(error.to_string().contains("cannot be appended"));
 }
 
 #[test]
@@ -321,8 +337,8 @@ fn stored_event_decode_returns_strong_domain_event_variant() {
 
 #[test]
 fn stored_event_decode_rejects_legacy_stored_event() {
-    let event = StoredEvent::new(
-        DurableEventType::Legacy,
+    let event = StoredEvent::new_raw(
+        DurableEventType::Legacy.as_str(),
         EventClass::Critical,
         "event-legacy".to_owned(),
         "session-1".to_owned(),
@@ -343,9 +359,12 @@ fn stored_event_decode_covers_every_known_domain_variant() {
         .copied()
         .filter(|event_type| *event_type != DurableEventType::Legacy)
     {
+        let event_class = event_type
+            .expected_event_class()
+            .expect("known durable event type should have expected class");
         let event = StoredEvent::new(
             event_type,
-            EventClass::Critical,
+            event_class,
             format!("event-{}", event_type.as_str()),
             "session-1".to_owned(),
             1,
@@ -512,6 +531,34 @@ fn durable_event_sync_mapping_covers_all_appendable_events() {
     assert_eq!(
         DurableEventType::LogTailRecovered.sync_class(),
         Some(EventSyncClass::TailRecovery)
+    );
+}
+
+#[test]
+fn durable_event_type_expected_class_covers_all_appendable_types() {
+    for event_type in ALL_DURABLE_EVENT_TYPES {
+        if !event_type.appendable() {
+            assert!(event_type.expected_event_class().is_none());
+            continue;
+        }
+        assert!(
+            event_type.expected_event_class().is_some(),
+            "{} should have an expected event class",
+            event_type.as_str()
+        );
+    }
+
+    assert_eq!(
+        DurableEventType::UserMessageRecorded.expected_event_class(),
+        Some(EventClass::Critical)
+    );
+    assert_eq!(
+        DurableEventType::ContextSourceCaptured.expected_event_class(),
+        Some(EventClass::NonCritical)
+    );
+    assert_eq!(
+        DurableEventType::SessionEntryRecorded.expected_event_class(),
+        Some(EventClass::NonCritical)
     );
 }
 
@@ -1189,6 +1236,10 @@ fn public_control_event_kinds_cover_control_entry_variants() {
             "verification_policy_changed",
         ),
         (
+            ControlEntry::VerificationCheckRun(event_verification_check_run_entry()),
+            "verification_check_run",
+        ),
+        (
             ControlEntry::VerificationRecorded(event_verification_recorded_entry()),
             "verification_recorded",
         ),
@@ -1632,8 +1683,24 @@ fn event_verification_recorded_entry() -> VerificationRecordedEntry {
             },
             check_spec_id: check.check_spec_id,
             check_status: ReceiptStatus::Succeeded,
+            failure_reason: None,
             mutates_verification_scope: false,
         },
+    }
+}
+
+fn event_verification_check_run_entry() -> VerificationCheckRunEntry {
+    let check = event_check_spec();
+    VerificationCheckRunEntry {
+        run_id: "check-run-1".to_owned(),
+        scope: EvidenceScope::Task("task-1".to_owned()),
+        check_spec_id: check.check_spec_id,
+        check_spec_hash: check.check_spec_hash,
+        status: VerificationCheckRunStatus::Succeeded,
+        receipt_id: Some("receipt-1".to_owned()),
+        source_event_id: Some("event-check-finished".to_owned()),
+        timeout_ms: Some(60_000),
+        reason: None,
     }
 }
 

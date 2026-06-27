@@ -61,8 +61,8 @@ use crate::{
     },
     verification::{
         CheckSpecRecordedEntry, ChildVerificationReceiptLinked, ReadinessEvaluatedEntry,
-        VerificationPolicyChangedEntry, VerificationRecordedEntry, VerificationStateProjection,
-        WorkspaceTrustDecisionEntry,
+        VerificationCheckRunEntry, VerificationPolicyChangedEntry, VerificationRecordedEntry,
+        VerificationStateProjection, WorkspaceTrustDecisionEntry,
     },
 };
 
@@ -150,6 +150,18 @@ impl SessionStreamRecord {
 }
 
 pub const SESSION_ENTRY_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const AGENT_THREAD_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const AGENT_PROFILE_TRUST_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const AGENT_PROFILE_POLICY_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const AGENT_RESULT_CONTINUATION_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const CHANGESET_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const CONVERSATION_QUEUE_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const PLAN_APPROVAL_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const PLUGIN_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const SKILL_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const TASK_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const TERMINAL_TASK_PROJECTION_SCHEMA_VERSION: u16 = 1;
+pub const USAGE_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 pub const VERIFICATION_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 
 /// One reducer-facing domain event plus the cursor position proving where it came from.
@@ -252,6 +264,8 @@ pub enum ControlEntry {
     CheckSpecRecorded(CheckSpecRecordedEntry),
     #[serde(alias = "VerificationPolicyChanged")]
     VerificationPolicyChanged(VerificationPolicyChangedEntry),
+    #[serde(alias = "VerificationCheckRun")]
+    VerificationCheckRun(VerificationCheckRunEntry),
     #[serde(alias = "VerificationRecorded")]
     VerificationRecorded(VerificationRecordedEntry),
     #[serde(alias = "ReadinessEvaluated")]
@@ -623,6 +637,7 @@ impl JsonlSessionStore {
     }
 
     fn open_locked_file(&self) -> Result<File> {
+        let existed = self.path.exists();
         let file = OpenOptions::new()
             .create(true)
             .read(true)
@@ -630,6 +645,9 @@ impl JsonlSessionStore {
             .open(&self.path)
             .with_context(|| format!("failed to open {}", self.path.display()))?;
         lock_exclusive_with_retry(&file, &self.path)?;
+        if !existed {
+            sync_parent_dir(&self.path)?;
+        }
         Ok(file)
     }
 }
@@ -955,6 +973,7 @@ fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
         ControlEntry::TaskStep(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::CheckSpecRecorded(_) => DurableEventType::CheckSpecRecorded,
         ControlEntry::VerificationPolicyChanged(_) => DurableEventType::VerificationPolicyChanged,
+        ControlEntry::VerificationCheckRun(_) => DurableEventType::VerificationCheckRun,
         ControlEntry::VerificationRecorded(_) => DurableEventType::VerificationRecorded,
         ControlEntry::ReadinessEvaluated(_) => DurableEventType::ReadinessEvaluated,
         ControlEntry::ChildVerificationReceiptLinked(_) => {
@@ -1245,6 +1264,7 @@ fn quarantine_tail_copy(path: &Path, content: &str, original_hash: &str) -> Resu
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let dir = parent.join(".sigil-recovery");
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    sync_parent_dir(&dir)?;
     let short_hash = original_hash
         .trim_start_matches("sha256:")
         .chars()
@@ -1262,6 +1282,7 @@ fn quarantine_tail_copy(path: &Path, content: &str, original_hash: &str) -> Resu
     quarantine_file
         .sync_all()
         .with_context(|| format!("failed to sync {}", quarantine_path.display()))?;
+    sync_parent_dir(&quarantine_path)?;
     Ok(quarantine_path)
 }
 
@@ -1293,7 +1314,8 @@ fn write_tail_recovery_intent(path: &Path, intent: &TailRecoveryIntent) -> Resul
     let file = File::open(&intent_path)
         .with_context(|| format!("failed to open {}", intent_path.display()))?;
     file.sync_all()
-        .with_context(|| format!("failed to sync {}", intent_path.display()))
+        .with_context(|| format!("failed to sync {}", intent_path.display()))?;
+    sync_parent_dir(&intent_path)
 }
 
 fn clear_tail_recovery_intent(path: &Path) -> Result<()> {
@@ -1301,8 +1323,16 @@ fn clear_tail_recovery_intent(path: &Path) -> Result<()> {
     if intent_path.exists() {
         fs::remove_file(&intent_path)
             .with_context(|| format!("failed to remove {}", intent_path.display()))?;
+        sync_parent_dir(&intent_path)?;
     }
     Ok(())
+}
+
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = File::open(parent).with_context(|| format!("failed to open {}", parent.display()))?;
+    dir.sync_all()
+        .with_context(|| format!("failed to sync {}", parent.display()))
 }
 
 /// In-memory session state backed by an optional append-only JSONL store.
@@ -1517,9 +1547,43 @@ impl Session {
         PlanApprovalProjection::from_entries(&self.entries)
     }
 
+    /// Rebuilds plan approval state directly from the durable mixed-format event stream.
+    pub fn try_plan_approval_projection_from_durable(
+        &self,
+    ) -> Result<Option<PlanApprovalProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = PlanApprovalProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_plan_approval_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
+    }
+
     /// Returns a durable task projection reconstructed from append-only control entries.
     pub fn task_state_projection(&self) -> TaskStateProjection {
         TaskStateProjection::from_entries(&self.entries)
+    }
+
+    /// Rebuilds task state directly from the durable mixed-format event stream.
+    ///
+    /// This is the RFC-0001 replay path for task projection. It preserves the existing infallible
+    /// `task_state_projection` API while giving callers and tests a fail-closed durable replay
+    /// option.
+    pub fn try_task_state_projection_from_durable(&self) -> Result<Option<TaskStateProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = TaskStateProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_task_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
     }
 
     /// Returns a durable agent thread projection reconstructed from append-only control entries.
@@ -1527,9 +1591,46 @@ impl Session {
         AgentThreadStateProjection::from_entries(&self.entries)
     }
 
+    /// Rebuilds agent thread state directly from the durable mixed-format event stream.
+    ///
+    /// This is the RFC-0001 replay path for the agent graph projection. It preserves the existing
+    /// infallible `agent_thread_state_projection` API while giving callers and tests a fail-closed
+    /// durable replay option.
+    pub fn try_agent_thread_state_projection_from_durable(
+        &self,
+    ) -> Result<Option<AgentThreadStateProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = AgentThreadStateProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_agent_thread_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        projection.finalize_replay();
+        Ok(Some(projection))
+    }
+
     /// Returns durable agent profile trust decisions reconstructed from append-only control entries.
     pub fn agent_profile_trust_projection(&self) -> AgentProfileTrustProjection {
         AgentProfileTrustProjection::from_entries(&self.entries)
+    }
+
+    /// Rebuilds agent profile trust decisions directly from the durable mixed-format event stream.
+    pub fn try_agent_profile_trust_projection_from_durable(
+        &self,
+    ) -> Result<Option<AgentProfileTrustProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = AgentProfileTrustProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_agent_profile_trust_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
     }
 
     /// Returns durable agent profile policy decisions reconstructed from append-only control entries.
@@ -1537,9 +1638,39 @@ impl Session {
         AgentProfilePolicyProjection::from_entries(&self.entries)
     }
 
+    /// Rebuilds agent profile policy decisions directly from the durable mixed-format event stream.
+    pub fn try_agent_profile_policy_projection_from_durable(
+        &self,
+    ) -> Result<Option<AgentProfilePolicyProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = AgentProfilePolicyProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_agent_profile_policy_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
+    }
+
     /// Returns a durable skill projection reconstructed from append-only control entries.
     pub fn skill_state_projection(&self) -> SkillStateProjection {
         SkillStateProjection::from_entries(&self.entries)
+    }
+
+    /// Rebuilds skill state directly from the durable mixed-format event stream.
+    pub fn try_skill_state_projection_from_durable(&self) -> Result<Option<SkillStateProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = SkillStateProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_skill_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
     }
 
     /// Returns a durable plugin projection reconstructed from append-only control entries.
@@ -1547,9 +1678,43 @@ impl Session {
         PluginStateProjection::from_entries(&self.entries)
     }
 
+    /// Rebuilds plugin state directly from the durable mixed-format event stream.
+    pub fn try_plugin_state_projection_from_durable(
+        &self,
+    ) -> Result<Option<PluginStateProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = PluginStateProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_plugin_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
+    }
+
     /// Returns a durable change set projection reconstructed from append-only control entries.
     pub fn changeset_projection(&self) -> ChangeSetProjection {
         ChangeSetProjection::from_entries(&self.entries)
+    }
+
+    /// Rebuilds change set state directly from the durable mixed-format event stream.
+    ///
+    /// This is the RFC-0001 replay path for changeset projection. It preserves the existing
+    /// infallible `changeset_projection` API while giving callers and tests a fail-closed durable
+    /// replay option.
+    pub fn try_changeset_projection_from_durable(&self) -> Result<Option<ChangeSetProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = ChangeSetProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_changeset_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
     }
 
     /// Returns durable verification evidence reconstructed from append-only control entries.
@@ -1582,12 +1747,68 @@ impl Session {
         TerminalTaskProjection::from_entries(&self.entries)
     }
 
+    /// Rebuilds terminal task state directly from the durable mixed-format event stream.
+    ///
+    /// This is the RFC-0001 replay path for terminal task projection. It preserves the existing
+    /// infallible `terminal_task_projection` API while giving callers and tests a fail-closed
+    /// durable replay option.
+    pub fn try_terminal_task_projection_from_durable(
+        &self,
+    ) -> Result<Option<TerminalTaskProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = TerminalTaskProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_terminal_task_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
+    }
+
     pub fn conversation_queue_projection(&self) -> ConversationQueueProjection {
         ConversationQueueProjection::from_entries(&self.entries)
     }
 
+    /// Rebuilds conversation queue state directly from the durable mixed-format event stream.
+    pub fn try_conversation_queue_projection_from_durable(
+        &self,
+    ) -> Result<Option<ConversationQueueProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = ConversationQueueProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_conversation_queue_projection_record(&mut projection, &mut cursor, &record)?;
+        }
+        Ok(Some(projection))
+    }
+
     pub fn agent_result_continuation_projection(&self) -> AgentResultContinuationProjection {
         AgentResultContinuationProjection::from_entries(&self.entries)
+    }
+
+    /// Rebuilds agent result continuation state directly from the durable mixed-format event stream.
+    pub fn try_agent_result_continuation_projection_from_durable(
+        &self,
+    ) -> Result<Option<AgentResultContinuationProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = AgentResultContinuationProjection::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_agent_result_continuation_projection_record(
+                &mut projection,
+                &mut cursor,
+                &record,
+            )?;
+        }
+        Ok(Some(projection))
     }
 
     /// Builds one provider request from stable system memory, projected session history, and tools.
@@ -1774,12 +1995,41 @@ impl Session {
         self.store.as_ref().map(JsonlSessionStore::path)
     }
 
+    /// Returns the next session-stream sequence for synthetic evidence tied to this session.
+    ///
+    /// Durable-only domain events do not appear in `Session::entries`, so callers that need
+    /// stream ordering must read the mixed-format JSONL stream when a store is present.
+    pub fn next_stream_sequence_hint(&self) -> Result<u64> {
+        let Some(path) = self.store_path() else {
+            return Ok((self.entries.len() as u64).saturating_add(1));
+        };
+        let records = JsonlSessionStore::read_event_records(path)?;
+        Ok(next_stream_sequence(&records))
+    }
+
     pub fn stats(&self) -> &SessionStats {
         &self.stats
     }
 
     pub fn stats_mut(&mut self) -> &mut SessionStats {
         &mut self.stats
+    }
+
+    /// Rebuilds usage and cost statistics directly from the durable mixed-format event stream.
+    ///
+    /// This is the RFC-0001 replay path for token/cost projection. It preserves the existing
+    /// infallible `stats` API while giving callers and tests a fail-closed durable replay option.
+    pub fn try_usage_stats_from_durable(&self) -> Result<Option<SessionStats>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut stats = SessionStats::default();
+        let mut cursor: Option<ProjectionCursor> = None;
+        for record in records {
+            apply_usage_projection_record(&mut stats, &mut cursor, &record)?;
+        }
+        Ok(Some(stats))
     }
 
     pub fn ensure_identity_entry(&mut self) -> Result<()> {
@@ -1846,6 +2096,326 @@ fn apply_verification_projection_record(
     }
     *cursor = Some(next_cursor);
     Ok(())
+}
+
+fn apply_plan_approval_projection_record(
+    projection: &mut PlanApprovalProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(PLAN_APPROVAL_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_task_projection_record(
+    projection: &mut TaskStateProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(TASK_STATE_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_skill_projection_record(
+    projection: &mut SkillStateProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(SKILL_STATE_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_plugin_projection_record(
+    projection: &mut PluginStateProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(PLUGIN_STATE_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_agent_thread_projection_record(
+    projection: &mut AgentThreadStateProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(AGENT_THREAD_STATE_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_agent_profile_trust_projection_record(
+    projection: &mut AgentProfileTrustProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(AGENT_PROFILE_TRUST_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_agent_profile_policy_projection_record(
+    projection: &mut AgentProfilePolicyProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(AGENT_PROFILE_POLICY_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_agent_result_continuation_projection_record(
+    projection: &mut AgentResultContinuationProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(AGENT_RESULT_CONTINUATION_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_conversation_queue_projection_record(
+    projection: &mut ConversationQueueProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(CONVERSATION_QUEUE_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_changeset_projection_record(
+    projection: &mut ChangeSetProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(CHANGESET_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_terminal_task_projection_record(
+    projection: &mut TerminalTaskProjection,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(TERMINAL_TASK_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        projection.apply_control_entry(&control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_usage_projection_record(
+    stats: &mut SessionStats,
+    cursor: &mut Option<ProjectionCursor>,
+    record: &SessionStreamRecord,
+) -> Result<()> {
+    let next_cursor = record.projection_cursor(USAGE_STATE_PROJECTION_SCHEMA_VERSION);
+    match projection_apply_decision_for_record(
+        cursor.as_ref(),
+        &next_cursor.session_id,
+        next_cursor.last_applied_stream_sequence,
+        &next_cursor.last_applied_event_id,
+        &next_cursor.last_applied_record_checksum,
+    )? {
+        ProjectionApplyDecision::IgnoreAlreadyApplied => return Ok(()),
+        ProjectionApplyDecision::Apply => {}
+    }
+    if let Some(domain_record) = record.domain_event_record()?
+        && let Some(SessionLogEntry::Control(control)) =
+            session_entry_from_domain_event(&domain_record.event)?
+    {
+        apply_usage_control_entry(stats, &control);
+    }
+    *cursor = Some(next_cursor);
+    Ok(())
+}
+
+fn apply_usage_control_entry(stats: &mut SessionStats, control: &ControlEntry) {
+    match control {
+        ControlEntry::UsageSnapshot(usage) => stats.apply_usage(usage),
+        ControlEntry::CompactionApplied(_) => stats.last_prompt_tokens = 0,
+        _ => {}
+    }
 }
 
 fn compaction_summary_message(record: &CompactionRecord) -> ModelMessage {
@@ -2005,16 +2575,10 @@ pub fn session_stats_from_entries(entries: &[SessionLogEntry]) -> SessionStats {
     let mut stats = SessionStats::default();
     for entry in entries {
         match entry {
-            SessionLogEntry::Control(ControlEntry::UsageSnapshot(usage)) => {
-                stats.apply_usage(usage)
-            }
-            SessionLogEntry::Control(ControlEntry::CompactionApplied(_)) => {
-                stats.last_prompt_tokens = 0;
-            }
+            SessionLogEntry::Control(control) => apply_usage_control_entry(&mut stats, control),
             SessionLogEntry::User(_)
             | SessionLogEntry::Assistant(_)
-            | SessionLogEntry::ToolResult(_)
-            | SessionLogEntry::Control(_) => {}
+            | SessionLogEntry::ToolResult(_) => {}
         }
     }
     stats

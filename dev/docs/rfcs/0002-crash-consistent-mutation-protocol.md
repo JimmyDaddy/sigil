@@ -1,6 +1,6 @@
 # RFC-0002 Crash-consistent Mutation Protocol
 
-状态：Draft
+状态：RFC core semantics implemented / productization remains
 
 创建日期：2026-06-25
 
@@ -385,23 +385,55 @@ Required deterministic tests:
 - 已新增 mutation domain 类型：`MutationPrepared`、`MutationCommitted`、`MutationReconciled`、`MutationBatchStarted`、`MutationBatchFinished`、`WriteCommitted`、`SnapshotCoverage`、`MutationSubject` 和 workspace revision/snapshot 绑定。
 - 已实现 `MutationCoordinator` / recorder 基础路径，受控文件 mutation 先 append prepare，再执行写入，最后 append commit/write receipt。
 - 已实现单文件 controlled write 的 workspace confinement、before hash、intended after hash、CAS 检查、temp file + atomic replace、file/parent sync 和 observed hash。
+- 已实现受控单文件 mutation 的最小 artifact capture：已有非敏感文件会在 prepare 阶段将旧内容写入 recorder artifact root，并以 `SnapshotCoverage::Captured` 引用；secret-like 文件默认记录 `SkippedSensitive`，不保存旧内容；legacy workspace `.sigil/sessions` 日志默认不会把 artifact 写回仓库 `.sigil`。
+- 已加固 mutation artifact 写入：blob 使用 temp-write + fsync + rename，复用既有 blob 前会校验内容 hash，截断或损坏时会重写。
+- 已新增 mutation artifact lifecycle 审计原语：artifact 删除、过期或内容不可用会追加 `MutationArtifactLifecycleRecorded`，历史 mutation event 不会被改写。
+- 已实现通用 mutation artifact retention / quota 扫描器：按 artifact metadata 扫描 artifact root，支持 age、count、byte quota，过期和不可用内容都通过 `MutationArtifactLifecycleRecorded` 追加审计事件，不静默删除。
+- 已新增用户可见 mutation artifact retention 默认配置：`StorageConfig.mutation_artifact_retention` 默认保留最多 10,000 个 artifact、512 MiB、30 天，并可转换为 scanner policy；普通 agent run 不会隐式清理。
+- 已在 `/config` Storage 页展示 artifact retention policy 和显式 cleanup 语义，用户能看到当前默认/覆盖值以及 cleanup 会记录 lifecycle event。
+- 已补充 `/config` Storage footer 的显式 artifact cleanup action：用户手动触发后会在 worker 空闲时调用 retention scanner，按当前 policy 清理 mutation artifact，并通过 scanner 追加 `MutationArtifactLifecycleRecorded` durable events。
+- 已补充 read-only artifact retention preview：`preview_artifact_retention(_at)` 复用 retention selection 但不删除内容、不追加 lifecycle event；`/config` Storage 会展示当前 artifact 数量/大小、cleanup preview 和预计 cleanup bytes。
+- 已补充 read-only artifact inventory：`list_mutation_artifacts` 暴露 artifact id、size、created_at、availability、operation ids 和 source paths；`/config` Storage 会展示前几条 artifact 摘要，用户能看到 cleanup 管理的 artifact 来源。
+- 已补充 `/config` Storage artifact 单项删除：Storage artifact list 支持当前选中项，footer `delete` 会在 worker 空闲时调用 `delete_mutation_artifact`，删除 blob/metadata 并追加 `MutationArtifactLifecycleRecorded(status=Deleted)` durable event；删除后 TUI 会刷新 retention preview 和 inventory。
+- 已补充 `/config` Storage selected artifact inspect view：artifact list 下方会展示当前选中 artifact 的短 id、完整 id、大小、可用性、operation ids 和 source paths；该视图只读取 metadata，不读取 artifact blob 内容，也不会追加 durable event。
 - 已接入受控 `write_file`、`edit_file`、`delete_file` 与 `apply_changeset` 路径；legacy no-recorder 路径保留兼容。
 - 已实现多文件 changeset batch id、per-file prepare/commit、batch started/finished 和 apply-stage failure 的 failed batch evidence。
+- 已实现最小 checkpoint restore helper：`SnapshotCoverage::Captured` 会读取并校验 mutation artifact，将 restore 作为新的 prepare/commit/write mutation 记录，并追加 `CheckpointRestored`；`SkippedSensitive` / `Unsupported` / `Unavailable` 会 fail closed，不会静默恢复。
 - 已实现 load/reconcile helper：prepared without terminal event 可按当前文件 hash 归类为 not applied、committed、conflict 或 unknown dirty。
+- 已实现受控 directory mutation evidence：目录创建/删除使用同一 prepare/commit/reconcile 协议；受控写入创建缺失父目录前会先记录 directory mutation，避免 crash 后出现“目录已创建但无 evidence”的状态。
 - 已将 committed/reconciled mutation evidence 接入 RFC-0003 readiness，受控写入会使旧 verification stale 或 missing。
 - 已实现 unknown mutation detection MVP：`ToolRegistry` 会对 shell/MCP/custom 类未知副作用工具做执行前后 verification-scope workspace snapshot，比对变化后追加 typed `WorkspaceMutationDetected`；`target/**` 等默认构建产物不会污染验证范围。
+- 已扩展 `WorkspaceMutationDetected` reason，支持 verification check 这类声明写入但快照未变化的 `DeclaredWriteEffect`，使 replay/audit 不会把写型检查当作 clean no-op。
+- 已实现 post-scan unavailable 的 fail-closed evidence：未知副作用工具执行后如果无法重建 workspace snapshot，会追加 `WorkspaceMutationDetected(ScanUnavailable, unknown_dirty=true)`，而不是把已经执行的工具结果静默当作 clean。
+- 已将 write-capable `ToolExecutionStarted` 的 `ExecutionMutationProfile` 持久化，并在 session load / interrupted reconciliation 中扫描未终止执行，产生 precise mutation 或 unknown dirty evidence。
+- 已将 persistent terminal cancel 路径接入 `terminal_start` 的 `ExecutionMutationProfile`：取消长进程时会对启动前 snapshot 做最终 reconciliation，并按当前 snapshot 去重而不是按 tool call 粗略跳过，覆盖用户主动 cancel 前后的 terminal 写入。
+- 已将 persistent terminal 自然退出路径接入终态刷新与 mutation reconciliation：TUI worker 空闲时会读取 active terminal 的 latest status，发现自然退出后追加 `TerminalTask` 终态，并基于 `terminal_start` 的 `ExecutionMutationProfile` 追加 precise `WorkspaceMutationDetected` 或 unknown-dirty evidence。
+- 已将 agent-loop `terminal_cancel` 路径接入同一 reconciliation：模型调用 terminal cancel 并返回终态时，kernel 会追加 `TerminalTask` 终态并基于原始 `terminal_start` profile 记录 workspace mutation，避免 cancel 前已发生的写入被 terminal_cancel 前后 scan 漏掉。
+- 已将运行中的 persistent terminal 接入 readiness replay：`terminal_start` 返回后只要 `TerminalTask` 仍处于 active 状态，系统会基于启动时的 `ExecutionMutationProfile` 产生 `running_terminal_task` unknown-dirty evidence；旧 verification 不会等到 terminal exit/cancel 才失效。
+- 已覆盖 MCP server lifecycle 的最小 unknown-dirty evidence：TUI lazy activation、TUI MCP refresh 和模型可见 `mcp_activate_server` 可通过当前 session recorder 追加 `WorkspaceMutationDetected(tool_call_id=None, unknown_dirty=true)`，避免外部 MCP 进程启动后被误判为 clean。
+- 已覆盖 TUI eager MCP startup 的最小 unknown-dirty evidence：worker 启动期间的 eager MCP refresh 会使用当前 session recorder，server 进程成功启动后追加 `WorkspaceMutationDetected(tool_call_id=None, unknown_dirty=true)`。
+- 已将 MCP server 启动失败/初始化崩溃路径改为 fail-closed evidence：只要 activation/refresh 尝试启动匹配的 MCP server 且带 mutation recorder，就会在 spawn/initialize/tools-list 结果之前追加 `WorkspaceMutationDetected(tool_call_id=None, unknown_dirty=true)`。
+- 已收紧低层 `ToolRegistry::execute` API contract：带 mutation recorder 执行非只读 Shell/MCP/Custom 未知副作用工具时，必须通过 `execute_after_started_audit` 标记调用方已持久化 `ToolExecutionStarted` / `ExecutionMutationProfile`；裸 `execute` 对这类调用 fail closed，只读 Shell 读取路径保持可执行。
+- 已确认当前 plugin integration 仅从静态 manifest 产生 agent/skill/hook/MCP registration review data；尚无 plugin hook command execution runtime，plugin-declared MCP server 也未自动并入 active MCP startup/refresh path。未来启用这些 plugin-owned external process 时必须复用 MCP/external-process unknown-dirty recorder。
+- 已补充 MCP ready/restart 的最小 TUI 产品化路径：MCP config footer 对 lazy deferred server 仍执行首次 activation，对 eager/ready/failed/stale server 可手动触发 refresh/restart recovery，并复用已有 refresh mutation recorder path。
+- 已补充 MCP refresh intent 的最小持久队列语义：手动 refresh 使用 worker 级 pending set；agent registry 暂时 shared 时不会丢失 refresh intent，并通过短 retry interval 避免 tight-loop failure spam。
+- 已补充 MCP list_changed health 可见性：server capability 变化会在 TUI 投影为 stale，并给出 refresh queued notice，避免 ready 后健康变化只静默进入后台 refresh。
+- 已加强受控 mutation subject 绑定：`MutationCoordinator` 会校验 relative subject 与 absolute target 一致，防止调用方写入 A 文件却记录 B 文件 evidence。
+- 已实现 workspace snapshot 大文件 fail-closed 策略：单文件超过 `VerificationScope.max_file_bytes` 时记录为 `Unsupported`，不读取内容、不生成 clean snapshot id，并使 workspace knowledge 进入 `UnknownDirty`；默认值仍为 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES`。
+- 已实现 workspace snapshot 权限拒绝 fail-closed 策略：无法 stat 或无法读取的条目会记录为 `PermissionDenied`，不产生 clean snapshot id，并使 workspace knowledge 进入 `UnknownDirty`。
+- 已在 workspace snapshot entry 中记录 Unix file mode；非 Unix 平台当前保留为 `None`，避免伪造跨平台不可比的 mode evidence。
+- 已明确非空目录递归删除不属于当前受控 mutation 协议：`delete_directory_with_mutation` 会在 `MutationPrepared` 前 fail closed，避免 unsupported recursive delete 留下 prepared-without-commit evidence。
 
-剩余实现：
+Productization remains：
 
-- 扩展 unknown mutation detection：persistent terminal 的长进程写入、MCP/plugin 外部进程生命周期、进程崩溃后未终止执行 reconciliation 仍需补齐。
-- 将 write-capable `ToolExecutionStarted` 的 `ExecutionMutationProfile` 持久化，并在 load 时对未终止执行做 reconciliation。
-- 将 checkpoint restore 接入同一 prepare/commit/reconcile 协议，并追加 `CheckpointRestored`。
-- 完成通用 Artifact Store、sensitive snapshot 策略、retention / quota / deletion 审计；当前 snapshot coverage 只提供类型边界。
-- 扩展 directory-level mutation、大文件策略、权限拒绝和跨平台 file mode 细节。
+- 启用 plugin hook command runtime 或自动合并 plugin-declared MCP servers 时，必须在 launch/activation 前接入同一 external-process unknown-dirty recorder；当前代码尚不存在这些 plugin-owned process execution 面。
+- 扩展 MCP ready 后进程 health / 自动恢复体验；当前 list_changed stale notice、手动 refresh/restart recovery、pending retry 和 activation/refresh mutation evidence 已落地。
+- 扩展 artifact lifecycle 产品体验：当前已有 `/config` Storage footer 手动 cleanup、单项 delete、retention policy、retention preview、artifact list 摘要、selected artifact inspect view 和 durable lifecycle events；后续可补定期维护任务或批量选择。
+- 大文件 fail-closed unsupported 已可按 `VerificationScope.max_file_bytes` 调整；Unix-only file mode 已作为当前实现限制记录，后续可按真实项目需求补非 Unix metadata evidence。
+- 递归目录删除仍不属于当前实现；如果未来需要，应单独设计 recursive directory mutation protocol，而不是复用空目录 delete 语义。
 
 ## 17. Open Questions
 
-- Exact location and retention policy for mutation artifacts.
-- Exact handling of very large files in snapshot manifests.
-- Whether file mode should be included on all platforms or only executable bit.
-- Whether directory-level mutation subjects are needed for first implementation.
+None for core semantics. Productization questions:
+
+- Whether non-Unix file metadata should gain a comparable mode representation later.

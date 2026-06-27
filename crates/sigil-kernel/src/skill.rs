@@ -215,20 +215,21 @@ impl SkillStateProjection {
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
         let mut projection = Self::default();
         for entry in entries {
-            match entry {
-                SessionLogEntry::Control(ControlEntry::SkillIndexCaptured(snapshot)) => {
-                    projection.latest_index = Some(snapshot.clone());
-                }
-                SessionLogEntry::Control(ControlEntry::SkillLoaded(entry)) => {
-                    projection.apply_loaded(entry);
-                }
-                SessionLogEntry::User(_)
-                | SessionLogEntry::Assistant(_)
-                | SessionLogEntry::ToolResult(_)
-                | SessionLogEntry::Control(_) => {}
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(control);
             }
         }
         projection
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        match control {
+            ControlEntry::SkillIndexCaptured(snapshot) => {
+                self.latest_index = Some(snapshot.clone());
+            }
+            ControlEntry::SkillLoaded(entry) => self.apply_loaded(entry),
+            _ => {}
+        }
     }
 
     pub fn latest_loaded(&self) -> Option<&SkillLoadState> {

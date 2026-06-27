@@ -6,7 +6,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use sigil_kernel::{
-    Agent, InteractionMode, JsonlSessionStore, McpServerStartup, ProviderCapabilities, RootConfig,
+    Agent, InteractionMode, JsonlSessionStore, McpServerStartup, MutationEventRecorder,
+    ProviderCapabilities, RootConfig,
 };
 use sigil_runtime::{McpElicitationHandler, McpRuntimeEventHandler};
 use tokio::runtime::Runtime;
@@ -73,6 +74,14 @@ pub fn spawn_agent_worker(
                 let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
                 return;
             }
+            let mutation_recorder =
+                match JsonlSessionStore::new(&session_log_path).map(MutationEventRecorder::new) {
+                    Ok(recorder) => recorder,
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                        return;
+                    }
+                };
             spawn_eager_mcp_startup_tasks(
                 &runtime,
                 registry.clone(),
@@ -82,6 +91,7 @@ pub fn spawn_agent_worker(
                 &message_tx,
                 elicitation_handler.clone(),
                 mcp_event_handler.clone(),
+                mutation_recorder,
             );
             let agent = Arc::new(Agent::new(provider, registry));
             run_worker_loop(
@@ -116,6 +126,7 @@ fn spawn_eager_mcp_startup_tasks(
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     mcp_event_handler: Arc<ChannelMcpRuntimeEventHandler>,
+    mutation_recorder: MutationEventRecorder,
 ) {
     for server in root_config
         .mcp_servers
@@ -140,9 +151,10 @@ fn spawn_eager_mcp_startup_tasks(
         let message_tx = message_tx.clone();
         let elicitation_handler: Arc<dyn McpElicitationHandler> = elicitation_handler.clone();
         let mcp_event_handler: Arc<dyn McpRuntimeEventHandler> = mcp_event_handler.clone();
+        let mutation_recorder = mutation_recorder.clone();
 
         runtime.spawn(async move {
-            match sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers(
+            match sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
                 &mut registry,
                 &root_config,
                 &provider_capabilities,
@@ -150,6 +162,7 @@ fn spawn_eager_mcp_startup_tasks(
                 &server_name,
                 elicitation_handler,
                 mcp_event_handler,
+                Some(mutation_recorder),
             )
             .await
             {

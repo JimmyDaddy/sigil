@@ -16,18 +16,20 @@ use sigil_kernel::{
     ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
     ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
     ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, EvidenceScope,
-    JsonlSessionStore, ModelMessage, PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope,
-    PlanApprovedEntry, ProviderCapabilities, ReasoningEffort, RootConfig, RunEvent,
-    SandboxProfileRequirement, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
-    SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode, TaskChildSessionEntry,
-    TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection,
-    TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
-    TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId, ToolApproval, ToolCall,
-    ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationScope, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WorkspaceTrustRequirement, default_user_config_dir, discover_candidate_checks_with_user_config,
-    plan_text_hash, plan_workspace_paths, saturating_elapsed, stable_workspace_id,
+    ExecutionMutationProfile, JsonlSessionStore, ModelMessage, MutationArtifactLifecycleRecorded,
+    MutationArtifactLifecycleStatus, MutationArtifactRetentionReport, MutationEventRecorder,
+    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry,
+    ProviderCapabilities, ReasoningEffort, RootConfig, RunEvent, SandboxProfileRequirement,
+    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
+    SkillDescriptor, SkillRunMode, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry,
+    TaskStepId, TaskStepSpec, TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
+    TerminalTaskId, ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
+    ToolSubjectAudit, VerificationPolicy, VerificationPolicyChangedEntry, VerificationScope,
+    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
+    default_user_config_dir, discover_candidate_checks_with_user_config, plan_text_hash,
+    plan_workspace_paths, saturating_elapsed, stable_workspace_id,
 };
 
 use crate::{
@@ -46,6 +48,9 @@ use super::{
     },
     session_flow::{auto_compact_session, load_session, session_compacted_message},
 };
+
+const TERMINAL_TASK_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+const MCP_REFRESH_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(super) fn run_worker_loop<P>(
     runtime: tokio::runtime::Runtime,
@@ -90,8 +95,10 @@ pub(super) fn run_worker_loop<P>(
     let mut next_run_id = 1_u64;
     let mut discarded_run_ids = BTreeSet::new();
     let mut pending_mcp_refreshes = BTreeSet::new();
+    let mut next_mcp_refresh_retry_at = Instant::now();
     let mut pending_agent_result_continuations =
         pending_agent_result_continuations_from_session(current_session.as_ref());
+    let mut next_terminal_task_refresh_at = Instant::now();
     let session_entries = current_session
         .as_ref()
         .map(Session::entries)
@@ -130,8 +137,11 @@ pub(super) fn run_worker_loop<P>(
             }
         }
 
-        if active_run.is_none() && !pending_mcp_refreshes.is_empty() {
-            refresh_pending_mcp_servers(
+        if active_run.is_none()
+            && !pending_mcp_refreshes.is_empty()
+            && Instant::now() >= next_mcp_refresh_retry_at
+        {
+            let shared_registry_blocked = refresh_pending_mcp_servers(
                 &runtime,
                 &mut agent,
                 &root_config,
@@ -140,8 +150,16 @@ pub(super) fn run_worker_loop<P>(
                 &message_tx,
                 Arc::clone(&elicitation_handler),
                 Arc::clone(&mcp_event_handler),
+                current_session
+                    .as_ref()
+                    .and_then(Session::mutation_event_recorder),
                 &mut pending_mcp_refreshes,
             );
+            next_mcp_refresh_retry_at = if shared_registry_blocked {
+                Instant::now() + MCP_REFRESH_RETRY_INTERVAL
+            } else {
+                Instant::now()
+            };
         }
 
         while let Ok(status_result) = provider_status_rx.try_recv() {
@@ -338,6 +356,27 @@ pub(super) fn run_worker_loop<P>(
         }
 
         if active_run.is_none() {
+            if Instant::now() >= next_terminal_task_refresh_at {
+                next_terminal_task_refresh_at = Instant::now() + TERMINAL_TASK_REFRESH_INTERVAL;
+                match refresh_terminal_task_statuses(
+                    &runtime,
+                    agent.tool_registry(),
+                    &options,
+                    &current_session_log_path,
+                    &mut current_session,
+                ) {
+                    Ok(updates) => {
+                        for (entry, entries) in updates {
+                            let _ = message_tx
+                                .send(WorkerMessage::TerminalTaskUpdated { entry, entries });
+                        }
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(error));
+                    }
+                }
+            }
+
             let completed_agent_threads = collect_finished_background_agent_runs(
                 &runtime,
                 &background_agent_runs,
@@ -1480,6 +1519,50 @@ pub(super) fn run_worker_loop<P>(
                     }
                 }
             }
+            Ok(WorkerCommand::CleanMutationArtifacts) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before cleaning mutation artifacts".to_owned(),
+                    ));
+                    continue;
+                }
+                match clean_mutation_artifacts(
+                    &root_config,
+                    &current_session_log_path,
+                    &current_session,
+                ) {
+                    Ok(report) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            format_mutation_artifact_cleanup_report(&report),
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::DeleteMutationArtifact { artifact_id }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before deleting mutation artifacts".to_owned(),
+                    ));
+                    continue;
+                }
+                match delete_mutation_artifact(
+                    &current_session_log_path,
+                    &current_session,
+                    &artifact_id,
+                ) {
+                    Ok(payload) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(
+                            format_mutation_artifact_delete_report(&payload),
+                        ));
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
             Ok(WorkerCommand::RefreshProviderBalance {
                 request_id,
                 provider_config,
@@ -1549,8 +1632,11 @@ pub(super) fn run_worker_loop<P>(
                     server_name: server_name.clone(),
                     status: McpActivationStatus::Activating,
                 });
+                let mutation_recorder = current_session
+                    .as_ref()
+                    .and_then(Session::mutation_event_recorder);
                 match runtime.block_on(
-                    sigil_runtime::activate_lazy_mcp_tools_detailed_with_mcp_handlers(
+                    sigil_runtime::activate_lazy_mcp_tools_detailed_with_mcp_handlers_and_mutation_recorder(
                         agent.tool_registry_mut(),
                         &root_config,
                         &provider_capabilities,
@@ -1558,6 +1644,7 @@ pub(super) fn run_worker_loop<P>(
                         server_name.as_deref(),
                         elicitation_handler.clone(),
                         mcp_event_handler.clone(),
+                        mutation_recorder,
                     ),
                 ) {
                     Ok(result) if result.matched_servers == 0 => {
@@ -1606,6 +1693,16 @@ pub(super) fn run_worker_loop<P>(
                         )));
                     }
                 }
+            }
+            Ok(WorkerCommand::RefreshMcpServer { server_name }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "cannot refresh MCP while the agent is running".to_owned(),
+                    ));
+                    continue;
+                }
+                pending_mcp_refreshes.insert(server_name);
+                next_mcp_refresh_retry_at = Instant::now();
             }
             Ok(WorkerCommand::SwitchSession { session_log_path }) => {
                 if active_run.is_some() {
@@ -2301,12 +2398,22 @@ pub(super) fn materialize_task_verification_config(
         .iter()
         .map(|entry| entry.trusted_check.check_spec.clone())
         .collect::<Vec<_>>();
+    let workspace_trust_requirement = if entries.iter().any(|entry| {
+        matches!(
+            entry.trusted_check.promoted_by,
+            CheckPromotion::WorkspaceTrusted { .. }
+        )
+    }) {
+        WorkspaceTrustRequirement::Trusted
+    } else {
+        WorkspaceTrustRequirement::None
+    };
     let policy = VerificationPolicy {
         required_checks,
         completion_criteria: CompletionCriteria::AllRequiredChecks,
         verification_scope: VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
         sandbox_profile: SandboxProfileRequirement::None,
-        workspace_trust_requirement: WorkspaceTrustRequirement::None,
+        workspace_trust_requirement,
         allow_unverified_completion: false,
         timeout_ms: None,
     };
@@ -2366,6 +2473,63 @@ pub(super) fn trust_workspace(
         .append_control(ControlEntry::WorkspaceTrustDecision(entry.clone()))
         .map_err(|error| format!("failed to append workspace trust decision: {error:#}"))?;
     Ok(TrustWorkspaceOutcome::Trusted { entry })
+}
+
+pub(super) fn clean_mutation_artifacts(
+    root_config: &RootConfig,
+    current_session_log_path: &Path,
+    current_session: &Option<Session>,
+) -> std::result::Result<MutationArtifactRetentionReport, String> {
+    if current_session.is_none() {
+        return Err("session state is unavailable".to_owned());
+    }
+    let store = JsonlSessionStore::new(current_session_log_path)
+        .map_err(|error| format!("failed to open mutation artifact recorder: {error:#}"))?;
+    let recorder = MutationEventRecorder::new(store);
+    recorder
+        .enforce_artifact_retention(&root_config.storage.mutation_artifact_retention.to_policy())
+        .map_err(|error| format!("failed to clean mutation artifacts: {error:#}"))
+}
+
+pub(super) fn delete_mutation_artifact(
+    current_session_log_path: &Path,
+    current_session: &Option<Session>,
+    artifact_id: &str,
+) -> std::result::Result<MutationArtifactLifecycleRecorded, String> {
+    if current_session.is_none() {
+        return Err("session state is unavailable".to_owned());
+    }
+    let store = JsonlSessionStore::new(current_session_log_path)
+        .map_err(|error| format!("failed to open mutation artifact recorder: {error:#}"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let event = recorder
+        .delete_mutation_artifact(artifact_id.to_owned(), "user requested artifact deletion")
+        .map_err(|error| format!("failed to delete mutation artifact: {error:#}"))?;
+    serde_json::from_value::<MutationArtifactLifecycleRecorded>(event.payload)
+        .map_err(|error| format!("failed to decode mutation artifact lifecycle: {error:#}"))
+}
+
+fn format_mutation_artifact_cleanup_report(report: &MutationArtifactRetentionReport) -> String {
+    format!(
+        "mutation artifact cleanup: scanned {} artifacts ({} bytes), expired {}, unavailable {}, recorded {} lifecycle events",
+        report.scanned_artifacts,
+        report.scanned_bytes,
+        report.expired_artifacts,
+        report.unavailable_artifacts,
+        report.lifecycle_events.len()
+    )
+}
+
+fn format_mutation_artifact_delete_report(payload: &MutationArtifactLifecycleRecorded) -> String {
+    let status = match payload.status {
+        MutationArtifactLifecycleStatus::Deleted => "deleted",
+        MutationArtifactLifecycleStatus::Expired => "expired",
+        MutationArtifactLifecycleStatus::Unavailable => "unavailable",
+    };
+    format!(
+        "mutation artifact deleted: {} status={status}",
+        payload.artifact_id
+    )
 }
 
 fn build_task_role_runtime(
@@ -2626,14 +2790,18 @@ fn refresh_pending_mcp_servers<P>(
     message_tx: &mpsc::Sender<WorkerMessage>,
     elicitation_handler: Arc<ChannelMcpElicitationHandler>,
     mcp_event_handler: Arc<ChannelMcpRuntimeEventHandler>,
+    mutation_recorder: Option<MutationEventRecorder>,
     pending_mcp_refreshes: &mut BTreeSet<String>,
-) where
+) -> bool
+where
     P: sigil_kernel::Provider + Send + Sync + 'static,
 {
     let servers = std::mem::take(pending_mcp_refreshes);
+    let mut shared_registry_blocked = false;
     for server_name in servers {
         let Some(agent) = Arc::get_mut(agent) else {
             pending_mcp_refreshes.insert(server_name.clone());
+            shared_registry_blocked = true;
             let _ = message_tx.send(WorkerMessage::RunFailed(
                 "cannot refresh MCP while agent registry is shared".to_owned(),
             ));
@@ -2647,15 +2815,18 @@ fn refresh_pending_mcp_servers<P>(
             elicitation_handler.clone();
         let mcp_event_handler_trait: Arc<dyn sigil_runtime::McpRuntimeEventHandler> =
             mcp_event_handler.clone();
-        match runtime.block_on(sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers(
-            agent.tool_registry_mut(),
-            root_config,
-            provider_capabilities,
-            options.workspace_root.clone(),
-            &server_name,
-            elicitation_handler_trait,
-            mcp_event_handler_trait,
-        )) {
+        match runtime.block_on(
+            sigil_runtime::refresh_mcp_server_tools_with_mcp_handlers_and_mutation_recorder(
+                agent.tool_registry_mut(),
+                root_config,
+                provider_capabilities,
+                options.workspace_root.clone(),
+                &server_name,
+                elicitation_handler_trait,
+                mcp_event_handler_trait,
+                mutation_recorder.clone(),
+            ),
+        ) {
             Ok(result) if result.matched_servers == 0 => {
                 let _ = message_tx.send(WorkerMessage::McpActivationStatus {
                     server_name: Some(server_name.clone()),
@@ -2691,6 +2862,7 @@ fn refresh_pending_mcp_servers<P>(
             }
         }
     }
+    shared_registry_blocked
 }
 
 struct RunTaskResult {
@@ -3768,6 +3940,66 @@ fn stable_route_suffix(value: &str) -> String {
     }
 }
 
+pub(super) fn refresh_terminal_task_statuses(
+    runtime: &tokio::runtime::Runtime,
+    registry: &ToolRegistry,
+    options: &AgentRunOptions,
+    current_session_log_path: &Path,
+    current_session: &mut Option<Session>,
+) -> std::result::Result<Vec<(TerminalTaskEntry, Vec<SessionLogEntry>)>, String> {
+    let Some(session) = current_session.as_mut() else {
+        return Ok(Vec::new());
+    };
+    let active_task_ids = session.terminal_task_projection().active_task_ids;
+    if active_task_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mutation_recorder = MutationEventRecorder::new(
+        JsonlSessionStore::new(current_session_log_path)
+            .map_err(|error| format!("failed to open mutation recorder: {error:#}"))?,
+    );
+    let tool_context = ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs)
+        .with_mutation_recorder(mutation_recorder.clone());
+    let mut updates = Vec::new();
+    for task_id in active_task_ids {
+        let call = ToolCall {
+            id: format!("tui-terminal-refresh-{}", task_id.as_str()),
+            name: "terminal_read".to_owned(),
+            args_json: serde_json::json!({
+                "task_id": task_id.as_str(),
+                "limit_bytes": 1
+            })
+            .to_string(),
+        };
+        let result = match runtime.block_on(registry.execute(tool_context.clone(), call)) {
+            Ok(result) if !result.is_error() => result,
+            Ok(_) | Err(_) => continue,
+        };
+        let Some(entry) = terminal_read_latest_entry(&result)? else {
+            continue;
+        };
+        if !entry.status.is_terminal() {
+            continue;
+        }
+
+        session
+            .append_control(ControlEntry::TerminalTask(entry.clone()))
+            .map_err(|error| format!("failed to append terminal task state: {error:#}"))?;
+        if let Some(profile) =
+            terminal_start_execution_profile_for_task(session.entries(), &entry.handle.task_id)
+        {
+            mutation_recorder
+                .reconcile_execution_mutation_profile(&options.workspace_root, &profile)
+                .map_err(|error| {
+                    format!("failed to reconcile terminal task workspace mutation: {error:#}")
+                })?;
+        }
+        updates.push((entry, session.entries().to_vec()));
+    }
+    Ok(updates)
+}
+
 pub(super) fn cancel_terminal_task(
     runtime: &tokio::runtime::Runtime,
     registry: ToolRegistry,
@@ -3795,7 +4027,14 @@ pub(super) fn cancel_terminal_task(
         return Err(format!("terminal task {task_id} is not running"));
     }
 
-    let tool_context = ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs);
+    let terminal_mutation_profile =
+        terminal_start_execution_profile_for_task(session.entries(), &terminal_task_id);
+    let mutation_recorder = MutationEventRecorder::new(
+        JsonlSessionStore::new(current_session_log_path)
+            .map_err(|error| format!("failed to open mutation recorder: {error:#}"))?,
+    );
+    let tool_context = ToolContext::new(options.workspace_root.clone(), options.tool_timeout_secs)
+        .with_mutation_recorder(mutation_recorder.clone());
     let call = ToolCall {
         id: format!("tui-terminal-cancel-{task_id}"),
         name: "terminal_cancel".to_owned(),
@@ -3804,18 +4043,26 @@ pub(super) fn cancel_terminal_task(
     let subjects = registry
         .permission_subjects(&tool_context, &call)
         .map_err(|error| format!("invalid terminal cancel arguments: {error:#}"))?;
+    let cancel_mutation_profile = registry
+        .execution_mutation_profile(&tool_context, &call)
+        .map_err(|error| {
+            format!("failed to capture terminal cancel mutation profile: {error:#}")
+        })?;
     append_terminal_cancel_execution_audit(
         &mut session,
         &call,
         &subjects,
         ToolExecutionStatus::Started,
         None,
+        cancel_mutation_profile.as_ref(),
         None,
     )
     .map_err(|error| format!("failed to append terminal cancel audit: {error:#}"))?;
 
     let execution_started = Instant::now();
-    let result = match runtime.block_on(registry.execute(tool_context.clone(), call.clone())) {
+    let result = match runtime
+        .block_on(registry.execute_after_started_audit(tool_context.clone(), call.clone()))
+    {
         Ok(result) => result,
         Err(error) => ToolResult::error(
             call.id.clone(),
@@ -3836,6 +4083,7 @@ pub(super) fn cancel_terminal_task(
         &subjects,
         execution_status,
         duration_ms,
+        None,
         Some(&result),
     )
     .map_err(|error| format!("failed to append terminal cancel audit: {error:#}"))?;
@@ -3847,9 +4095,26 @@ pub(super) fn cancel_terminal_task(
     session
         .append_control(ControlEntry::TerminalTask(entry.clone()))
         .map_err(|error| format!("failed to append terminal task state: {error:#}"))?;
+    if let Some(profile) = terminal_mutation_profile {
+        mutation_recorder
+            .reconcile_execution_mutation_profile(&options.workspace_root, &profile)
+            .map_err(|error| {
+                format!("failed to reconcile terminal task workspace mutation: {error:#}")
+            })?;
+    }
     let entries = session.entries().to_vec();
     *current_session = Some(session);
     Ok((entry, entries))
+}
+
+fn terminal_read_latest_entry(
+    result: &ToolResult,
+) -> std::result::Result<Option<TerminalTaskEntry>, String> {
+    let Some(details) = result.metadata.details.get("terminal_task") else {
+        return Ok(None);
+    };
+    TerminalTaskEntry::from_tool_result_details(details)
+        .map_err(|error| format!("invalid terminal read status result: {error:#}"))
 }
 
 pub(super) fn close_agent_thread(
@@ -4023,12 +4288,60 @@ fn terminal_cancel_entry_from_result(
     Ok(entry)
 }
 
+fn terminal_start_execution_profile_for_task(
+    entries: &[SessionLogEntry],
+    task_id: &TerminalTaskId,
+) -> Option<ExecutionMutationProfile> {
+    let mut profiles = std::collections::BTreeMap::<String, ExecutionMutationProfile>::new();
+    for entry in entries {
+        let SessionLogEntry::Control(ControlEntry::ToolExecution(execution)) = entry else {
+            continue;
+        };
+        if execution.tool_name != "terminal_start" {
+            continue;
+        }
+        if execution.status == ToolExecutionStatus::Started
+            && let Some(profile) = execution_mutation_profile_from_details(&execution.metadata)
+        {
+            profiles.insert(execution.call_id.clone(), profile);
+            continue;
+        }
+        if terminal_task_id_from_tool_metadata(&execution.metadata)
+            .as_deref()
+            .is_some_and(|recorded| recorded == task_id.as_str())
+            && let Some(profile) = profiles.get(&execution.call_id)
+        {
+            return Some(profile.clone());
+        }
+    }
+    None
+}
+
+fn execution_mutation_profile_from_details(
+    metadata: &ToolResultMeta,
+) -> Option<ExecutionMutationProfile> {
+    metadata
+        .details
+        .get("execution_mutation_profile")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn terminal_task_id_from_tool_metadata(metadata: &ToolResultMeta) -> Option<String> {
+    metadata
+        .details
+        .get("task_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
 fn append_terminal_cancel_execution_audit(
     session: &mut Session,
     call: &ToolCall,
     subjects: &[ToolSubject],
     status: ToolExecutionStatus,
     duration_ms: Option<u64>,
+    execution_mutation_profile: Option<&ExecutionMutationProfile>,
     result: Option<&ToolResult>,
 ) -> anyhow::Result<()> {
     let (changed_files, metadata, error, model_content_hash) = if let Some(result) = result {
@@ -4043,14 +4356,18 @@ fn append_terminal_cancel_execution_audit(
             Some(tool_result_model_content_hash(result)),
         )
     } else {
+        let mut details = serde_json::json!({
+            "call": {
+                "summary": format!("task_id={}", terminal_cancel_task_id_from_call(call))
+            }
+        });
+        if let Some(profile) = execution_mutation_profile {
+            details["execution_mutation_profile"] = serde_json::to_value(profile)?;
+        }
         (
             Vec::new(),
             ToolResultMeta {
-                details: serde_json::json!({
-                    "call": {
-                        "summary": format!("task_id={}", terminal_cancel_task_id_from_call(call))
-                    }
-                }),
+                details,
                 ..ToolResultMeta::default()
             },
             None,

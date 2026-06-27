@@ -141,6 +141,38 @@ fn config_footer_action_navigation_wraps() {
         ConfigFooterAction::Close
     );
     assert_eq!(
+        ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Storage),
+        ConfigFooterAction::CleanMutationArtifacts
+    );
+    assert_eq!(
+        ConfigFooterAction::CleanMutationArtifacts.next_for_section(ConfigSection::Storage),
+        ConfigFooterAction::DeleteMutationArtifact
+    );
+    assert_eq!(
+        ConfigFooterAction::Close.previous_for_section(ConfigSection::Storage),
+        ConfigFooterAction::DeleteMutationArtifact
+    );
+    assert_eq!(
+        ConfigFooterAction::DeleteMutationArtifact.next_for_section(ConfigSection::Storage),
+        ConfigFooterAction::Close
+    );
+    assert_eq!(
+        ConfigFooterAction::DeleteMutationArtifact.previous_for_section(ConfigSection::Storage),
+        ConfigFooterAction::CleanMutationArtifacts
+    );
+    assert_eq!(
+        ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Permissions),
+        ConfigFooterAction::TrustWorkspace
+    );
+    assert_eq!(
+        ConfigFooterAction::TrustWorkspace.next_for_section(ConfigSection::Permissions),
+        ConfigFooterAction::Close
+    );
+    assert_eq!(
+        ConfigFooterAction::Close.previous_for_section(ConfigSection::Permissions),
+        ConfigFooterAction::TrustWorkspace
+    );
+    assert_eq!(
         ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Mcp),
         ConfigFooterAction::ActivateMcp
     );
@@ -541,6 +573,27 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigField::McpCommand.action_label(), "Enter input");
     assert_eq!(ConfigField::SkillId.action_label(), "");
     assert_eq!(ConfigFooterAction::ActivateMcp.button_label(), "activate");
+    assert_eq!(
+        ConfigFooterAction::CleanMutationArtifacts.button_label(),
+        "clean"
+    );
+    assert_eq!(
+        ConfigFooterAction::CleanMutationArtifacts.field_label(),
+        "clean_artifacts"
+    );
+    assert_eq!(
+        ConfigFooterAction::DeleteMutationArtifact.button_label(),
+        "delete"
+    );
+    assert_eq!(
+        ConfigFooterAction::DeleteMutationArtifact.field_label(),
+        "delete_artifact"
+    );
+    assert_eq!(ConfigFooterAction::TrustWorkspace.button_label(), "trust");
+    assert_eq!(
+        ConfigFooterAction::TrustWorkspace.field_label(),
+        "trust_workspace"
+    );
     assert_eq!(ConfigFooterAction::TrustAgent.button_label(), "trust");
     assert_eq!(ConfigFooterAction::TrustAgent.field_label(), "trust_agent");
     assert_eq!(ConfigFooterAction::BlockAgent.field_label(), "block_agent");

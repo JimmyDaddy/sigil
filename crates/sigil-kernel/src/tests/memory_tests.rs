@@ -109,16 +109,20 @@ fn memory_loader_enabled_without_documents_keeps_base_prompt_only() -> Result<()
     assert_eq!(report.fingerprint, "none");
     assert_eq!(materialized.messages.len(), 1);
     assert_eq!(materialized.messages[0].id, "system:base");
+    let base_content = materialized.messages[0]
+        .content
+        .as_deref()
+        .expect("base prompt should have content");
+    let base_content_lower = base_content.to_ascii_lowercase();
+    assert!(base_content.contains("AI coding agent working inside the user's workspace"));
+    assert!(base_content.contains("implementation details"));
+    assert!(!base_content.contains("TUI-first"));
+    assert!(!base_content_lower.contains("rust"));
     assert!(
-        materialized.messages[0]
-            .content
-            .as_deref()
-            .is_some_and(|content| {
-                content.contains("model-visible agent tools")
-                    && content.contains("explicitly asks")
-                    && !content.contains("Direct task/subagent tool calls")
-                    && !content.contains("/plan flow")
-            })
+        base_content.contains("model-visible agent tools")
+            && base_content.contains("explicitly asks")
+            && !base_content.contains("Direct task/subagent tool calls")
+            && !base_content.contains("/plan flow")
     );
     Ok(())
 }

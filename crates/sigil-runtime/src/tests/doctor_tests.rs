@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     env,
     ffi::OsString,
@@ -7,6 +9,7 @@ use std::{
 };
 
 use anyhow::Result;
+use sigil_kernel::{DurableEventType, EventClass, JsonlSessionStore};
 use tempfile::tempdir;
 
 use super::*;
@@ -463,6 +466,135 @@ fn session_log_dir_checks_cover_existing_creatable_absolute_and_parentless_paths
                 && check.status == DoctorStatus::Warn
                 && check.message.contains("cannot determine parent"))
     );
+    Ok(())
+}
+
+#[test]
+fn doctor_session_stream_check_summarizes_valid_streams() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+    let store = JsonlSessionStore::new(session_dir.join("session-1.jsonl"))?;
+    store.append_event(
+        DurableEventType::DiagnosticRecorded,
+        EventClass::Critical,
+        serde_json::json!({ "message": "ok" }),
+    )?;
+    store.append_event(
+        DurableEventType::LogTailRecovered,
+        EventClass::Critical,
+        serde_json::json!({ "discarded_bytes": 2 }),
+    )?;
+    let mut report = DoctorReport::default();
+
+    check_session_streams(&mut report, &session_dir);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "session:stream"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("1 streams checked")
+            && check.message.contains("2 records")
+            && check.message.contains("last_sequence=2")
+            && check.message.contains("stored=2")
+            && check.message.contains("tail_recovered=1")
+    }));
+    Ok(())
+}
+
+#[test]
+fn doctor_session_stream_check_handles_empty_non_directory_and_scan_limit() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+    let session_file = temp.path().join("session-file");
+    fs::write(&session_file, "not a directory")?;
+    let mut report = DoctorReport::default();
+
+    check_session_streams(&mut report, &temp.path().join("missing-sessions"));
+    check_session_streams(&mut report, &session_file);
+    assert!(report.checks.is_empty());
+
+    check_session_streams(&mut report, &session_dir);
+    assert!(report.checks.iter().any(|check| {
+        check.name == "session:stream"
+            && check.status == DoctorStatus::Ok
+            && check.message == "no session logs yet"
+    }));
+
+    for index in 0..=super::MAX_SESSION_STREAMS_DOCTOR_SCAN {
+        let store = JsonlSessionStore::new(session_dir.join(format!("session-{index:02}.jsonl")))?;
+        store.append_event(
+            DurableEventType::DiagnosticRecorded,
+            EventClass::Critical,
+            serde_json::json!({ "index": index }),
+        )?;
+    }
+    let mut limited_report = DoctorReport::default();
+    check_session_streams(&mut limited_report, &session_dir);
+
+    assert!(limited_report.checks.iter().any(|check| {
+        check.name == "session:stream"
+            && check.status == DoctorStatus::Ok
+            && check.message.contains("20 streams checked")
+            && check.message.contains("skipped 1 older streams")
+    }));
+    Ok(())
+}
+
+#[test]
+fn doctor_session_stream_check_reports_checksum_failure() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+    let session_path = session_dir.join("session-1.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    let event = store.append_event(
+        DurableEventType::DiagnosticRecorded,
+        EventClass::Critical,
+        serde_json::json!({ "message": "ok" }),
+    )?;
+    let tampered =
+        fs::read_to_string(&session_path)?.replace(&event.record_checksum, "sha256:jcs-v1:bad");
+    fs::write(&session_path, tampered)?;
+    let mut report = DoctorReport::default();
+
+    check_session_streams(&mut report, &session_dir);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "session:stream"
+            && check.status == DoctorStatus::Error
+            && check.message.contains("failed RFC-0001 stream validation")
+            && check.message.contains("checksum mismatch")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("checksum/sequence"))
+    }));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_session_stream_check_reports_unreadable_directory() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+    let original_permissions = fs::metadata(&session_dir)?.permissions();
+    fs::set_permissions(&session_dir, fs::Permissions::from_mode(0o000))?;
+    let mut report = DoctorReport::default();
+
+    check_session_streams(&mut report, &session_dir);
+
+    fs::set_permissions(&session_dir, original_permissions)?;
+    assert!(report.checks.iter().any(|check| {
+        check.name == "session:stream"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("failed to inspect session log dir")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|remediation| remediation.contains("permissions"))
+    }));
     Ok(())
 }
 

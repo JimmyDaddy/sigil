@@ -115,6 +115,25 @@ fn changeset_projection_keeps_result_without_prior_proposal() {
 }
 
 #[test]
+fn changeset_projection_ignores_unrelated_control_entries() {
+    let projection = ChangeSetProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::Note {
+            kind: "unrelated".to_owned(),
+            data: serde_json::json!({"ignored": true}),
+        }),
+        SessionLogEntry::Control(ControlEntry::ChangeSetProposed(sample_change_set())),
+    ]);
+
+    let latest = projection.latest().expect("latest changeset");
+    assert_eq!(
+        projection.latest_change_set_id.as_ref(),
+        Some(&change_set_id())
+    );
+    assert!(latest.proposal.is_some());
+    assert!(latest.result.is_none());
+}
+
+#[test]
 fn changeset_projection_new_proposal_supersedes_prior_result_for_same_id() {
     let entries = vec![
         SessionLogEntry::Control(ControlEntry::ChangeSetProposed(sample_change_set())),

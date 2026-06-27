@@ -46,6 +46,7 @@ pub type WorkspaceTrustSnapshotId = String;
 /// Default verification scope hash used by sequential task readiness until RFC-0002 supplies
 /// richer per-workspace revision streams.
 pub const DEFAULT_TASK_VERIFICATION_SCOPE_HASH: &str = "task_step_default";
+pub const MAX_WORKSPACE_SNAPSHOT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Execution lifecycle, intentionally independent from verification proof status.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -258,6 +259,11 @@ pub struct VerificationScope {
     #[serde(default)]
     pub exclude: Vec<String>,
     pub tracked_files_only: bool,
+    #[serde(
+        default = "default_max_snapshot_file_bytes",
+        skip_serializing_if = "is_default_max_snapshot_file_bytes"
+    )]
+    pub max_file_bytes: u64,
     #[serde(default)]
     pub generated_roots: Vec<PathBuf>,
 }
@@ -269,6 +275,7 @@ impl VerificationScope {
             include: Vec::new(),
             exclude: default_scope_excludes(),
             tracked_files_only: true,
+            max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
             generated_roots: Vec::new(),
         }
     }
@@ -288,14 +295,31 @@ impl VerificationScope {
             .iter()
             .all(|pattern| required.exclude.iter().any(|required| required == pattern));
         let tracking_covers = !self.tracked_files_only || required.tracked_files_only;
-        include_covers && exclude_covers && tracking_covers
+        let max_file_bytes_covers = self.max_file_bytes >= required.max_file_bytes;
+        include_covers && exclude_covers && tracking_covers && max_file_bytes_covers
     }
+}
+
+pub fn default_max_snapshot_file_bytes() -> u64 {
+    MAX_WORKSPACE_SNAPSHOT_FILE_BYTES
+}
+
+fn is_default_max_snapshot_file_bytes(value: &u64) -> bool {
+    *value == default_max_snapshot_file_bytes()
 }
 
 pub fn default_scope_excludes() -> Vec<String> {
     [
         ".git/**",
-        ".sigil/**",
+        ".sigil/sessions/**",
+        ".sigil/tasks/**",
+        ".sigil/terminal/**",
+        ".sigil/cache/**",
+        ".sigil/artifacts/**",
+        ".sigil/tmp/**",
+        ".sigil/input-history.jsonl",
+        ".sigil-state/**",
+        ".sigil-recovery/**",
         "target/**",
         "node_modules/**",
         "dist/**",
@@ -1379,6 +1403,7 @@ fn build_workspace_snapshot_inner(
             paths,
             &include_set,
             &exclude_set,
+            scope.max_file_bytes,
             &mut entries,
         );
     } else {
@@ -1387,6 +1412,7 @@ fn build_workspace_snapshot_inner(
             &canonical_root,
             &include_set,
             &exclude_set,
+            scope.max_file_bytes,
             &mut entries,
         )?;
     }
@@ -1505,6 +1531,7 @@ fn collect_snapshot_entries_for_paths(
     paths: Vec<PathBuf>,
     include_set: &GlobSet,
     exclude_set: &GlobSet,
+    max_file_bytes: u64,
     entries: &mut Vec<WorkspaceSnapshotEntry>,
 ) {
     for relative in paths {
@@ -1531,6 +1558,7 @@ fn collect_snapshot_entries_for_paths(
             &path,
             relative,
             &metadata,
+            max_file_bytes,
         ));
     }
 }
@@ -1540,6 +1568,7 @@ fn collect_snapshot_entries(
     dir: &Path,
     include_set: &GlobSet,
     exclude_set: &GlobSet,
+    max_file_bytes: u64,
     entries: &mut Vec<WorkspaceSnapshotEntry>,
 ) -> Result<()> {
     let mut children = fs::read_dir(dir)
@@ -1569,7 +1598,14 @@ fn collect_snapshot_entries(
             }
         };
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            collect_snapshot_entries(workspace_root, &path, include_set, exclude_set, entries)?;
+            collect_snapshot_entries(
+                workspace_root,
+                &path,
+                include_set,
+                exclude_set,
+                max_file_bytes,
+                entries,
+            )?;
             continue;
         }
         if !is_included(&relative, include_set) {
@@ -1580,6 +1616,7 @@ fn collect_snapshot_entries(
             &path,
             relative,
             &metadata,
+            max_file_bytes,
         ));
     }
     Ok(())
@@ -1615,12 +1652,23 @@ fn snapshot_entry_for_path(
     path: &Path,
     relative: PathBuf,
     metadata: &fs::Metadata,
+    max_file_bytes: u64,
 ) -> WorkspaceSnapshotEntry {
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
         return snapshot_symlink_entry(workspace_root, path, relative);
     }
     if file_type.is_file() {
+        if metadata.len() > max_file_bytes {
+            return snapshot_entry(
+                relative,
+                FileType::File,
+                SnapshotEntryState::Unsupported,
+                None,
+                file_mode(metadata),
+                None,
+            );
+        }
         return match fs::read(path) {
             Ok(bytes) => snapshot_entry(
                 relative,
@@ -1879,6 +1927,8 @@ pub struct VerificationReceipt {
     pub binding: VerificationBinding,
     pub check_spec_id: CheckSpecId,
     pub check_status: ReceiptStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
     pub mutates_verification_scope: bool,
 }
 
@@ -1887,6 +1937,116 @@ pub struct VerificationReceipt {
 #[serde(rename_all = "snake_case")]
 pub struct VerificationRecordedEntry {
     pub receipt: VerificationReceipt,
+}
+
+pub type VerificationCheckRunId = String;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationCheckRunStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+    Inconclusive,
+    Errored,
+}
+
+impl VerificationCheckRunStatus {
+    pub fn from_receipt_status(status: ReceiptStatus) -> Self {
+        match status {
+            ReceiptStatus::Succeeded => Self::Succeeded,
+            ReceiptStatus::Failed => Self::Failed,
+            ReceiptStatus::Skipped => Self::Skipped,
+            ReceiptStatus::Inconclusive => Self::Inconclusive,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationCheckRunEntry {
+    pub run_id: VerificationCheckRunId,
+    pub scope: EvidenceScope,
+    pub check_spec_id: CheckSpecId,
+    pub check_spec_hash: String,
+    pub status: VerificationCheckRunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_id: Option<ReceiptId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<EventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl VerificationCheckRunEntry {
+    pub fn new(
+        run_id: VerificationCheckRunId,
+        scope: EvidenceScope,
+        check_spec: &CheckSpec,
+        status: VerificationCheckRunStatus,
+    ) -> Self {
+        Self {
+            run_id,
+            scope,
+            check_spec_id: check_spec.check_spec_id.clone(),
+            check_spec_hash: check_spec.check_spec_hash.clone(),
+            status,
+            receipt_id: None,
+            source_event_id: None,
+            timeout_ms: None,
+            reason: None,
+        }
+    }
+
+    pub fn with_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    pub fn with_terminal_receipt(mut self, receipt: &VerificationReceipt) -> Self {
+        self.status = VerificationCheckRunStatus::from_receipt_status(receipt.check_status);
+        self.receipt_id = Some(receipt.receipt.receipt_id.clone());
+        self.source_event_id = Some(receipt.receipt.source_event_id.clone());
+        self.reason = if let Some(reason) = receipt.failure_reason.clone() {
+            Some(reason)
+        } else if receipt.mutates_verification_scope {
+            Some("check mutated verification scope".to_owned())
+        } else {
+            None
+        };
+        self
+    }
+
+    pub fn with_error(mut self, reason: impl Into<String>) -> Self {
+        self.status = VerificationCheckRunStatus::Errored;
+        self.reason = Some(reason.into());
+        self
+    }
+}
+
+pub fn verification_check_run_id(
+    scope: &EvidenceScope,
+    check_spec: &CheckSpec,
+    policy_hash: Option<&str>,
+    workspace_snapshot_id: Option<&str>,
+    attempt_sequence: u64,
+) -> Result<VerificationCheckRunId> {
+    let scope =
+        serde_json::to_string(scope).context("failed to encode verification check scope")?;
+    let seed = format!(
+        "{}:{}:{}:{}:{}:{}",
+        scope,
+        check_spec.check_spec_id,
+        check_spec.check_spec_hash,
+        policy_hash.unwrap_or("-"),
+        workspace_snapshot_id.unwrap_or("-"),
+        attempt_sequence
+    );
+    Ok(stable_event_uuid("sigil-verification-check-run", &seed))
 }
 
 /// Request for executing one trusted verification check.
@@ -1925,10 +2085,18 @@ pub fn run_verification_check(
     })?;
     let workspace_id = stable_workspace_id(&workspace_root)?;
     let check = &request.trusted_check.check_spec;
+    let approval_event_id = request
+        .workspace_trust_approval_event_id
+        .clone()
+        .or_else(|| request.trusted_check.approval_event_id.clone());
+    let sandbox_decision_id = request
+        .workspace_trust_sandbox_decision_id
+        .clone()
+        .or_else(|| request.trusted_check.sandbox_decision_id.clone());
     if !request.policy.workspace_trust_requirement.is_satisfied(
         request.workspace_trust,
-        request.workspace_trust_approval_event_id.as_ref(),
-        request.workspace_trust_sandbox_decision_id.as_ref(),
+        approval_event_id.as_ref(),
+        sandbox_decision_id.as_ref(),
     ) {
         bail!(
             "verification check {} cannot run until workspace trust requirement is satisfied",
@@ -1959,7 +2127,21 @@ pub fn run_verification_check(
         || before_snapshot.workspace_snapshot_id != after_snapshot.workspace_snapshot_id
         || before_snapshot.workspace_knowledge.is_unknown_dirty()
         || after_snapshot.workspace_knowledge.is_unknown_dirty();
+    let mutation_event = if mutates_verification_scope {
+        append_check_workspace_mutation_detected_event(
+            session,
+            check,
+            &request.scope,
+            command_event.as_ref(),
+            &workspace_id,
+            &before_snapshot,
+            &after_snapshot,
+        )?
+    } else {
+        None
+    };
     let check_status = check_receipt_status(&command_output, mutates_verification_scope);
+    let failure_reason = check_failure_reason(&command_output, request.policy.timeout_ms);
     let check_event = append_check_finished_event(
         session,
         check,
@@ -1969,6 +2151,7 @@ pub fn run_verification_check(
         &after_snapshot,
         check_status,
         mutates_verification_scope,
+        mutation_event.as_ref(),
     )?;
     let (source_session_id, source_event_id, recorded_at_stream_sequence) =
         check_event_identity(session, check, &request.scope, check_event.as_ref());
@@ -2016,15 +2199,12 @@ pub fn run_verification_check(
             environment_fingerprint: environment_fingerprint(check),
             sandbox_profile_hash: sandbox_profile_hash(request.policy.sandbox_profile),
             workspace_trust_snapshot_id: request.workspace_trust_snapshot_id,
-            approval_event_id: request
-                .workspace_trust_approval_event_id
-                .or(request.trusted_check.approval_event_id),
-            sandbox_decision_id: request
-                .workspace_trust_sandbox_decision_id
-                .or(request.trusted_check.sandbox_decision_id),
+            approval_event_id,
+            sandbox_decision_id,
         },
         check_spec_id: check.check_spec_id.clone(),
         check_status,
+        failure_reason,
         mutates_verification_scope,
     };
     Ok(VerificationRecordedEntry {
@@ -2118,6 +2298,25 @@ fn check_receipt_status(
     }
 }
 
+fn check_failure_reason(
+    command_output: &CheckCommandOutput,
+    timeout_ms: Option<u64>,
+) -> Option<String> {
+    if command_output.succeeded() {
+        return None;
+    }
+    if command_output.timed_out {
+        return Some(match timeout_ms {
+            Some(timeout_ms) => format!("check timed out after {timeout_ms} ms"),
+            None => "check timed out".to_owned(),
+        });
+    }
+    Some(match command_output.exit_code {
+        Some(code) => format!("check exited with code {code}"),
+        None => "check terminated without exit code".to_owned(),
+    })
+}
+
 fn append_command_finished_event(
     session: &mut Session,
     check: &CheckSpec,
@@ -2144,6 +2343,54 @@ fn append_command_finished_event(
     )
 }
 
+fn append_check_workspace_mutation_detected_event(
+    session: &mut Session,
+    check: &CheckSpec,
+    scope: &EvidenceScope,
+    command_event: Option<&StoredEvent>,
+    workspace_id: &str,
+    before_snapshot: &WorkspaceSnapshotBuild,
+    after_snapshot: &WorkspaceSnapshotBuild,
+) -> Result<Option<StoredEvent>> {
+    let (reason, unknown_dirty) = if before_snapshot.workspace_knowledge.is_unknown_dirty() {
+        ("snapshot_incomplete_before", true)
+    } else if after_snapshot.workspace_knowledge.is_unknown_dirty() {
+        ("snapshot_incomplete_after", true)
+    } else if before_snapshot.workspace_snapshot_id != after_snapshot.workspace_snapshot_id {
+        ("snapshot_changed", false)
+    } else {
+        ("declared_write_effect", true)
+    };
+    let seed = format!(
+        "{scope:?}:{}:{}:{:?}:{:?}",
+        check.check_spec_hash,
+        command_event
+            .map(|event| event.event_id.as_str())
+            .unwrap_or("in-memory"),
+        before_snapshot.workspace_snapshot_id,
+        after_snapshot.workspace_snapshot_id,
+    );
+    let operation_id = stable_event_uuid("sigil-verification-mutation", &seed);
+    session.append_durable_event(
+        DurableEventType::WorkspaceMutationDetected,
+        EventClass::Critical,
+        serde_json::json!({
+            "operation_id": operation_id,
+            "tool_call_id": null,
+            "tool_name": format!("verification_check:{}", check.check_spec_id),
+            "tool_effect": check.effect,
+            "workspace_id": workspace_id,
+            "scope_hash": check.verification_scope_hash,
+            "from_workspace_snapshot_id": before_snapshot.workspace_snapshot_id,
+            "to_workspace_snapshot_id": after_snapshot.workspace_snapshot_id,
+            "base_workspace_revision": 0,
+            "workspace_revision": 1,
+            "reason": reason,
+            "unknown_dirty": unknown_dirty,
+        }),
+    )
+}
+
 fn append_check_finished_event(
     session: &mut Session,
     check: &CheckSpec,
@@ -2153,6 +2400,7 @@ fn append_check_finished_event(
     after_snapshot: &WorkspaceSnapshotBuild,
     status: ReceiptStatus,
     mutates_verification_scope: bool,
+    mutation_event: Option<&StoredEvent>,
 ) -> Result<Option<StoredEvent>> {
     session.append_durable_event(
         DurableEventType::CheckFinished,
@@ -2168,6 +2416,7 @@ fn append_check_finished_event(
             "after_workspace_knowledge": after_snapshot.workspace_knowledge,
             "status": status,
             "mutates_verification_scope": mutates_verification_scope,
+            "workspace_mutation_detected_event_id": mutation_event.map(|event| event.event_id.as_str()),
         }),
     )
 }
@@ -2450,6 +2699,7 @@ pub struct ReadinessEvaluatedEntry {
 pub struct VerificationStateProjection {
     pub check_specs: BTreeMap<(EvidenceScope, CheckSpecId), CheckSpecRecordedEntry>,
     pub policies: BTreeMap<EvidenceScope, VerificationPolicyChangedEntry>,
+    pub check_runs: BTreeMap<VerificationCheckRunId, VerificationCheckRunEntry>,
     pub receipts: BTreeMap<ReceiptId, VerificationRecordedEntry>,
     pub readiness: BTreeMap<EvidenceScope, ReadinessEvaluatedEntry>,
     pub child_receipt_links: Vec<ChildVerificationReceiptLinked>,
@@ -2479,6 +2729,10 @@ impl VerificationStateProjection {
 
     pub fn receipt(&self, receipt_id: &str) -> Option<&VerificationRecordedEntry> {
         self.receipts.get(receipt_id)
+    }
+
+    pub fn check_run(&self, run_id: &str) -> Option<&VerificationCheckRunEntry> {
+        self.check_runs.get(run_id)
     }
 
     pub fn check_spec(
@@ -2518,6 +2772,9 @@ impl VerificationStateProjection {
             }
             ControlEntry::VerificationPolicyChanged(entry) => {
                 self.policies.insert(entry.scope.clone(), entry.clone());
+            }
+            ControlEntry::VerificationCheckRun(entry) => {
+                self.check_runs.insert(entry.run_id.clone(), entry.clone());
             }
             ControlEntry::VerificationRecorded(entry) => {
                 self.receipts

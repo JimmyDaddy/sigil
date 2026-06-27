@@ -466,11 +466,9 @@ impl AgentProfileTrustProjection {
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
         let mut projection = Self::default();
         for entry in entries {
-            let SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(entry)) = entry
-            else {
-                continue;
-            };
-            projection.apply_trust(entry);
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(control);
+            }
         }
         projection
     }
@@ -488,6 +486,12 @@ impl AgentProfileTrustProjection {
     #[must_use]
     pub fn has_decision_for_profile(&self, profile_id: &AgentProfileId) -> bool {
         self.trust_entries.contains_key(profile_id)
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        if let ControlEntry::AgentProfileTrustDecision(entry) = control {
+            self.apply_trust(entry);
+        }
     }
 
     fn apply_trust(&mut self, entry: &AgentProfileTrustEntry) {
@@ -539,11 +543,9 @@ impl AgentProfilePolicyProjection {
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
         let mut projection = Self::default();
         for entry in entries {
-            let SessionLogEntry::Control(ControlEntry::AgentProfilePolicyDecision(entry)) = entry
-            else {
-                continue;
-            };
-            projection.apply_policy(entry);
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(control);
+            }
         }
         projection
     }
@@ -561,6 +563,12 @@ impl AgentProfilePolicyProjection {
     #[must_use]
     pub fn has_policy_for_profile(&self, profile_id: &AgentProfileId) -> bool {
         self.policy_entries.contains_key(profile_id)
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        if let ControlEntry::AgentProfilePolicyDecision(entry) = control {
+            self.apply_policy(entry);
+        }
     }
 
     fn apply_policy(&mut self, entry: &AgentProfilePolicyEntry) {
@@ -868,22 +876,28 @@ pub struct AgentResultContinuationProjection {
 impl AgentResultContinuationProjection {
     #[must_use]
     pub fn from_entries(entries: &[SessionLogEntry]) -> Self {
-        let mut statuses = BTreeMap::new();
+        let mut projection = Self::default();
         for entry in entries {
-            let SessionLogEntry::Control(ControlEntry::AgentResultContinuation(entry)) = entry
-            else {
-                continue;
-            };
-            statuses.insert(entry.thread_id.clone(), entry.status);
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(control);
+            }
         }
-        let pending_thread_ids = statuses
+        projection
+    }
+
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
+        if let ControlEntry::AgentResultContinuation(entry) = control {
+            self.statuses.insert(entry.thread_id.clone(), entry.status);
+            self.refresh_pending_thread_ids();
+        }
+    }
+
+    fn refresh_pending_thread_ids(&mut self) {
+        self.pending_thread_ids = self
+            .statuses
             .iter()
             .filter_map(|(thread_id, status)| status.is_unresolved().then_some(thread_id.clone()))
             .collect();
-        Self {
-            statuses,
-            pending_thread_ids,
-        }
     }
 }
 
@@ -1000,7 +1014,7 @@ impl AgentThreadStateProjection {
             let SessionLogEntry::Control(control) = entry else {
                 continue;
             };
-            projection.apply_control(control);
+            projection.apply_control_entry(control);
         }
         projection.finalize_replay();
         projection
@@ -1012,7 +1026,7 @@ impl AgentThreadStateProjection {
             .and_then(|thread_id| self.threads.get(thread_id))
     }
 
-    fn apply_control(&mut self, control: &ControlEntry) {
+    pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
         match control {
             ControlEntry::AgentProfileCaptured(entry) => {
                 self.profiles
@@ -1238,7 +1252,7 @@ impl AgentThreadStateProjection {
         self.thread_replay_order.push(thread_id.clone());
     }
 
-    fn finalize_replay(&mut self) {
+    pub(crate) fn finalize_replay(&mut self) {
         for thread in self.threads.values_mut() {
             if thread.legacy_task || thread.unresolved {
                 continue;

@@ -4,27 +4,35 @@ use anyhow::Result;
 use fs2::FileExt;
 
 use crate::{
-    AgentProfileCapturedEntry, AgentProfileId, AgentProfileSnapshot, AgentProfileSnapshotId,
-    AgentProfileSource, AgentProfileTrustEntry, AgentRole, AgentTrustState, CandidateCheck,
-    ChangeSet, ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
+    AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentProfileId,
+    AgentProfilePolicyEntry, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
+    AgentProfileTrustEntry, AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole,
+    AgentRunContextSnapshot, AgentThreadId, AgentThreadStartedEntry, AgentThreadStateProjection,
+    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentTrustState, CandidateCheck, ChangeSet,
+    ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
-    ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, DomainEvent,
-    DomainPayload, DurableEventType, EventClass, EvidenceReceipt, EvidenceScope,
-    ExecutionMutationProfile, LegacyEvent, MAX_EVENT_BYTES, McpElicitationDecision,
-    McpElicitationEntry, MemoryConfig, MemoryLoadReport, MemorySnapshot, MutationEventRecorder,
-    PluginCapability, PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry,
-    ProjectionCursor, ProviderContinuationState, ReadinessEvaluatedEntry, ReadinessEvaluation,
-    ReceiptStatus, RedactionState, RequiredAction, ResponseHandle, RunStatus,
-    SandboxProfileRequirement, SessionRef, SessionStreamRecord, SkillDescriptor,
-    SkillIndexSnapshot, SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent,
-    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
-    ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot,
-    ToolResultMeta, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats,
-    VerificationBinding, VerificationPolicy, VerificationPolicyChangedEntry, VerificationReceipt,
-    VerificationRecordedEntry, VerificationScope, VerificationStateProjection, VerificationVerdict,
-    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    ChildVerificationReceiptLinked, CompactionRecord, CompletionCriteria, ConversationInputKind,
+    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputStatus,
+    ConversationInputStatusEntry, ConversationInputTarget, DomainEvent, DomainPayload,
+    DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, ExecutionMutationProfile,
+    LegacyEvent, MAX_EVENT_BYTES, McpElicitationDecision, McpElicitationEntry, MemoryConfig,
+    MemoryLoadReport, MemorySnapshot, MutationEventRecorder, PlanApprovalExpiry,
+    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, PluginCapability,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, ProjectionCursor,
+    ProviderContinuationState, ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus,
+    RedactionState, RequiredAction, ResponseHandle, RunStatus, SandboxProfileRequirement,
+    SessionRef, SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
+    SkillRunMode, SkillSource, SkillTrustState, StoredEvent, TaskId, TaskPlanEntry, TaskPlanStatus,
+    TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus,
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
+    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats, VerificationBinding,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
+    VerificationScope, VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
+    WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
     WorkspaceTrustRequirement, provider::ModelMessage, stable_event_hash,
 };
 
@@ -196,8 +204,24 @@ fn sample_verification_recorded_entry() -> VerificationRecordedEntry {
             },
             check_spec_id: check.check_spec_id,
             check_status: ReceiptStatus::Succeeded,
+            failure_reason: None,
             mutates_verification_scope: false,
         },
+    }
+}
+
+fn sample_verification_check_run_entry() -> VerificationCheckRunEntry {
+    let check = sample_check_spec();
+    VerificationCheckRunEntry {
+        run_id: "check-run-1".to_owned(),
+        scope: EvidenceScope::Task("task-1".to_owned()),
+        check_spec_id: check.check_spec_id,
+        check_spec_hash: check.check_spec_hash,
+        status: VerificationCheckRunStatus::Succeeded,
+        receipt_id: Some("receipt-1".to_owned()),
+        source_event_id: Some("event-check-finished".to_owned()),
+        timeout_ms: Some(60_000),
+        reason: None,
     }
 }
 
@@ -252,6 +276,57 @@ fn test_step_id() -> TaskStepId {
 
 fn test_session_ref() -> SessionRef {
     SessionRef::new_relative("children/task-1.jsonl").expect("valid session ref")
+}
+
+fn test_agent_profile_id() -> AgentProfileId {
+    AgentProfileId::new("explore").expect("valid agent profile id")
+}
+
+fn test_agent_profile_snapshot_id() -> AgentProfileSnapshotId {
+    AgentProfileSnapshotId::new("explore-snapshot-1").expect("valid agent profile snapshot id")
+}
+
+fn test_agent_thread_id() -> AgentThreadId {
+    AgentThreadId::new("thread-1").expect("valid agent thread id")
+}
+
+fn test_agent_thread_session_ref() -> SessionRef {
+    SessionRef::new_relative("children/thread-1.jsonl").expect("valid agent thread session ref")
+}
+
+fn test_agent_run_context() -> AgentRunContextSnapshot {
+    AgentRunContextSnapshot {
+        profile_snapshot_id: test_agent_profile_snapshot_id(),
+        provider: "deepseek".to_owned(),
+        model: "deepseek-v4-flash".to_owned(),
+        reasoning_effort: None,
+        workspace_root: WorkspaceRootSnapshot::new("/workspace").expect("valid workspace root"),
+        effective_tool_scope_hash: "tool-scope-hash".to_owned(),
+        effective_permission_policy_hash: "permission-policy-hash".to_owned(),
+        effective_mcp_scope_hash: "mcp-scope-hash".to_owned(),
+        provider_capability_hash: "provider-capability-hash".to_owned(),
+        model_visible_agent_index_hash: Some("agent-index-hash".to_owned()),
+        budget_policy_hash: "budget-policy-hash".to_owned(),
+        provider_background_handle_ref: None,
+    }
+}
+
+fn test_agent_thread_started_entry() -> AgentThreadStartedEntry {
+    AgentThreadStartedEntry {
+        thread_id: test_agent_thread_id(),
+        parent_thread_id: None,
+        parent_session_ref: test_session_ref(),
+        thread_session_ref: test_agent_thread_session_ref(),
+        profile_id: test_agent_profile_id(),
+        profile_snapshot_id: test_agent_profile_snapshot_id(),
+        run_context: test_agent_run_context(),
+        objective: "inspect durable projection".to_owned(),
+        prompt_hash: "prompt-hash".to_owned(),
+        invocation_mode: AgentInvocationMode::Background,
+        invocation_source: AgentInvocationSource::Task,
+        display_name: Some("Explore".to_owned()),
+        created_at_ms: Some(1),
+    }
 }
 
 #[test]
@@ -332,6 +407,33 @@ fn session_stream_records_replay_to_domain_events_for_projection() -> Result<()>
         projected_entries[1],
         SessionLogEntry::Assistant(_)
     ));
+    Ok(())
+}
+
+#[test]
+fn session_next_stream_sequence_hint_counts_durable_only_events() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_event(
+        DurableEventType::WorkspaceMutationDetected,
+        EventClass::Critical,
+        serde_json::json!({
+            "operation_id": "op-1",
+            "tool_name": "mcp_server:docs",
+            "tool_effect": "unknown",
+            "workspace_id": "workspace-1",
+            "scope_hash": "scope-main",
+            "base_workspace_revision": 0,
+            "workspace_revision": 1,
+            "reason": "declared_write_effect",
+            "unknown_dirty": true
+        }),
+    )?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    assert_eq!(session.entries().len(), 0);
+    assert_eq!(session.next_stream_sequence_hint()?, 2);
     Ok(())
 }
 
@@ -886,6 +988,12 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
             DurableEventType::VerificationPolicyChanged,
         ),
         (
+            SessionLogEntry::Control(ControlEntry::VerificationCheckRun(
+                sample_verification_check_run_entry(),
+            )),
+            DurableEventType::VerificationCheckRun,
+        ),
+        (
             SessionLogEntry::Control(ControlEntry::VerificationRecorded(
                 sample_verification_recorded_entry(),
             )),
@@ -1086,6 +1194,23 @@ fn append_event_rejects_non_appendable_legacy_event_type() -> Result<()> {
         .expect_err("legacy event type should not be appendable");
 
     assert!(error.to_string().contains("cannot be appended"));
+    Ok(())
+}
+
+#[test]
+fn append_event_rejects_mismatched_known_event_class() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+
+    let error = store
+        .append_event(
+            DurableEventType::ToolExecutionStarted,
+            EventClass::NonCritical,
+            serde_json::json!({"call_id": "call-1"}),
+        )
+        .expect_err("recovery-critical event must not be appended as non-critical");
+
+    assert!(error.to_string().contains("event_class must be"));
     Ok(())
 }
 
@@ -2220,11 +2345,13 @@ fn append_session_entry_event_writes_verification_durable_event_types() -> Resul
 fn verification_state_projection_replays_control_entries() -> Result<()> {
     let check_spec_entry = sample_check_spec_recorded_entry();
     let policy_entry = sample_verification_policy_changed_entry()?;
+    let check_run_entry = sample_verification_check_run_entry();
     let recorded_entry = sample_verification_recorded_entry();
     let readiness_entry = sample_readiness_evaluated_entry();
     let child_link = sample_child_verification_receipt_linked();
     let trust_entry = sample_workspace_trust_decision_entry();
     let scope = policy_entry.scope.clone();
+    let check_run_id = check_run_entry.run_id.clone();
     let receipt_id = recorded_entry.receipt.receipt.receipt_id.clone();
     let workspace_id = trust_entry.workspace_id.clone();
     let entries = vec![
@@ -2236,6 +2363,7 @@ fn verification_state_projection_replays_control_entries() -> Result<()> {
         SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(
             policy_entry.clone(),
         )),
+        SessionLogEntry::Control(ControlEntry::VerificationCheckRun(check_run_entry.clone())),
         SessionLogEntry::Control(ControlEntry::VerificationRecorded(recorded_entry.clone())),
         SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness_entry.clone())),
         SessionLogEntry::Control(ControlEntry::ChildVerificationReceiptLinked(
@@ -2251,6 +2379,7 @@ fn verification_state_projection_replays_control_entries() -> Result<()> {
         Some(&check_spec_entry)
     );
     assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
+    assert_eq!(projection.check_run(&check_run_id), Some(&check_run_entry));
     assert_eq!(projection.receipt(&receipt_id), Some(&recorded_entry));
     assert_eq!(projection.latest_readiness(&scope), Some(&readiness_entry));
     assert_eq!(projection.child_receipt_links, vec![child_link]);
@@ -2283,20 +2412,538 @@ fn session_exposes_verification_state_projection() -> Result<()> {
 }
 
 #[test]
+fn session_exposes_optional_durable_task_state_projection() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    assert!(session.try_task_state_projection_from_durable()?.is_none());
+
+    session.append_control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: test_task_id(),
+        parent_session_ref: test_session_ref(),
+        objective: "implement task replay".to_owned(),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }))?;
+
+    let projection = session.task_state_projection();
+
+    assert_eq!(projection.latest_task_id.as_ref(), Some(&test_task_id()));
+    assert!(projection.tasks.contains_key(&test_task_id()));
+    Ok(())
+}
+
+#[test]
+fn optional_durable_projections_return_none_for_in_memory_sessions() -> Result<()> {
+    let session = Session::new("deepseek", "deepseek-v4-flash");
+
+    assert!(
+        session
+            .try_plan_approval_projection_from_durable()?
+            .is_none()
+    );
+    assert!(session.try_task_state_projection_from_durable()?.is_none());
+    assert!(
+        session
+            .try_agent_thread_state_projection_from_durable()?
+            .is_none()
+    );
+    assert!(
+        session
+            .try_agent_profile_trust_projection_from_durable()?
+            .is_none()
+    );
+    assert!(
+        session
+            .try_agent_profile_policy_projection_from_durable()?
+            .is_none()
+    );
+    assert!(session.try_skill_state_projection_from_durable()?.is_none());
+    assert!(
+        session
+            .try_plugin_state_projection_from_durable()?
+            .is_none()
+    );
+    assert!(session.try_changeset_projection_from_durable()?.is_none());
+    assert!(
+        session
+            .try_verification_state_projection_from_durable()?
+            .is_none()
+    );
+    assert!(
+        session
+            .try_terminal_task_projection_from_durable()?
+            .is_none()
+    );
+    assert!(
+        session
+            .try_conversation_queue_projection_from_durable()?
+            .is_none()
+    );
+    assert!(
+        session
+            .try_agent_result_continuation_projection_from_durable()?
+            .is_none()
+    );
+    assert!(session.try_usage_stats_from_durable()?.is_none());
+    Ok(())
+}
+
+#[test]
+fn task_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let legacy_run = SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+        task_id: test_task_id(),
+        parent_session_ref: test_session_ref(),
+        objective: "ship durable projection".to_owned(),
+        status: TaskRunStatus::Running,
+        reason: None,
+    }));
+    fs::write(&path, format!("{}\n", serde_json::to_string(&legacy_run)?))?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskPlan(
+        TaskPlanEntry {
+            task_id: test_task_id(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: Vec::new(),
+            reason: None,
+        },
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskStep(
+        TaskStepEntry {
+            task_id: test_task_id(),
+            plan_version: 1,
+            step_id: test_step_id(),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Completed,
+            title: Some("implement".to_owned()),
+            summary: Some("done".to_owned()),
+            reason: None,
+        },
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TaskRun(
+        TaskRunEntry {
+            task_id: test_task_id(),
+            parent_session_ref: test_session_ref(),
+            objective: "ship durable projection".to_owned(),
+            status: TaskRunStatus::Completed,
+            reason: Some("finished".to_owned()),
+        },
+    )))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_task_state_projection_from_durable()?
+        .expect("durable session should replay task projection");
+    let task = projection
+        .tasks
+        .get(&test_task_id())
+        .expect("task should replay from mixed stream");
+
+    assert_eq!(projection.latest_task_id.as_ref(), Some(&test_task_id()));
+    assert_eq!(task.status, TaskRunStatus::Completed);
+    assert_eq!(task.latest_plan_version, Some(1));
+    assert_eq!(
+        task.steps
+            .get(&(1, test_step_id()))
+            .map(|step| (&step.status, step.summary.as_deref())),
+        Some((&TaskStepStatus::Completed, Some("done")))
+    );
+    Ok(())
+}
+
+#[test]
+fn task_projection_record_helper_fails_closed_on_sequence_gap() -> Result<()> {
+    let event = StoredEvent::new(
+        DurableEventType::TaskStatusChanged,
+        EventClass::Critical,
+        "event-2".to_owned(),
+        "session-gap".to_owned(),
+        2,
+        serde_json::json!({}),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+    let mut projection = TaskStateProjection::default();
+    let mut cursor = Some(ProjectionCursor {
+        session_id: "session-gap".to_owned(),
+        projection_schema_version: super::TASK_STATE_PROJECTION_SCHEMA_VERSION,
+        last_applied_stream_sequence: 0,
+        last_applied_event_id: "event-0".to_owned(),
+        last_applied_record_checksum: "sha256:0".to_owned(),
+    });
+
+    let error = super::apply_task_projection_record(&mut projection, &mut cursor, &record)
+        .expect_err("projection should fail closed on sequence gaps");
+
+    assert!(error.to_string().contains("projection sequence gap"));
+    assert!(projection.tasks.is_empty());
+    Ok(())
+}
+
+#[test]
+fn task_projection_record_helper_fails_closed_on_unknown_critical_event() -> Result<()> {
+    let event = StoredEvent::new_raw(
+        "future_task_event",
+        EventClass::Critical,
+        "event-future".to_owned(),
+        "session-task".to_owned(),
+        1,
+        serde_json::json!({"value": "must not be ignored"}),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+    let mut projection = TaskStateProjection::default();
+    let mut cursor = None;
+
+    let error = super::apply_task_projection_record(&mut projection, &mut cursor, &record)
+        .expect_err("unknown critical event should fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("unknown critical event future_task_event")
+    );
+    assert!(projection.tasks.is_empty());
+    assert!(cursor.is_none());
+    Ok(())
+}
+
+#[test]
+fn session_exposes_optional_durable_agent_thread_state_projection() -> Result<()> {
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    assert!(
+        session
+            .try_agent_thread_state_projection_from_durable()?
+            .is_none()
+    );
+
+    session.append_control(ControlEntry::AgentThreadStarted(
+        test_agent_thread_started_entry(),
+    ))?;
+
+    let projection = session.agent_thread_state_projection();
+
+    assert_eq!(
+        projection.latest_thread_id.as_ref(),
+        Some(&test_agent_thread_id())
+    );
+    assert!(projection.threads.contains_key(&test_agent_thread_id()));
+    Ok(())
+}
+
+#[test]
+fn agent_thread_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let started = test_agent_thread_started_entry();
+    let legacy_started =
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(started.clone()));
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&legacy_started)?),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadStatusChanged(AgentThreadStatusChangedEntry {
+            thread_id: test_agent_thread_id(),
+            status: AgentThreadStatus::Completed,
+            reason: Some("finished".to_owned()),
+            updated_at_ms: Some(2),
+        }),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_agent_thread_state_projection_from_durable()?
+        .expect("durable session should replay agent thread projection");
+    let thread = projection
+        .threads
+        .get(&test_agent_thread_id())
+        .expect("agent thread should replay from mixed stream");
+
+    assert_eq!(
+        projection.latest_thread_id.as_ref(),
+        Some(&test_agent_thread_id())
+    );
+    assert_eq!(thread.status, AgentThreadStatus::Completed);
+    assert_eq!(thread.reason.as_deref(), Some("finished"));
+    assert_eq!(
+        thread.thread_session_ref.as_ref(),
+        Some(&started.thread_session_ref)
+    );
+    assert_eq!(thread.profile_id.as_ref(), Some(&started.profile_id));
+    Ok(())
+}
+
+#[test]
+fn agent_thread_projection_record_helper_fails_closed_on_sequence_gap() -> Result<()> {
+    let event = StoredEvent::new(
+        DurableEventType::SessionEntryRecorded,
+        EventClass::NonCritical,
+        "event-2".to_owned(),
+        "session-gap".to_owned(),
+        2,
+        serde_json::json!({}),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+    let mut projection = AgentThreadStateProjection::default();
+    let mut cursor = Some(ProjectionCursor {
+        session_id: "session-gap".to_owned(),
+        projection_schema_version: super::AGENT_THREAD_STATE_PROJECTION_SCHEMA_VERSION,
+        last_applied_stream_sequence: 0,
+        last_applied_event_id: "event-0".to_owned(),
+        last_applied_record_checksum: "sha256:0".to_owned(),
+    });
+
+    let error = super::apply_agent_thread_projection_record(&mut projection, &mut cursor, &record)
+        .expect_err("projection should fail closed on sequence gaps");
+
+    assert!(error.to_string().contains("projection sequence gap"));
+    assert!(projection.threads.is_empty());
+    Ok(())
+}
+
+#[test]
+fn agent_thread_projection_record_helper_fails_closed_on_unknown_critical_event() -> Result<()> {
+    let event = StoredEvent::new_raw(
+        "future_agent_thread_event",
+        EventClass::Critical,
+        "event-future-agent".to_owned(),
+        "session-agent-thread".to_owned(),
+        1,
+        serde_json::json!({"value": "must not be ignored"}),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+    let mut projection = AgentThreadStateProjection::default();
+    let mut cursor = None;
+
+    let error = super::apply_agent_thread_projection_record(&mut projection, &mut cursor, &record)
+        .expect_err("unknown critical event should fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("unknown critical event future_agent_thread_event")
+    );
+    assert!(projection.threads.is_empty());
+    assert!(cursor.is_none());
+    Ok(())
+}
+
+#[test]
+fn agent_profile_projections_replay_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let snapshot = AgentProfileSnapshot {
+        snapshot_id: test_agent_profile_snapshot_id(),
+        profile_id: test_agent_profile_id(),
+        source: AgentProfileSource::Workspace,
+        source_hash: "sha256:source".to_owned(),
+        profile_hash: "sha256:profile".to_owned(),
+        resolved_tool_scope_hash: "sha256:tools".to_owned(),
+        resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+        resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+        resolved_skill_hashes: vec!["sha256:skill".to_owned()],
+        trust_state: AgentTrustState::NeedsReview,
+    };
+    let legacy_trust = AgentProfileTrustEntry {
+        profile_id: snapshot.profile_id.clone(),
+        source: snapshot.source.clone(),
+        source_hash: snapshot.source_hash.clone(),
+        profile_hash: snapshot.profile_hash.clone(),
+        decision: AgentTrustState::Disabled,
+        reviewed_at_ms: 10,
+    };
+    let legacy_policy = AgentProfilePolicyEntry {
+        profile_id: snapshot.profile_id.clone(),
+        source: snapshot.source.clone(),
+        source_hash: snapshot.source_hash.clone(),
+        profile_hash: snapshot.profile_hash.clone(),
+        enabled: Some(false),
+        user_invocable: Some(false),
+        model_invocable: Some(false),
+        reviewed_at_ms: 11,
+    };
+    fs::write(
+        &path,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&SessionLogEntry::Control(
+                ControlEntry::AgentProfileTrustDecision(legacy_trust)
+            ))?,
+            serde_json::to_string(&SessionLogEntry::Control(
+                ControlEntry::AgentProfilePolicyDecision(legacy_policy)
+            ))?
+        ),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    let trusted = AgentProfileTrustEntry {
+        profile_id: snapshot.profile_id.clone(),
+        source: snapshot.source.clone(),
+        source_hash: snapshot.source_hash.clone(),
+        profile_hash: snapshot.profile_hash.clone(),
+        decision: AgentTrustState::Trusted,
+        reviewed_at_ms: 20,
+    };
+    let enabled = AgentProfilePolicyEntry {
+        profile_id: snapshot.profile_id.clone(),
+        source: snapshot.source.clone(),
+        source_hash: snapshot.source_hash.clone(),
+        profile_hash: snapshot.profile_hash.clone(),
+        enabled: Some(true),
+        user_invocable: Some(true),
+        model_invocable: Some(true),
+        reviewed_at_ms: 21,
+    };
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentProfileTrustDecision(trusted),
+    ))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentProfilePolicyDecision(enabled.clone()),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let trust_projection = session
+        .try_agent_profile_trust_projection_from_durable()?
+        .expect("durable session should replay profile trust");
+    let policy_projection = session
+        .try_agent_profile_policy_projection_from_durable()?
+        .expect("durable session should replay profile policy");
+
+    assert_eq!(
+        trust_projection.decision_for_snapshot(&snapshot),
+        Some(AgentTrustState::Trusted)
+    );
+    assert_eq!(
+        trust_projection.trust_replay_order,
+        vec![snapshot.profile_id.clone(), snapshot.profile_id.clone()]
+    );
+    assert_eq!(
+        policy_projection.policy_for_snapshot(&snapshot),
+        Some(&enabled)
+    );
+    assert_eq!(
+        policy_projection.policy_replay_order,
+        vec![snapshot.profile_id.clone(), snapshot.profile_id]
+    );
+    Ok(())
+}
+
+#[test]
+fn agent_result_continuation_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let thread = test_agent_thread_id();
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::Control(
+                ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+                    thread_id: thread.clone(),
+                    status: AgentResultContinuationStatus::Pending,
+                    reason: Some("waiting for child".to_owned()),
+                    updated_at_ms: Some(10),
+                })
+            ))?
+        ),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(AgentResultContinuationEntry {
+            thread_id: thread.clone(),
+            status: AgentResultContinuationStatus::Completed,
+            reason: Some("parent consumed child result".to_owned()),
+            updated_at_ms: Some(20),
+        }),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_agent_result_continuation_projection_from_durable()?
+        .expect("durable session should replay continuation state");
+
+    assert_eq!(
+        projection.statuses.get(&thread),
+        Some(&AgentResultContinuationStatus::Completed)
+    );
+    assert!(projection.pending_thread_ids.is_empty());
+    Ok(())
+}
+
+#[test]
+fn conversation_queue_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let queue_id = ConversationInputQueueId::new("queue-1")?;
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::Control(
+                ControlEntry::ConversationInputQueued(ConversationInputQueuedEntry {
+                    queue_id: queue_id.clone(),
+                    target: ConversationInputTarget::MainThread,
+                    kind: ConversationInputKind::Chat,
+                    prompt_hash: "sha256:prompt".to_owned(),
+                    prompt: "hello".to_owned(),
+                    reasoning_effort: None,
+                    created_at_ms: Some(10),
+                })
+            ))?
+        ),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputQueueControl(ConversationInputQueueControlEntry {
+            action: ConversationInputQueueControlAction::Pause,
+            reason: Some("manual pause".to_owned()),
+            updated_at_ms: Some(20),
+        }),
+    ))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ConversationInputStatusChanged(ConversationInputStatusEntry {
+            queue_id: queue_id.clone(),
+            status: ConversationInputStatus::Dispatching,
+            reason: Some("sending".to_owned()),
+            updated_at_ms: Some(30),
+        }),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_conversation_queue_projection_from_durable()?
+        .expect("durable session should replay conversation queue");
+
+    assert!(projection.paused);
+    assert_eq!(projection.next_dispatchable, None);
+    assert_eq!(projection.items.len(), 1);
+    assert_eq!(projection.items[0].queued.queue_id, queue_id);
+    assert_eq!(
+        projection.items[0].status,
+        ConversationInputStatus::Dispatching
+    );
+    assert_eq!(projection.items[0].reason.as_deref(), Some("sending"));
+    Ok(())
+}
+
+#[test]
 fn verification_state_projection_replays_durable_stream_records() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
     let check_spec_entry = sample_check_spec_recorded_entry();
     let policy_entry = sample_verification_policy_changed_entry()?;
+    let check_run_entry = sample_verification_check_run_entry();
     let recorded_entry = sample_verification_recorded_entry();
     let readiness_entry = sample_readiness_evaluated_entry();
     let scope = policy_entry.scope.clone();
+    let check_run_id = check_run_entry.run_id.clone();
     let receipt_id = recorded_entry.receipt.receipt.receipt_id.clone();
     for entry in [
         SessionLogEntry::Control(ControlEntry::CheckSpecRecorded(check_spec_entry.clone())),
         SessionLogEntry::Control(ControlEntry::VerificationPolicyChanged(
             policy_entry.clone(),
         )),
+        SessionLogEntry::Control(ControlEntry::VerificationCheckRun(check_run_entry.clone())),
         SessionLogEntry::Control(ControlEntry::VerificationRecorded(recorded_entry.clone())),
         SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(readiness_entry.clone())),
     ] {
@@ -2313,6 +2960,7 @@ fn verification_state_projection_replays_durable_stream_records() -> Result<()> 
         Some(&check_spec_entry)
     );
     assert_eq!(projection.latest_policy(&scope), Some(&policy_entry));
+    assert_eq!(projection.check_run(&check_run_id), Some(&check_run_entry));
     assert_eq!(projection.receipt(&receipt_id), Some(&recorded_entry));
     assert_eq!(projection.latest_readiness(&scope), Some(&readiness_entry));
     Ok(())
@@ -2403,6 +3051,104 @@ fn session_changeset_projection_replays_control_entries() -> Result<()> {
 }
 
 #[test]
+fn changeset_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let id = ChangeSetId::new("change-1")?;
+    let legacy_proposal = SessionLogEntry::Control(ControlEntry::ChangeSetProposed(ChangeSet {
+        id: id.clone(),
+        title: "Update README".to_owned(),
+        summary: "Update project overview".to_owned(),
+        risk: ChangeSetRisk::Low,
+        files: Vec::new(),
+        validations: Vec::new(),
+    }));
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&legacy_proposal)?),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::ChangeSetApplied(
+        ChangeSetResult {
+            id: id.clone(),
+            status: ChangeSetResultStatus::Applied,
+            file_results: Vec::new(),
+            message: Some("applied".to_owned()),
+        },
+    )))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_changeset_projection_from_durable()?
+        .expect("durable session should replay changeset projection");
+    let latest = projection.latest().expect("latest changeset");
+
+    assert_eq!(projection.latest_change_set_id.as_ref(), Some(&id));
+    assert!(latest.proposal.is_some());
+    assert!(matches!(
+        latest.result.as_ref(),
+        Some(result)
+            if result.status == ChangeSetResultStatus::Applied
+                && result.message.as_deref() == Some("applied")
+    ));
+    Ok(())
+}
+
+#[test]
+fn plan_approval_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let first = PlanApprovedEntry {
+        plan_version: 1,
+        plan_hash: "sha256:first".to_owned(),
+        approved_at_ms: 10,
+        permission: PlanApprovalPermission::Ask,
+        scope: PlanApprovalScope {
+            summary: "first plan".to_owned(),
+            workspace_paths: Vec::new(),
+        },
+        expires: PlanApprovalExpiry::NextUserPrompt,
+        clear_planning_context: false,
+    };
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::Control(ControlEntry::PlanApproved(first)))?
+        ),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    let second = PlanApprovedEntry {
+        plan_version: 2,
+        plan_hash: "sha256:second".to_owned(),
+        approved_at_ms: 20,
+        permission: PlanApprovalPermission::WorkspaceEdits,
+        scope: PlanApprovalScope {
+            summary: "second plan".to_owned(),
+            workspace_paths: vec!["README.md".to_owned()],
+        },
+        expires: PlanApprovalExpiry::Session,
+        clear_planning_context: true,
+    };
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::PlanApproved(
+        second.clone(),
+    )))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_plan_approval_projection_from_durable()?
+        .expect("durable session should replay plan approvals");
+
+    assert_eq!(projection.approvals.len(), 2);
+    assert_eq!(projection.latest_approval, Some(second.clone()));
+    assert_eq!(
+        projection.latest_by_hash.get("sha256:second"),
+        Some(&second)
+    );
+    Ok(())
+}
+
+#[test]
 fn session_terminal_task_projection_replays_control_entries() -> Result<()> {
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let id = TerminalTaskId::new("terminal-1")?;
@@ -2428,6 +3174,65 @@ fn session_terminal_task_projection_replays_control_entries() -> Result<()> {
     assert_eq!(projection.latest_task_id.as_ref(), Some(&id));
     assert_eq!(projection.active_task_ids, vec![id]);
     assert!(matches!(latest.status, TerminalTaskStatus::Running));
+    Ok(())
+}
+
+#[test]
+fn terminal_task_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let id = TerminalTaskId::new("terminal-1")?;
+    let legacy_running = SessionLogEntry::Control(ControlEntry::TerminalTask(TerminalTaskEntry {
+        handle: TerminalTaskHandle {
+            task_id: id.clone(),
+            command: "cargo test".to_owned(),
+            cwd: ".".into(),
+            shell: "zsh".to_owned(),
+            log_path: ".sigil/terminal/terminal-1/output.log".into(),
+            created_at_ms: 100,
+        },
+        status: TerminalTaskStatus::Running,
+        output_preview: Some("running tests".to_owned()),
+        output_hash: Some("sha256:abc".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 120,
+    }));
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&legacy_running)?),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::TerminalTask(
+        TerminalTaskEntry {
+            handle: TerminalTaskHandle {
+                task_id: id.clone(),
+                command: "cargo test".to_owned(),
+                cwd: ".".into(),
+                shell: "zsh".to_owned(),
+                log_path: ".sigil/terminal/terminal-1/output.log".into(),
+                created_at_ms: 100,
+            },
+            status: TerminalTaskStatus::Exited { exit_code: Some(0) },
+            output_preview: Some("ok".to_owned()),
+            output_hash: Some("sha256:def".to_owned()),
+            output_truncated: false,
+            updated_at_ms: 180,
+        },
+    )))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_terminal_task_projection_from_durable()?
+        .expect("durable session should replay terminal projection");
+    let latest = projection.latest().expect("latest terminal task");
+
+    assert_eq!(projection.latest_task_id.as_ref(), Some(&id));
+    assert!(projection.active_task_ids.is_empty());
+    assert!(matches!(
+        latest.status,
+        TerminalTaskStatus::Exited { exit_code: Some(0) }
+    ));
+    assert_eq!(latest.output_preview.as_deref(), Some("ok"));
     Ok(())
 }
 
@@ -2480,6 +3285,69 @@ fn session_skill_state_projection_replays_control_entries() -> Result<()> {
 }
 
 #[test]
+fn skill_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let snapshot = SkillIndexSnapshot::new(vec![SkillDescriptor {
+        id: "repo-review".to_owned(),
+        name: "Repo Review".to_owned(),
+        description: "Review repository changes".to_owned(),
+        when_to_use: Some("Use for repository code review.".to_owned()),
+        root: ".sigil/skills/repo-review".into(),
+        entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
+        source: SkillSource::Workspace,
+        sha256: "hash".to_owned(),
+        enabled: true,
+        trust: SkillTrustState::Trusted,
+        model_invocable: true,
+        user_invocable: true,
+        run_as: SkillRunMode::Inline,
+        agent: None,
+        argument_hint: None,
+        allowed_tools: Default::default(),
+        disallowed_tools: Default::default(),
+        path_patterns: Vec::new(),
+    }])?;
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::Control(ControlEntry::SkillIndexCaptured(
+                snapshot.clone()
+            )))?
+        ),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::SkillLoaded(
+        SkillLoadEntry {
+            skill_id: "repo-review".to_owned(),
+            sha256: "hash".to_owned(),
+            source: SkillSource::Workspace,
+            entrypoint: ".sigil/skills/repo-review/SKILL.md".into(),
+            run_id: Some("run-1".to_owned()),
+            call_id: Some("call-1".to_owned()),
+            byte_count: 128,
+            line_count: 7,
+            loaded_at_ms: 42,
+        },
+    )))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_skill_state_projection_from_durable()?
+        .expect("durable session should replay skills");
+    let latest_loaded = projection.latest_loaded().expect("latest loaded skill");
+
+    assert_eq!(projection.latest_index, Some(snapshot));
+    assert_eq!(
+        projection.latest_loaded_skill_id.as_deref(),
+        Some("repo-review")
+    );
+    assert_eq!(latest_loaded.entry.byte_count, 128);
+    Ok(())
+}
+
+#[test]
 fn session_plugin_state_projection_replays_control_entries() -> Result<()> {
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     let snapshot = PluginManifestSnapshot {
@@ -2505,6 +3373,58 @@ fn session_plugin_state_projection_replays_control_entries() -> Result<()> {
     session.append_control(ControlEntry::PluginTrustDecision(trust.clone()))?;
 
     let projection = session.plugin_state_projection();
+    let latest_manifest = projection
+        .latest_manifest()
+        .expect("latest plugin manifest");
+    let latest_trust = projection.latest_trust().expect("latest plugin trust");
+
+    assert_eq!(latest_manifest.plugin_id, "repo-review");
+    assert_eq!(latest_manifest.trust, PluginTrustDecision::Trusted);
+    assert_eq!(latest_trust, &trust);
+    Ok(())
+}
+
+#[test]
+fn plugin_state_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let snapshot = PluginManifestSnapshot {
+        plugin_id: "repo-review".to_owned(),
+        name: "Repository Review".to_owned(),
+        version: "0.1.0".to_owned(),
+        description: None,
+        manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
+        manifest_hash: "sha256:manifest".to_owned(),
+        capabilities: vec![PluginCapability::Skill {
+            path: "skills/review/SKILL.md".into(),
+        }],
+        trust: PluginTrustDecision::NeedsReview,
+    };
+    fs::write(
+        &path,
+        format!(
+            "{}\n",
+            serde_json::to_string(&SessionLogEntry::Control(
+                ControlEntry::PluginManifestCaptured(snapshot)
+            ))?
+        ),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    let trust = PluginTrustEntry {
+        plugin_id: "repo-review".to_owned(),
+        manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
+        manifest_hash: "sha256:manifest".to_owned(),
+        decision: PluginTrustDecision::Trusted,
+        reviewed_at_ms: 42,
+    };
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::PluginTrustDecision(trust.clone()),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_plugin_state_projection_from_durable()?
+        .expect("durable session should replay plugins");
     let latest_manifest = projection
         .latest_manifest()
         .expect("latest plugin manifest");
@@ -3024,6 +3944,287 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
     assert_eq!(stats.last_prompt_tokens, 0);
     assert_eq!(session.stats().prompt_tokens, 168);
     assert_eq!(session.stats().last_prompt_tokens, 0);
+    Ok(())
+}
+
+#[test]
+fn usage_stats_projection_replays_mixed_durable_stream_records() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let legacy_usage = SessionLogEntry::Control(ControlEntry::UsageSnapshot(UsageStats {
+        prompt_tokens: 120,
+        completion_tokens: 10,
+        cache_hit_tokens: 90,
+        cache_miss_tokens: 30,
+        input_cost: 12.0,
+        output_cost: 4.0,
+        cache_savings: 7.0,
+        system_fingerprint: None,
+    }));
+    fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&legacy_usage)?),
+    )?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::UsageSnapshot(
+        UsageStats {
+            prompt_tokens: 48,
+            completion_tokens: 6,
+            cache_hit_tokens: 28,
+            cache_miss_tokens: 20,
+            input_cost: 5.0,
+            output_cost: 2.0,
+            cache_savings: 3.0,
+            system_fingerprint: None,
+        },
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::CompactionApplied(CompactionRecord {
+            summary: "summary".to_owned(),
+            compacted_message_count: 2,
+            retained_tail_message_count: 2,
+        }),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let stats = session
+        .try_usage_stats_from_durable()?
+        .expect("durable session should replay usage stats");
+
+    assert_eq!(stats.prompt_tokens, 168);
+    assert_eq!(stats.completion_tokens, 16);
+    assert_eq!(stats.cache_hit_tokens, 118);
+    assert_eq!(stats.cache_miss_tokens, 50);
+    assert_eq!(stats.input_cost, 17.0);
+    assert_eq!(stats.output_cost, 6.0);
+    assert_eq!(stats.cache_savings, 10.0);
+    assert_eq!(stats.last_prompt_tokens, 0);
+    Ok(())
+}
+
+#[test]
+fn usage_stats_projection_returns_none_without_store() -> Result<()> {
+    let session = Session::new("deepseek", "deepseek-v4-flash");
+
+    assert!(session.try_usage_stats_from_durable()?.is_none());
+    Ok(())
+}
+
+#[test]
+fn usage_stats_projection_record_helper_ignores_idempotent_replay() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::UsageSnapshot(
+        UsageStats {
+            prompt_tokens: 9,
+            completion_tokens: 3,
+            cache_hit_tokens: 4,
+            cache_miss_tokens: 5,
+            input_cost: 0.9,
+            output_cost: 0.3,
+            cache_savings: 0.1,
+            system_fingerprint: None,
+        },
+    )))?;
+    let records = JsonlSessionStore::read_event_records(store.path())?;
+    let record = records
+        .first()
+        .expect("one durable record should be present");
+    let mut stats = crate::provider::SessionStats::default();
+    let mut cursor = None;
+
+    super::apply_usage_projection_record(&mut stats, &mut cursor, record)?;
+    super::apply_usage_projection_record(&mut stats, &mut cursor, record)?;
+
+    assert_eq!(stats.prompt_tokens, 9);
+    assert_eq!(stats.completion_tokens, 3);
+    assert_eq!(stats.last_prompt_tokens, 9);
+    assert!(cursor.is_some());
+    Ok(())
+}
+
+#[test]
+fn usage_stats_projection_record_helper_fails_closed_on_sequence_gap() -> Result<()> {
+    let event = StoredEvent::new(
+        DurableEventType::SessionEntryRecorded,
+        EventClass::NonCritical,
+        "event-2".to_owned(),
+        "session-gap".to_owned(),
+        2,
+        serde_json::json!({}),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+    let mut stats = crate::provider::SessionStats::default();
+    let mut cursor = Some(ProjectionCursor {
+        session_id: "session-gap".to_owned(),
+        projection_schema_version: super::USAGE_STATE_PROJECTION_SCHEMA_VERSION,
+        last_applied_stream_sequence: 0,
+        last_applied_event_id: "event-0".to_owned(),
+        last_applied_record_checksum: "sha256:0".to_owned(),
+    });
+
+    let error = super::apply_usage_projection_record(&mut stats, &mut cursor, &record)
+        .expect_err("projection should fail closed on sequence gaps");
+
+    assert!(error.to_string().contains("projection sequence gap"));
+    assert_eq!(stats.prompt_tokens, 0);
+    Ok(())
+}
+
+#[test]
+fn usage_stats_projection_record_helper_fails_closed_on_unknown_critical_event() -> Result<()> {
+    let event = StoredEvent::new_raw(
+        "future_usage_event",
+        EventClass::Critical,
+        "event-future-usage".to_owned(),
+        "session-usage".to_owned(),
+        1,
+        serde_json::json!({"value": "must not be ignored"}),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+    let mut stats = crate::provider::SessionStats::default();
+    let mut cursor = None;
+
+    let error = super::apply_usage_projection_record(&mut stats, &mut cursor, &record)
+        .expect_err("unknown critical event should fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("unknown critical event future_usage_event")
+    );
+    assert_eq!(stats.prompt_tokens, 0);
+    assert!(cursor.is_none());
+    Ok(())
+}
+
+#[test]
+fn durable_projection_record_helpers_ignore_idempotent_replay() -> Result<()> {
+    let event = StoredEvent::new(
+        DurableEventType::DiagnosticRecorded,
+        EventClass::Critical,
+        "event-diagnostic".to_owned(),
+        "session-projection".to_owned(),
+        1,
+        serde_json::json!({"message": "projection noop"}),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+
+    let mut plan = crate::PlanApprovalProjection::default();
+    let mut plan_cursor = None;
+    super::apply_plan_approval_projection_record(&mut plan, &mut plan_cursor, &record)?;
+    super::apply_plan_approval_projection_record(&mut plan, &mut plan_cursor, &record)?;
+
+    let mut task = TaskStateProjection::default();
+    let mut task_cursor = None;
+    super::apply_task_projection_record(&mut task, &mut task_cursor, &record)?;
+    super::apply_task_projection_record(&mut task, &mut task_cursor, &record)?;
+
+    let mut skill = crate::SkillStateProjection::default();
+    let mut skill_cursor = None;
+    super::apply_skill_projection_record(&mut skill, &mut skill_cursor, &record)?;
+    super::apply_skill_projection_record(&mut skill, &mut skill_cursor, &record)?;
+
+    let mut plugin = crate::PluginStateProjection::default();
+    let mut plugin_cursor = None;
+    super::apply_plugin_projection_record(&mut plugin, &mut plugin_cursor, &record)?;
+    super::apply_plugin_projection_record(&mut plugin, &mut plugin_cursor, &record)?;
+
+    let mut agent_threads = AgentThreadStateProjection::default();
+    let mut agent_threads_cursor = None;
+    super::apply_agent_thread_projection_record(
+        &mut agent_threads,
+        &mut agent_threads_cursor,
+        &record,
+    )?;
+    super::apply_agent_thread_projection_record(
+        &mut agent_threads,
+        &mut agent_threads_cursor,
+        &record,
+    )?;
+
+    let mut agent_trust = crate::AgentProfileTrustProjection::default();
+    let mut agent_trust_cursor = None;
+    super::apply_agent_profile_trust_projection_record(
+        &mut agent_trust,
+        &mut agent_trust_cursor,
+        &record,
+    )?;
+    super::apply_agent_profile_trust_projection_record(
+        &mut agent_trust,
+        &mut agent_trust_cursor,
+        &record,
+    )?;
+
+    let mut agent_policy = crate::AgentProfilePolicyProjection::default();
+    let mut agent_policy_cursor = None;
+    super::apply_agent_profile_policy_projection_record(
+        &mut agent_policy,
+        &mut agent_policy_cursor,
+        &record,
+    )?;
+    super::apply_agent_profile_policy_projection_record(
+        &mut agent_policy,
+        &mut agent_policy_cursor,
+        &record,
+    )?;
+
+    let mut agent_results = crate::AgentResultContinuationProjection::default();
+    let mut agent_results_cursor = None;
+    super::apply_agent_result_continuation_projection_record(
+        &mut agent_results,
+        &mut agent_results_cursor,
+        &record,
+    )?;
+    super::apply_agent_result_continuation_projection_record(
+        &mut agent_results,
+        &mut agent_results_cursor,
+        &record,
+    )?;
+
+    let mut conversation = crate::ConversationQueueProjection::default();
+    let mut conversation_cursor = None;
+    super::apply_conversation_queue_projection_record(
+        &mut conversation,
+        &mut conversation_cursor,
+        &record,
+    )?;
+    super::apply_conversation_queue_projection_record(
+        &mut conversation,
+        &mut conversation_cursor,
+        &record,
+    )?;
+
+    let mut changeset = crate::ChangeSetProjection::default();
+    let mut changeset_cursor = None;
+    super::apply_changeset_projection_record(&mut changeset, &mut changeset_cursor, &record)?;
+    super::apply_changeset_projection_record(&mut changeset, &mut changeset_cursor, &record)?;
+
+    let mut terminal = crate::TerminalTaskProjection::default();
+    let mut terminal_cursor = None;
+    super::apply_terminal_task_projection_record(&mut terminal, &mut terminal_cursor, &record)?;
+    super::apply_terminal_task_projection_record(&mut terminal, &mut terminal_cursor, &record)?;
+
+    for cursor in [
+        plan_cursor,
+        task_cursor,
+        skill_cursor,
+        plugin_cursor,
+        agent_threads_cursor,
+        agent_trust_cursor,
+        agent_policy_cursor,
+        agent_results_cursor,
+        conversation_cursor,
+        changeset_cursor,
+        terminal_cursor,
+    ] {
+        assert_eq!(
+            cursor
+                .expect("cursor should be recorded")
+                .last_applied_stream_sequence,
+            1
+        );
+    }
     Ok(())
 }
 

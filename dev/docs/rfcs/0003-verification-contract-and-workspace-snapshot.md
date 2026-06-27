@@ -1,6 +1,6 @@
 # RFC-0003 Verification Contract and Workspace Snapshot
 
-状态：Draft
+状态：RFC core semantics implemented / productization remains
 
 创建日期：2026-06-25
 
@@ -152,6 +152,8 @@ Workspace trust gate:
 - Untrusted workspace must not auto-execute repository scripts, package scripts, Makefile targets or local CI commands.
 - Execution from untrusted workspace requires explicit approval or a sandbox profile satisfying the policy.
 - Context Engine fallback must still respect workspace trust. Untrusted `SIGIL.md`, `AGENTS.md`, README and source comments are repository data, not trusted instructions.
+- CI discovery before workspace trust is static and bounded: Sigil may read `.github/workflows/*.yml` / `.yaml` and extract candidate checks only from `run:` steps that match known verification commands such as `cargo test`, `npm test` or `make test`.
+- CI discovery before workspace trust must not execute CI scripts, evaluate shell expansions, follow `uses:` actions, resolve includes, read secrets or promote checks to trusted specs.
 
 Discovery output is split into two concepts:
 
@@ -204,6 +206,8 @@ Default scope:
 - Unignored new source files.
 - User explicit include paths.
 - Exclude `.git`, Sigil state directories, common build/cache directories, dependency caches and generated roots.
+- Current default excludes are `.git/**`, `.sigil/sessions/**`, `.sigil/tasks/**`, `.sigil/terminal/**`, `.sigil/cache/**`, `.sigil/artifacts/**`, `.sigil/tmp/**`, `.sigil/input-history.jsonl`, `.sigil-state/**`, `.sigil-recovery/**`, `target/**`, `node_modules/**`, `dist/**`, `coverage/**`, `.pytest_cache/**`, `.env` and `.env.*`.
+- Repo-local `.sigil/skills/**`, `.sigil/agents/**`, `.sigil/plugins/**` and `.sigil/verification.toml` are not excluded by default; they are repository inputs and must affect the content-bound workspace snapshot when present.
 
 Rules:
 
@@ -255,6 +259,7 @@ DiagnosticRecorded
 TodoChanged
 VerificationRecorded
 VerificationPolicyChanged
+VerificationCheckRun
 EnvironmentFingerprintRecorded
 ReadinessEvaluated
 WorkspaceTrustDecision
@@ -380,7 +385,9 @@ Rules:
 - A verifier agent can propose checks or summarize observations, but cannot override system verdict.
 - Missing required check yields `Missing`, not `Passed`.
 - Check failure yields `Failed`.
-- Unknown dirty workspace yields `Stale` or `Inconclusive`, depending on whether prior evidence existed.
+- Unknown dirty workspace yields `Stale` when a prior successful receipt exists for the relevant scope, with `VerificationStaleReason::UnknownDirty` referencing the invalidating event.
+- Unknown dirty workspace yields `Inconclusive` when there is no prior successful receipt to invalidate, or when the unknown-dirty evidence has no specific event id.
+- Ambiguous check output is represented as an inconclusive check receipt; for `AllRequiredChecks` it yields `Inconclusive` and requires a rerun or user resolution.
 - Approval denial may yield `Blocked`, `Failed` or `CompletedUnverified`, depending on policy and task state.
 - User cancellation yields `Cancelled`; verification verdict remains independent.
 
@@ -429,6 +436,7 @@ TUI should show:
 - missing required checks
 - workspace trust warning
 - whether command execution required approval or sandbox
+- Narrow TUI surfaces compact verification reasons as: first actionable/stale reason plus `+N more`; full session audit still preserves full reason labels in the durable `ReadinessEvaluated` entry.
 
 Protocol should expose both:
 
@@ -493,26 +501,58 @@ Required deterministic tests:
 
 - 已新增 `RunStatus`、`VerificationVerdict`、`VisibleCompletionState`，并保持执行生命周期和验证结论分离。
 - 已实现 verification policy、policy merge、scope/trust/sandbox requirement、check spec hash 和 receipt applicability。
-- 已实现候选检查 discovery：用户全局配置、`.sigil/verification.toml`、CI、package scripts、Cargo、Makefile；未信任 workspace 只产生 candidate，不自动提升为 trusted check。
+- 已实现候选检查 discovery：用户全局配置、`.sigil/verification.toml`、CI、package scripts、Cargo、Makefile；未信任 workspace 只产生 candidate，不自动提升为 trusted check；CI discovery 在 trust 前只做静态 workflow `run:` 白名单扫描，不执行 workflow/action。
 - 已实现 `WorkspaceSnapshotManifestV1`、scope include/exclude/generated roots、git tracked/unignored snapshot、symlink/external/unsupported/missing entry 处理和 content-bound `WorkspaceSnapshotId`。
+- 已收窄默认 exclude：legacy runtime state（`.sigil/sessions/**`、terminal/cache/artifacts 等）、常见 build/cache 目录和 dotenv secret-like 文件仍排除，但 repo-local `.sigil/skills/**`、agents、plugins 和 verification config 会进入 workspace snapshot。
+- 已实现 workspace snapshot 大文件 fail-closed：超过 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES` 的文件标记为 `Unsupported`，不产生 clean snapshot id，避免把未覆盖的大文件误判为 verified。
 - 已实现 `run_verification_check` MVP：执行 trusted check、记录 command/check evidence、绑定 snapshot/policy/trust/sandbox/environment hash，并识别写型或自修改 check 不能产生最终 passed evidence。
-- 已实现 readiness reducer：写入无 receipt -> `Missing`，成功当前 receipt -> `Passed`，后续 mutation -> `Stale`，unknown dirty -> `Stale` 或 `Inconclusive`，失败/skip/cancel/recovered tool error 均有独立语义。
+- 已将写型或自修改 check 接入 RFC-0002 mutation evidence：runner 会追加 `WorkspaceMutationDetected`，使 replay/audit/stale-cause 能看到 check 本身造成或可能造成的 workspace 污染。
+- 已实现 readiness reducer：写入无 receipt -> `Missing`，成功当前 receipt -> `Passed`，后续 mutation -> `Stale`，unknown dirty 有 prior passed -> `Stale`，unknown dirty 无 prior passed -> `Inconclusive`，ambiguous check receipt -> `Inconclusive`，失败/skip/cancel/recovered tool error 均有独立语义。
 - 已接入 RFC-0002 typed `WorkspaceMutationDetected` evidence：readiness 会消费 detection event 的 scope、from/to workspace snapshot、tool effect 和 unknown-dirty 标志。
+- 已接入 RFC-0002 `CheckpointRestored` evidence：checkpoint restore 会作为 workspace mutation 进入 readiness，旧 verification 不会在 restore 后继续视为 current passed。
+- 已将 `/task` readiness 的 mutation 判定从 `changed_files` 扩展到 durable mutation evidence：即使 tool result 没有上报 changed files，只要当前 step 的 tool call 在 durable stream 中产生 `MutationCommitted`、`MutationReconciled`、`CheckpointRestored` 或 `WorkspaceMutationDetected`，也会进入 missing/stale/inconclusive verification 状态。
+- 已修正 `/task` durable mutation replay 的作用域：除当前 step tool call 外，readiness 也会纳入 task 开始后、且晚于最新 successful verification receipt 的 durable mutation evidence，避免 terminal_start 在前一 step/run、terminal exit/cancel 在后一 step 时被误判为 clean。
+- 已将 `/task` durable mutation replay failure 视为 `UnknownDirty`：corrupt/unreadable event stream 会产生 `ResolveUnknownDirty` action，而不是被误判为无需验证。
+- 已收紧 `/task` mutation baseline：只允许当前 task/step scope、当前 policy hash、当前 verification scope 和 required check 匹配的 successful receipt 推进 baseline，避免其他任务或其他 scope 的成功检查遮蔽当前任务 mutation。
+- 已覆盖 persistent terminal 自然退出产生的 durable mutation evidence：terminal task 自行退出后，TUI worker 会追加终态并 reconcile `terminal_start` 的 workspace snapshot transition，使后续 verification/readiness 看到 terminal 写入。
+- 已覆盖 agent-loop terminal cancel 产生的 durable mutation evidence：模型调用 `terminal_cancel` 返回终态时，kernel 会 reconcile 原始 `terminal_start` snapshot，使 cancel 前的终端写入污染旧 verification。
+- 已覆盖 persistent terminal 运行中状态：`terminal_start` 已完成但 terminal task 仍 running 时，readiness 会从 durable `TerminalTask` + `ExecutionMutationProfile` 重建 `running_terminal_task` unknown-dirty evidence，避免长进程执行期间被误判为 clean。
+- 已覆盖 MCP server lifecycle 的最小 unknown-dirty readiness 输入：TUI lazy activation、TUI MCP refresh 和 `mcp_activate_server` 可追加 `WorkspaceMutationDetected(tool_call_id=None)`，foreground chat 和 `/task` readiness 会将该 evidence 视为 workspace 污染。
+- 已覆盖 TUI eager MCP startup 的最小 unknown-dirty readiness 输入：worker 启动期间 eager MCP server 成功启动后会追加 `WorkspaceMutationDetected(tool_call_id=None)`，后续 foreground chat 和 `/task` readiness 不会把该 session 误判为 clean。
+- 已覆盖 MCP server 启动失败/初始化崩溃的 readiness 输入：activation/refresh 尝试启动 MCP server 时会先追加 unknown-dirty mutation evidence，即使 initialize 或 tools/list 失败，旧 verification 也会被污染。
+- 已补充 terminal task durable projection：active/exited terminal state 可从 mixed-format event stream 重建，readiness 与恢复路径不再只依赖 in-memory entries-based projection。
+- 已补充 changeset durable projection：`ChangeSetProposed` / `ChangeSetApplied` 可从 mixed-format event stream 重建，为后续 child/worktree merge review 与 parent re-check trace 提供 durable projection 基础。
+- 已补充 plan/skill/plugin durable projection：plan approval、skill load 和 plugin trust/context 状态可从 mixed-format event stream 重建，减少 workspace trust 与 extension context 对运行时临时状态的依赖。
+- 已补充 agent profile trust/policy、agent result continuation 和 conversation queue durable projection：profile trust/policy、child result continuation 和 queued input state 可从 mixed-format event stream 重建，进一步降低 resume 后 verification / trust / child-result UI 对 entries-only projection 的依赖。
+- 已将 child/agent merge 类 durable event 接入 `/task` readiness 的 mutation replay：`ChildChangesetMerged` / `AgentMergeApplied` 会使 parent workspace verification stale 或 unknown-dirty，child worktree 的 passed receipt 不会在 merge 后直接转移为 parent passed。
+- 已将 foreground chat final answer 接入 readiness：普通 chat run 结束时会追加系统计算的 `ReadinessEvaluated`；无 workspace mutation 时为 `NotApplicable`，存在 mutation 且缺少适用 receipt 时为 `Missing` / `CompletedUnverified`，不会把 final text 视为 verified。
 - 已将 `/task` step completion 接入 readiness：final text 不能直接证明 verified，missing check 会阻断/降级，RunCheck action 可执行 trusted check 后重算 readiness。
+- 已将 check runner lifecycle 进入 append-only control/audit：`RunCheck` 会记录 queued、running 和 terminal `VerificationCheckRun` entry，projection 保留每个 run 的最新状态；最终 proof 仍由 `VerificationRecorded` receipt 决定。
+- 已收紧 repo-local check 的 workspace trust 持续约束：由 trusted workspace promotion 产生的 policy 会携带 `WorkspaceTrustRequirement::Trusted`，避免 workspace trust 后续降级后继续自动执行 repo scripts。
+- 已修正 check runner 执行前 workspace trust gate：`run_verification_check` 会同时识别 request 级 approval/sandbox decision 和 `TrustedCheckSpec` promotion 自带的 approval/sandbox decision，避免已审批或已 sandboxed 的 repo-local trusted check 被错误拒绝。
+- 已在 session audit 中展示 workspace trust provenance：`WorkspaceTrustDecision` 会显示 trust snapshot、deciding event 和 reason，便于用户追溯 repo-local check promotion 的来源。
 - 已在 TUI 中展示 verification missing/passed/stale 等状态，并补 slash command 高亮、timeline command token 和 MCP failure 展示回归测试。
+- 已在 `/config` 的 Permissions 页补充 verification trust 摘要与 footer trust action：展示当前 workspace trust、用户配置 checks、repo-local candidate checks，并可直接触发 workspace trust promotion action。
+- 已增强 `/config` Permissions 的 repo-local verification check review 信息：候选检查会展示 source、command、effect、cwd、source path 和 promotion requirement，用户在 trust workspace 前能看到 repo-local check 将以什么能力执行。
+- 已在 TUI task sidebar / strip / session audit 中补充 workspace trust / check approval 的用户可读解释：`TrustWorkspace` 会显示 `workspace trust required`，`ApproveCheckExecution` 会显示对应 check approval；task sidebar 的 `action:` 行和 session audit 的 required action 摘要都改为用户可读短语，不再暴露内部 action token。
+- 已在 TUI task sidebar / strip 中展示最新 `VerificationCheckRun` queued/running/terminal 状态和失败原因；当已有 check run lifecycle evidence 时，不再只显示静态 `run_check` action。
+- 已在 TUI task sidebar / strip 中补充窄宽度 verification reason compact 展示：显示第一个 stale/actionable reason，并用 `+N more` 汇总其余原因；session audit 仍保留完整 reason labels。
+- 已补充 check runner 失败后的最小 retry affordance：queued/running 会隐藏重复 run action，terminal failed/errored/inconclusive/succeeded 等历史 run 不会遮蔽当前 `run_check` required action，用户能看到失败原因和重新运行入口。
+- 已将 check runner timeout / exit failure reason 写入 `VerificationReceipt`，并由 terminal `VerificationCheckRun` 继承；TUI 可直接展示系统产生的 `check timed out ...` / exit-code reason，而不是只显示泛化 failed 状态。
+- 已将 policy timeout 写入 `VerificationCheckRun` queued/running/terminal lifecycle audit，并在 task sidebar / strip / session detail 中展示，用户能看到 check-run 采用的 timeout 配置。
+- 已将 workspace snapshot 大文件阈值纳入 `VerificationScope.max_file_bytes`，并作为 policy-bound scope coverage 参与验证范围覆盖判断；默认值仍沿用 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES`。
+- 已确认当前 plugin integration 仅产生静态 manifest review/projection data；尚无 plugin hook command execution runtime，plugin-declared MCP server 也未自动进入 active startup/refresh path。未来启用这些 plugin-owned external process 时必须先产生 RFC-0002 unknown-dirty mutation evidence，verification reducer 才能消费。
 
-剩余实现：
+Productization remains：
 
-- 完成 check runner 产品化：自动执行策略、用户审批/信任 gate、sandbox gate、runner queue、timeout UI 和失败重试体验。
-- 将 RFC-0002 unknown mutation detection 继续扩展到 persistent terminal、MCP/plugin 进程生命周期和崩溃恢复，使这些路径的写入也必然污染旧 verification。
-- 扩展 verification scope exclude/profile：构建产物、依赖缓存、生成目录和写型检查后的二次非写检查策略需要更多真实项目测试。
-- 完成 workspace trust UX：repo-local checks 的 promotion、trust provenance、未信任 workspace 的配置/指令降级展示。
-- 完成 child verification / worktree merge 链路：child passed 只适用于 child snapshot，merge 后 parent 必须重新验证。
-- 将更多 historical/projected state 从 RFC-0001 durable replay 重建，而不是依赖运行时临时状态。
+- 完成 check runner 产品化：approval/sandbox promotion UI、自动执行策略和更完整的失败重试交互；runner lifecycle audit primitive、核心 trust gate、最小 queue/status UI、timeout visibility、terminal failure reason 和 retry affordance 已落地。
+- 启用 plugin hook command runtime 或自动合并 plugin-declared MCP servers 时，必须复用 RFC-0002 external-process unknown-dirty recorder；当前代码尚不存在这些 plugin-owned process execution 面。
+- 完成 MCP ready 后进程状态 UX / restart recovery；当前核心语义已确保 startup/refresh 尝试会污染旧 verification。
+- 扩展 verification scope profile：当前默认 profile 已固定常见 build/cache/secret-like excludes；额外生成目录、项目专用依赖缓存和写型检查后的二次非写检查策略需要更多真实项目测试。
+- 完成 workspace trust UX：repo-local checks 的完整 approve/sandbox flow、未信任 workspace 的配置/指令降级展示和更完整的 trust review 面；基础 audit provenance、`/config` candidate/trust 摘要、repo-local check review metadata、Permissions footer trust action、task sidebar/strip 与 session audit 的 trust/approval 解释已落地。
+- 完成 child verification / worktree merge 产品链路：child receipt import、merge review UI、parent re-check 引导和跨 session trace 展示仍需产品化；核心 reducer 已保证 child passed 不会在 parent merge 后直接转移。
+- 继续把后续新增 historical/projected state 接入 RFC-0001 durable replay；现有核心 task、verification、agent thread、terminal、changeset、plan、skill、plugin、profile trust/policy、continuation 和 queue projection 已具备 mixed-format stream replay 入口。
 
 ## 16. Open Questions
 
-- Exact default exclude list for build/cache/generated roots.
-- How much of CI check discovery should run before workspace trust.
-- Whether `Inconclusive` should be used for unknown dirty with no prior evidence or only for ambiguous check outputs.
-- How TUI should compact multiple stale reasons in narrow terminal width.
+None for core semantics. Remaining work is tracked under Productization remains.

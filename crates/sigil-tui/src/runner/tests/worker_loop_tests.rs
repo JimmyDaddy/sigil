@@ -1,17 +1,21 @@
 use std::{collections::BTreeMap, sync::mpsc};
 
-use sigil_kernel::config::TerminalConfig;
 use sigil_kernel::{
-    AgentConfig, CodeIntelligenceConfig, CompactionConfig, ControlEntry, McpServerConfig,
-    MemoryConfig, PermissionConfig, RootConfig, RunEvent, Session, SessionConfig, StorageConfig,
-    TaskConfig, TaskId, ToolEffect, VerificationCheckConfig, VerificationConfig, WorkspaceConfig,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, stable_workspace_id,
+    AgentConfig, CodeIntelligenceConfig, CompactionConfig, ControlEntry, DurableEventType,
+    JsonlSessionStore, McpServerConfig, MemoryConfig, MutationArtifactLifecycleRecorded,
+    MutationArtifactLifecycleStatus, MutationEventRecorder, PermissionConfig, RootConfig, RunEvent,
+    Session, SessionConfig, SessionStreamRecord, StorageConfig, TaskConfig, TaskId, ToolEffect,
+    VerificationCheckConfig, VerificationConfig, WorkspaceConfig, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, bytes_hash, config::TerminalConfig, stable_workspace_id,
 };
 
 use crate::runner::{
     event_bridge::ChannelEventHandler,
     protocol::WorkerMessage,
-    worker_loop::{TrustWorkspaceOutcome, materialize_task_verification_config, trust_workspace},
+    worker_loop::{
+        TrustWorkspaceOutcome, clean_mutation_artifacts, delete_mutation_artifact,
+        materialize_task_verification_config, trust_workspace,
+    },
 };
 
 #[test]
@@ -49,11 +53,11 @@ fn materialize_task_verification_config_records_specs_policy_and_events() {
             .is_some_and(|entry| entry.trusted_check.source
                 == sigil_kernel::CheckDiscoverySource::UserExplicitConfig)
     );
-    assert!(
-        projection
-            .latest_policy(&scope)
-            .is_some_and(|entry| entry.policy.required_checks.len() == 1)
-    );
+    assert!(projection.latest_policy(&scope).is_some_and(
+        |entry| entry.policy.required_checks.len() == 1
+            && entry.policy.workspace_trust_requirement
+                == sigil_kernel::WorkspaceTrustRequirement::None
+    ));
     let controls = rx
         .try_iter()
         .filter_map(|message| match message {
@@ -176,11 +180,11 @@ fn materialize_task_verification_config_promotes_repo_checks_for_trusted_workspa
         check.trusted_check.promoted_by,
         sigil_kernel::CheckPromotion::WorkspaceTrusted { .. }
     ));
-    assert!(
-        projection
-            .latest_policy(&scope)
-            .is_some_and(|entry| entry.policy.required_checks.len() == 1)
-    );
+    assert!(projection.latest_policy(&scope).is_some_and(
+        |entry| entry.policy.required_checks.len() == 1
+            && entry.policy.workspace_trust_requirement
+                == sigil_kernel::WorkspaceTrustRequirement::Trusted
+    ));
     let controls = rx
         .try_iter()
         .filter_map(|message| match message {
@@ -274,6 +278,105 @@ fn trust_workspace_requires_available_session() {
     let error = trust_workspace(temp.path(), &mut current_session).expect_err("missing session");
 
     assert!(error.contains("session state is unavailable"));
+}
+
+#[test]
+fn clean_mutation_artifacts_applies_retention_policy_and_records_lifecycle() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    std::fs::write(&target, "old")?;
+    let session_path = temp.path().join("sessions/session.jsonl");
+    let store = JsonlSessionStore::new(session_path.clone())?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let coordinator = recorder.coordinator(&workspace, "tool-call-cleanup", None)?;
+    let new_content = b"new";
+    let prepared =
+        coordinator.prepare_file("note.txt", target.clone(), Some(bytes_hash(new_content)))?;
+    coordinator.commit_write(&prepared, new_content)?;
+
+    let mut root_config = root_config_with_checks(&workspace, Vec::new());
+    root_config
+        .storage
+        .mutation_artifact_retention
+        .max_artifacts = Some(0);
+    root_config.storage.mutation_artifact_retention.max_bytes = None;
+    root_config
+        .storage
+        .mutation_artifact_retention
+        .expire_older_than_ms = None;
+    let current_session =
+        Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+
+    let report = clean_mutation_artifacts(&root_config, &session_path, &current_session)
+        .expect("cleanup should apply retention");
+
+    assert_eq!(report.scanned_artifacts, 1);
+    assert_eq!(report.expired_artifacts, 1);
+    assert_eq!(report.unavailable_artifacts, 0);
+    assert_eq!(report.lifecycle_events.len(), 1);
+    let lifecycle_records = JsonlSessionStore::read_event_records(&session_path)?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::MutationArtifactLifecycleRecorded.as_str() =>
+            {
+                Some(
+                    serde_json::from_value::<MutationArtifactLifecycleRecorded>(event.payload)
+                        .expect("lifecycle payload should decode"),
+                )
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        lifecycle_records.as_slice(),
+        [MutationArtifactLifecycleRecorded {
+            status: MutationArtifactLifecycleStatus::Expired,
+            ..
+        }]
+    ));
+    assert_eq!(
+        lifecycle_records[0].reason.as_str(),
+        "retention quota limit"
+    );
+    Ok(())
+}
+
+#[test]
+fn delete_mutation_artifact_records_user_requested_lifecycle() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    std::fs::write(&target, "old")?;
+    let session_path = temp.path().join("sessions/session.jsonl");
+    let store = JsonlSessionStore::new(session_path.clone())?;
+    let recorder = MutationEventRecorder::new(store.clone());
+    let coordinator = recorder.coordinator(&workspace, "tool-call-delete", None)?;
+    let new_content = b"new";
+    let prepared =
+        coordinator.prepare_file("note.txt", target.clone(), Some(bytes_hash(new_content)))?;
+    coordinator.commit_write(&prepared, new_content)?;
+    let artifact_id = recorder
+        .list_mutation_artifacts()?
+        .into_iter()
+        .next()
+        .expect("artifact should exist")
+        .artifact_id;
+    let current_session =
+        Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
+
+    let payload = delete_mutation_artifact(&session_path, &current_session, &artifact_id)
+        .expect("artifact deletion should record lifecycle");
+
+    assert_eq!(payload.artifact_id, artifact_id);
+    assert_eq!(payload.status, MutationArtifactLifecycleStatus::Deleted);
+    assert_eq!(payload.reason, "user requested artifact deletion");
+    assert!(recorder.list_mutation_artifacts()?.is_empty());
+    Ok(())
 }
 
 fn root_config_with_checks(

@@ -9,11 +9,12 @@ use anyhow::Result;
 use crate::{
     CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, ChildVerificationReceiptLinked, CompletionCriteria, DurableEventType,
-    EvidenceReceipt, EvidenceScope, FileType, JsonlSessionStore, ReadinessInput,
-    ReadinessProjectionMode, ReadinessReason, ReceiptStatus, RedactionState, RequiredAction,
-    RunStatus, SandboxProfileRequirement, Session, SessionLogEntry, SessionStreamRecord,
-    SnapshotEntryState, ToolEffect, VerificationBinding, VerificationCheckConfig,
-    VerificationCheckRunRequest, VerificationConfig, VerificationPolicy, VerificationReceipt,
+    EvidenceReceipt, EvidenceScope, FileType, JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
+    ReadinessInput, ReadinessProjectionMode, ReadinessReason, ReceiptStatus, RedactionState,
+    RequiredAction, RunStatus, SandboxProfileRequirement, Session, SessionLogEntry,
+    SessionStreamRecord, SnapshotEntryState, ToolEffect, VerificationBinding,
+    VerificationCheckConfig, VerificationCheckRunEntry, VerificationCheckRunRequest,
+    VerificationCheckRunStatus, VerificationConfig, VerificationPolicy, VerificationReceipt,
     VerificationScope, VerificationSkipDecision, VerificationStaleCause, VerificationStaleReason,
     VerificationStateProjection, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
     WorkspaceMutationEvidence, WorkspaceSnapshotEntry, WorkspaceSnapshotManifestV1, WorkspaceTrust,
@@ -98,12 +99,15 @@ fn visible_state_preserves_run_status_and_verification_verdict() {
 #[test]
 fn verification_policy_scope_trust_and_effect_helpers_cover_edges() -> Result<()> {
     assert!(super::default_scope_excludes().contains(&"target/**".to_owned()));
+    assert!(!super::default_scope_excludes().contains(&".sigil/**".to_owned()));
+    assert!(super::default_scope_excludes().contains(&".sigil/sessions/**".to_owned()));
     let repo_scope = VerificationScope::all_tracked("scope-main");
     let src_scope = VerificationScope {
         scope_hash: "scope-src".to_owned(),
         include: vec!["src/**".to_owned()],
         exclude: super::default_scope_excludes(),
         tracked_files_only: true,
+        max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
         generated_roots: Vec::new(),
     };
     let wide_scope = VerificationScope {
@@ -111,11 +115,17 @@ fn verification_policy_scope_trust_and_effect_helpers_cover_edges() -> Result<()
         include: vec!["**/*".to_owned()],
         exclude: repo_scope.exclude.clone(),
         tracked_files_only: false,
+        max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
         generated_roots: Vec::new(),
     };
     assert!(wide_scope.covers(&src_scope));
     assert!(!src_scope.covers(&repo_scope));
     assert!(!repo_scope.covers(&wide_scope));
+    let low_file_limit_scope = VerificationScope {
+        max_file_bytes: repo_scope.max_file_bytes.saturating_sub(1),
+        ..repo_scope.clone()
+    };
+    assert!(!low_file_limit_scope.covers(&repo_scope));
 
     assert_eq!(
         SandboxProfileRequirement::None.stricter(SandboxProfileRequirement::Sandboxed)?,
@@ -617,6 +627,58 @@ fn verification_check_runner_records_durable_check_and_passed_receipt() -> Resul
 }
 
 #[test]
+fn verification_check_runner_accepts_trusted_check_promotion_approval() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "stable\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let trusted_check = CandidateCheck {
+        source: CheckDiscoverySource::Cargo,
+        command: CheckCommand {
+            command: "rustc".to_owned(),
+            args: vec!["--version".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-discovery".to_owned(),
+        workspace_trust_snapshot_id: "trust-unknown".to_owned(),
+    }
+    .promote(
+        "rustc-version",
+        "scope-main",
+        ToolEffect::ReadOnly,
+        CheckPromotion::UserApproved {
+            approval_event_id: "event-approval".to_owned(),
+        },
+    )?;
+    let mut policy = policy_with_checks(vec![trusted_check.check_spec.clone()]);
+    policy.workspace_trust_requirement = WorkspaceTrustRequirement::ApprovalOrSandbox;
+
+    let recorded = run_verification_check(
+        &mut session,
+        VerificationCheckRunRequest {
+            workspace_root: workspace,
+            scope: EvidenceScope::Step("task_1:step_1".to_owned()),
+            trusted_check,
+            policy,
+            policy_hash: Some("policy-hash".to_owned()),
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "trust-unknown".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+        },
+    )?;
+
+    assert_eq!(recorded.receipt.check_status, ReceiptStatus::Succeeded);
+    assert_eq!(
+        recorded.receipt.binding.approval_event_id.as_deref(),
+        Some("event-approval")
+    );
+    Ok(())
+}
+
+#[test]
 fn verification_check_runner_covers_missing_workspace_and_in_memory_fallback() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -690,6 +752,7 @@ fn verification_check_runner_records_failed_and_mutating_checks() -> Result<()> 
     fs::create_dir(&workspace)?;
     fs::write(workspace.join("note.txt"), "stable\n")?;
     let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let store_path = store.path().to_path_buf();
     let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
 
     let failing_check = CandidateCheck {
@@ -761,6 +824,35 @@ fn verification_check_runner_records_failed_and_mutating_checks() -> Result<()> 
     )?;
     assert_eq!(mutating.receipt.check_status, ReceiptStatus::Inconclusive);
     assert!(mutating.receipt.mutates_verification_scope);
+    let mutating_terminal_run = VerificationCheckRunEntry::new(
+        "run-mutating".to_owned(),
+        EvidenceScope::Step("task_1:step_1".to_owned()),
+        &mutating_check.check_spec,
+        VerificationCheckRunStatus::Running,
+    )
+    .with_terminal_receipt(&mutating.receipt);
+    assert_eq!(
+        mutating_terminal_run.status,
+        VerificationCheckRunStatus::Inconclusive
+    );
+    assert_eq!(
+        mutating_terminal_run.reason.as_deref(),
+        Some("check mutated verification scope")
+    );
+    let mutation_events = JsonlSessionStore::read_event_records(&store_path)?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type == DurableEventType::WorkspaceMutationDetected.as_str() =>
+            {
+                Some(event.payload)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(mutation_events.len(), 1);
+    assert_eq!(mutation_events[0]["reason"], "declared_write_effect");
+    assert_eq!(mutation_events[0]["unknown_dirty"], true);
     Ok(())
 }
 
@@ -799,7 +891,7 @@ fn verification_check_runner_records_timeout_and_spawn_failure_edges() -> Result
         VerificationCheckRunRequest {
             workspace_root: workspace.clone(),
             scope: EvidenceScope::Step("task_1:step_1".to_owned()),
-            trusted_check: timeout_check,
+            trusted_check: timeout_check.clone(),
             policy: timeout_policy,
             policy_hash: None,
             workspace_trust: WorkspaceTrust::Unknown,
@@ -809,6 +901,22 @@ fn verification_check_runner_records_timeout_and_spawn_failure_edges() -> Result
         },
     )?;
     assert_eq!(timed_out.receipt.check_status, ReceiptStatus::Failed);
+    assert_eq!(
+        timed_out.receipt.failure_reason.as_deref(),
+        Some("check timed out after 1 ms")
+    );
+    let terminal_run = VerificationCheckRunEntry::new(
+        "run-timeout".to_owned(),
+        EvidenceScope::Step("task_1:step_1".to_owned()),
+        &timeout_check.check_spec,
+        VerificationCheckRunStatus::Running,
+    )
+    .with_terminal_receipt(&timed_out.receipt);
+    assert_eq!(terminal_run.status, VerificationCheckRunStatus::Failed);
+    assert_eq!(
+        terminal_run.reason.as_deref(),
+        Some("check timed out after 1 ms")
+    );
 
     let missing_command = CandidateCheck {
         source: CheckDiscoverySource::UserExplicitConfig,
@@ -849,6 +957,73 @@ fn verification_check_runner_records_timeout_and_spawn_failure_edges() -> Result
             .contains("failed to spawn verification check")
     );
     Ok(())
+}
+
+#[test]
+fn verification_check_run_entry_covers_terminal_status_and_error_edges() {
+    let check = CheckSpec::new(
+        "cargo-test",
+        CheckCommand {
+            command: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: None,
+        },
+        ToolEffect::ReadOnly,
+        "scope-main",
+    );
+    let skipped = verification_receipt(
+        "receipt-skipped",
+        &check,
+        "snapshot-1",
+        1,
+        ReceiptStatus::Skipped,
+        false,
+    );
+
+    let skipped_run = VerificationCheckRunEntry::new(
+        "run-skipped".to_owned(),
+        EvidenceScope::Step("task_1:step_1".to_owned()),
+        &check,
+        VerificationCheckRunStatus::Running,
+    )
+    .with_terminal_receipt(&skipped);
+    assert_eq!(skipped_run.status, VerificationCheckRunStatus::Skipped);
+    assert!(skipped_run.reason.is_none());
+
+    let errored_run = VerificationCheckRunEntry::new(
+        "run-error".to_owned(),
+        EvidenceScope::Step("task_1:step_1".to_owned()),
+        &check,
+        VerificationCheckRunStatus::Queued,
+    )
+    .with_error("spawn failed");
+    assert_eq!(errored_run.status, VerificationCheckRunStatus::Errored);
+    assert_eq!(errored_run.reason.as_deref(), Some("spawn failed"));
+}
+
+#[test]
+fn check_failure_reason_covers_timeout_and_signal_edges() {
+    let timeout_without_configured_ms = super::CheckCommandOutput {
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: true,
+    };
+    assert_eq!(
+        super::check_failure_reason(&timeout_without_configured_ms, None).as_deref(),
+        Some("check timed out")
+    );
+
+    let terminated_without_exit_code = super::CheckCommandOutput {
+        exit_code: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        timed_out: false,
+    };
+    assert_eq!(
+        super::check_failure_reason(&terminated_without_exit_code, None).as_deref(),
+        Some("check terminated without exit code")
+    );
 }
 
 #[test]
@@ -2337,6 +2512,7 @@ fn policy_inheritance_cannot_relax_parent_requirements() {
             include: vec!["src/**".to_owned()],
             exclude: vec!["target/**".to_owned()],
             tracked_files_only: true,
+            max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
             generated_roots: Vec::new(),
         },
         sandbox_profile: SandboxProfileRequirement::Sandboxed,
@@ -2350,6 +2526,7 @@ fn policy_inheritance_cannot_relax_parent_requirements() {
             include: vec!["tests/**".to_owned()],
             exclude: vec!["target/**".to_owned()],
             tracked_files_only: true,
+            max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
             generated_roots: Vec::new(),
         },
         allow_unverified_completion: true,
@@ -2373,6 +2550,7 @@ fn policy_inheritance_cannot_relax_parent_requirements() {
             include: vec!["src/**".to_owned()],
             exclude: all_tracked_parent.verification_scope.exclude.clone(),
             tracked_files_only: true,
+            max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
             generated_roots: Vec::new(),
         },
         ..all_tracked_parent.clone()
@@ -2528,6 +2706,106 @@ fn workspace_snapshot_builder_hashes_scope_and_excludes_build_outputs() {
 }
 
 #[test]
+fn workspace_snapshot_builder_includes_repo_local_skill_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".sigil/skills/review")).expect("skill dir");
+    fs::create_dir_all(temp.path().join(".sigil/sessions")).expect("session dir");
+    fs::write(
+        temp.path().join(".sigil/skills/review/SKILL.md"),
+        "name: review\n",
+    )
+    .expect("skill file");
+    fs::write(temp.path().join(".sigil/sessions/session.jsonl"), "{}\n").expect("session file");
+    let scope = VerificationScope::all_tracked("scope-main");
+
+    let first =
+        build_workspace_snapshot(temp.path(), "workspace-1", &scope, 1).expect("snapshot builds");
+
+    assert!(first.manifest.entries.iter().any(|entry| {
+        entry.normalized_path == Path::new(".sigil/skills/review/SKILL.md")
+            && entry.state == SnapshotEntryState::Present
+    }));
+    assert!(first.manifest.entries.iter().all(|entry| {
+        !entry
+            .normalized_path
+            .starts_with(Path::new(".sigil/sessions"))
+    }));
+
+    fs::write(
+        temp.path().join(".sigil/skills/review/SKILL.md"),
+        "name: review\nversion: 2\n",
+    )
+    .expect("skill rewrite");
+    let second =
+        build_workspace_snapshot(temp.path(), "workspace-1", &scope, 2).expect("snapshot rebuilds");
+
+    assert_ne!(first.workspace_snapshot_id, second.workspace_snapshot_id);
+}
+
+#[test]
+fn workspace_snapshot_builder_marks_large_files_unsupported() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = fs::File::create(temp.path().join("large.bin")).expect("large file");
+    file.set_len(MAX_WORKSPACE_SNAPSHOT_FILE_BYTES + 1)
+        .expect("sparse file length");
+    let scope = VerificationScope::all_tracked("scope-main");
+
+    let snapshot =
+        build_workspace_snapshot(temp.path(), "workspace-1", &scope, 1).expect("snapshot builds");
+
+    assert_eq!(
+        snapshot.workspace_knowledge,
+        WorkspaceKnowledge::UnknownDirty
+    );
+    assert!(snapshot.workspace_snapshot_id.is_none());
+    assert!(snapshot.manifest.entries.iter().any(|entry| {
+        entry.normalized_path == Path::new("large.bin")
+            && entry.file_type == FileType::File
+            && entry.content_hash.is_none()
+            && entry.state == SnapshotEntryState::Unsupported
+    }));
+}
+
+#[test]
+fn workspace_snapshot_builder_respects_scope_max_file_bytes() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::write(temp.path().join("note.txt"), b"abcd").expect("small file");
+    let low_limit_scope = VerificationScope {
+        max_file_bytes: 3,
+        ..VerificationScope::all_tracked("scope-main")
+    };
+
+    let unsupported = build_workspace_snapshot(temp.path(), "workspace-1", &low_limit_scope, 1)
+        .expect("snapshot builds");
+
+    assert_eq!(
+        unsupported.workspace_knowledge,
+        WorkspaceKnowledge::UnknownDirty
+    );
+    assert!(unsupported.workspace_snapshot_id.is_none());
+    assert!(unsupported.manifest.entries.iter().any(|entry| {
+        entry.normalized_path == Path::new("note.txt")
+            && entry.content_hash.is_none()
+            && entry.state == SnapshotEntryState::Unsupported
+    }));
+
+    let capturing_scope = VerificationScope {
+        max_file_bytes: 4,
+        ..low_limit_scope
+    };
+    let captured = build_workspace_snapshot(temp.path(), "workspace-1", &capturing_scope, 2)
+        .expect("snapshot rebuilds");
+
+    assert_eq!(captured.workspace_knowledge, WorkspaceKnowledge::Clean(2));
+    assert!(captured.workspace_snapshot_id.is_some());
+    assert!(captured.manifest.entries.iter().any(|entry| {
+        entry.normalized_path == Path::new("note.txt")
+            && entry.content_hash.is_some()
+            && entry.state == SnapshotEntryState::Present
+    }));
+}
+
+#[test]
 fn workspace_snapshot_builder_records_missing_literal_includes_as_clean() {
     let temp = tempfile::tempdir().expect("tempdir");
     let scope = VerificationScope {
@@ -2535,6 +2813,7 @@ fn workspace_snapshot_builder_records_missing_literal_includes_as_clean() {
         include: vec!["src/missing.rs".to_owned()],
         exclude: Vec::new(),
         tracked_files_only: true,
+        max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
         generated_roots: Vec::new(),
     };
 
@@ -2616,6 +2895,7 @@ fn workspace_snapshot_builder_filters_non_included_files_and_direct_unsupported_
         include: vec!["src/lib.rs".to_owned()],
         exclude: Vec::new(),
         tracked_files_only: false,
+        max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
         generated_roots: Vec::new(),
     };
 
@@ -2634,6 +2914,7 @@ fn workspace_snapshot_builder_filters_non_included_files_and_direct_unsupported_
         &temp.path().join("src"),
         PathBuf::from("src"),
         &metadata,
+        MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
     );
     assert_eq!(direct.file_type, FileType::Other);
     assert_eq!(direct.state, SnapshotEntryState::Unsupported);
@@ -2654,6 +2935,7 @@ fn workspace_snapshot_builder_records_internal_and_broken_symlinks() {
         include: vec!["**/*".to_owned()],
         exclude: super::default_scope_excludes(),
         tracked_files_only: false,
+        max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
         generated_roots: Vec::new(),
     };
 
@@ -2930,6 +3212,7 @@ fn verification_receipt(
         },
         check_spec_id: check.check_spec_id.clone(),
         check_status: status,
+        failure_reason: None,
         mutates_verification_scope,
     }
 }

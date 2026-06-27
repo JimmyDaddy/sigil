@@ -3,8 +3,9 @@ use std::{collections::BTreeMap, path::PathBuf, sync::mpsc, time::Duration};
 use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, RootConfig,
-    SessionConfig, WorkspaceConfig,
+    AgentConfig, DurableEventType, JsonlSessionStore, McpServerConfig, McpServerStartup,
+    MemoryConfig, PermissionConfig, RootConfig, SessionConfig, SessionStreamRecord,
+    WorkspaceConfig, WorkspaceMutationDetected,
 };
 use std::fs;
 use tempfile::tempdir;
@@ -153,7 +154,7 @@ fn spawn_agent_worker_starts_and_accepts_shutdown_for_valid_config() -> Result<(
 
     let (command_tx, message_rx) = spawn_agent_worker(
         root_config,
-        session_log_path,
+        session_log_path.clone(),
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
     )?;
@@ -242,7 +243,7 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
 
     let (command_tx, message_rx) = spawn_agent_worker(
         root_config,
-        session_log_path,
+        session_log_path.clone(),
         workspace_root,
         sigil_kernel::InteractionMode::Interactive,
     )?;
@@ -265,6 +266,25 @@ fn spawn_agent_worker_reports_ready_for_eager_mcp_startup() -> Result<()> {
             server_name: Some(ref server_name),
             status: McpActivationStatus::Ready { added_tools: 1 },
         } if server_name == "ready-eager"
+    ));
+    let records = JsonlSessionStore::read_event_records(&session_log_path)?;
+    let lifecycle_mutation = records.into_iter().find_map(|record| {
+        let SessionStreamRecord::Stored(event) = record else {
+            return None;
+        };
+        (DurableEventType::from_event_type(&event.event_type)
+            == Some(DurableEventType::WorkspaceMutationDetected))
+        .then(|| serde_json::from_value::<WorkspaceMutationDetected>(event.payload).ok())
+        .flatten()
+    });
+    assert!(matches!(
+        lifecycle_mutation,
+        Some(WorkspaceMutationDetected {
+            tool_call_id: None,
+            tool_name,
+            unknown_dirty: true,
+            ..
+        }) if tool_name == "mcp_server:ready-eager"
     ));
     let _ = command_tx.send(WorkerCommand::Shutdown);
     Ok(())

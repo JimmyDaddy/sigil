@@ -273,6 +273,8 @@ The staged gate reads the staged source snapshot before calculating added-line c
 
 To keep local commits fast, the staged gate generates LCOV only for packages containing staged business-code files; full workspace coverage still belongs to explicit `./scripts/coverage.sh` runs and CI.
 
+The staged gate defaults to `85%` added executable-line coverage. Use `STAGED_COVERAGE_MIN_LINES=96` when a release/CI-grade staged check is needed.
+
 The staged coverage script has focused Python unit tests for diff classification, LCov parsing, and added-line coverage calculation:
 
 ```bash

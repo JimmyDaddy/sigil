@@ -7,9 +7,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ApprovalMode, McpServerConfig, McpServerPinnedIdentity, McpServerStartup, McpServerTrustPolicy,
-    ProviderCapabilities, SecretRedactor, Tool, ToolAccess, ToolCategory, ToolContext,
-    ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject,
+    MutationEventRecorder, ProviderCapabilities, SecretRedactor, Tool, ToolAccess, ToolCategory,
+    ToolContext, ToolEffect, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
+    ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -33,6 +33,8 @@ pub struct McpToolRegistrationOptions {
     pub elicitation_handler: Arc<dyn McpElicitationHandler>,
     pub runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     pub startup: McpServerStartup,
+    pub mutation_recorder: Option<MutationEventRecorder>,
+    pub mutation_workspace_root: Option<PathBuf>,
 }
 
 impl McpToolRegistrationOptions {
@@ -53,6 +55,8 @@ impl McpToolRegistrationOptions {
             elicitation_handler: unsupported_mcp_elicitation_handler(),
             runtime_event_handler: unsupported_mcp_runtime_event_handler(),
             startup,
+            mutation_recorder: None,
+            mutation_workspace_root: None,
         })
     }
 
@@ -89,6 +93,16 @@ impl McpToolRegistrationOptions {
         runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
     ) -> Self {
         self.runtime_event_handler = runtime_event_handler;
+        self
+    }
+
+    pub fn with_mutation_recorder(
+        mut self,
+        workspace_root: PathBuf,
+        mutation_recorder: MutationEventRecorder,
+    ) -> Self {
+        self.mutation_workspace_root = Some(workspace_root);
+        self.mutation_recorder = Some(mutation_recorder);
         self
     }
 }
@@ -139,6 +153,7 @@ async fn register_mcp_tools_for_startup(
             continue;
         }
 
+        record_mcp_server_lifecycle_unknown_dirty(&options, &server.name)?;
         let client = match McpClient::spawn(
             server.clone(),
             options.roots.clone(),
@@ -251,6 +266,27 @@ async fn register_mcp_tools_for_startup(
             }
         }
     }
+    Ok(())
+}
+
+fn record_mcp_server_lifecycle_unknown_dirty(
+    options: &McpToolRegistrationOptions,
+    server_name: &str,
+) -> Result<()> {
+    let (Some(recorder), Some(workspace_root)) =
+        (&options.mutation_recorder, &options.mutation_workspace_root)
+    else {
+        return Ok(());
+    };
+    recorder
+        .record_external_process_unknown_dirty(
+            workspace_root,
+            format!("mcp_server:{server_name}"),
+            ToolEffect::Unknown,
+        )
+        .with_context(|| {
+            format!("failed to record MCP server {server_name} lifecycle mutation evidence")
+        })?;
     Ok(())
 }
 
