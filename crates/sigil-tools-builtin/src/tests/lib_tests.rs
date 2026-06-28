@@ -13,9 +13,10 @@ use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig,
     ExecutionIsolationPolicy, ExecutionReceipt, ExecutionRequest, JsonlSessionStore,
-    MutationEventRecorder, SessionStreamRecord, TerminalTaskId, Tool, ToolAccess, ToolCall,
-    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolRegistry,
-    ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    MutationEventRecorder, SessionStreamRecord, TerminalExecutionBackendCapabilities,
+    TerminalExecutionBackendKind, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
+    TerminalTaskStatus, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
+    ToolPreviewCapability, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -47,14 +48,49 @@ fn local_execution_backend_policy_fails_closed_when_sandbox_required() -> Result
     let result = super::build_execution_backend(&ExecutionConfig {
         backend: ExecutionBackendKind::Local,
         isolation: ExecutionIsolationPolicy::RequireSandbox,
+        ..ExecutionConfig::default()
     });
     let Err(error) = result else {
         panic!("local backend cannot satisfy required sandbox policy");
     };
     assert!(
-        error
-            .to_string()
-            .contains("execution sandbox required but Local backend")
+        error.to_string().contains(
+            "execution isolation require_sandbox requires filesystem and process isolation"
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn terminal_entry_details_serializes_execution_backend_metadata() -> Result<()> {
+    let entry = TerminalTaskEntry {
+        handle: TerminalTaskHandle {
+            task_id: TerminalTaskId::new("terminal-details")?,
+            command: "cargo test".to_owned(),
+            cwd: ".".into(),
+            shell: "zsh".to_owned(),
+            log_path: "state/artifacts/tasks/terminal-details/output.log".into(),
+            created_at_ms: 100,
+            execution_backend: Some(TerminalExecutionBackendKind::LocalPty),
+            execution_backend_capabilities: Some(TerminalExecutionBackendCapabilities::local_pty()),
+        },
+        status: TerminalTaskStatus::Running,
+        output_preview: Some("tail".to_owned()),
+        output_hash: Some("sha256:terminal".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 120,
+    };
+
+    let details = super::terminal_entry_details(&entry);
+
+    assert_eq!(details["execution_backend"], json!("local_pty"));
+    assert_eq!(
+        details["execution_backend_capabilities"]["persistent_pty"],
+        json!(true)
+    );
+    assert_eq!(
+        details["execution_backend_capabilities"]["input"],
+        json!(true)
     );
     Ok(())
 }
@@ -76,6 +112,7 @@ fn macos_seatbelt_backend_satisfies_required_sandbox_policy() -> Result<()> {
     let backend = super::build_execution_backend(&ExecutionConfig {
         backend: ExecutionBackendKind::MacosSeatbelt,
         isolation: ExecutionIsolationPolicy::RequireSandbox,
+        ..ExecutionConfig::default()
     })?;
 
     assert_eq!(backend.kind(), ExecutionBackendKind::MacosSeatbelt);
@@ -110,6 +147,7 @@ fn macos_seatbelt_backend_fails_closed_on_non_macos() {
     let result = super::build_execution_backend(&ExecutionConfig {
         backend: ExecutionBackendKind::MacosSeatbelt,
         isolation: ExecutionIsolationPolicy::RequireSandbox,
+        ..ExecutionConfig::default()
     });
 
     let Err(error) = result else {
@@ -220,15 +258,16 @@ fn sandbox_conformance_local_backend_fails_closed_for_required_sandbox() {
     let result = super::build_execution_backend(&ExecutionConfig {
         backend: ExecutionBackendKind::Local,
         isolation: ExecutionIsolationPolicy::RequireSandbox,
+        ..ExecutionConfig::default()
     });
 
     let Err(error) = result else {
         panic!("local backend must not satisfy required sandbox policy");
     };
     assert!(
-        error
-            .to_string()
-            .contains("execution sandbox required but Local backend")
+        error.to_string().contains(
+            "execution isolation require_sandbox requires filesystem and process isolation"
+        )
     );
 }
 

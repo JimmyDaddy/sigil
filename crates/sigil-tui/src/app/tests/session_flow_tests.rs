@@ -781,6 +781,36 @@ fn session_history_uses_first_user_prompt_as_display_title() -> Result<()> {
 }
 
 #[test]
+fn session_history_uses_projection_title_from_v2_stream() -> Result<()> {
+    let temp = tempdir()?;
+    let config = RootConfig {
+        workspace: WorkspaceConfig {
+            root: temp.path().display().to_string(),
+        },
+        ..test_config()
+    };
+    let session_dir = resolved_session_log_dir(&config, temp.path());
+    std::fs::create_dir_all(&session_dir)?;
+    let session_path = session_dir.join("session-v2-title.jsonl");
+    let store = JsonlSessionStore::new(&session_path)?;
+    store.append(&SessionLogEntry::User(ModelMessage::user(
+        "Projection-backed selector title",
+    )))?;
+
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    app.refresh_session_history();
+
+    assert_eq!(
+        app.session_history
+            .iter()
+            .find(|entry| entry.path == session_path)
+            .and_then(|entry| entry.title.as_deref()),
+        Some("Projection-backed selector title")
+    );
+    Ok(())
+}
+
+#[test]
 fn resume_command_shows_session_selector_and_enter_switches_selected_session() -> Result<()> {
     let temp = tempdir()?;
     let config = RootConfig {
@@ -1095,6 +1125,8 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
                     shell: "zsh".to_owned(),
                     log_path: ".sigil/terminal/terminal-1/output.log".into(),
                     created_at_ms: 100,
+                    execution_backend: None,
+                    execution_backend_capabilities: None,
                 },
                 status: sigil_kernel::TerminalTaskStatus::Running,
                 output_preview: Some("running tests".to_owned()),
@@ -1290,6 +1322,8 @@ fn session_terminal_entry(
             shell: "sh".to_owned(),
             log_path: Path::new(".sigil/tasks").join(task_id).join("output.log"),
             created_at_ms: 10,
+            execution_backend: None,
+            execution_backend_capabilities: None,
         },
         status,
         output_preview: Some("running output".to_owned()),

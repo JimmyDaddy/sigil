@@ -7,8 +7,8 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection,
-    TerminalTaskStatus,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus,
 };
 use crate::{ControlEntry, SessionLogEntry};
 
@@ -167,6 +167,11 @@ fn terminal_task_projection_respects_live_processes_and_starting_timeout() {
 
 #[test]
 fn terminal_task_status_labels_and_terminal_state_are_stable() {
+    assert_eq!(
+        TerminalExecutionBackendKind::LocalProcess.as_str(),
+        "local_process"
+    );
+    assert_eq!(TerminalExecutionBackendKind::LocalPty.as_str(), "local_pty");
     assert_eq!(TerminalTaskStatus::Starting.as_str(), "starting");
     assert_eq!(TerminalTaskStatus::Running.as_str(), "running");
     assert_eq!(
@@ -197,6 +202,14 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
         "shell": "zsh",
         "log_path": ".sigil/terminal/terminal-1/output.log",
         "created_at_ms": 100,
+        "execution_backend": "local_pty",
+        "execution_backend_capabilities": {
+            "persistent_pty": true,
+            "input": true,
+            "resize": true,
+            "cancel": true,
+            "output_log": true
+        },
         "updated_at_ms": 140,
         "output_preview": "final tail",
         "output_hash": "sha256:def",
@@ -208,6 +221,14 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
 
     assert_eq!(entry.handle.task_id.as_str(), "terminal-1");
     assert_eq!(entry.handle.command, "cargo test -- --ignored");
+    assert_eq!(
+        entry.handle.execution_backend,
+        Some(TerminalExecutionBackendKind::LocalPty)
+    );
+    assert_eq!(
+        entry.handle.execution_backend_capabilities,
+        Some(TerminalExecutionBackendCapabilities::local_pty())
+    );
     assert!(matches!(entry.status, TerminalTaskStatus::Cancelled));
     assert_eq!(entry.output_preview.as_deref(), Some("final tail"));
     assert_eq!(entry.output_hash.as_deref(), Some("sha256:def"));
@@ -227,6 +248,20 @@ fn terminal_task_entry_ignores_non_terminal_tool_details_and_rejects_partial_met
         TerminalTaskEntry::from_tool_result_details(&json!({
             "task_id": "terminal-1",
             "status_detail": { "state": "running" }
+        }))
+        .is_err()
+    );
+    assert!(
+        TerminalTaskEntry::from_tool_result_details(&json!({
+            "task_id": "terminal-1",
+            "status_detail": { "state": "running" },
+            "command": "cargo test",
+            "cwd": ".",
+            "shell": "zsh",
+            "log_path": ".sigil/terminal/terminal-1/output.log",
+            "created_at_ms": 100,
+            "updated_at_ms": 120,
+            "execution_backend_capabilities": "invalid"
         }))
         .is_err()
     );
@@ -256,6 +291,8 @@ fn sample_entry_for_id(
                 .join(task_id)
                 .join("output.log"),
             created_at_ms: 100,
+            execution_backend: None,
+            execution_backend_capabilities: None,
         },
         status,
         output_preview: Some("tail".to_owned()),

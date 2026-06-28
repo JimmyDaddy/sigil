@@ -1,9 +1,9 @@
 use anyhow::Result;
 
 use crate::{
-    ApprovalMode, ControlEntry, McpServerConfig, McpServerStartup, PluginAgentRef,
-    PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef,
-    PluginStateProjection, PluginTrustDecision, PluginTrustEntry, SessionLogEntry,
+    ApprovalMode, ControlEntry, ExecutionCoverageLabel, McpServerConfig, McpServerStartup,
+    PluginAgentRef, PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot,
+    PluginSkillRef, PluginStateProjection, PluginTrustDecision, PluginTrustEntry, SessionLogEntry,
     validate_plugin_id,
 };
 
@@ -104,6 +104,36 @@ fn plugin_manifest_validation_accepts_reviewable_capabilities() -> Result<()> {
             && !*required
     ));
     Ok(())
+}
+
+#[test]
+fn plugin_capabilities_report_execution_coverage_boundaries() {
+    let capabilities = sample_manifest().capabilities();
+
+    let agent = capabilities[0].execution_coverage_summary();
+    assert_eq!(agent.label, ExecutionCoverageLabel::PluginManaged);
+    assert!(!agent.local_backend_controls_execution);
+    assert!(agent.user_copy.contains("plugin trust"));
+    assert!(agent.user_copy.contains("does not cover plugin code"));
+
+    let hook = capabilities[2].execution_coverage_summary();
+    assert_eq!(hook.label, ExecutionCoverageLabel::PluginManaged);
+    assert!(!hook.local_backend_controls_execution);
+    assert!(hook.user_copy.contains("plugin trust"));
+
+    let skill = capabilities[1].execution_coverage_summary();
+    assert_eq!(skill.label, ExecutionCoverageLabel::PluginManaged);
+    assert!(!skill.local_backend_controls_execution);
+    assert!(skill.user_copy.contains("plugin trust"));
+
+    let mcp = capabilities[3].execution_coverage_summary();
+    assert_eq!(mcp.label, ExecutionCoverageLabel::ExternalMcpServer);
+    assert!(!mcp.local_backend_controls_execution);
+    assert!(mcp.user_copy.contains("MCP tools run"));
+    assert!(
+        mcp.user_copy
+            .contains("local shell sandbox does not cover them")
+    );
 }
 
 #[test]

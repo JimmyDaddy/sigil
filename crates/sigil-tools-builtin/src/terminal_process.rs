@@ -16,7 +16,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sigil_kernel::{TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus};
+use sigil_kernel::{
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+};
 use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
@@ -250,7 +253,13 @@ impl TerminalProcessManager {
     /// Returns an error when the command is empty, cwd escapes the workspace, artifacts cannot be
     /// created, the task id already exists, or process spawn fails.
     pub async fn start(&self, request: TerminalStartRequest) -> Result<TerminalTaskEntry> {
-        let plan = self.prepare_start(request).await?;
+        let plan = self
+            .prepare_start(
+                request,
+                TerminalExecutionBackendKind::LocalProcess,
+                TerminalExecutionBackendCapabilities::local_process(),
+            )
+            .await?;
 
         let mut command_process = Command::new(&plan.shell);
         command_process
@@ -318,7 +327,11 @@ impl TerminalProcessManager {
         request: TerminalStartRequest,
         pty_size: Option<TerminalPtySize>,
     ) -> Result<TerminalTaskEntry> {
-        let plan = self.prepare_start(request).await?;
+        let backend_kind = TerminalExecutionBackendKind::LocalPty;
+        let backend_capabilities = TerminalExecutionBackendCapabilities::local_pty();
+        let plan = self
+            .prepare_start(request, backend_kind, backend_capabilities)
+            .await?;
         let pty_runtime = spawn_pty_runtime(&plan, pty_size.unwrap_or_default())?;
         let summary = Arc::new(Mutex::new(plan.initial_entry.clone()));
         let managed = ManagedTerminalTask {
@@ -615,7 +628,12 @@ impl TerminalProcessManager {
         Ok(())
     }
 
-    async fn prepare_start(&self, request: TerminalStartRequest) -> Result<TerminalTaskStartPlan> {
+    async fn prepare_start(
+        &self,
+        request: TerminalStartRequest,
+        execution_backend: TerminalExecutionBackendKind,
+        execution_backend_capabilities: TerminalExecutionBackendCapabilities,
+    ) -> Result<TerminalTaskStartPlan> {
         let command = request.command.trim().to_owned();
         if command.is_empty() {
             bail!("terminal command cannot be empty");
@@ -649,6 +667,8 @@ impl TerminalProcessManager {
             shell: shell.clone(),
             log_path: artifacts.relative_output.clone(),
             created_at_ms,
+            execution_backend: Some(execution_backend),
+            execution_backend_capabilities: Some(execution_backend_capabilities),
         };
         let initial_entry = TerminalTaskEntry {
             handle: handle.clone(),

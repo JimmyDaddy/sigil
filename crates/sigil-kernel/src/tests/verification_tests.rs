@@ -71,11 +71,53 @@ impl ExecutionBackend for FakeVerificationBackend {
     }
 }
 
+#[derive(Debug, Default)]
+struct FakeSandboxVerificationBackend;
+
+impl ExecutionBackend for FakeSandboxVerificationBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::MacosSeatbelt
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities {
+            filesystem_isolation: true,
+            network_isolation: true,
+            process_isolation: true,
+            resource_limits: false,
+            persistent_pty: false,
+            workspace_snapshot: false,
+        }
+    }
+
+    fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
+        let capabilities = self.capabilities();
+        Box::pin(async move {
+            Ok(ExecutionReceipt {
+                backend: ExecutionBackendKind::MacosSeatbelt,
+                capabilities,
+                exit_code: Some(0),
+                stdout: format!("fake sandbox executed {}\n", request.program).into_bytes(),
+                stderr: Vec::new(),
+                timed_out: false,
+            })
+        })
+    }
+}
+
 fn run_verification_check_with_fake_backend(
     session: &mut Session,
     request: VerificationCheckRunRequest,
 ) -> Result<crate::VerificationRecordedEntry> {
     let backend = FakeVerificationBackend;
+    futures::executor::block_on(run_verification_check(session, &backend, request))
+}
+
+fn run_verification_check_with_sandbox_backend(
+    session: &mut Session,
+    request: VerificationCheckRunRequest,
+) -> Result<crate::VerificationRecordedEntry> {
+    let backend = FakeSandboxVerificationBackend;
     futures::executor::block_on(run_verification_check(session, &backend, request))
 }
 
@@ -385,6 +427,7 @@ fn check_promotion_receipt_and_projection_helpers_cover_edges() -> Result<()> {
         &scope,
         WorkspaceTrustRequirement::None,
         WorkspaceTrust::Unknown,
+        SandboxProfileRequirement::None,
     ));
     assert!(!receipt.is_applicable_to(
         &check,
@@ -392,6 +435,7 @@ fn check_promotion_receipt_and_projection_helpers_cover_edges() -> Result<()> {
         &scope,
         WorkspaceTrustRequirement::None,
         WorkspaceTrust::Unknown,
+        SandboxProfileRequirement::None,
     ));
     assert!(!receipt.is_applicable_to(
         &check,
@@ -399,6 +443,7 @@ fn check_promotion_receipt_and_projection_helpers_cover_edges() -> Result<()> {
         &scope,
         WorkspaceTrustRequirement::Trusted,
         WorkspaceTrust::Unknown,
+        SandboxProfileRequirement::None,
     ));
     assert!(receipt.is_applicable_to(
         &check,
@@ -406,6 +451,7 @@ fn check_promotion_receipt_and_projection_helpers_cover_edges() -> Result<()> {
         &scope,
         WorkspaceTrustRequirement::Trusted,
         WorkspaceTrust::Trusted,
+        SandboxProfileRequirement::None,
     ));
 
     let mut projection = VerificationStateProjection::default();
@@ -710,6 +756,154 @@ fn verification_check_runner_records_durable_check_and_passed_receipt() -> Resul
         ]
     );
     Ok(())
+}
+
+#[test]
+fn verification_check_runner_binds_receipt_to_actual_sandbox_backend() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir(&workspace)?;
+    fs::write(workspace.join("note.txt"), "stable\n")?;
+    let store = JsonlSessionStore::new(temp.path().join("state/session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    let trusted_check = CandidateCheck {
+        source: CheckDiscoverySource::UserExplicitConfig,
+        command: CheckCommand {
+            command: "rustc".to_owned(),
+            args: vec!["--version".to_owned()],
+            cwd: None,
+        },
+        source_event_id: "event-config".to_owned(),
+        workspace_trust_snapshot_id: "user-config".to_owned(),
+    }
+    .promote(
+        "rustc-version",
+        "scope-main",
+        ToolEffect::ReadOnly,
+        CheckPromotion::ExplicitUserConfig {
+            config_event_id: "event-config".to_owned(),
+        },
+    )?;
+    let mut policy = policy_with_checks(vec![trusted_check.check_spec.clone()]);
+    policy.sandbox_profile = SandboxProfileRequirement::Sandboxed;
+
+    let recorded = run_verification_check_with_sandbox_backend(
+        &mut session,
+        VerificationCheckRunRequest {
+            workspace_root: workspace,
+            scope: EvidenceScope::Step("task_1:step_1".to_owned()),
+            trusted_check,
+            policy,
+            policy_hash: Some("policy-hash".to_owned()),
+            workspace_trust: WorkspaceTrust::Unknown,
+            workspace_trust_snapshot_id: "user-config".to_owned(),
+            workspace_trust_approval_event_id: None,
+            workspace_trust_sandbox_decision_id: None,
+        },
+    )?;
+
+    assert_eq!(recorded.receipt.check_status, ReceiptStatus::Succeeded);
+    assert_eq!(
+        recorded.receipt.binding.execution_backend,
+        Some(ExecutionBackendKind::MacosSeatbelt)
+    );
+    let capabilities = recorded
+        .receipt
+        .binding
+        .execution_backend_capabilities
+        .expect("new receipt should bind backend capabilities");
+    assert!(capabilities.supports_required_sandbox());
+    assert_eq!(
+        recorded.receipt.binding.sandbox_profile_hash,
+        super::sandbox_profile_hash_for_execution(
+            SandboxProfileRequirement::Sandboxed,
+            ExecutionBackendKind::MacosSeatbelt,
+            capabilities
+        )
+    );
+    assert_ne!(
+        recorded.receipt.binding.sandbox_profile_hash,
+        super::sandbox_profile_hash(SandboxProfileRequirement::Sandboxed)
+    );
+    Ok(())
+}
+
+#[test]
+fn sandbox_required_policy_rejects_receipt_without_matching_backend_binding() {
+    let check = check_spec("cargo-test");
+    let mut policy = policy_with_checks(vec![check.clone()]);
+    policy.sandbox_profile = SandboxProfileRequirement::Sandboxed;
+    let snapshot = "snapshot-current".to_owned();
+    let mut input = ReadinessInput::new_run(RunStatus::Completed, policy);
+    input.current_workspace_snapshot_id = Some(snapshot.clone());
+    input.workspace_knowledge = WorkspaceKnowledge::Clean(1);
+    input.verification_receipts.push(verification_receipt(
+        "receipt-legacy",
+        &check,
+        &snapshot,
+        12,
+        ReceiptStatus::Succeeded,
+        false,
+    ));
+
+    let legacy_evaluation = evaluate_readiness(&input);
+
+    assert_eq!(
+        legacy_evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+    assert!(
+        legacy_evaluation
+            .required_actions
+            .contains(&RequiredAction::RunCheck {
+                check_spec_id: "cargo-test".to_owned()
+            })
+    );
+
+    input.verification_receipts[0].binding.execution_backend = Some(ExecutionBackendKind::Local);
+    input.verification_receipts[0]
+        .binding
+        .execution_backend_capabilities = Some(ExecutionBackendCapabilities::default());
+    input.verification_receipts[0].binding.sandbox_profile_hash =
+        super::sandbox_profile_hash_for_execution(
+            SandboxProfileRequirement::Sandboxed,
+            ExecutionBackendKind::Local,
+            ExecutionBackendCapabilities::default(),
+        );
+
+    let local_evaluation = evaluate_readiness(&input);
+
+    assert_eq!(
+        local_evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+
+    let capabilities = ExecutionBackendCapabilities {
+        filesystem_isolation: true,
+        network_isolation: true,
+        process_isolation: true,
+        resource_limits: false,
+        persistent_pty: false,
+        workspace_snapshot: false,
+    };
+    input.verification_receipts[0].binding.execution_backend =
+        Some(ExecutionBackendKind::MacosSeatbelt);
+    input.verification_receipts[0]
+        .binding
+        .execution_backend_capabilities = Some(capabilities);
+    input.verification_receipts[0].binding.sandbox_profile_hash =
+        super::sandbox_profile_hash_for_execution(
+            SandboxProfileRequirement::Sandboxed,
+            ExecutionBackendKind::MacosSeatbelt,
+            capabilities,
+        );
+
+    let sandbox_evaluation = evaluate_readiness(&input);
+
+    assert_eq!(
+        sandbox_evaluation.verification_verdict,
+        VerificationVerdict::Passed
+    );
 }
 
 #[test]
@@ -3461,6 +3655,8 @@ fn verification_receipt(
             check_spec_hash: check.check_spec_hash.clone(),
             environment_fingerprint: "env-1".to_owned(),
             sandbox_profile_hash: "sandbox-local".to_owned(),
+            execution_backend: None,
+            execution_backend_capabilities: None,
             workspace_trust_snapshot_id: "trust-1".to_owned(),
             approval_event_id: None,
             sandbox_decision_id: None,

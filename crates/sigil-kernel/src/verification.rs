@@ -1493,6 +1493,10 @@ pub struct VerificationBinding {
     pub check_spec_hash: String,
     pub environment_fingerprint: EnvironmentFingerprint,
     pub sandbox_profile_hash: SandboxProfileHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<ExecutionBackendKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_backend_capabilities: Option<ExecutionBackendCapabilities>,
     pub workspace_trust_snapshot_id: WorkspaceTrustSnapshotId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_event_id: Option<EventId>,
@@ -2441,7 +2445,13 @@ pub async fn run_verification_check(
             verification_scope_hash: request.policy.verification_scope.scope_hash,
             check_spec_hash: check.check_spec_hash.clone(),
             environment_fingerprint: environment_fingerprint(check),
-            sandbox_profile_hash: sandbox_profile_hash(request.policy.sandbox_profile),
+            sandbox_profile_hash: sandbox_profile_hash_for_execution(
+                request.policy.sandbox_profile,
+                command_output.backend,
+                command_output.backend_capabilities,
+            ),
+            execution_backend: Some(command_output.backend),
+            execution_backend_capabilities: Some(command_output.backend_capabilities),
             workspace_trust_snapshot_id: request.workspace_trust_snapshot_id,
             approval_event_id,
             sandbox_decision_id,
@@ -2688,6 +2698,7 @@ fn environment_fingerprint(check: &CheckSpec) -> EnvironmentFingerprint {
     )
 }
 
+#[cfg(test)]
 fn sandbox_profile_hash(requirement: SandboxProfileRequirement) -> SandboxProfileHash {
     stable_hash_parts(
         "sandbox",
@@ -2697,6 +2708,39 @@ fn sandbox_profile_hash(requirement: SandboxProfileRequirement) -> SandboxProfil
         "",
         "v1",
     )
+}
+
+fn sandbox_profile_hash_for_execution(
+    requirement: SandboxProfileRequirement,
+    backend: ExecutionBackendKind,
+    capabilities: ExecutionBackendCapabilities,
+) -> SandboxProfileHash {
+    let filesystem_isolation = capability_bit("filesystem", capabilities.filesystem_isolation);
+    let network_isolation = capability_bit("network", capabilities.network_isolation);
+    let process_isolation = capability_bit("process", capabilities.process_isolation);
+    let resource_limits = capability_bit("resource_limits", capabilities.resource_limits);
+    let persistent_pty = capability_bit("persistent_pty", capabilities.persistent_pty);
+    let workspace_snapshot = capability_bit("workspace_snapshot", capabilities.workspace_snapshot);
+    stable_hash_parts(
+        "sandbox",
+        requirement.as_str(),
+        [
+            backend.as_str(),
+            filesystem_isolation.as_str(),
+            network_isolation.as_str(),
+            process_isolation.as_str(),
+            resource_limits.as_str(),
+            persistent_pty.as_str(),
+            workspace_snapshot.as_str(),
+        ],
+        "",
+        "",
+        "v2",
+    )
+}
+
+fn capability_bit(name: &str, value: bool) -> String {
+    format!("{name}={value}")
 }
 
 impl SandboxProfileRequirement {
@@ -2734,6 +2778,7 @@ impl VerificationReceipt {
         scope: &VerificationScope,
         trust_requirement: WorkspaceTrustRequirement,
         workspace_trust: WorkspaceTrust,
+        sandbox_requirement: SandboxProfileRequirement,
     ) -> bool {
         self.check_spec_id == check.check_spec_id
             && self.binding.check_spec_hash == check.check_spec_hash
@@ -2742,6 +2787,7 @@ impl VerificationReceipt {
             && self.receipt.workspace_snapshot_id.as_ref() == Some(current_snapshot_id)
             && !self.mutates_verification_scope
             && receipt_satisfies_execution_trust(self, trust_requirement, workspace_trust)
+            && receipt_satisfies_sandbox_profile(self, sandbox_requirement)
     }
 }
 
@@ -2768,6 +2814,7 @@ fn receipt_matches_current_context(
     scope: &VerificationScope,
     trust_requirement: WorkspaceTrustRequirement,
     workspace_trust: WorkspaceTrust,
+    sandbox_requirement: SandboxProfileRequirement,
 ) -> bool {
     receipt.check_spec_id == check.check_spec_id
         && receipt.binding.check_spec_hash == check.check_spec_hash
@@ -2775,6 +2822,39 @@ fn receipt_matches_current_context(
         && receipt.binding.verification_scope_hash == scope.scope_hash
         && receipt.receipt.workspace_snapshot_id.as_ref() == Some(current_snapshot_id)
         && receipt_satisfies_execution_trust(receipt, trust_requirement, workspace_trust)
+        && receipt_satisfies_sandbox_profile(receipt, sandbox_requirement)
+}
+
+fn receipt_satisfies_sandbox_profile(
+    receipt: &VerificationReceipt,
+    requirement: SandboxProfileRequirement,
+) -> bool {
+    match requirement {
+        SandboxProfileRequirement::None => true,
+        SandboxProfileRequirement::ApprovalOrSandbox => {
+            receipt.binding.approval_event_id.is_some()
+                || receipt.binding.sandbox_decision_id.is_some()
+                || receipt_has_matching_sandbox_backend(receipt, requirement)
+        }
+        SandboxProfileRequirement::Sandboxed => {
+            receipt_has_matching_sandbox_backend(receipt, requirement)
+        }
+    }
+}
+
+fn receipt_has_matching_sandbox_backend(
+    receipt: &VerificationReceipt,
+    requirement: SandboxProfileRequirement,
+) -> bool {
+    let Some(backend) = receipt.binding.execution_backend else {
+        return false;
+    };
+    let Some(capabilities) = receipt.binding.execution_backend_capabilities else {
+        return false;
+    };
+    capabilities.supports_required_sandbox()
+        && receipt.binding.sandbox_profile_hash
+            == sandbox_profile_hash_for_execution(requirement, backend, capabilities)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3383,6 +3463,7 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
                     &input.policy.verification_scope,
                     input.policy.workspace_trust_requirement,
                     input.workspace_trust,
+                    input.policy.sandbox_profile,
                 )
             })
             .max_by_key(|receipt| receipt.receipt.recorded_at_stream_sequence);

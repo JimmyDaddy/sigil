@@ -149,6 +149,8 @@ fn dispatch_terminal_entry(
             shell: "sh".to_owned(),
             log_path: Path::new(".sigil/tasks").join(task_id).join("output.log"),
             created_at_ms: 10,
+            execution_backend: None,
+            execution_backend_capabilities: None,
         },
         status,
         output_preview: Some("running output".to_owned()),

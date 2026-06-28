@@ -10,7 +10,10 @@ use std::{
 use std::os::unix::fs::{PermissionsExt, symlink};
 
 use anyhow::{Result, anyhow};
-use sigil_kernel::{TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus};
+use sigil_kernel::{
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+};
 use tokio::{
     fs::OpenOptions,
     io::AsyncWriteExt,
@@ -95,11 +98,23 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
         .await?;
 
     assert!(matches!(entry.status, TerminalTaskStatus::Running));
+    assert_eq!(
+        entry.handle.execution_backend,
+        Some(TerminalExecutionBackendKind::LocalProcess)
+    );
+    assert_eq!(
+        entry.handle.execution_backend_capabilities,
+        Some(TerminalExecutionBackendCapabilities::local_process())
+    );
     let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
     assert!(matches!(
         final_entry.status,
         TerminalTaskStatus::Exited { exit_code: Some(0) }
     ));
+    assert_eq!(
+        final_entry.handle.execution_backend,
+        Some(TerminalExecutionBackendKind::LocalProcess)
+    );
     assert_eq!(
         final_entry.handle.log_path,
         PathBuf::from("state/artifacts/tasks/terminal-1/output.log")
@@ -374,6 +389,14 @@ async fn terminal_process_manager_pty_records_context_and_env() -> Result<()> {
     let context = manager.permission_context(&task_id)?;
     assert_eq!(context.task_id, task_id);
     assert_eq!(context.command, "printf 'env:%s' \"$SIGIL_TEST_ENV\"");
+    assert_eq!(
+        entry.handle.execution_backend,
+        Some(TerminalExecutionBackendKind::LocalPty)
+    );
+    assert_eq!(
+        entry.handle.execution_backend_capabilities,
+        Some(TerminalExecutionBackendCapabilities::local_pty())
+    );
     let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
     assert!(matches!(
         final_entry.status,
@@ -886,6 +909,8 @@ fn test_entry(task_id: TerminalTaskId) -> TerminalTaskEntry {
             shell: "sh".to_owned(),
             log_path: PathBuf::from("state/artifacts/tasks/test/output.log"),
             created_at_ms: 1,
+            execution_backend: None,
+            execution_backend_capabilities: None,
         },
         status: TerminalTaskStatus::Running,
         output_preview: None,

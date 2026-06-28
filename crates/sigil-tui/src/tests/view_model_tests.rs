@@ -4,11 +4,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
-    ControlEntry, EventHandler, MemoryConfig, PermissionConfig, RootConfig, RunEvent,
-    SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec, TaskStepStatus,
-    ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolResult, ToolResultMeta,
-    ToolSpec, WorkspaceConfig,
+    ContextBodyRef, ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource,
+    ContextTrustLevel, ControlEntry, EventHandler, MemoryConfig, PackedContext, PermissionConfig,
+    RootConfig, RunEvent, SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskPlanEntry,
+    TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
+    TaskStepStatus, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolResult,
+    ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::*;
@@ -41,6 +42,27 @@ fn test_config() -> RootConfig {
         task: Default::default(),
         providers: BTreeMap::new(),
         mcp_servers: Vec::new(),
+    }
+}
+
+fn context_item(
+    id: &str,
+    source: ContextSource,
+    token_cost: usize,
+    inclusion_reason: ContextInclusionReason,
+) -> ContextItem {
+    ContextItem {
+        id: id.to_owned(),
+        source,
+        source_event_id: None,
+        trust_level: ContextTrustLevel::UntrustedRepositoryData,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: None,
+        token_cost,
+        score: None,
+        inclusion_reason,
+        body_ref: ContextBodyRef::inline("context"),
     }
 }
 
@@ -83,6 +105,234 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
             .controls
             .iter()
             .any(|line| line == "Ctrl-C: quit")
+    );
+}
+
+#[test]
+fn context_provenance_summary_reports_budget_sources_and_exclusions() {
+    let packed = PackedContext {
+        max_tokens: 20,
+        used_tokens: 13,
+        stable_prefix: vec![context_item(
+            "system",
+            ContextSource::SystemPrompt,
+            4,
+            ContextInclusionReason::StablePrompt,
+        )],
+        dynamic_suffix: vec![
+            context_item(
+                "symbol",
+                ContextSource::LspSymbol,
+                6,
+                ContextInclusionReason::RetrievalHit,
+            ),
+            context_item(
+                "archive",
+                ContextSource::SessionArchive,
+                3,
+                ContextInclusionReason::RetrievalHit,
+            ),
+        ],
+        excluded: vec![
+            context_item(
+                "secret",
+                ContextSource::RepositoryFile,
+                2,
+                ContextInclusionReason::ExcludedSecret,
+            ),
+            context_item(
+                "overflow",
+                ContextSource::SessionArchive,
+                8,
+                ContextInclusionReason::ExcludedTokenBudget,
+            ),
+        ],
+    };
+
+    let summary = ContextProvenanceSummaryViewModel::from_packed_context(&packed, 2);
+
+    assert_eq!(
+        summary.budget_line,
+        "context: 13 / 20 tokens · 3 included · 2 excluded"
+    );
+    assert_eq!(
+        summary.top_sources,
+        vec![
+            "symbol · 1 item(s) · 6 tokens".to_owned(),
+            "system · 1 item(s) · 4 tokens".to_owned()
+        ]
+    );
+    assert!(
+        summary
+            .excluded_summary
+            .contains(&"secret · 1 item(s)".to_owned())
+    );
+    assert!(
+        summary
+            .excluded_summary
+            .contains(&"token budget · 1 item(s)".to_owned())
+    );
+    assert_eq!(
+        summary.warning.as_deref(),
+        Some("secret-like context was blocked")
+    );
+    assert_eq!(summary.recommended_action.as_deref(), Some("review egress"));
+    let lines = summary.lines();
+    assert!(lines.iter().any(|line| line == "action: review egress"));
+}
+
+#[test]
+fn context_provenance_summary_keeps_one_recommended_action() {
+    let packed = PackedContext {
+        max_tokens: 5,
+        used_tokens: 0,
+        stable_prefix: Vec::new(),
+        dynamic_suffix: Vec::new(),
+        excluded: vec![
+            context_item(
+                "untrusted",
+                ContextSource::WorkspaceInstruction,
+                2,
+                ContextInclusionReason::ExcludedUntrustedWorkspace,
+            ),
+            context_item(
+                "overflow",
+                ContextSource::RepositoryFile,
+                3,
+                ContextInclusionReason::ExcludedTokenBudget,
+            ),
+        ],
+    };
+
+    let summary = ContextProvenanceSummaryViewModel::from_packed_context(&packed, 5);
+
+    assert_eq!(
+        summary.warning.as_deref(),
+        Some("untrusted workspace context was not promoted")
+    );
+    assert_eq!(summary.recommended_action.as_deref(), Some("review trust"));
+    assert_eq!(
+        summary
+            .lines()
+            .into_iter()
+            .filter(|line| line.starts_with("action:"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn context_provenance_summary_covers_remaining_source_and_exclusion_labels() {
+    let included_sources = [
+        ContextSource::UserMessage,
+        ContextSource::WorkspaceInstruction,
+        ContextSource::ToolObservation,
+        ContextSource::DurableEvent,
+        ContextSource::EvidenceReceipt,
+        ContextSource::MutationEvidence,
+        ContextSource::VerificationEvidence,
+        ContextSource::LspDiagnostic,
+        ContextSource::LspReference,
+        ContextSource::CurrentDiff,
+        ContextSource::TaskDigest,
+        ContextSource::ExtensionProvided,
+    ];
+    let packed = PackedContext {
+        max_tokens: 200,
+        used_tokens: included_sources.len(),
+        stable_prefix: Vec::new(),
+        dynamic_suffix: included_sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                context_item(
+                    &format!("source-{index}"),
+                    source.clone(),
+                    1,
+                    ContextInclusionReason::RetrievalHit,
+                )
+            })
+            .collect(),
+        excluded: vec![
+            context_item(
+                "egress-denied",
+                ContextSource::RepositoryFile,
+                1,
+                ContextInclusionReason::ExcludedEgressDenied,
+            ),
+            context_item(
+                "unsupported",
+                ContextSource::RepositoryFile,
+                1,
+                ContextInclusionReason::ExcludedUnsupported,
+            ),
+            context_item(
+                "other-exclusion",
+                ContextSource::RepositoryFile,
+                1,
+                ContextInclusionReason::StablePrompt,
+            ),
+        ],
+    };
+
+    let summary = ContextProvenanceSummaryViewModel::from_packed_context(&packed, 20);
+
+    for label in [
+        "user",
+        "workspace instruction",
+        "tool",
+        "event",
+        "evidence",
+        "mutation",
+        "verification",
+        "diagnostic",
+        "reference",
+        "diff",
+        "task digest",
+        "extension",
+    ] {
+        assert!(
+            summary
+                .top_sources
+                .iter()
+                .any(|source| source.starts_with(label)),
+            "missing context source label {label}"
+        );
+    }
+    for label in ["egress denied", "unsupported", "other"] {
+        assert!(
+            summary
+                .excluded_summary
+                .iter()
+                .any(|source| source.starts_with(label)),
+            "missing exclusion label {label}"
+        );
+    }
+    assert!(summary.warning.is_none());
+    assert!(summary.recommended_action.is_none());
+}
+
+#[test]
+fn context_provenance_summary_recommends_budget_adjustment_for_budget_only_exclusion() {
+    let packed = PackedContext {
+        max_tokens: 5,
+        used_tokens: 5,
+        stable_prefix: Vec::new(),
+        dynamic_suffix: Vec::new(),
+        excluded: vec![context_item(
+            "overflow",
+            ContextSource::SessionArchive,
+            8,
+            ContextInclusionReason::ExcludedTokenBudget,
+        )],
+    };
+
+    let summary = ContextProvenanceSummaryViewModel::from_packed_context(&packed, 5);
+
+    assert!(summary.warning.is_none());
+    assert_eq!(
+        summary.recommended_action.as_deref(),
+        Some("adjust context budget")
     );
 }
 

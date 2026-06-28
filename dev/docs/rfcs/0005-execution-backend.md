@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / slice 5 sandbox conformance tests implemented
+状态：draft / E05.3 persistent terminal metadata implemented
 
 创建日期：2026-06-28
 
@@ -22,6 +22,10 @@
 第三切片将 RFC-0003 verification check runner 接入同一个 `ExecutionBackend`。验证命令不再直接 spawn 本地进程；`/task` orchestrator 使用 runtime 配置的 backend，并在缺少 backend 时 fail closed。
 
 第四切片增加第一个 OS sandbox backend MVP：macOS `sandbox-exec` / Seatbelt 后端。它仅覆盖 non-interactive command execution，不覆盖 persistent terminal、MCP、插件或远端工具。
+
+后续切片增加 execution coverage labels，用于明确 shell、MCP、插件和远端能力分别由哪个边界控制。该模型只描述真实覆盖关系，不把 MCP、插件或远端服务宣传成本地 shell sandbox 保护。
+
+Persistent terminal 切片不把 PTY 伪装成 non-interactive bash。它先把 terminal task 的 backend kind/capability 写入 durable handle 和 tool metadata，让 projection、恢复和 UI 能区分 local process 与 local PTY 边界。
 
 ## 2. Goals
 
@@ -78,17 +82,31 @@ pub trait ExecutionBackend {
 - 已将 runtime 的 local tool registry 构建接入 `RootConfig.execution`。
 - 已将 verification check runner 迁移到 `ExecutionBackend::execute`，并新增毫秒级 timeout 支持，避免 RFC-0003 policy timeout 在 backend 边界丢精度。
 - 已将 `/task` orchestrator 接入 runtime 配置的 execution backend；自动或手动 `RunCheck` action 不再绕过 backend。
-- 已增加 fail-closed policy：当配置要求 sandbox 时，`LocalBackend` 会拒绝构建工具 registry，而不是静默继续裸跑。
+- 已增加 fail-closed policy：当配置要求 sandbox 或选择需要 sandbox 的 profile preset 时，`LocalBackend` 会拒绝构建工具 registry，而不是静默继续裸跑。
+- 已新增 coarse sandbox profile presets：`unconfined`、`workspace_write`、`build_offline`、`build_networked`。
+  - `workspace_write` 和 `build_*` 要求 filesystem + process isolation。
+  - `build_offline` 额外要求 network isolation。
+  - `build_*` 标记 dependency caches should be mounted read-only，具体 mount enforcement 留给 backend implementation。
+- 已新增 execution coverage labels：
+  - `shell` 工具标记为 `local_backend_enforced`，由配置的 local execution backend 控制。
+  - MCP 工具标记为 `external_mcp_server`，运行在 MCP server 自身边界中；local shell sandbox 不覆盖 MCP server。
+  - 插件声明的 agent、skill 和 hook 能力标记为 `plugin_managed`，由插件 trust 决策治理；local shell sandbox 不覆盖插件代码。
+  - 远端执行可标记为 `remote_service`，不受本地 shell sandbox 覆盖。
+  - file/search/agent 等 kernel-mediated 工具不会复用 shell sandbox 文案。
+- 已新增 persistent terminal execution metadata：
+  - `TerminalTaskHandle` 可记录 `execution_backend` 和 `execution_backend_capabilities`。
+  - local process terminal 标记为 `local_process`，支持 cancel/output log，不支持 persistent PTY input/resize。
+  - local PTY terminal 标记为 `local_pty`，支持 persistent PTY、input、resize、cancel 和 output log。
+  - terminal tool result details 会带出这些字段，`TerminalTaskEntry::from_tool_result_details` 可从 metadata 重建；旧日志缺字段时保持兼容。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
 - 已保留 `bash` 的 timeout、stdout/stderr metadata、exit-code error 和 scratch env 行为。
 
 ## 6. Productization Remains
 
-- 根据首个 sandbox backend 增加更细的 profile presets，例如 `workspace_write`、`build_offline`、`build_networked`。
 - 增加 Linux / Windows / container backend，并明确各平台 capability 差异。
-- 扩展 sandbox conformance tests 到 Linux / Windows / container backend 和后续 profile presets。
-- 迁移 persistent terminal 时必须单独处理 PTY、长进程、resize、kill 和恢复语义。
-- MCP、插件和远端工具必须明确标注是否受本地 backend 控制；不能复用 shell sandbox 文案。
+- 扩展 sandbox conformance tests 到 Linux / Windows / container backend 和后续 backend-specific profile enforcement。
+- 为 persistent terminal 接入真正 OS sandbox backend。当前已记录 local process / local PTY backend metadata，但仍不表示 PTY 进程已受 Seatbelt/Bubblewrap/container 强制隔离。
+- 将 execution coverage labels 接入更完整的 TUI/runtime detail views；当前已提供 kernel/plugin summary API 和测试覆盖。
 
 ## 7. Validation
 
@@ -106,6 +124,15 @@ cargo test -p sigil-kernel root_config_loads_macos_seatbelt_execution_backend
 cargo test -p sigil-tools-builtin macos_seatbelt
 cargo test -p sigil-runtime build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required
 cargo test -p sigil-tools-builtin sandbox_conformance
+cargo test -p sigil-kernel execution_config
+cargo test -p sigil-runtime build_tool_registry_fails_closed_when_profile_requires_sandbox
+cargo test -p sigil-kernel execution_coverage
+cargo test -p sigil-kernel plugin_capabilities_report_execution_coverage_boundaries
+cargo test -p sigil-runtime mcp
+cargo test -p sigil-tui config
+cargo test -p sigil-tools-builtin terminal_process
+cargo test -p sigil-kernel terminal
+cargo test -p sigil-tui terminal
 ```
 
-注意：`macos_seatbelt` 只证明 macOS non-interactive command backend 的最小 enforcement。完整跨平台 sandbox、profile presets、persistent terminal sandbox 和 MCP/plugin 进程隔离仍属于后续切片。
+注意：`macos_seatbelt` 只证明 macOS non-interactive command backend 的最小 enforcement。完整跨平台 sandbox、persistent terminal sandbox 和 MCP/plugin 进程隔离仍属于后续切片。E05.3 的 terminal metadata 只让 durable state 清楚记录 local process / local PTY 能力边界，不提供额外隔离。E05.4 的 coverage label 只说明哪些边界不受 local shell sandbox 覆盖，不提供额外隔离。

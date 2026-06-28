@@ -282,9 +282,10 @@ fn validate_execution_backend(
     config: &ExecutionConfig,
     backend: &dyn ExecutionBackend,
 ) -> Result<()> {
-    if config.isolation.requires_sandbox() && !backend.capabilities().supports_required_sandbox() {
+    if let Err(reason) = config.validate_profile_capabilities(backend.capabilities()) {
         bail!(
-            "execution sandbox required but {:?} backend does not provide filesystem and process isolation",
+            "execution sandbox profile {:?} cannot be satisfied by {:?} backend: {reason}",
+            config.profile,
             backend.kind()
         );
     }
@@ -2145,7 +2146,7 @@ fn terminal_entry_result(
 }
 
 fn terminal_entry_details(entry: &TerminalTaskEntry) -> Value {
-    json!({
+    let mut details = json!({
         "task_id": entry.handle.task_id.as_str(),
         "status": entry.status.as_str(),
         "status_detail": &entry.status,
@@ -2158,7 +2159,19 @@ fn terminal_entry_details(entry: &TerminalTaskEntry) -> Value {
         "output_preview": &entry.output_preview,
         "output_hash": &entry.output_hash,
         "output_truncated": entry.output_truncated
-    })
+    });
+    let details_object = details
+        .as_object_mut()
+        .expect("terminal task details should be a JSON object");
+    details_object.insert(
+        "execution_backend".to_owned(),
+        json!(entry.handle.execution_backend),
+    );
+    details_object.insert(
+        "execution_backend_capabilities".to_owned(),
+        json!(entry.handle.execution_backend_capabilities),
+    );
+    details
 }
 
 fn terminal_input_result(

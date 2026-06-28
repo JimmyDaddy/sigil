@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{McpServerConfig, McpServerStartup},
+    execution_backend::ExecutionCoverageSummary,
     permission::ApprovalMode,
     session::{ControlEntry, SessionLogEntry},
+    tool::ToolCategory,
 };
 
 /// Provider-neutral manifest for one local capability package.
@@ -197,6 +199,19 @@ pub enum PluginCapability {
 }
 
 impl PluginCapability {
+    /// Returns the execution-boundary summary for this plugin capability.
+    ///
+    /// This describes whether Sigil's local execution backend controls the capability execution.
+    /// It is intentionally separate from trust approval: a trusted MCP server or plugin hook may
+    /// still run outside the local shell sandbox boundary.
+    #[must_use]
+    pub fn execution_coverage_summary(&self) -> ExecutionCoverageSummary {
+        if matches!(self, Self::McpServer { .. }) {
+            return ExecutionCoverageSummary::for_tool_category(ToolCategory::Mcp);
+        }
+        ExecutionCoverageSummary::plugin_managed()
+    }
+
     /// Validates a capability summary before it is captured in the control log.
     ///
     /// # Errors

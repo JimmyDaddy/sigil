@@ -51,6 +51,62 @@ pub struct TerminalTaskHandle {
     pub shell: String,
     pub log_path: PathBuf,
     pub created_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<TerminalExecutionBackendKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_backend_capabilities: Option<TerminalExecutionBackendCapabilities>,
+}
+
+/// Terminal execution backend used for a persistent terminal task.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalExecutionBackendKind {
+    LocalProcess,
+    LocalPty,
+}
+
+impl TerminalExecutionBackendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalProcess => "local_process",
+            Self::LocalPty => "local_pty",
+        }
+    }
+}
+
+/// Capability summary for one terminal execution backend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct TerminalExecutionBackendCapabilities {
+    pub persistent_pty: bool,
+    pub input: bool,
+    pub resize: bool,
+    pub cancel: bool,
+    pub output_log: bool,
+}
+
+impl TerminalExecutionBackendCapabilities {
+    #[must_use]
+    pub fn local_process() -> Self {
+        Self {
+            persistent_pty: false,
+            input: false,
+            resize: false,
+            cancel: true,
+            output_log: true,
+        }
+    }
+
+    #[must_use]
+    pub fn local_pty() -> Self {
+        Self {
+            persistent_pty: true,
+            input: true,
+            resize: true,
+            cancel: true,
+            output_log: true,
+        }
+    }
 }
 
 /// Durable lifecycle status for one terminal task.
@@ -144,6 +200,19 @@ impl TerminalTaskEntry {
                 shell: required_string(details, "shell")?.to_owned(),
                 log_path,
                 created_at_ms: required_u64(details, "created_at_ms")?,
+                execution_backend: optional_value(details, "execution_backend")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|error| anyhow!("invalid terminal task execution_backend: {error}"))?,
+                execution_backend_capabilities: optional_value(
+                    details,
+                    "execution_backend_capabilities",
+                )
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| {
+                    anyhow!("invalid terminal task execution_backend_capabilities: {error}")
+                })?,
             },
             status,
             output_preview: optional_string(details, "output_preview").map(str::to_owned),
@@ -306,6 +375,10 @@ fn required_string<'a>(details: &'a Value, key: &str) -> Result<&'a str> {
 
 fn optional_string<'a>(details: &'a Value, key: &str) -> Option<&'a str> {
     details.get(key).and_then(Value::as_str)
+}
+
+fn optional_value<'a>(details: &'a Value, key: &str) -> Option<&'a Value> {
+    details.get(key)
 }
 
 fn required_u64(details: &Value, key: &str) -> Result<u64> {

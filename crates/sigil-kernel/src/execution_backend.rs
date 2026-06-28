@@ -4,6 +4,8 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
+use crate::tool::ToolCategory;
+
 /// Stable identifier for an execution backend implementation.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -11,6 +13,16 @@ pub enum ExecutionBackendKind {
     #[default]
     Local,
     MacosSeatbelt,
+}
+
+impl ExecutionBackendKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::MacosSeatbelt => "macos_seatbelt",
+        }
+    }
 }
 
 /// Capability summary for an execution backend.
@@ -45,6 +57,8 @@ pub struct ExecutionConfig {
     pub backend: ExecutionBackendKind,
     #[serde(default)]
     pub isolation: ExecutionIsolationPolicy,
+    #[serde(default)]
+    pub profile: ExecutionSandboxProfile,
 }
 
 /// Required isolation level for command execution.
@@ -62,6 +76,174 @@ impl ExecutionIsolationPolicy {
     #[must_use]
     pub fn requires_sandbox(self) -> bool {
         matches!(self, Self::RequireSandbox)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionSandboxProfile {
+    /// Preserve current execution behavior. This is not a sandbox profile.
+    #[default]
+    Unconfined,
+    /// Commands may write the workspace but should not mutate user state outside it.
+    WorkspaceWrite,
+    /// Build-like commands may read dependency caches but must not use the network.
+    BuildOffline,
+    /// Build-like commands may read dependency caches and use the network.
+    BuildNetworked,
+}
+
+impl ExecutionSandboxProfile {
+    #[must_use]
+    pub fn spec(self) -> ExecutionSandboxProfileSpec {
+        match self {
+            Self::Unconfined => ExecutionSandboxProfileSpec {
+                profile: self,
+                summary: "unconfined local execution",
+                requires_sandbox: false,
+                requires_network_isolation: false,
+                network_allowed: true,
+                dependency_caches_read_only: false,
+            },
+            Self::WorkspaceWrite => ExecutionSandboxProfileSpec {
+                profile: self,
+                summary: "workspace-write sandbox",
+                requires_sandbox: true,
+                requires_network_isolation: false,
+                network_allowed: false,
+                dependency_caches_read_only: false,
+            },
+            Self::BuildOffline => ExecutionSandboxProfileSpec {
+                profile: self,
+                summary: "offline build sandbox with read-only dependency caches",
+                requires_sandbox: true,
+                requires_network_isolation: true,
+                network_allowed: false,
+                dependency_caches_read_only: true,
+            },
+            Self::BuildNetworked => ExecutionSandboxProfileSpec {
+                profile: self,
+                summary: "networked build sandbox with read-only dependency caches",
+                requires_sandbox: true,
+                requires_network_isolation: false,
+                network_allowed: true,
+                dependency_caches_read_only: true,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionSandboxProfileSpec {
+    pub profile: ExecutionSandboxProfile,
+    pub summary: &'static str,
+    pub requires_sandbox: bool,
+    pub requires_network_isolation: bool,
+    pub network_allowed: bool,
+    pub dependency_caches_read_only: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCoverageLabel {
+    KernelMediated,
+    LocalBackendEnforced,
+    ExternalMcpServer,
+    PluginManaged,
+    RemoteService,
+    UnknownExternal,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionCoverageSummary {
+    pub label: ExecutionCoverageLabel,
+    pub local_backend_controls_execution: bool,
+    pub user_copy: &'static str,
+}
+
+impl ExecutionCoverageSummary {
+    #[must_use]
+    pub fn for_tool_category(category: ToolCategory) -> Self {
+        match category {
+            ToolCategory::Shell => Self {
+                label: ExecutionCoverageLabel::LocalBackendEnforced,
+                local_backend_controls_execution: true,
+                user_copy: "shell commands use the configured local execution backend",
+            },
+            ToolCategory::Mcp => Self {
+                label: ExecutionCoverageLabel::ExternalMcpServer,
+                local_backend_controls_execution: false,
+                user_copy: "MCP tools run in their server boundary; local shell sandbox does not cover them",
+            },
+            ToolCategory::Custom => Self {
+                label: ExecutionCoverageLabel::UnknownExternal,
+                local_backend_controls_execution: false,
+                user_copy: "custom tools must declare their own execution boundary",
+            },
+            ToolCategory::File | ToolCategory::Search | ToolCategory::Agent => Self {
+                label: ExecutionCoverageLabel::KernelMediated,
+                local_backend_controls_execution: false,
+                user_copy: "kernel-mediated tool; local shell sandbox is not the execution boundary",
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn plugin_managed() -> Self {
+        Self {
+            label: ExecutionCoverageLabel::PluginManaged,
+            local_backend_controls_execution: false,
+            user_copy: "plugin capability is governed by plugin trust; local shell sandbox does not cover plugin code",
+        }
+    }
+
+    #[must_use]
+    pub fn remote_service() -> Self {
+        Self {
+            label: ExecutionCoverageLabel::RemoteService,
+            local_backend_controls_execution: false,
+            user_copy: "remote execution is outside the local shell sandbox",
+        }
+    }
+}
+
+impl ExecutionConfig {
+    #[must_use]
+    pub fn profile_spec(&self) -> ExecutionSandboxProfileSpec {
+        self.profile.spec()
+    }
+
+    #[must_use]
+    pub fn requires_sandbox(&self) -> bool {
+        self.isolation.requires_sandbox() || self.profile_spec().requires_sandbox
+    }
+
+    pub fn validate_profile_capabilities(
+        &self,
+        capabilities: ExecutionBackendCapabilities,
+    ) -> std::result::Result<(), String> {
+        let spec = self.profile_spec();
+        if self.requires_sandbox() && !capabilities.supports_required_sandbox() {
+            if self.isolation.requires_sandbox() && !spec.requires_sandbox {
+                return Err(
+                    "execution isolation require_sandbox requires filesystem and process isolation"
+                        .to_owned(),
+                );
+            }
+            return Err(format!(
+                "execution profile {:?} requires filesystem and process isolation",
+                self.profile
+            ));
+        }
+        if spec.requires_network_isolation && !capabilities.network_isolation {
+            return Err(format!(
+                "execution profile {:?} requires network isolation",
+                self.profile
+            ));
+        }
+        Ok(())
     }
 }
 

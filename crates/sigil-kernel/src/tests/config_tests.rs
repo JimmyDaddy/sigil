@@ -8,8 +8,9 @@ use super::{
     resolve_workspace_root, user_home_dir_from_env,
 };
 use crate::{
-    AgentConfig, AgentRole, ApprovalMode, ExecutionBackendKind, ExecutionIsolationPolicy,
-    SkillConfig, StorageConfig, StorageRoot, TaskConfig, TaskMode, WorkspaceConfig,
+    AgentConfig, AgentRole, ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind,
+    ExecutionIsolationPolicy, ExecutionSandboxProfile, SkillConfig, StorageConfig, StorageRoot,
+    TaskConfig, TaskMode, WorkspaceConfig,
 };
 
 #[test]
@@ -949,6 +950,10 @@ model = "deepseek-v4-flash"
         config.execution.isolation,
         ExecutionIsolationPolicy::AllowLocal
     );
+    assert_eq!(
+        config.execution.profile,
+        ExecutionSandboxProfile::Unconfined
+    );
 }
 
 #[test]
@@ -962,6 +967,7 @@ model = "deepseek-v4-flash"
 [execution]
 backend = "local"
 isolation = "require_sandbox"
+profile = "build_offline"
 "#,
     )
     .expect("execution config should parse");
@@ -970,6 +976,10 @@ isolation = "require_sandbox"
     assert_eq!(
         config.execution.isolation,
         ExecutionIsolationPolicy::RequireSandbox
+    );
+    assert_eq!(
+        config.execution.profile,
+        ExecutionSandboxProfile::BuildOffline
     );
 }
 
@@ -996,6 +1006,60 @@ isolation = "require_sandbox"
         config.execution.isolation,
         ExecutionIsolationPolicy::RequireSandbox
     );
+}
+
+#[test]
+fn execution_config_profiles_validate_backend_capabilities() {
+    let local_capabilities = ExecutionBackendCapabilities::default();
+    let sandbox_capabilities = ExecutionBackendCapabilities {
+        filesystem_isolation: true,
+        process_isolation: true,
+        ..ExecutionBackendCapabilities::default()
+    };
+    let offline_capabilities = ExecutionBackendCapabilities {
+        filesystem_isolation: true,
+        process_isolation: true,
+        network_isolation: true,
+        ..ExecutionBackendCapabilities::default()
+    };
+
+    let workspace_write = crate::ExecutionConfig {
+        profile: ExecutionSandboxProfile::WorkspaceWrite,
+        ..crate::ExecutionConfig::default()
+    };
+    assert!(
+        workspace_write
+            .validate_profile_capabilities(local_capabilities)
+            .expect_err("workspace_write requires sandbox")
+            .contains("filesystem and process isolation")
+    );
+    workspace_write
+        .validate_profile_capabilities(sandbox_capabilities)
+        .expect("workspace_write accepts basic sandbox capabilities");
+
+    let build_offline = crate::ExecutionConfig {
+        profile: ExecutionSandboxProfile::BuildOffline,
+        ..crate::ExecutionConfig::default()
+    };
+    assert!(
+        build_offline
+            .validate_profile_capabilities(sandbox_capabilities)
+            .expect_err("build_offline requires network isolation")
+            .contains("network isolation")
+    );
+    build_offline
+        .validate_profile_capabilities(offline_capabilities)
+        .expect("build_offline accepts network-isolating sandbox");
+
+    let build_networked = crate::ExecutionConfig {
+        profile: ExecutionSandboxProfile::BuildNetworked,
+        ..crate::ExecutionConfig::default()
+    };
+    assert!(build_networked.profile_spec().network_allowed);
+    assert!(build_networked.profile_spec().dependency_caches_read_only);
+    build_networked
+        .validate_profile_capabilities(sandbox_capabilities)
+        .expect("build_networked does not require network isolation");
 }
 
 #[test]

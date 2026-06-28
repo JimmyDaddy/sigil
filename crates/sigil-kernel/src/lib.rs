@@ -66,8 +66,11 @@ pub use config::{
 pub use context_engine::{
     ContextBodyRef, ContextDigestText, ContextDigestTextKind, ContextDigestV0,
     ContextDigestV0Builder, ContextEgressDecisionId, ContextInclusionReason, ContextItem,
-    ContextItemId, ContextRepoRevision, ContextSensitivity, ContextSource, ContextTrustLevel,
-    estimate_context_token_cost,
+    ContextItemId, ContextPackOptions, ContextPackPlacement, ContextRepoRevision,
+    ContextSensitivity, ContextSource, ContextTruncation, ContextTrustLevel,
+    DEFAULT_SESSION_ARCHIVE_MAX_INDEX_BYTES, PackedContext, SessionArchive, SessionArchiveEntry,
+    SessionArchiveEntryId, SessionArchiveSearchHit, estimate_context_token_cost,
+    pack_context_items,
 };
 pub use conversation_queue::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
@@ -78,9 +81,10 @@ pub use conversation_queue::{
 pub use eval::{
     EvalCase, EvalCaseId, EvalCaseRunner, EvalCaseRunnerOptions, EvalEvidenceId, EvalEvidenceKind,
     EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalFakeToolAction, EvalFakeToolRegistry,
-    EvalFixtureId, EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRequiredAction,
+    EvalFixtureId, EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRepoCheckPromotion,
+    EvalReportArtifact, EvalReportArtifacts, EvalReportRecord, EvalRequiredAction,
     EvalRequiredActionKind, EvalResult, EvalRunId, EvalRunMetadata, EvalStepId, EvalToolCallId,
-    EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture,
+    EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture, write_eval_report_artifacts,
 };
 pub use event::{
     ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent, DurableEventType,
@@ -95,7 +99,8 @@ pub use event::{
 };
 pub use execution_backend::{
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig,
-    ExecutionFuture, ExecutionIsolationPolicy, ExecutionReceipt, ExecutionRequest,
+    ExecutionCoverageLabel, ExecutionCoverageSummary, ExecutionFuture, ExecutionIsolationPolicy,
+    ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile, ExecutionSandboxProfileSpec,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
@@ -130,7 +135,11 @@ pub use plugin::{
     validate_plugin_id,
 };
 pub use projection::{
-    FILE_PROJECTION_STORE_SCHEMA_VERSION, FileProjectionStore, ProjectionStoreState,
+    FILE_PROJECTION_STORE_SCHEMA_VERSION, FileProjectionStore, ProjectionRebuildOutput,
+    ProjectionRebuildReport, ProjectionStore, ProjectionStoreState,
+    SESSION_LIST_PROJECTION_SCHEMA_VERSION, SessionListProjectionEntry,
+    SessionListProjectionSnapshot, SessionListReadinessSummary, SessionListTaskSummary,
+    SessionListUsageSummary, session_list_projection_from_records,
 };
 pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
@@ -166,8 +175,9 @@ pub use task_orchestrator::{
     TaskChildSessionRunRequest, TaskChildSessionRunner,
 };
 pub use terminal_task::{
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection,
-    TerminalTaskStatus, TerminalTaskSummary,
+    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus,
+    TerminalTaskSummary,
 };
 pub use time::saturating_elapsed;
 pub use tool::{

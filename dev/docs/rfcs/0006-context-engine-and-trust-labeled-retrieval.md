@@ -98,7 +98,10 @@ Implementation progress:
 - 已验证 trusted workspace instruction 必须匹配 workspace trust label；未信任仓库内容不能伪装成 instruction。
 - 已验证 included secret context 必须携带 egress decision。
 - 已验证 digest 中的 `VerificationVerdict::Passed` 必须引用已有 receipt，不能由 digest 自己创造 evidence。
-- 尚未实现 session archive、BM25/repo retrieval、LSP source provider、token budget packer 或 TUI provenance summary。
+- 已新增 session-local archive + BM25 retrieval，返回 trust/sensitivity-labeled hits、snippet、score、token cost 和 truncation metadata；secret archive hits without egress are represented as excluded context.
+- 已新增 code-intel context adapter，将 symbols、diagnostics、references、repo file hits 和 current diff 转为 provenance-labeled context hits；secret hits without egress are represented as excluded context.
+- 已新增 deterministic token budget packer，输出 stable prefix、dynamic suffix 和 excluded context，保持 provider prefix cache 友好并记录 budget/secret exclusion reason。
+- 已新增 TUI provenance summary view model，展示 context budget、top included sources、excluded reason summary、untrusted/secret warning 和一个 recommended action。
 
 ## 6. ContextDigestV0
 

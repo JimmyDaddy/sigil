@@ -5,12 +5,13 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::{
-    ApprovalMode, DurableEventType, JsonlSessionStore, MessageRole, MutationEventRecorder,
-    SessionStreamRecord, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget,
-    ToolDiffStats, ToolEgressAudit, ToolErrorKind, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolPreviewSnapshot, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope, VerificationScope,
-    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationScan, provider::ToolCall,
+    ApprovalMode, DurableEventType, ExecutionCoverageLabel, ExecutionCoverageSummary,
+    JsonlSessionStore, MessageRole, MutationEventRecorder, SessionStreamRecord, Tool, ToolAccess,
+    ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolErrorKind,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope,
+    VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationScan,
+    provider::ToolCall,
 };
 
 #[test]
@@ -947,6 +948,34 @@ fn tool_labels_are_stable() {
     assert_eq!(ToolErrorKind::Protocol.as_str(), "protocol");
     assert_eq!(ToolErrorKind::Unsupported.as_str(), "unsupported");
     assert_eq!(ToolErrorKind::Internal.as_str(), "internal");
+}
+
+#[test]
+fn execution_coverage_labels_do_not_overstate_shell_sandbox() {
+    let shell = ExecutionCoverageSummary::for_tool_category(ToolCategory::Shell);
+    assert_eq!(shell.label, ExecutionCoverageLabel::LocalBackendEnforced);
+    assert!(shell.local_backend_controls_execution);
+    assert!(shell.user_copy.contains("local execution backend"));
+
+    let mcp = ExecutionCoverageSummary::for_tool_category(ToolCategory::Mcp);
+    assert_eq!(mcp.label, ExecutionCoverageLabel::ExternalMcpServer);
+    assert!(!mcp.local_backend_controls_execution);
+    assert!(mcp.user_copy.contains("server boundary"));
+    assert!(mcp.user_copy.contains("does not cover"));
+
+    let custom = ExecutionCoverageSummary::for_tool_category(ToolCategory::Custom);
+    assert_eq!(custom.label, ExecutionCoverageLabel::UnknownExternal);
+    assert!(!custom.local_backend_controls_execution);
+    assert!(
+        custom
+            .user_copy
+            .contains("declare their own execution boundary")
+    );
+
+    let file = ExecutionCoverageSummary::for_tool_category(ToolCategory::File);
+    assert_eq!(file.label, ExecutionCoverageLabel::KernelMediated);
+    assert!(!file.local_backend_controls_execution);
+    assert!(file.user_copy.contains("kernel-mediated"));
 }
 
 #[test]

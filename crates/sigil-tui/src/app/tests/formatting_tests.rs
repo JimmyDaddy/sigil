@@ -297,6 +297,8 @@ fn format_terminal_entry(
                 .join(task_id)
                 .join("output.log"),
             created_at_ms: 10,
+            execution_backend: None,
+            execution_backend_capabilities: None,
         },
         status,
         output_preview: Some("line 1\nline 2".to_owned()),

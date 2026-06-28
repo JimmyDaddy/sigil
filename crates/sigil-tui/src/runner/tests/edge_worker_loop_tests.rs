@@ -1152,6 +1152,8 @@ fn edge_terminal_entry(task_id: &str, status: TerminalTaskStatus) -> Result<Term
                 .join(task_id)
                 .join("output.log"),
             created_at_ms: 10,
+            execution_backend: None,
+            execution_backend_capabilities: None,
         },
         status,
         output_preview: Some("old preview".to_owned()),

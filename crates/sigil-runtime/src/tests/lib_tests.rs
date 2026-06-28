@@ -12,13 +12,13 @@ use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ControlEntry,
-    ExecutionBackendKind, ExecutionIsolationPolicy, InteractionMode, JsonlSessionStore,
-    LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig,
-    ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig,
-    Session, SessionConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
-    SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, WorkspaceConfig,
+    ExecutionBackendKind, ExecutionIsolationPolicy, ExecutionSandboxProfile, InteractionMode,
+    JsonlSessionStore, LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig,
+    PermissionConfig, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport,
+    RoleModelConfig, RootConfig, Session, SessionConfig, SessionLogEntry, SkillDescriptor,
+    SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig,
+    ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
+    ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
@@ -898,9 +898,30 @@ async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<(
     };
 
     assert!(
+        error.to_string().contains(
+            "execution isolation require_sandbox requires filesystem and process isolation"
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_tool_registry_fails_closed_when_profile_requires_sandbox() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.execution.backend = ExecutionBackendKind::Local;
+    config.execution.profile = ExecutionSandboxProfile::WorkspaceWrite;
+
+    let result =
+        build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await;
+    let Err(error) = result else {
+        panic!("local backend must not satisfy sandbox profile");
+    };
+
+    assert!(
         error
             .to_string()
-            .contains("execution sandbox required but Local backend")
+            .contains("execution profile WorkspaceWrite requires filesystem and process isolation")
     );
     Ok(())
 }

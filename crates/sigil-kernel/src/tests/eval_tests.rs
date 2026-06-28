@@ -4,12 +4,14 @@ use serde_json::json;
 use crate::{
     DurableEventType, EvalCase, EvalCaseRunner, EvalCaseRunnerOptions, EvalEvidenceKind,
     EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalFakeToolAction, EvalFakeToolRegistry,
-    EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRequiredActionKind, EvalResult,
-    EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture, EventClass,
-    JsonlSessionStore, MutationEventRecorder, MutationObservedState, MutationReconciled,
-    MutationResolution, PermissionConfig, PermissionPolicy, PermissionPreset, ProjectionCursor,
-    RunStatus, SessionStreamRecord, StoredEvent, ToolAccess, ToolCategory, ToolPreviewCapability,
-    ToolSpec, ToolSubject, VerificationVerdict, VisibleCompletionState, bytes_hash,
+    EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRepoCheckPromotion,
+    EvalRequiredActionKind, EvalResult, EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary,
+    EvalWorkspaceFixture, EventClass, JsonlSessionStore, MutationEventRecorder,
+    MutationObservedState, MutationReconciled, MutationResolution, PermissionConfig,
+    PermissionPolicy, PermissionPreset, ProjectionCursor, RunStatus, SessionStreamRecord,
+    StoredEvent, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject,
+    VerificationVerdict, VisibleCompletionState, WorkspaceTrust, bytes_hash,
+    write_eval_report_artifacts,
 };
 
 #[test]
@@ -612,6 +614,638 @@ fn eval_stale_after_later_write_points_to_invalidating_mutation() {
             .count(),
         2
     );
+}
+
+#[test]
+fn eval_mutating_check_cannot_produce_final_passed_evidence() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace_root = temp.path().join("workspace");
+    let case = EvalCase::deterministic(
+        "case-mutating-check",
+        "write note and run a check that unexpectedly mutates it",
+        EvalWorkspaceFixture::new("fixture-mutating-check").with_file("note.txt", "old"),
+        EvalProviderScript::new(vec![
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-write".to_owned(),
+                tool_name: "write_note".to_owned(),
+                args_json: "{\"path\":\"note.txt\"}".to_owned(),
+            },
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-mutating-check".to_owned(),
+                tool_name: "fmt_check".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::FinalAnswer {
+                text: "check completed".to_owned(),
+            },
+        ]),
+    );
+    let runner = EvalCaseRunner::new(
+        EvalFakeToolRegistry::new()
+            .with_tool(
+                "write_note",
+                EvalFakeToolAction::ControlledWriteSuccess {
+                    path: "note.txt".into(),
+                    content: "new".to_owned(),
+                },
+            )
+            .with_tool(
+                "fmt_check",
+                EvalFakeToolAction::CheckMutatingSuccess {
+                    check_id: "fmt-check".to_owned(),
+                    path: "note.txt".into(),
+                    content: "new\n".to_owned(),
+                },
+            ),
+    )
+    .with_options(EvalCaseRunnerOptions::with_workspace_root(
+        workspace_root.clone(),
+    ));
+
+    let result = runner.run(case).expect("mutating check eval run");
+
+    assert_eq!(result.run_status, RunStatus::Completed);
+    assert_eq!(
+        result.verification_verdict,
+        VerificationVerdict::Inconclusive
+    );
+    assert_eq!(
+        result.visible_state,
+        VisibleCompletionState::CompletedUnverified
+    );
+    assert_eq!(result.outcome, EvalOutcomeKind::CompletedUnverified);
+    assert_eq!(
+        result.required_actions[0].kind,
+        EvalRequiredActionKind::RunCheck
+    );
+    assert!(result.failures.iter().any(|failure| {
+        failure.kind == EvalFailureKind::VerificationInconclusive
+            && failure
+                .evidence
+                .iter()
+                .any(|evidence| evidence.id == "mutating_check")
+    }));
+    assert_eq!(
+        result.changed_files,
+        vec![
+            std::path::PathBuf::from("note.txt"),
+            std::path::PathBuf::from("note.txt")
+        ]
+    );
+    let session_log_path = result.session_log_path.as_ref().expect("session log path");
+    let session_log = std::fs::read_to_string(session_log_path).expect("session log readable");
+    assert!(session_log.contains("\"label\":\"mutating_check\""));
+    assert!(session_log.contains("\"check_id\":\"fmt-check\""));
+    assert!(session_log.contains("\"mutated_file\":\"note.txt\""));
+}
+
+#[test]
+fn eval_non_writing_check_after_mutating_check_can_pass() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace_root = temp.path().join("workspace");
+    let case = EvalCase::deterministic(
+        "case-mutating-check-rerun",
+        "rerun a non-writing check after formatter mutation",
+        EvalWorkspaceFixture::new("fixture-mutating-check-rerun").with_file("note.txt", "old"),
+        EvalProviderScript::new(vec![
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-write".to_owned(),
+                tool_name: "write_note".to_owned(),
+                args_json: "{\"path\":\"note.txt\"}".to_owned(),
+            },
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-mutating-check".to_owned(),
+                tool_name: "fmt_check".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-read-only-check".to_owned(),
+                tool_name: "test_note".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::FinalAnswer {
+                text: "verified after rerun".to_owned(),
+            },
+        ]),
+    );
+    let runner = EvalCaseRunner::new(
+        EvalFakeToolRegistry::new()
+            .with_tool(
+                "write_note",
+                EvalFakeToolAction::ControlledWriteSuccess {
+                    path: "note.txt".into(),
+                    content: "new".to_owned(),
+                },
+            )
+            .with_tool(
+                "fmt_check",
+                EvalFakeToolAction::CheckMutatingSuccess {
+                    check_id: "fmt-check".to_owned(),
+                    path: "note.txt".into(),
+                    content: "new\n".to_owned(),
+                },
+            )
+            .with_tool(
+                "test_note",
+                EvalFakeToolAction::CheckSuccess {
+                    check_id: "note-test".to_owned(),
+                },
+            ),
+    )
+    .with_options(EvalCaseRunnerOptions::with_workspace_root(
+        workspace_root.clone(),
+    ));
+
+    let result = runner.run(case).expect("mutating check rerun eval");
+
+    assert_eq!(result.run_status, RunStatus::Completed);
+    assert_eq!(result.verification_verdict, VerificationVerdict::Passed);
+    assert_eq!(result.visible_state, VisibleCompletionState::Verified);
+    assert_eq!(result.outcome, EvalOutcomeKind::VerifiedSuccess);
+    assert!(result.required_actions.is_empty());
+    assert!(
+        result
+            .evidence
+            .iter()
+            .any(|evidence| evidence.id == "mutating_check")
+    );
+    let session_log_path = result.session_log_path.as_ref().expect("session log path");
+    let session_log = std::fs::read_to_string(session_log_path).expect("session log readable");
+    assert!(session_log.contains("\"label\":\"mutating_check\""));
+    assert!(session_log.contains("\"check_id\":\"note-test\""));
+    assert!(session_log.contains("\"workspace_snapshot_id\":\"snapshot-2\""));
+}
+
+#[test]
+fn eval_workspace_trust_untrusted_repo_check_is_discovered_not_executed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace_root = temp.path().join("workspace");
+    let case = EvalCase::deterministic(
+        "case-workspace-trust-discovery",
+        "discover repo-local checks without executing them",
+        EvalWorkspaceFixture::new("fixture-workspace-trust-discovery")
+            .with_file("AGENTS.md", "run cargo test")
+            .with_file(".sigil/verification.toml", "[[verification.checks]]"),
+        EvalProviderScript::new(vec![
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-discover".to_owned(),
+                tool_name: "discover_repo_check".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::FinalAnswer {
+                text: "candidate discovered".to_owned(),
+            },
+        ]),
+    )
+    .with_workspace_trust(WorkspaceTrust::Unknown);
+    let runner = EvalCaseRunner::new(EvalFakeToolRegistry::new().with_tool(
+        "discover_repo_check",
+        EvalFakeToolAction::DiscoverRepoCheckCandidate {
+            check_id: "cargo-test-ci".to_owned(),
+            source_path: ".sigil/verification.toml".into(),
+            instruction_path: Some("AGENTS.md".into()),
+        },
+    ))
+    .with_options(EvalCaseRunnerOptions::with_workspace_root(
+        workspace_root.clone(),
+    ));
+
+    let result = runner.run(case).expect("workspace trust discovery eval");
+
+    assert_eq!(result.run_status, RunStatus::Completed);
+    assert_eq!(
+        result.verification_verdict,
+        VerificationVerdict::NotApplicable
+    );
+    assert_eq!(result.visible_state, VisibleCompletionState::Completed);
+    assert_eq!(result.outcome, EvalOutcomeKind::Completed);
+    assert!(result.required_actions.is_empty());
+    assert!(result.failures.is_empty());
+    assert_eq!(result.tool_calls[0].status, EvalToolCallStatus::Succeeded);
+    let session_log_path = result.session_log_path.as_ref().expect("session log path");
+    let session_log = std::fs::read_to_string(session_log_path).expect("session log readable");
+    assert!(session_log.contains("\"label\":\"repo_check_candidate_discovered\""));
+    assert!(session_log.contains("\"check_id\":\"cargo-test-ci\""));
+    assert!(session_log.contains("\"source_path\":\".sigil/verification.toml\""));
+    assert!(session_log.contains("\"instruction_path\":\"AGENTS.md\""));
+    assert!(session_log.contains("\"instruction_trust\":\"untrusted_repository_data\""));
+    assert!(!session_log.contains("\"label\":\"repo_check_executed\""));
+}
+
+#[test]
+fn eval_workspace_trust_blocks_unpromoted_repo_check_execution() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace_root = temp.path().join("workspace");
+    let case = EvalCase::deterministic(
+        "case-workspace-trust-block",
+        "block an untrusted repo-local check without approval",
+        EvalWorkspaceFixture::new("fixture-workspace-trust-block")
+            .with_file(".github/workflows/ci.yml", "cargo test"),
+        EvalProviderScript::new(vec![
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-discover".to_owned(),
+                tool_name: "discover_repo_check".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-run-check".to_owned(),
+                tool_name: "repo_check".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::FinalAnswer {
+                text: "should not be reached".to_owned(),
+            },
+        ]),
+    )
+    .with_workspace_trust(WorkspaceTrust::Unknown);
+    let runner = EvalCaseRunner::new(
+        EvalFakeToolRegistry::new()
+            .with_tool(
+                "discover_repo_check",
+                EvalFakeToolAction::DiscoverRepoCheckCandidate {
+                    check_id: "cargo-test-ci".to_owned(),
+                    source_path: ".github/workflows/ci.yml".into(),
+                    instruction_path: None,
+                },
+            )
+            .with_tool(
+                "repo_check",
+                EvalFakeToolAction::RepoCheckSuccess {
+                    check_id: "cargo-test-ci".to_owned(),
+                },
+            ),
+    )
+    .with_options(EvalCaseRunnerOptions::with_workspace_root(
+        workspace_root.clone(),
+    ));
+
+    let result = runner.run(case).expect("workspace trust blocked eval");
+
+    assert_eq!(result.run_status, RunStatus::Blocked);
+    assert_eq!(
+        result.verification_verdict,
+        VerificationVerdict::NotApplicable
+    );
+    assert_eq!(result.visible_state, VisibleCompletionState::NeedsUser);
+    assert_eq!(result.outcome, EvalOutcomeKind::PermissionDenied);
+    assert_eq!(
+        result.required_actions[0].kind,
+        EvalRequiredActionKind::ApproveWorkspace
+    );
+    assert!(result.failures.iter().any(|failure| {
+        failure.kind == EvalFailureKind::PermissionDenied
+            && failure.message.contains("requires explicit approval")
+    }));
+    assert!(result.tool_calls.iter().any(|tool_call| {
+        tool_call.tool_name == "repo_check" && tool_call.status == EvalToolCallStatus::Denied
+    }));
+    let session_log_path = result.session_log_path.as_ref().expect("session log path");
+    let session_log = std::fs::read_to_string(session_log_path).expect("session log readable");
+    assert!(session_log.contains("\"label\":\"repo_check_execution_blocked\""));
+    assert!(session_log.contains("\"reason\":\"missing_approval_or_sandbox_promotion\""));
+    assert!(!session_log.contains("\"label\":\"repo_check_executed\""));
+}
+
+#[test]
+fn eval_workspace_trust_promoted_repo_check_can_execute() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace_root = temp.path().join("workspace");
+    let case = EvalCase::deterministic(
+        "case-workspace-trust-promoted",
+        "run a repo-local check only after explicit approval",
+        EvalWorkspaceFixture::new("fixture-workspace-trust-promoted")
+            .with_file(".sigil/verification.toml", "[[verification.checks]]"),
+        EvalProviderScript::new(vec![
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-discover".to_owned(),
+                tool_name: "discover_repo_check".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-promote".to_owned(),
+                tool_name: "approve_repo_check".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::ToolCall {
+                tool_call_id: "call-run-check".to_owned(),
+                tool_name: "repo_check".to_owned(),
+                args_json: "{}".to_owned(),
+            },
+            EvalProviderStep::FinalAnswer {
+                text: "verified".to_owned(),
+            },
+        ]),
+    )
+    .with_workspace_trust(WorkspaceTrust::Unknown);
+    let runner = EvalCaseRunner::new(
+        EvalFakeToolRegistry::new()
+            .with_tool(
+                "discover_repo_check",
+                EvalFakeToolAction::DiscoverRepoCheckCandidate {
+                    check_id: "cargo-test-ci".to_owned(),
+                    source_path: ".sigil/verification.toml".into(),
+                    instruction_path: None,
+                },
+            )
+            .with_tool(
+                "approve_repo_check",
+                EvalFakeToolAction::PromoteRepoCheck {
+                    check_id: "cargo-test-ci".to_owned(),
+                    promotion: EvalRepoCheckPromotion::UserApproved {
+                        approval_event_id: "approval-event-1".to_owned(),
+                    },
+                },
+            )
+            .with_tool(
+                "repo_check",
+                EvalFakeToolAction::RepoCheckSuccess {
+                    check_id: "cargo-test-ci".to_owned(),
+                },
+            ),
+    )
+    .with_options(EvalCaseRunnerOptions::with_workspace_root(
+        workspace_root.clone(),
+    ));
+
+    let result = runner.run(case).expect("workspace trust promoted eval");
+
+    assert_eq!(result.run_status, RunStatus::Completed);
+    assert_eq!(result.verification_verdict, VerificationVerdict::Passed);
+    assert_eq!(result.visible_state, VisibleCompletionState::Verified);
+    assert_eq!(result.outcome, EvalOutcomeKind::VerifiedSuccess);
+    assert!(result.required_actions.is_empty());
+    assert!(result.failures.is_empty());
+    let session_log_path = result.session_log_path.as_ref().expect("session log path");
+    let session_log = std::fs::read_to_string(session_log_path).expect("session log readable");
+    assert!(session_log.contains("\"label\":\"repo_check_promoted\""));
+    assert!(session_log.contains("\"promotion_id\":\"user_approved\""));
+    assert!(session_log.contains("\"approval_event_id\":\"approval-event-1\""));
+    assert!(session_log.contains("\"label\":\"repo_check_executed\""));
+}
+
+#[test]
+fn eval_report_writes_deterministic_artifacts() -> Result<()> {
+    let default_temp = tempfile::tempdir()?;
+    let output_dir = std::env::var_os("SIGIL_DETERMINISTIC_EVAL_REPORT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| default_temp.path().join("eval-report"));
+    let workspace_root = output_dir.join("workspaces");
+    let results = deterministic_report_results(&workspace_root)?;
+
+    let artifacts = write_eval_report_artifacts(&output_dir, &results)?;
+
+    assert!(artifacts.results_jsonl_path.exists());
+    assert!(artifacts.summary_path.exists());
+    assert!(artifacts.artifact_dir.exists());
+    let jsonl = std::fs::read_to_string(&artifacts.results_jsonl_path)?;
+    assert_eq!(jsonl.lines().count(), results.len());
+    assert!(jsonl.contains("\"provider\":\"fake\""));
+    assert!(jsonl.contains("\"model\":\"deterministic\""));
+    assert!(jsonl.contains("\"config_hash\":\"sha256:deterministic\""));
+    assert!(jsonl.contains("\"tool_schema_digest\":\"sha256:deterministic\""));
+    assert!(jsonl.contains("\"outcome\":\"verified_success\""));
+    assert!(jsonl.contains("\"outcome\":\"completed_unverified\""));
+    assert!(jsonl.contains("\"outcome\":\"failed_verification\""));
+    assert!(jsonl.contains("\"outcome\":\"permission_denied\""));
+    assert!(jsonl.contains("\"verification_verdict\":\"stale\""));
+    assert!(jsonl.contains("\"failure_artifacts\""));
+
+    let retained_artifacts = std::fs::read_dir(&artifacts.artifact_dir)?.count();
+    assert!(retained_artifacts >= 4);
+    let summary = std::fs::read_to_string(&artifacts.summary_path)?;
+    assert!(summary.contains("# Sigil Deterministic Eval Report"));
+    assert!(summary.contains("Total cases: 6"));
+    assert!(summary.contains("VerifiedSuccess"));
+    assert!(summary.contains("CompletedUnverified"));
+    assert!(summary.contains("FailedVerification"));
+    assert!(summary.contains("PermissionDenied"));
+    assert!(summary.contains("Stale"));
+
+    Ok(())
+}
+
+fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<EvalResult>> {
+    Ok(vec![
+        run_report_case(
+            workspace_root,
+            EvalCase::deterministic(
+                "report-read-only",
+                "read-only task",
+                EvalWorkspaceFixture::new("fixture-report-read-only")
+                    .with_file("README.md", "Sigil"),
+                EvalProviderScript::new(vec![
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-read".to_owned(),
+                        tool_name: "read_repo".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::FinalAnswer {
+                        text: "read only".to_owned(),
+                    },
+                ]),
+            ),
+            EvalFakeToolRegistry::new().with_tool(
+                "read_repo",
+                EvalFakeToolAction::ReadOnlySuccess {
+                    output: "ok".to_owned(),
+                },
+            ),
+        )?,
+        run_report_case(
+            workspace_root,
+            EvalCase::deterministic(
+                "report-verified",
+                "write then verify",
+                EvalWorkspaceFixture::new("fixture-report-verified").with_file("note.txt", "old"),
+                EvalProviderScript::new(vec![
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-write".to_owned(),
+                        tool_name: "write_note".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-check".to_owned(),
+                        tool_name: "check_note".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::FinalAnswer {
+                        text: "verified".to_owned(),
+                    },
+                ]),
+            ),
+            EvalFakeToolRegistry::new()
+                .with_tool(
+                    "write_note",
+                    EvalFakeToolAction::ControlledWriteSuccess {
+                        path: "note.txt".into(),
+                        content: "new".to_owned(),
+                    },
+                )
+                .with_tool(
+                    "check_note",
+                    EvalFakeToolAction::CheckSuccess {
+                        check_id: "note-check".to_owned(),
+                    },
+                ),
+        )?,
+        run_report_case(
+            workspace_root,
+            EvalCase::deterministic(
+                "report-missing",
+                "write without verification",
+                EvalWorkspaceFixture::new("fixture-report-missing").with_file("note.txt", "old"),
+                EvalProviderScript::new(vec![
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-write".to_owned(),
+                        tool_name: "write_note".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::FinalAnswer {
+                        text: "done".to_owned(),
+                    },
+                ]),
+            ),
+            EvalFakeToolRegistry::new().with_tool(
+                "write_note",
+                EvalFakeToolAction::ControlledWriteSuccess {
+                    path: "note.txt".into(),
+                    content: "new".to_owned(),
+                },
+            ),
+        )?,
+        run_report_case(
+            workspace_root,
+            EvalCase::deterministic(
+                "report-stale",
+                "write verify then write again",
+                EvalWorkspaceFixture::new("fixture-report-stale").with_file("note.txt", "old"),
+                EvalProviderScript::new(vec![
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-write-1".to_owned(),
+                        tool_name: "write_note".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-check".to_owned(),
+                        tool_name: "check_note".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-write-2".to_owned(),
+                        tool_name: "rewrite_note".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::FinalAnswer {
+                        text: "stale".to_owned(),
+                    },
+                ]),
+            ),
+            EvalFakeToolRegistry::new()
+                .with_tool(
+                    "write_note",
+                    EvalFakeToolAction::ControlledWriteSuccess {
+                        path: "note.txt".into(),
+                        content: "new".to_owned(),
+                    },
+                )
+                .with_tool(
+                    "check_note",
+                    EvalFakeToolAction::CheckSuccess {
+                        check_id: "note-check".to_owned(),
+                    },
+                )
+                .with_tool(
+                    "rewrite_note",
+                    EvalFakeToolAction::ControlledWriteSuccess {
+                        path: "note.txt".into(),
+                        content: "newer".to_owned(),
+                    },
+                ),
+        )?,
+        run_report_case(
+            workspace_root,
+            EvalCase::deterministic(
+                "report-failed",
+                "write then failing check",
+                EvalWorkspaceFixture::new("fixture-report-failed").with_file("note.txt", "old"),
+                EvalProviderScript::new(vec![
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-write".to_owned(),
+                        tool_name: "write_note".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-check".to_owned(),
+                        tool_name: "check_note".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                ]),
+            ),
+            EvalFakeToolRegistry::new()
+                .with_tool(
+                    "write_note",
+                    EvalFakeToolAction::ControlledWriteSuccess {
+                        path: "note.txt".into(),
+                        content: "new".to_owned(),
+                    },
+                )
+                .with_tool(
+                    "check_note",
+                    EvalFakeToolAction::CheckFailure {
+                        check_id: "note-check".to_owned(),
+                        message: "check failed".to_owned(),
+                    },
+                ),
+        )?,
+        run_report_case(
+            workspace_root,
+            EvalCase::deterministic(
+                "report-denied",
+                "untrusted repo check without promotion",
+                EvalWorkspaceFixture::new("fixture-report-denied")
+                    .with_file(".github/workflows/ci.yml", "cargo test"),
+                EvalProviderScript::new(vec![
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-discover".to_owned(),
+                        tool_name: "discover_repo_check".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                    EvalProviderStep::ToolCall {
+                        tool_call_id: "call-run-check".to_owned(),
+                        tool_name: "repo_check".to_owned(),
+                        args_json: "{}".to_owned(),
+                    },
+                ]),
+            )
+            .with_workspace_trust(WorkspaceTrust::Unknown),
+            EvalFakeToolRegistry::new()
+                .with_tool(
+                    "discover_repo_check",
+                    EvalFakeToolAction::DiscoverRepoCheckCandidate {
+                        check_id: "cargo-test-ci".to_owned(),
+                        source_path: ".github/workflows/ci.yml".into(),
+                        instruction_path: None,
+                    },
+                )
+                .with_tool(
+                    "repo_check",
+                    EvalFakeToolAction::RepoCheckSuccess {
+                        check_id: "cargo-test-ci".to_owned(),
+                    },
+                ),
+        )?,
+    ])
+}
+
+fn run_report_case(
+    workspace_root: &std::path::Path,
+    case: EvalCase,
+    registry: EvalFakeToolRegistry,
+) -> Result<EvalResult> {
+    let case_workspace = workspace_root.join(&case.metadata.case_id);
+    EvalCaseRunner::new(registry)
+        .with_options(EvalCaseRunnerOptions::with_workspace_root(case_workspace))
+        .run(case)
 }
 
 #[test]

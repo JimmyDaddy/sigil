@@ -1,11 +1,12 @@
 //! RFC-0013 eval harness result model.
 //!
-//! This module intentionally contains only provider-neutral result types. The deterministic
-//! harness, fixture runner, model runner, report writer, and product surfaces are separate slices.
+//! This module intentionally contains provider-neutral result types plus deterministic developer
+//! harness helpers. Model-backed runners and product surfaces are separate slices.
 
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -15,7 +16,8 @@ use serde_json::json;
 
 use crate::{
     ControlEntry, EventId, JsonlSessionStore, ProjectionCursor, RunStatus, SessionLogEntry,
-    VerificationVerdict, VisibleCompletionState, session::SESSION_ENTRY_PROJECTION_SCHEMA_VERSION,
+    VerificationVerdict, VisibleCompletionState, WorkspaceTrust,
+    session::SESSION_ENTRY_PROJECTION_SCHEMA_VERSION,
 };
 
 #[cfg(test)]
@@ -307,6 +309,171 @@ impl EvalResult {
     }
 }
 
+/// One retained artifact produced by an eval report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct EvalReportArtifact {
+    pub kind: String,
+    pub path: PathBuf,
+}
+
+/// One JSONL record written by the deterministic eval report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct EvalReportRecord {
+    pub provider: String,
+    pub model: String,
+    pub config_hash: String,
+    pub tool_schema_digest: String,
+    pub deterministic: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_artifacts: Vec<EvalReportArtifact>,
+    pub result: EvalResult,
+}
+
+/// Paths written by [`write_eval_report_artifacts`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct EvalReportArtifacts {
+    pub results_jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    pub artifact_dir: PathBuf,
+}
+
+/// Writes deterministic eval report artifacts without invoking a real model.
+///
+/// The report keeps structured JSONL as the machine-readable source and a small Markdown summary
+/// for developer inspection. Session logs are retained for all non-verified outcomes.
+pub fn write_eval_report_artifacts(
+    output_dir: impl AsRef<Path>,
+    results: &[EvalResult],
+) -> Result<EvalReportArtifacts> {
+    let output_dir = output_dir.as_ref();
+    let artifact_dir = output_dir.join("artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .with_context(|| format!("failed to create {}", artifact_dir.display()))?;
+
+    let records = build_eval_report_records(results, &artifact_dir)?;
+    let results_jsonl_path = output_dir.join("results.jsonl");
+    let mut results_file = fs::File::create(&results_jsonl_path)
+        .with_context(|| format!("failed to create {}", results_jsonl_path.display()))?;
+    for record in &records {
+        serde_json::to_writer(&mut results_file, record)
+            .context("failed to serialize eval report record")?;
+        results_file
+            .write_all(b"\n")
+            .context("failed to write eval report newline")?;
+    }
+
+    let summary_path = output_dir.join("summary.md");
+    fs::write(&summary_path, render_eval_report_summary(&records))
+        .with_context(|| format!("failed to write {}", summary_path.display()))?;
+
+    Ok(EvalReportArtifacts {
+        results_jsonl_path,
+        summary_path,
+        artifact_dir,
+    })
+}
+
+fn build_eval_report_records(
+    results: &[EvalResult],
+    artifact_dir: &Path,
+) -> Result<Vec<EvalReportRecord>> {
+    let mut records = Vec::new();
+    for result in results {
+        let fixture_path = result
+            .session_log_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf);
+        let mut failure_artifacts = Vec::new();
+        if !matches!(
+            result.outcome,
+            EvalOutcomeKind::VerifiedSuccess | EvalOutcomeKind::Completed
+        ) && let Some(session_log_path) = &result.session_log_path
+        {
+            let artifact_path = artifact_dir.join(format!(
+                "{}-{}-session.jsonl",
+                sanitize_path_component(&result.metadata.case_id),
+                sanitize_path_component(&result.metadata.run_id)
+            ));
+            fs::copy(session_log_path, &artifact_path).with_context(|| {
+                format!(
+                    "failed to retain session log {}",
+                    session_log_path.display()
+                )
+            })?;
+            failure_artifacts.push(EvalReportArtifact {
+                kind: "session_log".to_owned(),
+                path: artifact_path,
+            });
+        }
+        records.push(EvalReportRecord {
+            provider: result.metadata.provider.clone(),
+            model: result.metadata.model.clone(),
+            config_hash: result.metadata.config_hash.clone(),
+            tool_schema_digest: result.metadata.tool_schema_digest.clone(),
+            deterministic: result.metadata.provider == "fake"
+                && result.metadata.model == "deterministic",
+            fixture_path,
+            failure_artifacts,
+            result: result.clone(),
+        });
+    }
+    Ok(records)
+}
+
+fn render_eval_report_summary(records: &[EvalReportRecord]) -> String {
+    let mut by_outcome = BTreeMap::<String, usize>::new();
+    let mut by_verdict = BTreeMap::<String, usize>::new();
+    for record in records {
+        *by_outcome
+            .entry(format!("{:?}", record.result.outcome))
+            .or_default() += 1;
+        *by_verdict
+            .entry(format!("{:?}", record.result.verification_verdict))
+            .or_default() += 1;
+    }
+
+    let mut summary = String::new();
+    summary.push_str("# Sigil Deterministic Eval Report\n\n");
+    summary.push_str(&format!("Total cases: {}\n\n", records.len()));
+    summary.push_str("## Outcomes\n\n");
+    for (outcome, count) in by_outcome {
+        summary.push_str(&format!("- `{outcome}`: {count}\n"));
+    }
+    summary.push_str("\n## Verification Verdicts\n\n");
+    for (verdict, count) in by_verdict {
+        summary.push_str(&format!("- `{verdict}`: {count}\n"));
+    }
+    summary.push_str("\n## Cases\n\n");
+    for record in records {
+        summary.push_str(&format!(
+            "- `{}`: outcome=`{:?}`, run=`{:?}`, verification=`{:?}`, visible=`{:?}`, provider=`{}`, model=`{}`\n",
+            record.result.metadata.case_id,
+            record.result.outcome,
+            record.result.run_status,
+            record.result.verification_verdict,
+            record.result.visible_state,
+            record.provider,
+            record.model
+        ));
+        if !record.failure_artifacts.is_empty() {
+            for artifact in &record.failure_artifacts {
+                summary.push_str(&format!(
+                    "  - artifact `{}`: `{}`\n",
+                    artifact.kind,
+                    artifact.path.display()
+                ));
+            }
+        }
+    }
+    summary
+}
+
 /// One deterministic eval case runnable without a real provider or network.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -315,6 +482,8 @@ pub struct EvalCase {
     pub prompt: String,
     pub fixture: EvalWorkspaceFixture,
     pub script: EvalProviderScript,
+    #[serde(default = "default_eval_workspace_trust")]
+    pub workspace_trust: WorkspaceTrust,
 }
 
 impl EvalCase {
@@ -334,8 +503,20 @@ impl EvalCase {
             prompt: prompt.into(),
             fixture,
             script,
+            workspace_trust: WorkspaceTrust::Unknown,
         }
     }
+
+    /// Overrides the workspace trust state for this deterministic eval case.
+    #[must_use]
+    pub fn with_workspace_trust(mut self, workspace_trust: WorkspaceTrust) -> Self {
+        self.workspace_trust = workspace_trust;
+        self
+    }
+}
+
+fn default_eval_workspace_trust() -> WorkspaceTrust {
+    WorkspaceTrust::Unknown
 }
 
 /// In-memory file fixture materialized into a temporary eval workspace.
@@ -455,6 +636,24 @@ pub enum EvalFakeToolAction {
         check_id: String,
         message: String,
     },
+    CheckMutatingSuccess {
+        check_id: String,
+        path: PathBuf,
+        content: String,
+    },
+    DiscoverRepoCheckCandidate {
+        check_id: String,
+        source_path: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instruction_path: Option<PathBuf>,
+    },
+    PromoteRepoCheck {
+        check_id: String,
+        promotion: EvalRepoCheckPromotion,
+    },
+    RepoCheckSuccess {
+        check_id: String,
+    },
     PermissionDenied {
         message: String,
     },
@@ -465,6 +664,42 @@ pub enum EvalFakeToolAction {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<PathBuf>,
     },
+}
+
+/// Deterministic promotion provenance for a repo-local eval check candidate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum EvalRepoCheckPromotion {
+    UserApproved { approval_event_id: EventId },
+    Sandboxed { sandbox_decision_id: EventId },
+}
+
+impl EvalRepoCheckPromotion {
+    fn evidence_id(&self) -> &'static str {
+        match self {
+            Self::UserApproved { .. } => "user_approved",
+            Self::Sandboxed { .. } => "sandboxed",
+        }
+    }
+
+    fn evidence_payload(&self) -> serde_json::Value {
+        match self {
+            Self::UserApproved { approval_event_id } => {
+                json!({ "kind": "user_approved", "approval_event_id": approval_event_id })
+            }
+            Self::Sandboxed {
+                sandbox_decision_id,
+            } => json!({ "kind": "sandboxed", "sandbox_decision_id": sandbox_decision_id }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+struct EvalRepoCheckCandidateState {
+    check_id: String,
+    source_path: PathBuf,
+    instruction_path: Option<PathBuf>,
 }
 
 /// Options for deterministic eval execution.
@@ -550,6 +785,8 @@ impl EvalCaseRunner {
         let mut tool_calls = Vec::new();
         let mut failures = Vec::new();
         let mut required_actions = Vec::new();
+        let mut repo_check_candidates = BTreeMap::<String, EvalRepoCheckCandidateState>::new();
+        let mut promoted_repo_checks = BTreeMap::<String, EvalRepoCheckPromotion>::new();
 
         for step in &case.script.steps {
             match step {
@@ -576,15 +813,22 @@ impl EvalCaseRunner {
                         }),
                     )?;
                     let action = self.tools.action_for(tool_name);
+                    let mut fake_tool_state = EvalFakeToolState {
+                        changed_files: &mut changed_files,
+                        tool_calls: &mut tool_calls,
+                        failures: &mut failures,
+                        verification_verdict: &mut verification_verdict,
+                        repo_check_candidates: &mut repo_check_candidates,
+                        promoted_repo_checks: &mut promoted_repo_checks,
+                        required_actions: &mut required_actions,
+                    };
                     apply_fake_tool_action(
                         &workspace_root,
                         tool_call_id,
                         tool_name,
                         action,
-                        &mut changed_files,
-                        &mut tool_calls,
-                        &mut failures,
-                        &mut verification_verdict,
+                        case.workspace_trust,
+                        &mut fake_tool_state,
                         &mut capture,
                     )?;
                     if let Some(terminal) = terminal_status_from_failures(&failures) {
@@ -624,7 +868,9 @@ impl EvalCaseRunner {
         if !changed_files.is_empty()
             && matches!(
                 verification_verdict,
-                VerificationVerdict::Missing | VerificationVerdict::Stale
+                VerificationVerdict::Missing
+                    | VerificationVerdict::Inconclusive
+                    | VerificationVerdict::Stale
             )
         {
             required_actions.push(EvalRequiredAction::new(
@@ -672,17 +918,32 @@ fn prepare_workspace(root: &Path, fixture: &EvalWorkspaceFixture) -> Result<()> 
     Ok(())
 }
 
+struct EvalFakeToolState<'a> {
+    changed_files: &'a mut Vec<PathBuf>,
+    tool_calls: &'a mut Vec<EvalToolCallSummary>,
+    failures: &'a mut Vec<EvalFailure>,
+    verification_verdict: &'a mut VerificationVerdict,
+    repo_check_candidates: &'a mut BTreeMap<String, EvalRepoCheckCandidateState>,
+    promoted_repo_checks: &'a mut BTreeMap<String, EvalRepoCheckPromotion>,
+    required_actions: &'a mut Vec<EvalRequiredAction>,
+}
+
 fn apply_fake_tool_action(
     workspace_root: &Path,
     tool_call_id: &str,
     tool_name: &str,
     action: EvalFakeToolAction,
-    changed_files: &mut Vec<PathBuf>,
-    tool_calls: &mut Vec<EvalToolCallSummary>,
-    failures: &mut Vec<EvalFailure>,
-    verification_verdict: &mut VerificationVerdict,
+    workspace_trust: WorkspaceTrust,
+    state: &mut EvalFakeToolState<'_>,
     capture: &mut EvalEventCapture,
 ) -> Result<()> {
+    let changed_files = &mut *state.changed_files;
+    let tool_calls = &mut *state.tool_calls;
+    let failures = &mut *state.failures;
+    let verification_verdict = &mut *state.verification_verdict;
+    let repo_check_candidates = &mut *state.repo_check_candidates;
+    let promoted_repo_checks = &mut *state.promoted_repo_checks;
+    let required_actions = &mut *state.required_actions;
     match action {
         EvalFakeToolAction::ReadOnlySuccess { output } => {
             tool_calls.push(tool_summary(
@@ -771,6 +1032,183 @@ fn apply_fake_tool_action(
                     "status": "failed",
                     "check_id": check_id,
                     "message": message,
+                }),
+            )?;
+        }
+        EvalFakeToolAction::CheckMutatingSuccess {
+            check_id,
+            path,
+            content,
+        } => {
+            let full_path = workspace_root.join(&path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            fs::write(&full_path, content)
+                .with_context(|| format!("failed to write {}", full_path.display()))?;
+            changed_files.push(path.clone());
+            tool_calls.push(tool_summary(
+                tool_call_id,
+                tool_name,
+                EvalToolCallStatus::Succeeded,
+            ));
+            let mutation_evidence = capture.record(
+                "mutating_check",
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "check_id": check_id,
+                    "path": &path,
+                }),
+            )?;
+            let (kind, message, verdict) = if *verification_verdict == VerificationVerdict::Passed {
+                (
+                    EvalFailureKind::VerificationStale,
+                    "mutating check invalidated the previous verification receipt",
+                    VerificationVerdict::Stale,
+                )
+            } else {
+                (
+                    EvalFailureKind::VerificationInconclusive,
+                    "check modified verification scope and cannot prove final state",
+                    VerificationVerdict::Inconclusive,
+                )
+            };
+            *verification_verdict = verdict;
+            let mut failure = EvalFailure::new(kind, message);
+            failure.evidence.push(mutation_evidence);
+            failures.push(failure);
+            capture.record(
+                "tool_result",
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "status": "inconclusive",
+                    "check_id": check_id,
+                    "mutated_file": &path,
+                    "workspace_snapshot_id": format!("snapshot-{}", changed_files.len()),
+                }),
+            )?;
+        }
+        EvalFakeToolAction::DiscoverRepoCheckCandidate {
+            check_id,
+            source_path,
+            instruction_path,
+        } => {
+            repo_check_candidates.insert(
+                check_id.clone(),
+                EvalRepoCheckCandidateState {
+                    check_id: check_id.clone(),
+                    source_path: source_path.clone(),
+                    instruction_path: instruction_path.clone(),
+                },
+            );
+            tool_calls.push(tool_summary(
+                tool_call_id,
+                tool_name,
+                EvalToolCallStatus::Succeeded,
+            ));
+            capture.record(
+                "repo_check_candidate_discovered",
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "check_id": check_id,
+                    "source_path": source_path,
+                    "instruction_path": instruction_path,
+                    "workspace_trust": workspace_trust,
+                    "instruction_trust": if workspace_trust == WorkspaceTrust::Trusted {
+                        "workspace_instruction"
+                    } else {
+                        "untrusted_repository_data"
+                    },
+                }),
+            )?;
+        }
+        EvalFakeToolAction::PromoteRepoCheck {
+            check_id,
+            promotion,
+        } => {
+            tool_calls.push(tool_summary(
+                tool_call_id,
+                tool_name,
+                EvalToolCallStatus::Succeeded,
+            ));
+            let Some(candidate) = repo_check_candidates.get(&check_id) else {
+                tool_calls.pop();
+                tool_calls.push(tool_summary(
+                    tool_call_id,
+                    tool_name,
+                    EvalToolCallStatus::Failed,
+                ));
+                failures.push(EvalFailure::new(
+                    EvalFailureKind::Harness,
+                    format!("repo check candidate {check_id} was not discovered"),
+                ));
+                capture.record(
+                    "repo_check_promotion_failed",
+                    json!({
+                        "tool_call_id": tool_call_id,
+                        "check_id": check_id,
+                        "reason": "candidate_not_discovered",
+                    }),
+                )?;
+                return Ok(());
+            };
+            promoted_repo_checks.insert(check_id.clone(), promotion.clone());
+            capture.record(
+                "repo_check_promoted",
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "check_id": check_id,
+                    "source_path": &candidate.source_path,
+                    "instruction_path": &candidate.instruction_path,
+                    "workspace_trust": workspace_trust,
+                    "promotion": promotion.evidence_payload(),
+                    "promotion_id": promotion.evidence_id(),
+                }),
+            )?;
+        }
+        EvalFakeToolAction::RepoCheckSuccess { check_id } => {
+            let Some(promotion) = promoted_repo_checks.get(&check_id) else {
+                tool_calls.push(tool_summary(
+                    tool_call_id,
+                    tool_name,
+                    EvalToolCallStatus::Denied,
+                ));
+                failures.push(EvalFailure::new(
+                    EvalFailureKind::PermissionDenied,
+                    format!(
+                        "repo-local check {check_id} requires explicit approval or sandbox promotion"
+                    ),
+                ));
+                required_actions.push(EvalRequiredAction::new(
+                    EvalRequiredActionKind::ApproveWorkspace,
+                    "approve workspace or run the repo-local check in an allowed sandbox",
+                ));
+                capture.record(
+                    "repo_check_execution_blocked",
+                    json!({
+                        "tool_call_id": tool_call_id,
+                        "check_id": check_id,
+                        "workspace_trust": workspace_trust,
+                        "reason": "missing_approval_or_sandbox_promotion",
+                    }),
+                )?;
+                return Ok(());
+            };
+            *verification_verdict = VerificationVerdict::Passed;
+            tool_calls.push(tool_summary(
+                tool_call_id,
+                tool_name,
+                EvalToolCallStatus::Succeeded,
+            ));
+            capture.record(
+                "repo_check_executed",
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "status": "succeeded",
+                    "check_id": check_id,
+                    "workspace_snapshot_id": format!("snapshot-{}", changed_files.len()),
+                    "promotion": promotion.evidence_payload(),
                 }),
             )?;
         }

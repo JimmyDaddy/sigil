@@ -1,6 +1,6 @@
 # RFC-0008 Thread Projection and Agent Graph Observability
 
-状态：draft / roadmap candidate
+状态：draft / E08.2 thread index and session list projection implemented
 
 创建日期：2026-06-28
 
@@ -107,7 +107,20 @@ cargo test -p sigil-runtime projection
 cargo test -p sigil-tui session
 ```
 
-## 10. Open Questions
+## 10. Implementation Progress
+
+- 已新增 kernel `ProjectionStore<T>` trait，统一 load、single-record apply 和 stream rebuild 入口。
+- 已新增 `ProjectionRebuildReport` / `ProjectionRebuildOutput`，rebuild 可报告 applied / ignored record 数和最终 cursor。
+- 已有 file-backed `FileProjectionStore<T>` 实现 trait，projection 与 cursor 仍保存在同一个 envelope 中，并通过 temporary file + atomic rename + parent dir sync 持久化。
+- 已补 verification file projection specialization，并保持 JSONL 为 truth source；projection store 可删除后从 durable stream 重建。
+- 已补测试覆盖 duplicate replay、sequence gap、cursor ahead、schema/name mismatch、corrupt projection store、trait dispatch 和 rebuild diagnostics。
+- 已新增 session list projection：`SessionListProjectionSnapshot` / `SessionListProjectionEntry` 从 mixed legacy/v2 stream 重建 session metadata、首个用户标题、usage、task 和 readiness 摘要。
+- 已新增 file-backed session list projection store specialization，保持 projection + cursor 原子保存。
+- TUI session history 已接入 projection adapter 读取 v2 title，并保留旧 bounded line scanner 作为 fallback；active approval/tool execution 仍不依赖 projection。
+
+本阶段没有引入 SQLite，也没有让 active approval/tool execution 依赖 projection。
+
+## 11. Open Questions
 
 - Whether file-backed projection remains enough for TUI-only workflows.
 - Which projection family should be the first SQLite candidate.

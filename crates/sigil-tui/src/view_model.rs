@@ -1,6 +1,7 @@
-use std::{env, path::Path};
+use std::{collections::BTreeMap, env, path::Path};
 
 use ratatui::text::Line;
+use sigil_kernel::{ContextInclusionReason, ContextItem, ContextSource, PackedContext};
 
 use crate::{
     app::{AppState, ComposerQueueAction, PaneFocus},
@@ -168,6 +169,178 @@ pub(crate) struct QueueActionButtonViewModel {
     pub detail: String,
     pub selected: bool,
     pub destructive: bool,
+}
+
+// RFC-0006 keeps this adapter available for the provenance surface without adding another default
+// info-rail section before the product flow is selected.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextProvenanceSummaryViewModel {
+    pub budget_line: String,
+    pub top_sources: Vec<String>,
+    pub excluded_summary: Vec<String>,
+    pub warning: Option<String>,
+    pub recommended_action: Option<String>,
+}
+
+#[allow(dead_code)]
+impl ContextProvenanceSummaryViewModel {
+    pub(crate) fn from_packed_context(packed: &PackedContext, top_source_limit: usize) -> Self {
+        let included = packed
+            .stable_prefix
+            .iter()
+            .chain(packed.dynamic_suffix.iter())
+            .collect::<Vec<_>>();
+        let budget_line = format!(
+            "context: {} / {} tokens · {} included · {} excluded",
+            packed.used_tokens,
+            packed.max_tokens,
+            included.len(),
+            packed.excluded.len()
+        );
+        let top_sources = context_source_summary(&included, top_source_limit);
+        let excluded_summary = context_excluded_summary(&packed.excluded);
+        let warning = context_warning(&packed.excluded);
+        let recommended_action = context_recommended_action(&packed.excluded);
+
+        Self {
+            budget_line,
+            top_sources,
+            excluded_summary,
+            warning,
+            recommended_action,
+        }
+    }
+
+    pub(crate) fn lines(&self) -> Vec<String> {
+        let mut lines = vec![self.budget_line.clone()];
+        lines.extend(
+            self.top_sources
+                .iter()
+                .map(|line| format!("source: {line}")),
+        );
+        lines.extend(
+            self.excluded_summary
+                .iter()
+                .map(|line| format!("excluded: {line}")),
+        );
+        if let Some(warning) = &self.warning {
+            lines.push(format!("warning: {warning}"));
+        }
+        if let Some(action) = &self.recommended_action {
+            lines.push(format!("action: {action}"));
+        }
+        lines
+    }
+}
+
+#[allow(dead_code)]
+fn context_source_summary(items: &[&ContextItem], limit: usize) -> Vec<String> {
+    let mut groups = BTreeMap::<&'static str, (usize, usize)>::new();
+    for item in items {
+        let entry = groups
+            .entry(context_source_label(&item.source))
+            .or_default();
+        entry.0 += 1;
+        entry.1 += item.token_cost;
+    }
+    let mut rows = groups
+        .into_iter()
+        .map(|(source, (count, tokens))| (source, count, tokens))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.2.cmp(&left.2).then_with(|| left.0.cmp(right.0)));
+    rows.into_iter()
+        .take(limit)
+        .map(|(source, count, tokens)| format!("{source} · {count} item(s) · {tokens} tokens"))
+        .collect()
+}
+
+#[allow(dead_code)]
+fn context_excluded_summary(items: &[ContextItem]) -> Vec<String> {
+    let mut groups = BTreeMap::<&'static str, usize>::new();
+    for item in items {
+        *groups
+            .entry(context_exclusion_label(&item.inclusion_reason))
+            .or_default() += 1;
+    }
+    groups
+        .into_iter()
+        .map(|(reason, count)| format!("{reason} · {count} item(s)"))
+        .collect()
+}
+
+#[allow(dead_code)]
+fn context_warning(items: &[ContextItem]) -> Option<String> {
+    if items
+        .iter()
+        .any(|item| item.inclusion_reason == ContextInclusionReason::ExcludedSecret)
+    {
+        return Some("secret-like context was blocked".to_owned());
+    }
+    if items
+        .iter()
+        .any(|item| item.inclusion_reason == ContextInclusionReason::ExcludedUntrustedWorkspace)
+    {
+        return Some("untrusted workspace context was not promoted".to_owned());
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn context_recommended_action(items: &[ContextItem]) -> Option<String> {
+    if items
+        .iter()
+        .any(|item| item.inclusion_reason == ContextInclusionReason::ExcludedSecret)
+    {
+        return Some("review egress".to_owned());
+    }
+    if items
+        .iter()
+        .any(|item| item.inclusion_reason == ContextInclusionReason::ExcludedUntrustedWorkspace)
+    {
+        return Some("review trust".to_owned());
+    }
+    if items
+        .iter()
+        .any(|item| item.inclusion_reason == ContextInclusionReason::ExcludedTokenBudget)
+    {
+        return Some("adjust context budget".to_owned());
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn context_source_label(source: &ContextSource) -> &'static str {
+    match source {
+        ContextSource::SystemPrompt => "system",
+        ContextSource::UserMessage => "user",
+        ContextSource::WorkspaceInstruction => "workspace instruction",
+        ContextSource::RepositoryFile => "repo file",
+        ContextSource::ToolObservation => "tool",
+        ContextSource::DurableEvent => "event",
+        ContextSource::EvidenceReceipt => "evidence",
+        ContextSource::MutationEvidence => "mutation",
+        ContextSource::VerificationEvidence => "verification",
+        ContextSource::LspSymbol => "symbol",
+        ContextSource::LspDiagnostic => "diagnostic",
+        ContextSource::LspReference => "reference",
+        ContextSource::CurrentDiff => "diff",
+        ContextSource::SessionArchive => "session archive",
+        ContextSource::TaskDigest => "task digest",
+        ContextSource::ExtensionProvided => "extension",
+    }
+}
+
+#[allow(dead_code)]
+fn context_exclusion_label(reason: &ContextInclusionReason) -> &'static str {
+    match reason {
+        ContextInclusionReason::ExcludedUntrustedWorkspace => "untrusted workspace",
+        ContextInclusionReason::ExcludedSecret => "secret",
+        ContextInclusionReason::ExcludedEgressDenied => "egress denied",
+        ContextInclusionReason::ExcludedTokenBudget => "token budget",
+        ContextInclusionReason::ExcludedUnsupported => "unsupported",
+        _ => "other",
+    }
 }
 
 impl FooterViewModel {
