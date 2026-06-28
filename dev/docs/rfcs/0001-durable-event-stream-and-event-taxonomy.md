@@ -487,12 +487,13 @@ Required deterministic tests:
 - 已新增 typed durable decode seam：`decode_typed_stored_event` 会把 mutation、verification、task、agent thread、terminal 和 changeset family 收敛为强类型 `TypedDomainEvent`，并继续对 unknown critical event fail closed。
 - 已新增 projection-facing typed record API：`SessionStreamRecord::typed_domain_event_record` 输出 typed event 和 `ProjectionCursor`，后续 typed reducer / projection store 可在不重新解析 JSON 的情况下消费 cursor-bound event。
 - 已新增文件型 persistent projection store：`FileProjectionStore` 将 projection snapshot 与 `ProjectionCursor` 写入同一 envelope，并通过 temporary file + atomic replace 持久化，首个真实 projection 为 `VerificationStateProjectionSnapshot`；duplicate replay、sequence gap、cursor ahead 和 JSONL rebuild 已有测试覆盖。
+- 已新增 HTTP protocol event boundary：`sigil-http` 将 public run event 包装为 durable / transient protocol envelope，durable SSE frame 带 `Last-Event-ID` cursor，transient delta 不带 replay id；`HttpProtocolEventBuffer` 只重放 cursor 之后的 durable event，并对 malformed、scope mismatch 和 cursor-ahead fail closed。
 
 Productization remains：
 
 - 如果未来需要跨客户端高频查询，再将文件型 projection store 替换或扩展为 SQLite/materialized view；JSONL 仍是事实来源，projection 仍必须可重建。
 - 为尚未收敛的 durable event owner 继续补齐强类型 payload struct 与 upcaster，逐步减少泛型 JSON payload 的 reducer 接触面；当前 payload version 仍只有 v1，第一次引入 v2 payload 时必须补对应 version upcaster 测试。
-- 在 protocol/server 阶段实现 durable cursor / `Last-Event-ID` replay；transient event replay 保持非承诺。
+- 完整 HTTP listener / app-server 仍属于未来 server productization；当前已完成 protocol DTO / SSE cursor / reconnect replay helper，不承诺 transient event replay。
 - 如果真实 session 中出现合理的大型 durable payload，再单独评估 1 MiB / 64 层 event limit 是否需要配置化；当前限制已作为 core guard 生效。
 
 ## 17. Open Questions

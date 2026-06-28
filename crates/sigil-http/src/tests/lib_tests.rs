@@ -7,9 +7,10 @@ use serde_json::{Value, json};
 use sigil_kernel::{PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision};
 
 use super::{
-    DEFAULT_HTTP_TOKEN_ENV, HTTP_RUN_EVENT_SSE_NAME, HttpApprovalDecision,
-    HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpPendingApproval, HttpRegistryError, HttpRunApprovalMode, HttpRunDriver,
+    DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_RUN_EVENT_SSE_NAME,
+    HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig,
+    HttpAuthError, HttpPendingApproval, HttpProtocolEventBuffer, HttpProtocolEventClass,
+    HttpProtocolReplayError, HttpRegistryError, HttpRunApprovalMode, HttpRunDriver,
     HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
     HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpServerConfig,
     HttpServerConfigError, HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError,
@@ -221,15 +222,46 @@ fn public_run_event_serializes_to_run_event_sse_frame() {
     let data: Value = serde_json::from_str(sse.data()).expect("sse data should be json");
 
     assert_eq!(sse.event(), HTTP_RUN_EVENT_SSE_NAME);
-    assert_eq!(data["schema_version"], 1);
-    assert_eq!(data["session_id"], "session-1");
-    assert_eq!(data["run_id"], "run-1");
-    assert_eq!(data["sequence"], 12);
-    assert_eq!(data["event"]["type"], "text_delta");
-    assert_eq!(data["event"]["text"], "hello");
+    assert_eq!(sse.id(), None);
+    assert_eq!(data["schema_version"], HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
+    assert_eq!(data["event_class"], "transient");
+    assert_eq!(data.get("replay_id"), None);
+    assert_eq!(data["run_event"]["schema_version"], 1);
+    assert_eq!(data["run_event"]["session_id"], "session-1");
+    assert_eq!(data["run_event"]["run_id"], "run-1");
+    assert_eq!(data["run_event"]["sequence"], 12);
+    assert_eq!(data["run_event"]["event"]["type"], "text_delta");
+    assert_eq!(data["run_event"]["event"]["text"], "hello");
     assert_eq!(
         sse.encode(),
         format!("event: run_event\ndata: {}\n\n", sse.data())
+    );
+}
+
+#[test]
+fn durable_public_run_event_gets_sse_id_and_replay_cursor() {
+    let event = PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        2,
+        PublicRunEventKind::RunFinished {
+            final_text: "done".to_owned(),
+        },
+    );
+
+    let sse = public_run_event_to_sse(&event).expect("durable event should serialize");
+    let data: Value = serde_json::from_str(sse.data()).expect("sse data should be json");
+
+    assert_eq!(sse.id(), Some("sigil-http-run-v1:session-1:run-1:2"));
+    assert_eq!(data["replay_id"], "sigil-http-run-v1:session-1:run-1:2");
+    assert_eq!(data["event_class"], "durable");
+    assert_eq!(data["run_event"]["event"]["type"], "run_finished");
+    assert_eq!(
+        sse.encode(),
+        format!(
+            "id: sigil-http-run-v1:session-1:run-1:2\nevent: run_event\ndata: {}\n\n",
+            sse.data()
+        )
     );
 }
 
@@ -254,6 +286,12 @@ fn sse_event_encoder_handles_multiline_data_and_rejects_bad_event_names() {
         HttpSseEvent::new("bad\nname", "payload"),
         Err(HttpSseError::InvalidEventName {
             event: "bad\nname".to_owned()
+        })
+    );
+    assert_eq!(
+        HttpSseEvent::with_id(Some("bad\nid".to_owned()), "debug", "payload"),
+        Err(HttpSseError::InvalidEventId {
+            id: "bad\nid".to_owned()
         })
     );
 }
@@ -295,7 +333,113 @@ fn run_event_sequencer_is_monotonic_per_session_run_pair() {
     assert_eq!(second.sequence, 2);
     assert_eq!(other_run.sequence, 1);
     assert_eq!(other_session.sequence, 1);
-    assert_eq!(third_data["sequence"], 3);
+    assert_eq!(third_data["run_event"]["sequence"], 3);
+    assert_eq!(third_sse.id(), Some("sigil-http-run-v1:session-1:run-1:3"));
+}
+
+#[test]
+fn protocol_event_buffer_replays_only_durable_events_after_last_event_id() {
+    let buffer = HttpProtocolEventBuffer::new();
+    buffer
+        .push_run_event(PublicRunEvent::new(
+            "session-1",
+            "run-1",
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "hello".to_owned(),
+            },
+        ))
+        .expect("durable start event should record");
+    let first_delta = buffer
+        .push_run_event(PublicRunEvent::new(
+            "session-1",
+            "run-1",
+            2,
+            PublicRunEventKind::TextDelta {
+                text: "partial".to_owned(),
+            },
+        ))
+        .expect("transient text delta should record");
+    let finished = buffer
+        .push_run_event(PublicRunEvent::new(
+            "session-1",
+            "run-1",
+            3,
+            PublicRunEventKind::RunFinished {
+                final_text: "done".to_owned(),
+            },
+        ))
+        .expect("durable finish event should record");
+    buffer
+        .push_run_event(PublicRunEvent::new(
+            "session-1",
+            "run-2",
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "other".to_owned(),
+            },
+        ))
+        .expect("other run should record");
+
+    assert_eq!(first_delta.event_class, HttpProtocolEventClass::Transient);
+    assert_eq!(first_delta.replay_id, None);
+    assert_eq!(finished.event_class, HttpProtocolEventClass::Durable);
+
+    let replay = buffer
+        .replay_run_after(
+            "session-1",
+            "run-1",
+            Some("sigil-http-run-v1:session-1:run-1:1"),
+        )
+        .expect("durable cursor should replay later durable events");
+
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].run_event.sequence, 3);
+    let replay_event =
+        serde_json::to_value(&replay[0].run_event.event).expect("replayed event should serialize");
+    let finished_event =
+        serde_json::to_value(&finished.run_event.event).expect("finished event should serialize");
+    assert_eq!(replay_event, finished_event);
+}
+
+#[test]
+fn protocol_event_buffer_replay_fails_closed_on_bad_or_wrong_cursor() {
+    let buffer = HttpProtocolEventBuffer::new();
+    buffer
+        .push_run_event(PublicRunEvent::new(
+            "session-1",
+            "run-1",
+            1,
+            PublicRunEventKind::RunStarted {
+                prompt: "hello".to_owned(),
+            },
+        ))
+        .expect("event should record");
+
+    assert!(matches!(
+        buffer.replay_run_after("session-1", "run-1", Some("not-a-cursor")),
+        Err(HttpProtocolReplayError::InvalidCursor { .. })
+    ));
+    assert_eq!(
+        buffer
+            .replay_run_after(
+                "session-1",
+                "run-1",
+                Some("sigil-http-run-v1:session-1:run-2:1")
+            )
+            .expect_err("wrong run cursor should fail closed"),
+        HttpProtocolReplayError::CursorScopeMismatch
+    );
+    assert_eq!(
+        buffer
+            .replay_run_after(
+                "session-1",
+                "run-1",
+                Some("sigil-http-run-v1:session-1:run-1:2")
+            )
+            .expect_err("ahead cursor should fail closed"),
+        HttpProtocolReplayError::CursorAhead
+    );
 }
 
 #[test]
