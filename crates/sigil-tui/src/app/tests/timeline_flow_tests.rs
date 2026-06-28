@@ -1865,25 +1865,7 @@ fn activity_pane_keymap_preserves_composer_shortcuts_and_sidebar_navigation() ->
     assert!(rows.iter().any(|row| row.label == "main" && row.selected));
 
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    let rows = app.agent_sidebar_rows();
-    assert!(rows.iter().any(|row| row.label == "agents" && row.selected));
-
-    app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert_eq!(
-        app.last_notice(),
-        Some("agent focus unavailable: no child agents recorded")
-    );
-    let transcript = app
-        .transcript_lines(8)
-        .into_iter()
-        .map(|line| {
-            line.spans
-                .into_iter()
-                .map(|span| span.content.into_owned())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>();
-    assert!(!transcript.iter().any(|line| line.contains("agent view:")));
+    assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
 
     app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))?;
     app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;

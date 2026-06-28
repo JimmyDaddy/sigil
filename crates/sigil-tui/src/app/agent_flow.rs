@@ -559,15 +559,6 @@ impl AppState {
                 ));
             }
         }
-        if items.len() == 1 {
-            items.push(AgentSidebarItem {
-                label: "agents".to_owned(),
-                detail: "no child agents recorded".to_owned(),
-                target: None,
-                thread_id: None,
-                muted: true,
-            });
-        }
         items
     }
 

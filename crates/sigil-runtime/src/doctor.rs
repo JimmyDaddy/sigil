@@ -26,6 +26,7 @@ const LEGACY_WORKSPACE_STATE_DIR: &str = ".sigil";
 const LEGACY_SESSIONS_DIR: &str = "sessions";
 const LEGACY_INPUT_HISTORY_FILE: &str = "input-history.jsonl";
 const MAX_SESSION_STREAMS_DOCTOR_SCAN: usize = 20;
+const MAX_SESSION_STREAM_DOCTOR_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Severity for one local diagnostics check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -391,7 +392,12 @@ fn check_session_streams(report: &mut DoctorReport, session_dir: &Path) {
     session_paths.truncate(MAX_SESSION_STREAMS_DOCTOR_SCAN);
 
     let mut summary = SessionStreamDoctorSummary::default();
+    let mut oversized_skipped = 0usize;
     for path in &session_paths {
+        if session_stream_too_large_for_doctor(path) {
+            oversized_skipped += 1;
+            continue;
+        }
         match JsonlSessionStore::read_event_records(path) {
             Ok(records) => summary.add_records(records),
             Err(error) => {
@@ -411,7 +417,7 @@ fn check_session_streams(report: &mut DoctorReport, session_dir: &Path) {
     let skipped = total_streams.saturating_sub(session_paths.len());
     let mut message = format!(
         "{} streams checked, {} records, last_sequence={}, legacy={}, stored={}",
-        session_paths.len(),
+        session_paths.len().saturating_sub(oversized_skipped),
         summary.records,
         summary.last_sequence,
         summary.legacy_records,
@@ -426,7 +432,19 @@ fn check_session_streams(report: &mut DoctorReport, session_dir: &Path) {
     if skipped > 0 {
         message.push_str(&format!(", skipped {skipped} older streams"));
     }
-    report.push(DoctorStatus::Ok, "session:stream", message);
+    if oversized_skipped > 0 {
+        message.push_str(&format!(
+            ", skipped {oversized_skipped} oversized streams over {MAX_SESSION_STREAM_DOCTOR_BYTES} bytes"
+        ));
+        report.push_with_remediation(
+            DoctorStatus::Warn,
+            "session:stream",
+            message,
+            Some("open a focused session audit for oversized streams instead of loading them during startup diagnostics"),
+        );
+    } else {
+        report.push(DoctorStatus::Ok, "session:stream", message);
+    }
 }
 
 fn session_log_paths(session_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
@@ -445,6 +463,12 @@ fn session_log_paths(session_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
             .then_with(|| left.cmp(right))
     });
     Ok(paths)
+}
+
+fn session_stream_too_large_for_doctor(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|metadata| metadata.len() > MAX_SESSION_STREAM_DOCTOR_BYTES)
+        .unwrap_or(false)
 }
 
 fn session_modified_time(path: &Path) -> std::time::SystemTime {

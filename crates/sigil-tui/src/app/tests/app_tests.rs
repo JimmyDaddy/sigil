@@ -271,22 +271,18 @@ fn agent_command_edges_cover_unavailable_rows_and_usage() -> Result<()> {
         },
     ))]);
     let rows = app.agent_sidebar_rows();
-    assert!(
-        rows.iter()
-            .any(|row| row.label == "agents" && row.detail == "no child agents recorded")
-    );
+    assert_eq!(rows.len(), 1);
+    assert!(rows.iter().any(|row| row.label == "main"));
+    assert!(!rows.iter().any(|row| row.label == "agents"));
     app.active_pane = PaneFocus::Activity;
     app.sidebar_selected_card = SidebarCard::Agents;
     app.sidebar_agent_selected = 1;
     app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert_eq!(
-        app.last_notice(),
-        Some("agent focus unavailable: no child agents recorded")
-    );
+    assert_eq!(app.last_notice(), Some("no agent selected"));
     assert!(
         app.timeline
             .iter()
-            .any(|entry| entry.text == "agent focus unavailable: no child agents recorded")
+            .any(|entry| entry.text == "no agent selected")
     );
     Ok(())
 }
@@ -418,12 +414,8 @@ fn agent_sidebar_rows_show_plan_subagent_availability_and_child_sessions() -> Re
     assert!(rows.iter().any(|row| {
         row.label == "main" && row.detail == "idle in current session" && row.active
     }));
-    assert!(rows.iter().any(|row| {
-        row.label == "agents"
-            && row.detail == "no child agents recorded"
-            && !row.active
-            && row.muted
-    }));
+    assert_eq!(rows.len(), 1);
+    assert!(!rows.iter().any(|row| row.muted));
     let temp = tempdir()?;
     let session_dir = temp.path().join(".sigil/sessions");
     app.session_log_path = session_dir.join("session-parent.jsonl");
@@ -1869,8 +1861,6 @@ fn activity_pane_sidebar_keys_cover_permission_agents_usage_and_noop_paths() -> 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Agents);
     assert_eq!(app.sidebar_agent_selected, 0);
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.sidebar_agent_selected, 1);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
     assert_eq!(app.sidebar_selected_card, SidebarCard::Usage);
 

@@ -8,6 +8,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(not(test))]
+use anyhow::Context;
 use anyhow::Result;
 #[cfg(not(test))]
 use crossterm::{
@@ -80,13 +82,7 @@ pub fn run_tui(config: Option<PathBuf>) -> Result<()> {
         execute!(stdout, EnableMouseCapture)?;
         cleanup.mouse_capture_active = true;
     }
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::with_options(
-        backend,
-        TerminalOptions {
-            viewport: Viewport::Inline(inline_viewport_height),
-        },
-    )?;
+    let mut terminal = terminal_with_inline_fallback(stdout, inline_viewport_height)?;
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         run_app(
             &mut terminal,
@@ -238,6 +234,30 @@ fn enable_bracketed_paste<W: io::Write>(writer: &mut W) -> io::Result<bool> {
 fn current_inline_viewport_height() -> Result<u16> {
     let (_, height) = crossterm::terminal::size()?;
     Ok(height.max(12))
+}
+
+#[cfg(not(test))]
+fn terminal_with_inline_fallback(
+    stdout: io::Stdout,
+    inline_viewport_height: u16,
+) -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+    let backend = CrosstermBackend::new(stdout);
+    match Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(inline_viewport_height),
+        },
+    ) {
+        Ok(terminal) => Ok(terminal),
+        Err(inline_error) => {
+            let backend = CrosstermBackend::new(io::stdout());
+            Terminal::new(backend).with_context(|| {
+                format!(
+                    "inline viewport unavailable ({inline_error}); failed to initialize fallback terminal"
+                )
+            })
+        }
+    }
 }
 
 #[cfg(not(test))]

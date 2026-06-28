@@ -9,8 +9,7 @@ use std::{
 use sigil_kernel::{
     CompactionPreview, ControlEntry, JsonlSessionStore, ModelMessage, RootConfig, Session,
     SessionLogEntry, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewSnapshot,
-    inspect_memory_documents, latest_compaction_record, session_list_projection_from_records,
-    session_stats_from_entries,
+    inspect_memory_documents, latest_compaction_record, session_stats_from_entries,
 };
 use uuid::Uuid;
 
@@ -25,7 +24,6 @@ use super::{
 };
 
 const SESSION_HISTORY_TITLE_LINE_MAX_BYTES: usize = 256 * 1024;
-
 impl AppState {
     pub fn restore_latest_session_from_disk(&mut self, root_config: &RootConfig) -> bool {
         self.refresh_session_history();
@@ -268,8 +266,7 @@ impl AppState {
                     .map(|duration| duration.as_secs())
                     .unwrap_or(0);
                 let bytes = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-                let title = session_history_title_from_projection(&path)
-                    .or_else(|| session_history_title_from_log(&path));
+                let title = session_history_title_from_log(&path);
                 sessions.push((
                     modified,
                     SessionHistoryEntry {
@@ -830,14 +827,6 @@ fn session_history_title_from_log(path: &Path) -> Option<String> {
         }
     }
     None
-}
-
-fn session_history_title_from_projection(path: &Path) -> Option<String> {
-    let records = JsonlSessionStore::read_event_records(path).ok()?;
-    let projection = session_list_projection_from_records(&records).ok()?;
-    projection
-        .latest_session()
-        .and_then(|entry| entry.title.clone())
 }
 
 fn read_bounded_line<R: BufRead>(

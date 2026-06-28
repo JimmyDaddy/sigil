@@ -542,6 +542,35 @@ fn doctor_session_stream_check_handles_empty_non_directory_and_scan_limit() -> R
 }
 
 #[test]
+fn doctor_session_stream_check_skips_oversized_streams() -> Result<()> {
+    let temp = tempdir()?;
+    let session_dir = temp.path().join("sessions");
+    fs::create_dir(&session_dir)?;
+
+    let store = JsonlSessionStore::new(session_dir.join("session-small.jsonl"))?;
+    store.append_event(
+        DurableEventType::DiagnosticRecorded,
+        EventClass::Critical,
+        serde_json::json!({ "message": "ok" }),
+    )?;
+
+    let oversized_path = session_dir.join("session-oversized.jsonl");
+    let oversized_file = fs::File::create(&oversized_path)?;
+    oversized_file.set_len(super::MAX_SESSION_STREAM_DOCTOR_BYTES + 1)?;
+
+    let mut report = DoctorReport::default();
+    check_session_streams(&mut report, &session_dir);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "session:stream"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("1 streams checked")
+            && check.message.contains("skipped 1 oversized streams")
+    }));
+    Ok(())
+}
+
+#[test]
 fn doctor_session_stream_check_reports_checksum_failure() -> Result<()> {
     let temp = tempdir()?;
     let session_dir = temp.path().join("sessions");

@@ -1691,6 +1691,19 @@ fn session_misc_helpers_cover_resume_ambiguity_and_empty_restore_data() -> Resul
     std::fs::write(title_file.path(), "\nnot-json\n")?;
     assert_eq!(session_history_title_from_log(title_file.path()), None);
 
+    let large_title_file = tempfile::NamedTempFile::new()?;
+    let title_line = serde_json::to_string(&SessionLogEntry::User(ModelMessage::user(
+        "large history title",
+    )))?;
+    std::fs::write(
+        large_title_file.path(),
+        format!("{title_line}\n{}", "x".repeat(1024)),
+    )?;
+    assert_eq!(
+        session_history_title_from_log(large_title_file.path()).as_deref(),
+        Some("large history title")
+    );
+
     let before = app.timeline.len();
     app.push_restored_reasoning_delta("");
     assert_eq!(app.timeline.len(), before);

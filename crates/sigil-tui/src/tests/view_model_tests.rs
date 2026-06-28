@@ -984,7 +984,7 @@ fn info_rail_projects_memory_off_and_agent_rows() {
             .info_rail
             .agent_lines
             .iter()
-            .any(|line| line == "  agents: ◇ no child agents recorded")
+            .all(|line| !line.contains("no child agents recorded"))
     );
 }
 
