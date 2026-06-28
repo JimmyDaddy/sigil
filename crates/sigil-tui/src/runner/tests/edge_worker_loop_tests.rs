@@ -248,6 +248,9 @@ fn resolve_continue_task_uses_latest_unfinished_task() -> Result<()> {
             display_name: None,
             detail: None,
             role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
         }],
         reason: None,
     }))?;
@@ -288,6 +291,9 @@ fn resolve_continue_task_reports_latest_completed_task() -> Result<()> {
             display_name: None,
             detail: None,
             role: AgentRole::Executor,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
         }],
         reason: None,
     }))?;
@@ -323,6 +329,9 @@ fn append_cancelled_task_state_marks_active_task_step_and_child() -> Result<()> 
             display_name: None,
             detail: None,
             role: AgentRole::SubagentWrite,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
         }],
         reason: None,
     }))?;
@@ -998,6 +1007,9 @@ fn seed_running_subagent_task(
             display_name: None,
             detail: None,
             role: AgentRole::SubagentWrite,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
         }],
         reason: None,
     }))?;

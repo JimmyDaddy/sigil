@@ -574,6 +574,7 @@ fn restored_session_view_shows_compaction_block_and_restored_prompt_pressure() -
             summary: "Compacted 2 earlier messages into a stable local summary.\n01. user hello\n02. assistant world".to_owned(),
             compacted_message_count: 2,
             retained_tail_message_count: 3,
+            task_memory: None,
         })),
         SessionLogEntry::User(ModelMessage::user("latest prompt")),
     ];
@@ -618,6 +619,7 @@ fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> 
                 summary: "Compacted 1 earlier messages into a stable local summary.".to_owned(),
                 compacted_message_count: 1,
                 retained_tail_message_count: 1,
+                task_memory: None,
             })),
             SessionLogEntry::User(ModelMessage::user("latest prompt")),
         ],
@@ -1139,6 +1141,7 @@ fn session_view_audit_renders_control_entries() -> Result<()> {
             summary: "summary".to_owned(),
             compacted_message_count: 3,
             retained_tail_message_count: 2,
+            task_memory: None,
         })),
         SessionLogEntry::Control(ControlEntry::Note {
             kind: "checkpoint".to_owned(),

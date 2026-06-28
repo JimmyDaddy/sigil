@@ -353,11 +353,12 @@ fn automatic_compaction_message_resets_status_and_emits_notice() -> Result<()> {
         session_log_path,
         provider_name: app.provider_name.clone(),
         model_name: app.model_name.clone(),
-        record: CompactionRecord {
+        record: Box::new(CompactionRecord {
             summary: "summary".to_owned(),
             compacted_message_count: 3,
             retained_tail_message_count: 2,
-        },
+            task_memory: None,
+        }),
         trigger: CompactionTrigger::AutomaticHardThreshold,
         entries: Vec::new(),
     })?;
@@ -795,11 +796,12 @@ fn worker_messages_cover_run_start_notice_and_manual_compaction_restore() -> Res
         session_log_path: session_log_path.clone(),
         provider_name: "restored-provider".to_owned(),
         model_name: "restored-model".to_owned(),
-        record: CompactionRecord {
+        record: Box::new(CompactionRecord {
             summary: "summary".to_owned(),
             compacted_message_count: 2,
             retained_tail_message_count: 1,
-        },
+            task_memory: None,
+        }),
         trigger: CompactionTrigger::Manual,
         entries,
     })?;
@@ -904,6 +906,9 @@ fn worker_control_events_update_task_sidebar_immediately() -> Result<()> {
                 display_name: None,
                 detail: None,
                 role: sigil_kernel::AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             }],
             reason: None,
         },
@@ -2110,11 +2115,12 @@ fn manual_compaction_restores_session_view_and_notice() -> Result<()> {
         session_log_path: session_log_path.clone(),
         provider_name: "compacted-provider".to_owned(),
         model_name: "compacted-model".to_owned(),
-        record: CompactionRecord {
+        record: Box::new(CompactionRecord {
             summary: "summary".to_owned(),
             compacted_message_count: 2,
             retained_tail_message_count: 1,
-        },
+            task_memory: None,
+        }),
         trigger: CompactionTrigger::Manual,
         entries: entries.clone(),
     })?;

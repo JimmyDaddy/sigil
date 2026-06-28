@@ -346,13 +346,9 @@ path = "agents/reviewer/agent.toml"
 "#,
     )?;
     let pending = crate::discover_workspace_plugins(&workspace, &[])?;
-    let trust = SessionLogEntry::Control(ControlEntry::PluginTrustDecision(PluginTrustEntry {
-        plugin_id: "repo.review".to_owned(),
-        manifest_path: pending.manifests[0].manifest_path.clone(),
-        manifest_hash: pending.manifests[0].manifest_hash.clone(),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    }));
+    let trust = SessionLogEntry::Control(ControlEntry::PluginTrustDecision(
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)?,
+    ));
 
     let registry = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
         &root_config(),
@@ -492,15 +488,10 @@ path = "agents/unreadable/agent.toml"
         .manifests
         .iter()
         .map(|manifest| {
-            SessionLogEntry::Control(ControlEntry::PluginTrustDecision(PluginTrustEntry {
-                plugin_id: manifest.plugin_id.clone(),
-                manifest_path: manifest.manifest_path.clone(),
-                manifest_hash: manifest.manifest_hash.clone(),
-                decision: PluginTrustDecision::Trusted,
-                reviewed_at_ms: 42,
-            }))
+            PluginTrustEntry::for_snapshot(manifest, PluginTrustDecision::Trusted, 42)
+                .map(|trust| SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trust)))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
 
     let registry = AgentProfileRegistry::from_root_config_with_workspace_and_entries(
         &root_config(),

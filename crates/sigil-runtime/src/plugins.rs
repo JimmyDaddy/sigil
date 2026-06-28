@@ -7,8 +7,9 @@ use std::{
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    McpServerConfig, PluginAgentRef, PluginHookRef, PluginManifest, PluginManifestSnapshot,
-    PluginTrustDecision, PluginTrustEntry, SkillDescriptor, SkillIndexSnapshot, validate_plugin_id,
+    McpServerConfig, PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginHookRef, PluginManifest,
+    PluginManifestSnapshot, PluginTrustDecision, PluginTrustEntry, SkillDescriptor,
+    SkillIndexSnapshot, validate_plugin_id,
 };
 
 use crate::skills::discover_plugin_skill_descriptors;
@@ -313,7 +314,11 @@ impl PluginDiscovery {
         let bytes = fs::read(manifest_path).with_context(|| {
             format!("failed to read plugin manifest {}", manifest_path.display())
         })?;
-        let manifest_hash = format!("{:x}", Sha256::digest(&bytes));
+        let manifest_hash = format!(
+            "{}{:x}",
+            PLUGIN_MANIFEST_DIGEST_PREFIX,
+            Sha256::digest(&bytes)
+        );
         let raw = std::str::from_utf8(&bytes).with_context(|| {
             format!("plugin manifest is not utf-8: {}", manifest_path.display())
         })?;

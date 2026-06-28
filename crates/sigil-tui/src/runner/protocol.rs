@@ -235,7 +235,7 @@ pub enum WorkerMessage {
         session_log_path: PathBuf,
         provider_name: String,
         model_name: String,
-        record: CompactionRecord,
+        record: Box<CompactionRecord>,
         trigger: CompactionTrigger,
         entries: Vec<SessionLogEntry>,
     },

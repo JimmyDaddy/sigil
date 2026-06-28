@@ -2453,8 +2453,8 @@ fn config_plugins_step_discovers_and_renders_trust_review_details() -> Result<()
     assert!(detail.contains("- MCP 1 command: node server.js"));
     assert!(detail.contains("- MCP 1 startup: lazy"));
     assert!(detail.contains("- MCP 1 required: no"));
-    assert!(detail.contains("- Approve: trusts this manifest hash"));
-    assert!(detail.contains("- Deny: disables this manifest hash"));
+    assert!(detail.contains("- Approve: trusts this reviewed manifest"));
+    assert!(detail.contains("- Deny: disables this reviewed manifest"));
     assert!(detail.contains("plugins: Up/Down plugin · PgUp/PgDn wrap · footer approve/deny"));
 
     let nav = app.config_nav_lines().join("\n");

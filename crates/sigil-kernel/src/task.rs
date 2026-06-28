@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Component, Path, PathBuf},
 };
 
@@ -211,6 +211,71 @@ pub enum TaskStepStatus {
     Interrupted,
 }
 
+/// Runtime intent for a task graph step.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStepMode {
+    Read,
+    Write,
+    Review,
+    Verify,
+}
+
+impl TaskStepMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Review => "review",
+            Self::Verify => "verify",
+        }
+    }
+
+    fn default_for_role(role: AgentRole) -> Self {
+        match role {
+            AgentRole::Planner | AgentRole::SubagentRead => Self::Read,
+            AgentRole::Executor | AgentRole::SubagentWrite => Self::Write,
+        }
+    }
+}
+
+/// Workspace isolation contract for a task graph step.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskIsolationMode {
+    SharedReadOnly,
+    SequentialWorkspaceWrite,
+    ChangesetOnly,
+    Worktree,
+}
+
+impl TaskIsolationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SharedReadOnly => "shared_read_only",
+            Self::SequentialWorkspaceWrite => "sequential_workspace_write",
+            Self::ChangesetOnly => "changeset_only",
+            Self::Worktree => "worktree",
+        }
+    }
+
+    fn default_for_mode(mode: TaskStepMode) -> Self {
+        match mode {
+            TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify => {
+                Self::SharedReadOnly
+            }
+            TaskStepMode::Write => Self::SequentialWorkspaceWrite,
+        }
+    }
+
+    fn is_write_isolation(self) -> bool {
+        matches!(
+            self,
+            Self::SequentialWorkspaceWrite | Self::ChangesetOnly | Self::Worktree
+        )
+    }
+}
+
 impl TaskStepStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -260,6 +325,32 @@ pub struct TaskStepSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub role: AgentRole,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<TaskStepId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TaskStepMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<TaskIsolationMode>,
+}
+
+impl TaskStepSpec {
+    pub fn effective_mode(&self) -> TaskStepMode {
+        self.mode
+            .unwrap_or_else(|| TaskStepMode::default_for_role(self.role))
+    }
+
+    pub fn effective_isolation(&self) -> TaskIsolationMode {
+        self.isolation
+            .unwrap_or_else(|| TaskIsolationMode::default_for_mode(self.effective_mode()))
+    }
+
+    pub fn is_review_advisory(&self) -> bool {
+        self.effective_mode() == TaskStepMode::Review
+    }
+
+    pub fn requires_system_verifier(&self) -> bool {
+        self.effective_mode() == TaskStepMode::Verify
+    }
 }
 
 /// Bound task context for the internal planner tool.
@@ -306,9 +397,27 @@ pub fn task_plan_update_tool_spec() -> ToolSpec {
                                 "type": "string",
                                 "enum": ["planner", "executor", "subagent_read", "subagent_write"],
                                 "description": "Use executor for main-session work, subagent_read for delegated read-only verification in a child session, and subagent_write only when the delegated step may edit files."
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "description": "Step id that must complete before this step is ready."
+                                },
+                                "description": "Explicit DAG dependencies. Omit or use [] for an independent step."
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["read", "write", "review", "verify"],
+                                "description": "Step intent. Reviewer output is advisory; verify steps are still bound to system verification."
+                            },
+                            "isolation": {
+                                "type": "string",
+                                "enum": ["shared_read_only", "sequential_workspace_write", "changeset_only", "worktree"],
+                                "description": "Workspace isolation contract. Write steps must not use shared_read_only."
                             }
                         },
-                        "required": ["step_id", "title", "role"],
+                        "required": ["step_id", "title", "role", "mode", "isolation"],
                         "additionalProperties": false
                     }
                 },
@@ -362,15 +471,29 @@ pub fn task_plan_update_entry(
                 ),
                 None => None,
             };
+            let mode = step
+                .mode
+                .unwrap_or_else(|| TaskStepMode::default_for_role(step.role));
+            let isolation = step
+                .isolation
+                .unwrap_or_else(|| TaskIsolationMode::default_for_mode(mode));
             Ok(TaskStepSpec {
                 step_id: TaskStepId::new(step.step_id)?,
                 title: step.title,
                 display_name,
                 detail: step.detail,
                 role: step.role,
+                depends_on: step
+                    .depends_on
+                    .into_iter()
+                    .map(TaskStepId::new)
+                    .collect::<Result<Vec<_>>>()?,
+                mode: Some(mode),
+                isolation: Some(isolation),
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    validate_task_plan_graph_steps(&steps)?;
     Ok(TaskPlanEntry {
         task_id: context.task_id.clone(),
         plan_version: args.plan_version,
@@ -389,6 +512,113 @@ pub fn task_plan_update_result_content(entry: &TaskPlanEntry) -> String {
         "steps": entry.steps.len()
     })
     .to_string()
+}
+
+/// Validates DAG metadata carried by task plan steps.
+///
+/// # Errors
+///
+/// Returns an error when step ids are duplicated, dependencies reference missing steps, the graph
+/// contains a cycle, or a step declares an isolation mode incompatible with its mode.
+pub fn validate_task_plan_graph_steps(steps: &[TaskStepSpec]) -> Result<()> {
+    let mut step_index = HashMap::<TaskStepId, usize>::new();
+    for (index, step) in steps.iter().enumerate() {
+        if step_index.insert(step.step_id.clone(), index).is_some() {
+            bail!("duplicate task step id {}", step.step_id.as_str());
+        }
+        let mode = step.effective_mode();
+        let isolation = step.effective_isolation();
+        validate_step_mode_isolation(&step.step_id, mode, isolation)?;
+    }
+
+    for step in steps {
+        let mut dependencies = BTreeSet::new();
+        for dependency in &step.depends_on {
+            if dependency == &step.step_id {
+                bail!(
+                    "task step {} cannot depend on itself",
+                    step.step_id.as_str()
+                );
+            }
+            if !step_index.contains_key(dependency) {
+                bail!(
+                    "task step {} depends on missing step {}",
+                    step.step_id.as_str(),
+                    dependency.as_str()
+                );
+            }
+            if !dependencies.insert(dependency) {
+                bail!(
+                    "task step {} repeats dependency {}",
+                    step.step_id.as_str(),
+                    dependency.as_str()
+                );
+            }
+        }
+    }
+
+    let mut marks = vec![VisitMark::Unvisited; steps.len()];
+    for index in 0..steps.len() {
+        visit_task_step(index, steps, &step_index, &mut marks)?;
+    }
+    Ok(())
+}
+
+fn validate_step_mode_isolation(
+    step_id: &TaskStepId,
+    mode: TaskStepMode,
+    isolation: TaskIsolationMode,
+) -> Result<()> {
+    if mode == TaskStepMode::Write {
+        if isolation == TaskIsolationMode::SharedReadOnly {
+            bail!(
+                "write task step {} cannot use shared_read_only isolation",
+                step_id.as_str()
+            );
+        }
+        return Ok(());
+    }
+    if isolation.is_write_isolation() {
+        bail!(
+            "{mode} task step {} cannot use write isolation {isolation}",
+            step_id.as_str(),
+            mode = mode.as_str(),
+            isolation = isolation.as_str()
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisitMark {
+    Unvisited,
+    Visiting,
+    Visited,
+}
+
+fn visit_task_step(
+    index: usize,
+    steps: &[TaskStepSpec],
+    step_index: &HashMap<TaskStepId, usize>,
+    marks: &mut [VisitMark],
+) -> Result<()> {
+    match marks[index] {
+        VisitMark::Visited => return Ok(()),
+        VisitMark::Visiting => {
+            bail!("task plan contains a dependency cycle");
+        }
+        VisitMark::Unvisited => {}
+    }
+
+    marks[index] = VisitMark::Visiting;
+    for dependency in &steps[index].depends_on {
+        let Some(dependency_index) = step_index.get(dependency).copied() else {
+            continue;
+        };
+        visit_task_step(dependency_index, steps, step_index, marks)?;
+    }
+    marks[index] = VisitMark::Visited;
+    Ok(())
 }
 
 fn deserialize_task_plan_status<'de, D>(
@@ -428,6 +658,12 @@ struct RawTaskStepSpec {
     #[serde(default)]
     pub detail: Option<String>,
     pub role: AgentRole,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub mode: Option<TaskStepMode>,
+    #[serde(default)]
+    pub isolation: Option<TaskIsolationMode>,
 }
 
 /// Append-only task run lifecycle entry.
@@ -627,12 +863,19 @@ impl TaskStateProjection {
                 }
             }
         }
+        let graph_result = TaskGraphProjection::from_plan_entry(entry);
+        let (graph, graph_validation_error) = match graph_result {
+            Ok(graph) => (Some(graph), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         task.plans.insert(
             entry.plan_version,
             TaskPlanProjection {
                 plan_version: entry.plan_version,
                 status: entry.status,
                 steps: entry.steps.clone(),
+                graph,
+                graph_validation_error,
                 reason: entry.reason.clone(),
             },
         );
@@ -821,7 +1064,80 @@ pub struct TaskPlanProjection {
     pub plan_version: u32,
     pub status: TaskPlanStatus,
     pub steps: Vec<TaskStepSpec>,
+    pub graph: Option<TaskGraphProjection>,
+    pub graph_validation_error: Option<String>,
     pub reason: Option<String>,
+}
+
+/// Durable DAG view reconstructed from a task plan entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskGraphProjection {
+    pub task_id: TaskId,
+    pub graph_version: u32,
+    pub steps: Vec<TaskGraphStepProjection>,
+}
+
+impl TaskGraphProjection {
+    /// Builds a graph projection from one accepted or proposed task plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan carries invalid DAG metadata.
+    pub fn from_plan_entry(entry: &TaskPlanEntry) -> Result<Self> {
+        validate_task_plan_graph_steps(&entry.steps)?;
+        Ok(Self {
+            task_id: entry.task_id.clone(),
+            graph_version: entry.plan_version,
+            steps: entry
+                .steps
+                .iter()
+                .map(TaskGraphStepProjection::from_step_spec)
+                .collect(),
+        })
+    }
+
+    pub fn ready_steps<'a>(
+        &'a self,
+        statuses: &'a BTreeMap<(u32, TaskStepId), TaskStepProjection>,
+    ) -> Vec<&'a TaskGraphStepProjection> {
+        self.steps
+            .iter()
+            .filter(|step| {
+                let step_key = (self.graph_version, step.step_id.clone());
+                let not_started = statuses
+                    .get(&step_key)
+                    .is_none_or(|status| status.status == TaskStepStatus::Pending);
+                not_started
+                    && step.depends_on.iter().all(|dependency| {
+                        statuses
+                            .get(&(self.graph_version, dependency.clone()))
+                            .is_some_and(|status| status.status == TaskStepStatus::Completed)
+                    })
+            })
+            .collect()
+    }
+}
+
+/// One task graph step as materialized for scheduling and TUI summaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskGraphStepProjection {
+    pub step_id: TaskStepId,
+    pub title: String,
+    pub mode: TaskStepMode,
+    pub depends_on: Vec<TaskStepId>,
+    pub isolation: TaskIsolationMode,
+}
+
+impl TaskGraphStepProjection {
+    fn from_step_spec(step: &TaskStepSpec) -> Self {
+        Self {
+            step_id: step.step_id.clone(),
+            title: step.title.clone(),
+            mode: step.effective_mode(),
+            depends_on: step.depends_on.clone(),
+            isolation: step.effective_isolation(),
+        }
+    }
 }
 
 /// Projection for one task step.

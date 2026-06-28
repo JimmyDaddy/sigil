@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     config::{McpServerConfig, McpServerStartup},
@@ -13,6 +14,9 @@ use crate::{
     session::{ControlEntry, SessionLogEntry},
     tool::ToolCategory,
 };
+
+/// Canonical prefix for plugin manifest content digests.
+pub const PLUGIN_MANIFEST_DIGEST_PREFIX: &str = "sha256:";
 
 /// Provider-neutral manifest for one local capability package.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -49,9 +53,7 @@ impl PluginManifest {
         if self.name.trim().is_empty() {
             bail!("plugin {} has empty name", self.id);
         }
-        if self.version.trim().is_empty() {
-            bail!("plugin {} has empty version", self.id);
-        }
+        validate_plugin_version(&self.id, &self.version)?;
         for agent in &self.agents {
             agent.validate()?;
         }
@@ -287,19 +289,24 @@ impl PluginManifestSnapshot {
     /// Returns an error when the snapshot cannot safely identify the manifest or capabilities.
     pub fn validate(&self) -> Result<()> {
         validate_plugin_id(&self.plugin_id)?;
-        if self.version.trim().is_empty() {
-            bail!("plugin {} snapshot has empty version", self.plugin_id);
-        }
+        validate_plugin_version(&self.plugin_id, &self.version)?;
         if self.manifest_path.as_os_str().is_empty() {
             bail!("plugin {} snapshot has empty manifest path", self.plugin_id);
         }
-        if self.manifest_hash.trim().is_empty() {
-            bail!("plugin {} snapshot has empty manifest hash", self.plugin_id);
-        }
+        validate_plugin_manifest_digest(&self.plugin_id, &self.manifest_hash)?;
         for capability in &self.capabilities {
             capability.validate()?;
         }
         Ok(())
+    }
+
+    /// Returns a deterministic digest of the reviewable capabilities projected from the manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if capability serialization fails.
+    pub fn capability_digest(&self) -> Result<String> {
+        plugin_capability_digest(&self.capabilities)
     }
 }
 
@@ -310,11 +317,37 @@ pub struct PluginTrustEntry {
     pub plugin_id: String,
     pub manifest_path: PathBuf,
     pub manifest_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_digest: Option<String>,
     pub decision: PluginTrustDecision,
     pub reviewed_at_ms: u64,
 }
 
 impl PluginTrustEntry {
+    /// Creates a trust entry bound to the current static manifest review subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot is invalid or its capability digest cannot be computed.
+    pub fn for_snapshot(
+        snapshot: &PluginManifestSnapshot,
+        decision: PluginTrustDecision,
+        reviewed_at_ms: u64,
+    ) -> Result<Self> {
+        snapshot.validate()?;
+        Ok(Self {
+            plugin_id: snapshot.plugin_id.clone(),
+            manifest_path: snapshot.manifest_path.clone(),
+            manifest_hash: snapshot.manifest_hash.clone(),
+            manifest_version: Some(snapshot.version.clone()),
+            capability_digest: Some(snapshot.capability_digest()?),
+            decision,
+            reviewed_at_ms,
+        })
+    }
+
     /// Validates trust metadata before it is persisted.
     ///
     /// # Errors
@@ -328,19 +361,37 @@ impl PluginTrustEntry {
                 self.plugin_id
             );
         }
-        if self.manifest_hash.trim().is_empty() {
-            bail!(
-                "plugin {} trust entry has empty manifest hash",
-                self.plugin_id
-            );
+        validate_plugin_manifest_digest(&self.plugin_id, &self.manifest_hash)?;
+        if let Some(version) = &self.manifest_version {
+            validate_plugin_version(&self.plugin_id, version)?;
+        }
+        if let Some(capability_digest) = &self.capability_digest {
+            validate_plugin_capability_digest(&self.plugin_id, capability_digest)?;
         }
         Ok(())
     }
 
     pub fn matches_snapshot(&self, snapshot: &PluginManifestSnapshot) -> bool {
-        self.plugin_id == snapshot.plugin_id
-            && self.manifest_path == snapshot.manifest_path
-            && self.manifest_hash == snapshot.manifest_hash
+        if self.plugin_id != snapshot.plugin_id
+            || self.manifest_path != snapshot.manifest_path
+            || !plugin_manifest_digests_match(&self.manifest_hash, &snapshot.manifest_hash)
+        {
+            return false;
+        }
+        if let Some(version) = &self.manifest_version
+            && version != &snapshot.version
+        {
+            return false;
+        }
+        if let Some(capability_digest) = &self.capability_digest {
+            let Ok(snapshot_digest) = snapshot.capability_digest() else {
+                return false;
+            };
+            if !plugin_manifest_digests_match(capability_digest, &snapshot_digest) {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -427,6 +478,97 @@ pub fn validate_plugin_id(id: &str) -> Result<()> {
         bail!("invalid plugin id {id:?}");
     }
     Ok(())
+}
+
+/// Validates a plugin version string without forcing a package ecosystem-specific semver.
+///
+/// # Errors
+///
+/// Returns an error when the version is empty, path-like, contains whitespace/control characters,
+/// or is too long for review surfaces.
+pub fn validate_plugin_version(plugin_id: &str, version: &str) -> Result<()> {
+    if version.trim().is_empty() {
+        bail!("plugin {plugin_id} has empty version");
+    }
+    if version.len() > 128 {
+        bail!("plugin {plugin_id} version is too long");
+    }
+    if version
+        .chars()
+        .any(|value| value.is_ascii_control() || value.is_ascii_whitespace())
+    {
+        bail!("plugin {plugin_id} version cannot contain whitespace or control characters");
+    }
+    if version.contains('/') || version.contains('\\') || version.contains("..") {
+        bail!("plugin {plugin_id} version cannot be path-like");
+    }
+    Ok(())
+}
+
+/// Validates a plugin manifest content digest.
+///
+/// New snapshots use `sha256:<64 lowercase hex>`. Bare 64-character SHA-256 values are accepted
+/// only for compatibility with manifests captured before the prefix was introduced.
+///
+/// # Errors
+///
+/// Returns an error when the digest is empty, has an unsupported prefix, has the wrong length, or
+/// contains non-hex characters.
+pub fn validate_plugin_manifest_digest(plugin_id: &str, digest: &str) -> Result<()> {
+    normalize_plugin_manifest_digest(digest)
+        .map(|_| ())
+        .ok_or_else(|| anyhow::anyhow!("plugin {plugin_id} manifest hash must be a SHA-256 digest"))
+}
+
+/// Validates a plugin capability digest.
+///
+/// # Errors
+///
+/// Returns an error when the digest is not a SHA-256 digest.
+pub fn validate_plugin_capability_digest(plugin_id: &str, digest: &str) -> Result<()> {
+    normalize_plugin_manifest_digest(digest)
+        .map(|_| ())
+        .ok_or_else(|| {
+            anyhow::anyhow!("plugin {plugin_id} capability digest must be a SHA-256 digest")
+        })
+}
+
+/// Returns true when two manifest digests identify the same content.
+///
+/// This accepts prefixed-vs-bare SHA-256 compatibility but does not match malformed digests.
+#[must_use]
+pub fn plugin_manifest_digests_match(left: &str, right: &str) -> bool {
+    let Some(left) = normalize_plugin_manifest_digest(left) else {
+        return false;
+    };
+    let Some(right) = normalize_plugin_manifest_digest(right) else {
+        return false;
+    };
+    left.eq_ignore_ascii_case(right)
+}
+
+fn normalize_plugin_manifest_digest(digest: &str) -> Option<&str> {
+    if digest.is_empty() || digest.trim() != digest {
+        return None;
+    }
+    let value = digest;
+    let value = value
+        .strip_prefix(PLUGIN_MANIFEST_DIGEST_PREFIX)
+        .unwrap_or(value);
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn plugin_capability_digest(capabilities: &[PluginCapability]) -> Result<String> {
+    let bytes = serde_json::to_vec(capabilities)?;
+    Ok(format!(
+        "{}{:x}",
+        PLUGIN_MANIFEST_DIGEST_PREFIX,
+        Sha256::digest(&bytes)
+    ))
 }
 
 fn validate_manifest_relative_path(kind: &str, path: &Path) -> Result<()> {

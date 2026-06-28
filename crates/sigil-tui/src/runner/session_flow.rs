@@ -42,7 +42,7 @@ pub(super) fn session_compacted_message(
         session_log_path: session_log_path.to_path_buf(),
         provider_name: session.provider_name().to_owned(),
         model_name: session.model_name().to_owned(),
-        record,
+        record: Box::new(record),
         trigger,
         entries: session.entries().to_vec(),
     }

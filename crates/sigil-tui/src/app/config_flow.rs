@@ -1944,13 +1944,7 @@ impl AppState {
         };
 
         plugin.validate()?;
-        let trust = PluginTrustEntry {
-            plugin_id: plugin.plugin_id.clone(),
-            manifest_path: plugin.manifest_path.clone(),
-            manifest_hash: plugin.manifest_hash.clone(),
-            decision,
-            reviewed_at_ms: unix_time_ms(),
-        };
+        let trust = PluginTrustEntry::for_snapshot(&plugin, decision, unix_time_ms())?;
         trust.validate()?;
 
         self.ensure_current_session_identity()?;
@@ -2676,11 +2670,11 @@ fn render_plugin_detail_lines(plugin: &PluginManifestSnapshot) -> Vec<String> {
     lines.extend(render_plugin_mcp_lines(&plugin.capabilities));
     lines.push(render_config_readonly_row(
         "Approve",
-        "trusts this manifest hash",
+        "trusts this reviewed manifest",
     ));
     lines.push(render_config_readonly_row(
         "Deny",
-        "disables this manifest hash",
+        "disables this reviewed manifest",
     ));
     lines
 }

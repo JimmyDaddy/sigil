@@ -927,7 +927,11 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
             SessionLogEntry::Control(ControlEntry::PluginTrustDecision(PluginTrustEntry {
                 plugin_id: "repo-review".to_owned(),
                 manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
-                manifest_hash: "sha256:manifest".to_owned(),
+                manifest_hash:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                manifest_version: None,
+                capability_digest: None,
                 decision: PluginTrustDecision::Trusted,
                 reviewed_at_ms: 42,
             })),
@@ -1100,7 +1104,9 @@ fn session_entry_event_type_maps_session_entries_to_durable_types() -> Result<()
                     version: "0.1.0".to_owned(),
                     description: None,
                     manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
-                    manifest_hash: "sha256:manifest".to_owned(),
+                    manifest_hash:
+                        "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .to_owned(),
                     capabilities: vec![PluginCapability::Skill {
                         path: "skills/review/SKILL.md".into(),
                     }],
@@ -3432,19 +3438,14 @@ fn session_plugin_state_projection_replays_control_entries() -> Result<()> {
         version: "0.1.0".to_owned(),
         description: None,
         manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
-        manifest_hash: "sha256:manifest".to_owned(),
+        manifest_hash: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_owned(),
         capabilities: vec![PluginCapability::Skill {
             path: "skills/review/SKILL.md".into(),
         }],
         trust: PluginTrustDecision::NeedsReview,
     };
-    let trust = PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
-        manifest_hash: "sha256:manifest".to_owned(),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    };
+    let trust = PluginTrustEntry::for_snapshot(&snapshot, PluginTrustDecision::Trusted, 42)?;
     session.append_control(ControlEntry::PluginManifestCaptured(snapshot))?;
     session.append_control(ControlEntry::PluginTrustDecision(trust.clone()))?;
 
@@ -3470,7 +3471,8 @@ fn plugin_state_projection_replays_mixed_durable_stream_records() -> Result<()> 
         version: "0.1.0".to_owned(),
         description: None,
         manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
-        manifest_hash: "sha256:manifest".to_owned(),
+        manifest_hash: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .to_owned(),
         capabilities: vec![PluginCapability::Skill {
             path: "skills/review/SKILL.md".into(),
         }],
@@ -3481,18 +3483,12 @@ fn plugin_state_projection_replays_mixed_durable_stream_records() -> Result<()> 
         format!(
             "{}\n",
             serde_json::to_string(&SessionLogEntry::Control(
-                ControlEntry::PluginManifestCaptured(snapshot)
+                ControlEntry::PluginManifestCaptured(snapshot.clone())
             ))?
         ),
     )?;
     let store = JsonlSessionStore::new(&path)?;
-    let trust = PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
-        manifest_hash: "sha256:manifest".to_owned(),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    };
+    let trust = PluginTrustEntry::for_snapshot(&snapshot, PluginTrustDecision::Trusted, 42)?;
     store.append_session_entry_event(&SessionLogEntry::Control(
         ControlEntry::PluginTrustDecision(trust.clone()),
     ))?;
@@ -3816,6 +3812,7 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
         summary: "summary-old".to_owned(),
         compacted_message_count: 1,
         retained_tail_message_count: 2,
+        task_memory: None,
     }))?;
     session.append_control(ControlEntry::ResponseHandleTracked(ResponseHandle {
         provider_name: "deepseek".to_owned(),
@@ -3835,6 +3832,7 @@ fn latest_control_state_queries_return_latest_matching_records() -> Result<()> {
         summary: "summary-new".to_owned(),
         compacted_message_count: 3,
         retained_tail_message_count: 2,
+        task_memory: None,
     }))?;
 
     assert!(matches!(
@@ -4010,6 +4008,7 @@ fn session_stats_are_restored_from_usage_snapshots() -> Result<()> {
             summary: "summary".to_owned(),
             compacted_message_count: 2,
             retained_tail_message_count: 2,
+            task_memory: None,
         })),
     ];
 
@@ -4059,6 +4058,7 @@ fn usage_stats_projection_replays_mixed_durable_stream_records() -> Result<()> {
             summary: "summary".to_owned(),
             compacted_message_count: 2,
             retained_tail_message_count: 2,
+            task_memory: None,
         }),
     ))?;
     let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
@@ -4582,6 +4582,7 @@ fn session_projection_helpers_repair_orphans_and_ignore_empty_compaction_records
         summary: "   ".to_owned(),
         compacted_message_count: 1,
         retained_tail_message_count: 1,
+        task_memory: None,
     }))?;
 
     let projected = session.messages();
@@ -4592,6 +4593,7 @@ fn session_projection_helpers_repair_orphans_and_ignore_empty_compaction_records
         summary: "summary".to_owned(),
         compacted_message_count: 2,
         retained_tail_message_count: 1,
+        task_memory: None,
     });
     assert_eq!(summary.role, crate::MessageRole::Assistant);
     assert_eq!(summary.content.as_deref(), Some("summary"));

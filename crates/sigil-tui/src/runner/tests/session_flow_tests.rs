@@ -63,6 +63,7 @@ fn session_compacted_message_includes_provider_and_model() -> Result<()> {
         summary: "test summary".to_owned(),
         compacted_message_count: 5,
         retained_tail_message_count: 2,
+        task_memory: None,
     };
     let message =
         session_compacted_message(&path, &session, record.clone(), CompactionTrigger::Manual);
@@ -78,7 +79,7 @@ fn session_compacted_message_includes_provider_and_model() -> Result<()> {
             assert_eq!(session_log_path, path);
             assert_eq!(provider_name, "deepseek");
             assert_eq!(model_name, "deepseek-v4-flash");
-            assert_eq!(returned_record, record);
+            assert_eq!(*returned_record, record);
             assert_eq!(trigger, CompactionTrigger::Manual);
             Ok(())
         }
@@ -95,6 +96,7 @@ fn session_compacted_message_captures_entries() -> Result<()> {
         summary: "summary".to_owned(),
         compacted_message_count: 0,
         retained_tail_message_count: 0,
+        task_memory: None,
     };
     let message = session_compacted_message(
         &path,
@@ -128,6 +130,7 @@ fn session_compacted_message_uses_trigger_enum() {
         summary: "s".to_owned(),
         compacted_message_count: 0,
         retained_tail_message_count: 0,
+        task_memory: None,
     };
 
     let manual =

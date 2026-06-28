@@ -200,6 +200,8 @@ pub struct CompactionRecord {
     pub summary: String,
     pub compacted_message_count: usize,
     pub retained_tail_message_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_memory: Option<crate::TaskMemoryV1>,
 }
 
 /// Deterministic preview of what one manual compaction would fold and project.
@@ -1963,6 +1965,7 @@ impl Session {
             summary,
             compacted_message_count,
             retained_tail_message_count: raw_messages.len().saturating_sub(compacted_message_count),
+            task_memory: None,
         };
         self.append_control(ControlEntry::CompactionApplied(record.clone()))?;
         self.stats.last_prompt_tokens = 0;
@@ -2007,6 +2010,7 @@ impl Session {
             summary: summarize_messages(&raw_messages[..compacted_message_count]),
             compacted_message_count,
             retained_tail_message_count: raw_messages.len().saturating_sub(compacted_message_count),
+            task_memory: None,
         };
         Ok(Some(CompactionPreview {
             folded_messages: raw_messages[..compacted_message_count].to_vec(),

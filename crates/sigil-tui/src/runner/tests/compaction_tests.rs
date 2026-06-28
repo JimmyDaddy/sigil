@@ -152,7 +152,7 @@ fn hard_threshold_run_is_auto_compacted_after_finish() -> Result<()> {
         WorkerMessage::SessionCompacted { trigger, ref record, ref entries, .. }
             if trigger == CompactionTrigger::AutomaticHardThreshold
                 && record.compacted_message_count == 1
-                && entries.iter().any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::CompactionApplied(saved)) if saved == record))
+                && entries.iter().any(|entry| matches!(entry, SessionLogEntry::Control(ControlEntry::CompactionApplied(saved)) if saved == record.as_ref()))
     ));
 
     worker.shutdown()?;

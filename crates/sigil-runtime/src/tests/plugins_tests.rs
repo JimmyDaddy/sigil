@@ -117,7 +117,7 @@ trust: trusted
 # Review
 "#,
     );
-    write_plugin_manifest(
+    let manifest_path = write_plugin_manifest(
         workspace.path(),
         "repo-review",
         r#"id = "repo-review"
@@ -154,7 +154,10 @@ required = false
     assert_eq!(manifest.plugin_id, "repo-review");
     assert_eq!(manifest.name, "Repository Review");
     assert_eq!(manifest.trust, PluginTrustDecision::NeedsReview);
-    assert!(manifest.manifest_hash.len() >= 32);
+    assert_eq!(
+        manifest.manifest_hash,
+        expected_manifest_digest(&manifest_path)
+    );
     assert_eq!(
         manifest.capabilities,
         vec![
@@ -180,6 +183,140 @@ required = false
         ]
     );
     assert!(report.registrations.is_empty());
+}
+
+#[test]
+fn untrusted_plugin_does_not_load_skill_content_before_review() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_skill(
+        workspace.path(),
+        "repo-review",
+        "skills/review/SKILL.md",
+        r#"---
+id review
+---
+
+# Invalid frontmatter that must not be parsed before trust
+"#,
+    );
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[skills]]
+path = "skills/review/SKILL.md"
+"#,
+    );
+
+    let report =
+        discover_workspace_plugins(workspace.path(), &[]).expect("plugin discovery should succeed");
+
+    assert!(report.warnings.is_empty());
+    assert_eq!(report.manifests.len(), 1);
+    assert_eq!(report.manifests[0].trust, PluginTrustDecision::NeedsReview);
+    assert!(report.registrations.is_empty());
+}
+
+#[test]
+fn disabled_plugin_manifest_does_not_register_capabilities() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_skill(
+        workspace.path(),
+        "repo-review",
+        "skills/review/SKILL.md",
+        r#"---
+id: review
+---
+
+# Review
+"#,
+    );
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[skills]]
+path = "skills/review/SKILL.md"
+
+[[hooks]]
+event = "pre_tool_use"
+command = "scripts/check-tool-policy.sh"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Disabled, 42)
+            .expect("trust should build");
+
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("disabled plugin discovery should succeed");
+
+    assert!(report.warnings.is_empty());
+    assert_eq!(report.manifests[0].trust, PluginTrustDecision::Disabled);
+    assert!(report.registrations.is_empty());
+}
+
+#[test]
+fn plugin_manifest_digest_is_sha256_of_static_manifest_content() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    let manifest_path = write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[skills]]
+path = "skills/review/SKILL.md"
+"#,
+    );
+    write_plugin_skill(
+        workspace.path(),
+        "repo-review",
+        "skills/review/SKILL.md",
+        "# Review",
+    );
+
+    let report =
+        discover_workspace_plugins(workspace.path(), &[]).expect("plugin discovery should succeed");
+
+    assert!(report.warnings.is_empty());
+    assert_eq!(
+        report.manifests[0].manifest_hash,
+        expected_manifest_digest(&manifest_path)
+    );
+}
+
+#[test]
+fn invalid_plugin_version_is_rejected_before_registration() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "bad version"
+"#,
+    );
+
+    let report =
+        discover_workspace_plugins(workspace.path(), &[]).expect("plugin discovery should succeed");
+
+    assert!(report.manifests.is_empty());
+    assert!(report.registrations.is_empty());
+    assert!(report.warnings.iter().any(|warning| {
+        warning.kind == PluginDiscoveryWarningKind::InvalidManifest
+            && warning
+                .message
+                .contains("version cannot contain whitespace")
+    }));
 }
 
 #[test]
@@ -236,13 +373,9 @@ required = false
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
         .expect("initial discovery should succeed");
-    let trust = PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: pending.manifests[0].manifest_path.clone(),
-        manifest_hash: pending.manifests[0].manifest_hash.clone(),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    };
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
 
     let report = discover_workspace_plugins(workspace.path(), &[trust])
         .expect("trusted plugin discovery should succeed");
@@ -319,13 +452,9 @@ path = "skills/review/SKILL.md"
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
         .expect("initial discovery should succeed");
-    let stale_trust = PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: pending.manifests[0].manifest_path.clone(),
-        manifest_hash: pending.manifests[0].manifest_hash.clone(),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    };
+    let stale_trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
     write_plugin_manifest(
         workspace.path(),
         "repo-review",
@@ -344,6 +473,53 @@ path = "skills/review/SKILL.md"
     assert_eq!(changed.manifests[0].version, "0.2.0");
     assert_eq!(changed.manifests[0].trust, PluginTrustDecision::NeedsReview);
     assert!(changed.registrations.is_empty());
+}
+
+#[test]
+fn legacy_bare_sha256_trust_entry_matches_prefixed_manifest_digest() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_skill(
+        workspace.path(),
+        "repo-review",
+        "skills/review/SKILL.md",
+        "# Review",
+    );
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[skills]]
+path = "skills/review/SKILL.md"
+"#,
+    );
+    let pending = discover_workspace_plugins(workspace.path(), &[])
+        .expect("initial discovery should succeed");
+    let trust = PluginTrustEntry {
+        plugin_id: "repo-review".to_owned(),
+        manifest_path: pending.manifests[0].manifest_path.clone(),
+        manifest_hash: pending.manifests[0]
+            .manifest_hash
+            .strip_prefix("sha256:")
+            .expect("runtime digest should be prefixed")
+            .to_owned(),
+        manifest_version: Some(pending.manifests[0].version.clone()),
+        capability_digest: Some(
+            pending.manifests[0]
+                .capability_digest()
+                .expect("capability digest should compute"),
+        ),
+        decision: PluginTrustDecision::Trusted,
+        reviewed_at_ms: 42,
+    };
+
+    let report = discover_workspace_plugins(workspace.path(), &[trust])
+        .expect("trusted plugin discovery should succeed");
+
+    assert_eq!(report.manifests[0].trust, PluginTrustDecision::Trusted);
+    assert_eq!(report.registrations.skills.len(), 1);
 }
 
 #[test]
@@ -514,13 +690,9 @@ path = "skills/second/SKILL.md"
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
         .expect("initial discovery should succeed");
-    let trust = PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: pending.manifests[0].manifest_path.clone(),
-        manifest_hash: pending.manifests[0].manifest_hash.clone(),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    };
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
 
     let report = discover_workspace_plugins(workspace.path(), &[trust])
         .expect("trusted plugin discovery should succeed");
@@ -686,13 +858,9 @@ required = false
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
         .expect("initial discovery should succeed");
-    let trust = PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: pending.manifests[0].manifest_path.clone(),
-        manifest_hash: pending.manifests[0].manifest_hash.clone(),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    };
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
     let report = discover_workspace_plugins(workspace.path(), &[trust])
         .expect("trusted plugin discovery should succeed");
 
@@ -771,13 +939,9 @@ path = "skills/review/SKILL.md"
     );
     let pending = discover_workspace_plugins(workspace.path(), &[])
         .expect("initial discovery should succeed");
-    let trust = PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: pending.manifests[0].manifest_path.clone(),
-        manifest_hash: pending.manifests[0].manifest_hash.clone(),
-        decision: PluginTrustDecision::Trusted,
-        reviewed_at_ms: 42,
-    };
+    let trust =
+        PluginTrustEntry::for_snapshot(&pending.manifests[0], PluginTrustDecision::Trusted, 42)
+            .expect("trust should build");
     let report = discover_workspace_plugins(workspace.path(), &[trust])
         .expect("trusted plugin discovery should succeed");
     let existing = SkillIndexSnapshot::new(report.registrations.skills.clone())
@@ -951,6 +1115,11 @@ fn write_file(path: &Path, content: &str) {
     fs::create_dir_all(path.parent().expect("path should have parent"))
         .expect("parent should create");
     fs::write(path, content).expect("file should write");
+}
+
+fn expected_manifest_digest(path: &Path) -> String {
+    let bytes = fs::read(path).expect("manifest should read");
+    format!("sha256:{:x}", Sha256::digest(&bytes))
 }
 
 fn root_config() -> RootConfig {

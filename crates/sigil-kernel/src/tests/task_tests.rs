@@ -3,12 +3,13 @@ use anyhow::Result;
 use crate::{
     AgentRole, ControlEntry, Session, SessionLogEntry, SessionRef,
     TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus,
-    TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepSpec,
-    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall,
-    child_session_ref, normalize_task_agent_display_name, task_plan_update_entry,
-    task_plan_update_result_content, task_plan_update_tool_spec,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
+    TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+    TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
+    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
+    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
+    normalize_task_agent_display_name, task_plan_update_entry, task_plan_update_result_content,
+    task_plan_update_tool_spec, validate_task_plan_graph_steps,
 };
 
 fn task_id(value: &str) -> Result<TaskId> {
@@ -67,6 +68,20 @@ fn task_role_and_status_labels_are_stable() {
     assert_eq!(AgentRole::Executor.as_str(), "executor");
     assert_eq!(AgentRole::SubagentRead.as_str(), "subagent_read");
     assert_eq!(AgentRole::SubagentWrite.as_str(), "subagent_write");
+    assert_eq!(TaskStepMode::Read.as_str(), "read");
+    assert_eq!(TaskStepMode::Write.as_str(), "write");
+    assert_eq!(TaskStepMode::Review.as_str(), "review");
+    assert_eq!(TaskStepMode::Verify.as_str(), "verify");
+    assert_eq!(
+        TaskIsolationMode::SharedReadOnly.as_str(),
+        "shared_read_only"
+    );
+    assert_eq!(
+        TaskIsolationMode::SequentialWorkspaceWrite.as_str(),
+        "sequential_workspace_write"
+    );
+    assert_eq!(TaskIsolationMode::ChangesetOnly.as_str(), "changeset_only");
+    assert_eq!(TaskIsolationMode::Worktree.as_str(), "worktree");
 
     assert!(TaskRunStatus::Completed.is_terminal());
     assert!(TaskRunStatus::Failed.is_terminal());
@@ -129,6 +144,9 @@ fn task_control_entries_roundtrip() -> Result<()> {
                 display_name: None,
                 detail: Some("read code".to_owned()),
                 role: AgentRole::Planner,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             }],
             reason: None,
         }),
@@ -221,11 +239,191 @@ fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
     assert!(spec.description.contains("subagent_read"));
     assert!(spec.description.contains("subagent_write"));
     assert!(spec.input_schema.to_string().contains("display_name"));
+    assert!(spec.input_schema.to_string().contains("depends_on"));
+    assert!(spec.input_schema.to_string().contains("shared_read_only"));
+    assert!(
+        spec.input_schema
+            .to_string()
+            .contains("sequential_workspace_write")
+    );
     assert!(
         spec.input_schema
             .to_string()
             .contains("delegated read-only verification")
     );
+}
+
+#[test]
+fn task_dag_schema_parses_valid_metadata_and_projects_graph() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 3,
+    };
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: r#"{
+            "plan_version":1,
+            "status":"accepted",
+            "steps":[
+                {
+                    "step_id":"explore",
+                    "title":"Explore",
+                    "role":"subagent_read",
+                    "mode":"read",
+                    "isolation":"shared_read_only"
+                },
+                {
+                    "step_id":"implement",
+                    "title":"Implement",
+                    "role":"executor",
+                    "depends_on":["explore"],
+                    "mode":"write",
+                    "isolation":"sequential_workspace_write"
+                },
+                {
+                    "step_id":"verify",
+                    "title":"Verify",
+                    "role":"executor",
+                    "depends_on":["implement"],
+                    "mode":"verify",
+                    "isolation":"shared_read_only"
+                }
+            ]
+        }"#
+        .to_owned(),
+    };
+
+    let entry = task_plan_update_entry(&context, &call)?;
+
+    assert_eq!(entry.steps[0].effective_mode(), TaskStepMode::Read);
+    assert_eq!(
+        entry.steps[1].effective_isolation(),
+        TaskIsolationMode::SequentialWorkspaceWrite
+    );
+    assert_eq!(entry.steps[2].depends_on, vec![step_id("implement")?]);
+
+    let graph = TaskGraphProjection::from_plan_entry(&entry)?;
+    assert_eq!(graph.graph_version, 1);
+    assert_eq!(graph.steps.len(), 3);
+    assert_eq!(graph.steps[0].mode, TaskStepMode::Read);
+    assert_eq!(graph.steps[1].depends_on, vec![step_id("explore")?]);
+
+    let projection = TaskStateProjection::from_entries(&[SessionLogEntry::Control(
+        ControlEntry::TaskPlan(entry),
+    )]);
+    let projected_graph = projection
+        .latest_task()
+        .and_then(|task| task.plans.get(&1))
+        .and_then(|plan| plan.graph.as_ref())
+        .expect("accepted plan should project valid task graph");
+    assert_eq!(projected_graph.steps[2].mode, TaskStepMode::Verify);
+    Ok(())
+}
+
+#[test]
+fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Result<()> {
+    let read_step = TaskStepSpec {
+        step_id: step_id("read")?,
+        title: "read".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    let write_step = TaskStepSpec {
+        step_id: step_id("write")?,
+        title: "write".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::Executor,
+        depends_on: vec![step_id("read")?],
+        mode: Some(TaskStepMode::Write),
+        isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+    };
+    validate_task_plan_graph_steps(&[read_step.clone(), write_step.clone()])?;
+
+    let mut missing_dependency = write_step.clone();
+    missing_dependency.depends_on = vec![step_id("missing")?];
+    assert!(validate_task_plan_graph_steps(&[read_step.clone(), missing_dependency]).is_err());
+
+    let duplicate_id = TaskStepSpec {
+        step_id: step_id("read")?,
+        title: "duplicate".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    assert!(validate_task_plan_graph_steps(&[read_step.clone(), duplicate_id]).is_err());
+
+    let mut self_dependency = read_step.clone();
+    self_dependency.depends_on = vec![step_id("read")?];
+    assert!(validate_task_plan_graph_steps(&[self_dependency]).is_err());
+
+    let mut repeated_dependency = write_step.clone();
+    repeated_dependency.depends_on = vec![step_id("read")?, step_id("read")?];
+    assert!(validate_task_plan_graph_steps(&[read_step.clone(), repeated_dependency]).is_err());
+
+    let mut first_cycle = read_step.clone();
+    first_cycle.depends_on = vec![step_id("write")?];
+    let mut second_cycle = write_step.clone();
+    second_cycle.depends_on = vec![step_id("read")?];
+    assert!(validate_task_plan_graph_steps(&[first_cycle, second_cycle]).is_err());
+
+    let mut unsafe_write = write_step.clone();
+    unsafe_write.isolation = Some(TaskIsolationMode::SharedReadOnly);
+    assert!(validate_task_plan_graph_steps(&[read_step.clone(), unsafe_write]).is_err());
+
+    let mut over_isolated_read = read_step;
+    over_isolated_read.isolation = Some(TaskIsolationMode::SequentialWorkspaceWrite);
+    assert!(validate_task_plan_graph_steps(&[over_isolated_read, write_step]).is_err());
+    Ok(())
+}
+
+#[test]
+fn task_verify_mode_separates_review_advisory_from_system_verifier() -> Result<()> {
+    let review_step = TaskStepSpec {
+        step_id: step_id("review")?,
+        title: "Review".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Review),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+    let verify_step = TaskStepSpec {
+        step_id: step_id("verify")?,
+        title: "Verify".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::Executor,
+        depends_on: vec![step_id("review")?],
+        mode: Some(TaskStepMode::Verify),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+
+    assert!(review_step.is_review_advisory());
+    assert!(!review_step.requires_system_verifier());
+    assert!(!verify_step.is_review_advisory());
+    assert!(verify_step.requires_system_verifier());
+
+    let entry = TaskPlanEntry {
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![review_step, verify_step],
+        reason: None,
+    };
+    let graph = TaskGraphProjection::from_plan_entry(&entry)?;
+    assert_eq!(graph.steps[0].mode, TaskStepMode::Review);
+    assert_eq!(graph.steps[1].mode, TaskStepMode::Verify);
+    Ok(())
 }
 
 #[test]
@@ -242,6 +440,9 @@ fn task_projection_replays_run_plan_and_step_state() -> Result<()> {
                 display_name: None,
                 detail: None,
                 role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             }],
             reason: None,
         })),

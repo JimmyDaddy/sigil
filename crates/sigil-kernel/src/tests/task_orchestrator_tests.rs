@@ -1163,6 +1163,9 @@ async fn subagent_step_runs_in_child_session_and_links_parent() -> Result<()> {
             display_name: None,
             detail: None,
             role: crate::AgentRole::SubagentRead,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
         }],
         reason: None,
     }))?;
@@ -1258,6 +1261,9 @@ async fn direct_child_session_keeps_skill_context_out_of_parent_history() -> Res
                 display_name: None,
                 detail: Some("direct user-invoked child-session skill".to_owned()),
                 role: crate::AgentRole::SubagentWrite,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             },
             AgentRunInput::without_persisted_user_message(vec![
                 ModelMessage::system("Loaded Sigil skill body SECRET_SKILL_BODY"),
@@ -1369,6 +1375,9 @@ async fn direct_child_session_runs_configured_check_after_mutating_write() -> Re
                 display_name: None,
                 detail: None,
                 role: crate::AgentRole::SubagentWrite,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             },
             AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("write")]),
             options.clone(),
@@ -1442,6 +1451,9 @@ async fn direct_child_session_blocks_mutating_write_without_verification_config(
                 display_name: None,
                 detail: None,
                 role: crate::AgentRole::SubagentWrite,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             },
             AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("write")]),
             options.clone(),
@@ -1508,6 +1520,9 @@ async fn direct_child_session_rejects_non_subagent_roles() -> Result<()> {
                 display_name: None,
                 detail: None,
                 role: crate::AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             },
             AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("run")]),
             options(),
@@ -1565,6 +1580,9 @@ async fn direct_child_session_supports_subagent_read_role() -> Result<()> {
                 display_name: None,
                 detail: None,
                 role: crate::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             },
             AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("inspect")]),
             options(),
@@ -1629,6 +1647,9 @@ async fn direct_child_session_records_failed_child_provider() -> Result<()> {
                 display_name: None,
                 detail: None,
                 role: crate::AgentRole::SubagentWrite,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             },
             AgentRunInput::without_persisted_user_message(vec![ModelMessage::user("run")]),
             options(),
@@ -1806,6 +1827,9 @@ async fn child_step_rejects_parent_role_in_child_runner() -> Result<()> {
         display_name: None,
         detail: None,
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let mut handler = crate::event::NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
@@ -1869,6 +1893,9 @@ async fn subagent_step_error_marks_child_session_failed() -> Result<()> {
             display_name: None,
             detail: None,
             role: crate::AgentRole::SubagentRead,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
         }],
         reason: None,
     }))?;
@@ -2077,6 +2104,9 @@ async fn proposed_plan_is_not_executable() -> Result<()> {
             display_name: None,
             detail: None,
             role: crate::AgentRole::Executor,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
         }],
         reason: None,
     }))?;
@@ -2267,6 +2297,9 @@ fn task_step_readiness_marks_changed_files_unverified() -> Result<()> {
         display_name: None,
         detail: Some("write note".to_owned()),
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let output = StepRunOutput {
         final_text: "done".to_owned(),
@@ -2314,6 +2347,9 @@ fn task_step_readiness_uses_durable_mutation_without_changed_files() -> Result<(
         display_name: None,
         detail: Some("write note through shell".to_owned()),
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -2378,6 +2414,9 @@ fn task_step_readiness_uses_post_task_mutation_from_prior_tool_call() -> Result<
         display_name: None,
         detail: Some("cancel terminal".to_owned()),
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -2451,6 +2490,9 @@ fn task_step_readiness_treats_durable_mutation_replay_failure_as_unknown_dirty()
         display_name: None,
         detail: Some("durable replay failed".to_owned()),
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -2514,6 +2556,9 @@ fn task_step_readiness_uses_recorded_check_specs_and_workspace_snapshot() -> Res
         display_name: None,
         detail: Some("write note".to_owned()),
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     std::fs::write(temp.path().join("note.txt"), "edited\n")?;
@@ -2589,6 +2634,9 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
         display_name: None,
         detail: Some("write note".to_owned()),
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -2754,6 +2802,9 @@ fn task_step_auto_run_policy_defaults_manual_and_reads_recorded_policy() -> Resu
         display_name: None,
         detail: Some("write note".to_owned()),
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     let mut options = options();
@@ -2808,6 +2859,9 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
         display_name: None,
         detail: None,
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -3039,6 +3093,9 @@ fn task_step_status_blocks_when_readiness_requires_action() -> Result<()> {
         display_name: None,
         detail: None,
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     std::fs::write(temp.path().join("note.txt"), "edited\n")?;
@@ -3089,6 +3146,9 @@ fn task_step_readiness_records_recovered_tool_error_reason() -> Result<()> {
         display_name: None,
         detail: None,
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     std::fs::write(temp.path().join("note.txt"), "unchanged\n")?;
@@ -3140,6 +3200,9 @@ fn task_step_verification_config_does_not_block_read_only_step() -> Result<()> {
         display_name: None,
         detail: None,
         role: crate::AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     std::fs::write(temp.path().join("note.txt"), "unchanged\n")?;
@@ -3206,6 +3269,9 @@ fn task_step_default_policy_uses_only_current_task_scope() -> Result<()> {
         display_name: None,
         detail: None,
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     std::fs::write(temp.path().join("note.txt"), "edited\n")?;
@@ -3304,6 +3370,9 @@ fn task_step_readiness_uses_projected_workspace_trust() -> Result<()> {
         display_name: None,
         detail: None,
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     std::fs::write(temp.path().join("note.txt"), "edited\n")?;
@@ -3373,6 +3442,9 @@ fn task_step_readiness_carries_unknown_dirty_snapshot_evidence() -> Result<()> {
         display_name: None,
         detail: None,
         role: crate::AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     };
     let temp = tempfile::tempdir()?;
     let outside = tempfile::tempdir()?;
@@ -4061,6 +4133,9 @@ fn seed_two_step_task(
                 display_name: None,
                 detail: None,
                 role: crate::AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             },
             TaskStepSpec {
                 step_id: TaskStepId::new("step_2")?,
@@ -4068,6 +4143,9 @@ fn seed_two_step_task(
                 display_name: None,
                 detail: None,
                 role: crate::AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             },
         ],
         reason: None,
@@ -4105,6 +4183,9 @@ fn seed_single_step_task(session: &mut Session, role: crate::AgentRole) -> Resul
             display_name: None,
             detail: Some("detail".to_owned()),
             role,
+            depends_on: Vec::new(),
+            mode: None,
+            isolation: None,
         }],
         reason: None,
     }))?;

@@ -603,7 +603,7 @@ impl AppState {
                         self.provider_name = provider_name;
                         self.model_name = model_name;
                         self.sync_current_session_state(entries);
-                        self.latest_compaction_record = Some(record.clone());
+                        self.latest_compaction_record = Some((*record).clone());
                         self.recompute_compaction_status(false);
                         self.last_notice = Some("auto compacted".to_owned());
                         self.refresh_session_history();

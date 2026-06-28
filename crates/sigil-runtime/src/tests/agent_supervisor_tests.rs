@@ -318,6 +318,9 @@ fn step(id: &str) -> Result<TaskStepSpec> {
         display_name: Some(id.to_owned()),
         detail: Some("test child step".to_owned()),
         role: AgentRole::SubagentRead,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     })
 }
 
@@ -328,6 +331,9 @@ fn write_step(id: &str) -> Result<TaskStepSpec> {
         display_name: Some(id.to_owned()),
         detail: Some("test write child step".to_owned()),
         role: AgentRole::SubagentWrite,
+        depends_on: Vec::new(),
+        mode: None,
+        isolation: None,
     })
 }
 

@@ -4,8 +4,14 @@ use crate::{
     ApprovalMode, ControlEntry, ExecutionCoverageLabel, McpServerConfig, McpServerStartup,
     PluginAgentRef, PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot,
     PluginSkillRef, PluginStateProjection, PluginTrustDecision, PluginTrustEntry, SessionLogEntry,
-    validate_plugin_id,
+    plugin_manifest_digests_match, validate_plugin_id, validate_plugin_manifest_digest,
+    validate_plugin_version,
 };
+
+const VALID_PLUGIN_DIGEST: &str =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const VALID_PLUGIN_DIGEST_BARE: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn sample_manifest() -> PluginManifest {
     PluginManifest {
@@ -45,20 +51,15 @@ fn sample_snapshot() -> PluginManifestSnapshot {
         version: manifest.version.clone(),
         description: manifest.description.clone(),
         manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
-        manifest_hash: "sha256:manifest".to_owned(),
+        manifest_hash: VALID_PLUGIN_DIGEST.to_owned(),
         capabilities: manifest.capabilities(),
         trust: PluginTrustDecision::NeedsReview,
     }
 }
 
 fn sample_trust(decision: PluginTrustDecision) -> PluginTrustEntry {
-    PluginTrustEntry {
-        plugin_id: "repo-review".to_owned(),
-        manifest_path: ".sigil/plugins/repo-review/plugin.toml".into(),
-        manifest_hash: "sha256:manifest".to_owned(),
-        decision,
-        reviewed_at_ms: 42,
-    }
+    PluginTrustEntry::for_snapshot(&sample_snapshot(), decision, 42)
+        .expect("sample trust should build")
 }
 
 #[test]
@@ -149,6 +150,10 @@ fn plugin_manifest_validation_rejects_unsafe_edges() {
     empty_version.version.clear();
     assert!(empty_version.validate().is_err());
 
+    let mut invalid_version = sample_manifest();
+    invalid_version.version = "bad version".to_owned();
+    assert!(invalid_version.validate().is_err());
+
     let mut invalid_id = sample_manifest();
     invalid_id.id = "bad plugin".to_owned();
     assert!(invalid_id.validate().is_err());
@@ -231,11 +236,19 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
     assert!(invalid_snapshot.validate().is_err());
 
     let mut invalid_snapshot = sample_snapshot();
+    invalid_snapshot.version = "../0.1.0".to_owned();
+    assert!(invalid_snapshot.validate().is_err());
+
+    let mut invalid_snapshot = sample_snapshot();
     invalid_snapshot.manifest_path.clear();
     assert!(invalid_snapshot.validate().is_err());
 
     let mut invalid_snapshot = sample_snapshot();
     invalid_snapshot.manifest_hash = " ".to_owned();
+    assert!(invalid_snapshot.validate().is_err());
+
+    let mut invalid_snapshot = sample_snapshot();
+    invalid_snapshot.manifest_hash = "sha256:not-a-digest".to_owned();
     assert!(invalid_snapshot.validate().is_err());
 
     let mut invalid_snapshot = sample_snapshot();
@@ -251,6 +264,46 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
     let mut invalid_trust = sample_trust(PluginTrustDecision::Trusted);
     invalid_trust.manifest_hash.clear();
     assert!(invalid_trust.validate().is_err());
+
+    let mut invalid_trust = sample_trust(PluginTrustDecision::Trusted);
+    invalid_trust.manifest_hash = "md5:0123456789abcdef0123456789abcdef".to_owned();
+    assert!(invalid_trust.validate().is_err());
+}
+
+#[test]
+fn plugin_manifest_digest_validation_accepts_canonical_and_legacy_sha256() {
+    assert!(validate_plugin_manifest_digest("repo-review", VALID_PLUGIN_DIGEST).is_ok());
+    assert!(validate_plugin_manifest_digest("repo-review", VALID_PLUGIN_DIGEST_BARE).is_ok());
+    assert!(plugin_manifest_digests_match(
+        VALID_PLUGIN_DIGEST,
+        VALID_PLUGIN_DIGEST_BARE
+    ));
+    assert!(plugin_manifest_digests_match(
+        "sha256:ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789",
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    ));
+    assert!(validate_plugin_manifest_digest("repo-review", "sha256:too-short").is_err());
+    assert!(
+        validate_plugin_manifest_digest(
+            "repo-review",
+            "sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        )
+        .is_err()
+    );
+    assert!(!plugin_manifest_digests_match(
+        "sha256:not-a-digest",
+        "sha256:not-a-digest"
+    ));
+}
+
+#[test]
+fn plugin_version_validation_rejects_path_like_or_unreviewable_versions() {
+    assert!(validate_plugin_version("repo-review", "0.1.0").is_ok());
+    assert!(validate_plugin_version("repo-review", "2026.06.29-alpha").is_ok());
+    assert!(validate_plugin_version("repo-review", " ").is_err());
+    assert!(validate_plugin_version("repo-review", "bad version").is_err());
+    assert!(validate_plugin_version("repo-review", "../0.1.0").is_err());
+    assert!(validate_plugin_version("repo-review", "0.1.0\nnext").is_err());
 }
 
 #[test]
@@ -290,8 +343,8 @@ fn plugin_manifest_snapshot_and_trust_entries_roundtrip() -> Result<()> {
 
 #[test]
 fn plugin_control_entries_accept_legacy_pascal_case_aliases() -> Result<()> {
-    let captured_json = r#"{"control":{"PluginManifestCaptured":{"plugin_id":"repo-review","name":"Repository Review","version":"0.1.0","manifest_path":".sigil/plugins/repo-review/plugin.toml","manifest_hash":"sha256:manifest","capabilities":[{"kind":"skill","path":"skills/review/SKILL.md"}],"trust":"needs_review"}}}"#;
-    let trusted_json = r#"{"control":{"PluginTrustDecision":{"plugin_id":"repo-review","manifest_path":".sigil/plugins/repo-review/plugin.toml","manifest_hash":"sha256:manifest","decision":"trusted","reviewed_at_ms":42}}}"#;
+    let captured_json = r#"{"control":{"PluginManifestCaptured":{"plugin_id":"repo-review","name":"Repository Review","version":"0.1.0","manifest_path":".sigil/plugins/repo-review/plugin.toml","manifest_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","capabilities":[{"kind":"skill","path":"skills/review/SKILL.md"}],"trust":"needs_review"}}}"#;
+    let trusted_json = r#"{"control":{"PluginTrustDecision":{"plugin_id":"repo-review","manifest_path":".sigil/plugins/repo-review/plugin.toml","manifest_hash":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","decision":"trusted","reviewed_at_ms":42}}}"#;
     let restored_captured: SessionLogEntry = serde_json::from_str(captured_json)?;
     let restored_trusted: SessionLogEntry = serde_json::from_str(trusted_json)?;
 
@@ -354,7 +407,8 @@ fn plugin_state_projection_ignores_manifest_snapshot_trust_without_entry() {
 #[test]
 fn plugin_state_projection_does_not_apply_trust_for_changed_manifest_hash() {
     let mut snapshot = sample_snapshot();
-    snapshot.manifest_hash = "sha256:new-manifest".to_owned();
+    snapshot.manifest_hash =
+        "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_owned();
     snapshot.trust = PluginTrustDecision::Trusted;
     let trusted = sample_trust(PluginTrustDecision::Trusted);
     let projection = PluginStateProjection::from_entries(&[
@@ -366,5 +420,41 @@ fn plugin_state_projection_does_not_apply_trust_for_changed_manifest_hash() {
         .latest_manifest()
         .expect("latest manifest should exist");
 
+    assert_eq!(latest_manifest.trust, PluginTrustDecision::NeedsReview);
+}
+
+#[test]
+fn plugin_state_projection_invalidates_trust_when_version_changes_even_with_same_digest() {
+    let trusted = sample_trust(PluginTrustDecision::Trusted);
+    let mut changed = sample_snapshot();
+    changed.version = "0.2.0".to_owned();
+
+    let projection = PluginStateProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trusted)),
+        SessionLogEntry::Control(ControlEntry::PluginManifestCaptured(changed)),
+    ]);
+
+    let latest_manifest = projection
+        .latest_manifest()
+        .expect("latest manifest should exist");
+    assert_eq!(latest_manifest.trust, PluginTrustDecision::NeedsReview);
+}
+
+#[test]
+fn plugin_state_projection_invalidates_trust_when_capabilities_change_even_with_same_digest() {
+    let trusted = sample_trust(PluginTrustDecision::Trusted);
+    let mut changed = sample_snapshot();
+    changed.capabilities.push(PluginCapability::Skill {
+        path: "skills/extra/SKILL.md".into(),
+    });
+
+    let projection = PluginStateProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trusted)),
+        SessionLogEntry::Control(ControlEntry::PluginManifestCaptured(changed)),
+    ]);
+
+    let latest_manifest = projection
+        .latest_manifest()
+        .expect("latest manifest should exist");
     assert_eq!(latest_manifest.trust, PluginTrustDecision::NeedsReview);
 }

@@ -19,6 +19,7 @@ pub mod secret;
 pub mod session;
 pub mod skill;
 pub mod task;
+pub mod task_memory;
 pub mod task_orchestrator;
 pub mod terminal_task;
 pub mod time;
@@ -130,9 +131,10 @@ pub use plan::{
     PlanApprovalScope, PlanApprovedEntry, plan_text_hash, plan_workspace_paths,
 };
 pub use plugin::{
-    PluginAgentRef, PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot,
-    PluginSkillRef, PluginStateProjection, PluginTrustDecision, PluginTrustEntry,
-    validate_plugin_id,
+    PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginCapability, PluginHookRef, PluginManifest,
+    PluginManifestSnapshot, PluginSkillRef, PluginStateProjection, PluginTrustDecision,
+    PluginTrustEntry, plugin_manifest_digests_match, validate_plugin_capability_digest,
+    validate_plugin_id, validate_plugin_manifest_digest, validate_plugin_version,
 };
 pub use projection::{
     FILE_PROJECTION_STORE_SCHEMA_VERSION, FileProjectionStore, ProjectionRebuildOutput,
@@ -161,13 +163,19 @@ pub use skill::{
 };
 pub use task::{
     AgentRole, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskPlanEntry, TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId,
-    TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStateProjection,
-    TaskStepEntry, TaskStepId, TaskStepProjection, TaskStepSpec, TaskStepStatus,
-    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, child_session_ref,
-    normalize_task_agent_display_name, task_plan_update_entry, task_plan_update_result_content,
-    task_plan_update_tool_spec,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
+    TaskGraphProjection, TaskGraphStepProjection, TaskId, TaskIsolationMode, TaskPlanEntry,
+    TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus,
+    TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskSubagentElicitationRouteEntry, child_session_ref, normalize_task_agent_display_name,
+    task_plan_update_entry, task_plan_update_result_content, task_plan_update_tool_spec,
+    validate_task_plan_graph_steps,
+};
+pub use task_memory::{
+    AttemptRef, BranchId, CommandReceiptId, FileChangeRef, SourcedDecision, SourcedFact,
+    TaskMemoryExtractionInput, TaskMemoryId, TaskMemoryV1, VerificationReceiptId,
+    extract_task_memory_from_stream_records,
 };
 pub use task_orchestrator::{
     LegacyTaskChildSessionRunner, SequentialTaskOrchestrator, SequentialTaskRequest,

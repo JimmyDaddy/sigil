@@ -2,9 +2,10 @@ use sigil_kernel::{
     AgentRole, ControlEntry, EvidenceScope, ModelMessage, ReadinessEvaluatedEntry,
     ReadinessEvaluation, ReadinessReason, RequiredAction, RunStatus, SessionLogEntry, SessionRef,
     TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
-    TaskStepSpec, TaskStepStatus, VerificationCheckRunEntry, VerificationCheckRunStatus,
-    VerificationStaleCause, VerificationStaleReason, VerificationVerdict, VisibleCompletionState,
+    TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
+    TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus, VerificationCheckRunEntry,
+    VerificationCheckRunStatus, VerificationStaleCause, VerificationStaleReason,
+    VerificationVerdict, VisibleCompletionState,
 };
 
 use super::{
@@ -326,6 +327,87 @@ fn task_sidebar_keeps_plain_completed_label_without_verification_action() {
 }
 
 #[test]
+fn task_sidebar_separates_review_advisory_from_system_verify() {
+    let task_id = TaskId::new("task_1").expect("task id");
+    let review_step_id = TaskStepId::new("review").expect("step id");
+    let verify_step_id = TaskStepId::new("verify").expect("step id");
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::TaskRun(TaskRunEntry {
+            task_id: task_id.clone(),
+            parent_session_ref: SessionRef::new_relative("parent.jsonl").expect("session ref"),
+            objective: "Review then verify".to_owned(),
+            status: TaskRunStatus::Completed,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![
+                TaskStepSpec {
+                    step_id: review_step_id.clone(),
+                    title: "Review changes".to_owned(),
+                    display_name: None,
+                    detail: None,
+                    role: AgentRole::SubagentRead,
+                    depends_on: Vec::new(),
+                    mode: Some(TaskStepMode::Review),
+                    isolation: Some(TaskIsolationMode::SharedReadOnly),
+                },
+                TaskStepSpec {
+                    step_id: verify_step_id.clone(),
+                    title: "Verify changes".to_owned(),
+                    display_name: None,
+                    detail: None,
+                    role: AgentRole::Executor,
+                    depends_on: vec![review_step_id],
+                    mode: Some(TaskStepMode::Verify),
+                    isolation: Some(TaskIsolationMode::SharedReadOnly),
+                },
+            ],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id.clone(),
+            plan_version: 1,
+            step_id: TaskStepId::new("review").expect("step id"),
+            role: AgentRole::SubagentRead,
+            status: TaskStepStatus::Completed,
+            title: Some("Review changes".to_owned()),
+            summary: Some("advisory review complete".to_owned()),
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id,
+            plan_version: 1,
+            step_id: verify_step_id,
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Completed,
+            title: Some("Verify changes".to_owned()),
+            summary: Some("agent says verified".to_owned()),
+            reason: None,
+        })),
+    ];
+
+    let lines = task_sidebar_lines(&entries);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "last: v1:verify needs check")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("reviewed review · Review changes"))
+    );
+
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert_eq!(strip.rows[0].label, "1. reviewed · Review changes");
+    assert_eq!(strip.rows[1].label, "2. needs check · Verify changes");
+    assert!(strip.rows[1].detail.contains("verify · verify"));
+}
+
+#[test]
 fn task_sidebar_marks_non_user_state_missing_verification_as_needing_check() {
     let entries = task_entries_with_custom_readiness(
         TaskRunStatus::Completed,
@@ -554,6 +636,9 @@ fn task_entries_with_custom_readiness_and_reasons(
                 display_name: None,
                 detail: None,
                 role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: None,
+                isolation: None,
             }],
             reason: None,
         })),
