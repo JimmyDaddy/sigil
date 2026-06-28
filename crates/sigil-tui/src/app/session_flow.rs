@@ -1126,9 +1126,11 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 readiness_reasons_label(&entry.evaluation.reasons)
             ),
             ControlEntry::ChildVerificationReceiptLinked(entry) => format!(
-                "[ctl] verification child receipt {} child={} snapshot={}",
+                "[ctl] child verification receipt {} child={} status={} parent_recheck={} snapshot={}",
                 truncate_session_view_text(&entry.child_receipt_id, 48),
                 truncate_session_view_text(&entry.child_session_id, 48),
+                child_verification_link_status_label(entry),
+                child_verification_parent_recheck_label(entry),
                 truncate_session_view_text(&entry.child_workspace_snapshot_id, 16)
             ),
             ControlEntry::WorkspaceTrustDecision(entry) => format!(
@@ -1606,6 +1608,26 @@ fn verification_stale_reason_label(reason: &sigil_kernel::VerificationStaleReaso
         sigil_kernel::VerificationStaleReason::UnknownDirty(event_id) => {
             format!("unknown_dirty:{event_id}")
         }
+    }
+}
+
+fn child_verification_link_status_label(
+    entry: &sigil_kernel::ChildVerificationReceiptLinked,
+) -> &'static str {
+    if entry.merge_event_id.is_some() {
+        "merged"
+    } else {
+        "linked"
+    }
+}
+
+fn child_verification_parent_recheck_label(
+    entry: &sigil_kernel::ChildVerificationReceiptLinked,
+) -> &'static str {
+    if entry.merge_event_id.is_some() {
+        "required"
+    } else {
+        "not_required"
     }
 }
 

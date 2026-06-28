@@ -1,7 +1,8 @@
 use sigil_kernel::{
     AgentRole, ControlEntry, EvidenceScope, ModelMessage, ReadinessEvaluatedEntry,
     ReadinessEvaluation, ReadinessReason, RequiredAction, RunStatus, SessionLogEntry, SessionRef,
-    TaskId, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
+    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
     TaskStepSpec, TaskStepStatus, VerificationCheckRunEntry, VerificationCheckRunStatus,
     VerificationStaleCause, VerificationStaleReason, VerificationVerdict, VisibleCompletionState,
 };
@@ -151,6 +152,78 @@ fn task_sidebar_compacts_multiple_verification_reasons() {
     let strip = task_strip_view(&entries).expect("task strip should project");
     assert!(strip.detail.contains("MCP server docs"));
     assert!(strip.detail.contains("+3 more"));
+}
+
+#[test]
+fn task_sidebar_surfaces_child_merge_recheck_trace() {
+    let mut entries = task_entries_with_custom_readiness_and_reasons(
+        TaskRunStatus::Paused,
+        TaskStepStatus::Blocked,
+        VerificationVerdict::Stale,
+        VisibleCompletionState::NeedsUser,
+        vec![RequiredAction::RunCheck {
+            check_spec_id: "docs-check".to_owned(),
+        }],
+        vec![ReadinessReason::VerificationStale(VerificationStaleCause {
+            reason: VerificationStaleReason::WorkspaceChanged("merge-event".to_owned()),
+            from_workspace_snapshot_id: Some("parent-before".to_owned()),
+            to_workspace_snapshot_id: Some("parent-after".to_owned()),
+        })],
+    );
+    let child_task_id = TaskId::new("child_1").expect("child task id");
+    entries.push(SessionLogEntry::Control(ControlEntry::TaskChildSession(
+        TaskChildSessionEntry {
+            task_id: TaskId::new("task_1").expect("task id"),
+            plan_version: 1,
+            step_id: TaskStepId::new("fix_typo").expect("step id"),
+            child_task_id: child_task_id.clone(),
+            child_session_ref: SessionRef::new_relative("children/task_1/fix_typo-child_1.jsonl")
+                .expect("child session ref"),
+            role: AgentRole::SubagentRead,
+            status: TaskChildSessionStatus::Completed,
+            summary_hash: None,
+        },
+    )));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::TaskChildSessionDisplayName(TaskChildSessionDisplayNameEntry {
+            task_id: TaskId::new("task_1").expect("task id"),
+            plan_version: 1,
+            step_id: TaskStepId::new("fix_typo").expect("step id"),
+            child_task_id,
+            display_name: "Review Agent".to_owned(),
+        }),
+    ));
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::ChildVerificationReceiptLinked(
+            sigil_kernel::ChildVerificationReceiptLinked {
+                parent_session_id: "parent-session".to_owned(),
+                child_session_id: "child_1".to_owned(),
+                child_receipt_id: "child-receipt".to_owned(),
+                child_event_id: "child-event".to_owned(),
+                child_workspace_id: "child-workspace".to_owned(),
+                child_workspace_snapshot_id: "child-snapshot".to_owned(),
+                policy_hash: "policy-hash".to_owned(),
+                changeset_id: Some("changeset-1".to_owned()),
+                merge_event_id: Some("merge-event".to_owned()),
+            },
+        ),
+    ));
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| { line == "merge: Review Agent completed; run parent check" })
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "action: run check docs-check")
+    );
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert!(strip.detail.contains("Review Agent completed"));
+    assert!(strip.detail.contains("run parent check"));
 }
 
 #[test]

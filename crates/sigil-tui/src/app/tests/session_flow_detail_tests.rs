@@ -369,7 +369,9 @@ fn render_verification_control_entries_for_audit_view() -> Result<()> {
             },
         ),
     ));
-    assert!(linked.contains("[ctl] verification child receipt child-receipt child=child-session"));
+    assert!(linked.contains(
+        "[ctl] child verification receipt child-receipt child=child-session status=merged parent_recheck=required"
+    ));
 
     let trust = render_session_log_entry(&SessionLogEntry::Control(
         ControlEntry::WorkspaceTrustDecision(sigil_kernel::WorkspaceTrustDecisionEntry {
@@ -511,6 +513,25 @@ fn verification_audit_label_helpers_cover_all_variants() {
             .starts_with("verification_stale:")
         );
     }
+    let unmerged_link = sigil_kernel::ChildVerificationReceiptLinked {
+        parent_session_id: "parent-session".to_owned(),
+        child_session_id: "child-session".to_owned(),
+        child_receipt_id: "child-receipt".to_owned(),
+        child_event_id: "child-event".to_owned(),
+        child_workspace_id: "child-workspace".to_owned(),
+        child_workspace_snapshot_id: "child-snapshot".to_owned(),
+        policy_hash: "policy-hash".to_owned(),
+        changeset_id: None,
+        merge_event_id: None,
+    };
+    assert_eq!(
+        child_verification_link_status_label(&unmerged_link),
+        "linked"
+    );
+    assert_eq!(
+        child_verification_parent_recheck_label(&unmerged_link),
+        "not_required"
+    );
 
     for reason in [
         sigil_kernel::ReadinessReason::LegacyEvidenceUnavailable,

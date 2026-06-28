@@ -1,8 +1,9 @@
 use sigil_kernel::{
-    EvidenceScope, ReadinessEvaluatedEntry, RequiredAction, SessionLogEntry, TaskPlanProjection,
-    TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepId, TaskStepSpec,
-    TaskStepStatus, TerminalTaskProjection, VerificationCheckRunEntry, VerificationCheckRunStatus,
-    VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
+    ChildVerificationReceiptLinked, EvidenceScope, ReadinessEvaluatedEntry, RequiredAction,
+    SessionLogEntry, TaskChildSessionEntry, TaskPlanProjection, TaskRunProjection, TaskRunStatus,
+    TaskStateProjection, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskProjection,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState,
 };
 
 use crate::ui::{StatusKind, status_symbol};
@@ -107,6 +108,9 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
         if let Some(summary) = readiness_reason_summary(&readiness.evaluation.reasons, 48) {
             lines.push(format!("verification reason: {summary}"));
         }
+        if let Some(summary) = child_merge_recheck_summary(entries, task, readiness, 48) {
+            lines.push(format!("merge: {summary}"));
+        }
         for action in readiness.evaluation.required_actions.iter().take(2) {
             lines.extend(required_action_context_lines(action));
             if let Some(run) = latest_check_run_for_action(entries, &scope, action) {
@@ -190,6 +194,10 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             {
                 detail.push_str(" · ");
                 detail.push_str(&reason_summary);
+            }
+            if let Some(summary) = child_merge_recheck_summary(entries, task, readiness, 40) {
+                detail.push_str(" · ");
+                detail.push_str(&summary);
             }
             if let Some(run) = latest_check_run_for_actions(
                 entries,
@@ -762,6 +770,97 @@ fn verification_stale_reason_compact_label(
             )
         }
     }
+}
+
+fn child_merge_recheck_summary(
+    entries: &[SessionLogEntry],
+    task: &TaskRunProjection,
+    readiness: &ReadinessEvaluatedEntry,
+    max_chars: usize,
+) -> Option<String> {
+    let merge_event_id = readiness
+        .evaluation
+        .reasons
+        .iter()
+        .find_map(workspace_changed_event_id)?;
+    let link = latest_child_verification_link_for_merge(entries, merge_event_id)?;
+    let child = child_session_for_link(task, link);
+    let child_label = child
+        .map(|child| {
+            let name = task
+                .display_name_for_child_session(child)
+                .unwrap_or_else(|| child.child_task_id.as_str());
+            format!("{name} {}", task_child_session_status_label(child.status))
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "child {}",
+                truncate_session_view_text(&link.child_session_id, 16)
+            )
+        });
+    Some(truncate_session_view_text(
+        &format!("{child_label}; run parent check"),
+        max_chars,
+    ))
+}
+
+fn workspace_changed_event_id(reason: &sigil_kernel::ReadinessReason) -> Option<&str> {
+    let sigil_kernel::ReadinessReason::VerificationStale(cause) = reason else {
+        return None;
+    };
+    match &cause.reason {
+        sigil_kernel::VerificationStaleReason::WorkspaceChanged(event_id) => Some(event_id),
+        sigil_kernel::VerificationStaleReason::UnknownDirty(event_id) => Some(event_id),
+        sigil_kernel::VerificationStaleReason::CheckSpecChanged(_)
+        | sigil_kernel::VerificationStaleReason::PolicyChanged(_)
+        | sigil_kernel::VerificationStaleReason::EnvironmentChanged(_)
+        | sigil_kernel::VerificationStaleReason::SandboxChanged(_)
+        | sigil_kernel::VerificationStaleReason::TrustChanged(_) => None,
+    }
+}
+
+fn latest_child_verification_link_for_merge<'a>(
+    entries: &'a [SessionLogEntry],
+    merge_event_id: &str,
+) -> Option<&'a ChildVerificationReceiptLinked> {
+    entries.iter().rev().find_map(|entry| {
+        let SessionLogEntry::Control(sigil_kernel::ControlEntry::ChildVerificationReceiptLinked(
+            link,
+        )) = entry
+        else {
+            return None;
+        };
+        link.merge_event_id
+            .as_deref()
+            .is_some_and(|event_id| event_id == merge_event_id)
+            .then_some(link)
+    })
+}
+
+fn child_session_for_link<'a>(
+    task: &'a TaskRunProjection,
+    link: &ChildVerificationReceiptLinked,
+) -> Option<&'a TaskChildSessionEntry> {
+    let matching = task
+        .child_sessions
+        .values()
+        .filter(|child| child_session_matches_link(child, link))
+        .collect::<Vec<_>>();
+    if matching.len() == 1 {
+        return matching.into_iter().next();
+    }
+    if task.child_sessions.len() == 1 {
+        return task.child_sessions.values().next();
+    }
+    None
+}
+
+fn child_session_matches_link(
+    child: &TaskChildSessionEntry,
+    link: &ChildVerificationReceiptLinked,
+) -> bool {
+    let path = child.child_session_ref.as_path().to_string_lossy();
+    path.contains(&link.child_session_id)
 }
 
 fn required_action_label(action: &RequiredAction) -> String {
