@@ -394,8 +394,10 @@ Required deterministic tests:
 - 已补充 `/config` Storage footer 的显式 artifact cleanup action：用户手动触发后会在 worker 空闲时调用 retention scanner，按当前 policy 清理 mutation artifact，并通过 scanner 追加 `MutationArtifactLifecycleRecorded` durable events。
 - 已补充 read-only artifact retention preview：`preview_artifact_retention(_at)` 复用 retention selection 但不删除内容、不追加 lifecycle event；`/config` Storage 会展示当前 artifact 数量/大小、cleanup preview 和预计 cleanup bytes。
 - 已补充 read-only artifact inventory：`list_mutation_artifacts` 暴露 artifact id、size、created_at、availability、operation ids 和 source paths；`/config` Storage 会展示前几条 artifact 摘要，用户能看到 cleanup 管理的 artifact 来源。
-- 已补充 `/config` Storage artifact 单项删除：Storage artifact list 支持当前选中项，footer `delete` 会在 worker 空闲时调用 `delete_mutation_artifact`，删除 blob/metadata 并追加 `MutationArtifactLifecycleRecorded(status=Deleted)` durable event；删除后 TUI 会刷新 retention preview 和 inventory。
-- 已补充 `/config` Storage selected artifact inspect view：artifact list 下方会展示当前选中 artifact 的短 id、完整 id、大小、可用性、operation ids 和 source paths；该视图只读取 metadata，不读取 artifact blob 内容，也不会追加 durable event。
+- 已补充 mutation artifact 单项删除的 worker/action 后端能力：`delete_mutation_artifact` 会删除 blob/metadata 并追加 `MutationArtifactLifecycleRecorded(status=Deleted)` durable event；该能力保留给 future advanced/debug surface，不作为 `/config` Storage 普通 footer 主流程。
+- 已补充 `/config` Storage selected artifact inspect view：artifact list 下方会展示当前选中 artifact 的来源、大小、可用性和 restore 影响；完整 artifact id、operation ids 和内部引用保留在 durable audit/backend，不进入普通用户主流程。该视图只读取 metadata，不读取 artifact blob 内容，也不会追加 durable event。
+- 已补充 artifact maintenance 的低噪声产品化路径：Storage 只在 preview 发现 expired / unavailable / quota-selected artifact 时显示一个 recommended cleanup 提示；没有可清理项时不在 startup 或 `/config` 打开时打扰用户。
+- 已补充 cleanup intent durable audit：显式 `clean` 会先追加 `MutationArtifactCleanupRequested`，再逐 artifact 追加 `MutationArtifactLifecycleRecorded`；preview / inventory 仍然只读，不修改 artifact store。
 - 已接入受控 `write_file`、`edit_file`、`delete_file` 与 `apply_changeset` 路径；legacy no-recorder 路径保留兼容。
 - 已实现多文件 changeset batch id、per-file prepare/commit、batch started/finished 和 apply-stage failure 的 failed batch evidence。
 - 已实现最小 checkpoint restore helper：`SnapshotCoverage::Captured` 会读取并校验 mutation artifact，将 restore 作为新的 prepare/commit/write mutation 记录，并追加 `CheckpointRestored`；`SkippedSensitive` / `Unsupported` / `Unavailable` 会 fail closed，不会静默恢复。
@@ -427,8 +429,8 @@ Required deterministic tests:
 Productization remains：
 
 - 启用 plugin hook command runtime 或自动合并 plugin-declared MCP servers 时，必须在 launch/activation 前接入同一 external-process unknown-dirty recorder；当前代码尚不存在这些 plugin-owned process execution 面。
-- 扩展 MCP ready 后进程 health / 自动恢复体验；当前 list_changed stale notice、手动 refresh/restart recovery、pending retry 和 activation/refresh mutation evidence 已落地。
-- 扩展 artifact lifecycle 产品体验：当前已有 `/config` Storage footer 手动 cleanup、单项 delete、retention policy、retention preview、artifact list 摘要、selected artifact inspect view 和 durable lifecycle events；后续可补定期维护任务或批量选择。
+- MCP ready 后进程 health / 自动恢复体验的主路径已落地：`/config` MCP lifecycle 显示 deferred/activating/ready/failed/stale/refreshing，footer 对 lazy server 执行 activation，对 eager/ready/failed/stale server 执行 refresh/restart recovery；`list_changed` 会标记 stale 并 queue refresh，worker pending refresh set 保留 intent 并避免 tight-loop failure spam，activation/refresh 继续记录 MCP lifecycle unknown-dirty evidence。
+- artifact lifecycle 主路径产品化已落地：`/config` Storage 展示 recommended cleanup preview、retention policy、低噪声 recommended cleanup 提示、artifact list 摘要和 selected artifact inspect view；footer 只保留一个 `clean` action，逐 artifact delete、cleanup target 切换和 multi-select 只作为 advanced/debug 后端能力，不作为普通用户主流程。显式 cleanup intent 与逐 artifact lifecycle result 都进入 durable audit。剩余工作仅限后续真正引入后台 periodic maintenance 时的禁用开关；当前普通 agent run 不会隐式清理。
 - 大文件 fail-closed unsupported 已可按 `VerificationScope.max_file_bytes` 调整；Unix-only file mode 已作为当前实现限制记录，后续可按真实项目需求补非 Unix metadata evidence。
 - 递归目录删除仍不属于当前实现；如果未来需要，应单独设计 recursive directory mutation protocol，而不是复用空目录 delete 语义。
 

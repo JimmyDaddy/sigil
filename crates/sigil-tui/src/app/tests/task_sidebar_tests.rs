@@ -53,7 +53,7 @@ fn verification_labels_cover_all_sidebar_variants() {
         (RequiredAction::TrustWorkspace, "workspace trust required"),
         (
             RequiredAction::ResolveUnknownDirty,
-            "resolve unknown workspace change",
+            "refresh source or run check",
         ),
         (
             RequiredAction::ReRunNonWritingCheck {
@@ -120,6 +120,11 @@ fn task_sidebar_compacts_multiple_verification_reasons() {
         VisibleCompletionState::NeedsUser,
         vec![RequiredAction::ResolveUnknownDirty],
         vec![
+            ReadinessReason::WorkspaceMutationSource {
+                event_id: "event-mcp".to_owned(),
+                source_label: "MCP server docs".to_owned(),
+                recovery_hint: Some("refresh MCP or run check".to_owned()),
+            },
             ReadinessReason::VerificationStale(VerificationStaleCause {
                 reason: VerificationStaleReason::WorkspaceChanged("event-workspace".to_owned()),
                 from_workspace_snapshot_id: Some("snapshot-before".to_owned()),
@@ -140,11 +145,12 @@ fn task_sidebar_compacts_multiple_verification_reasons() {
 
     assert!(lines.iter().any(|line| line == "verification: stale"));
     assert!(lines.iter().any(|line| {
-        line == "verification reason: stale workspace changed event-workspace +2 more"
+        line.starts_with("verification reason: MCP server docs: refresh MCP")
+            && line.contains("+3 more")
     }));
     let strip = task_strip_view(&entries).expect("task strip should project");
-    assert!(strip.detail.contains("stale workspace"));
-    assert!(strip.detail.contains("+2 more"));
+    assert!(strip.detail.contains("MCP server docs"));
+    assert!(strip.detail.contains("+3 more"));
 }
 
 #[test]
@@ -152,6 +158,11 @@ fn task_sidebar_compact_labels_cover_verification_reason_edges() {
     assert_eq!(
         readiness_reason_summary(
             &[
+                ReadinessReason::WorkspaceMutationSource {
+                    event_id: "event-mcp".to_owned(),
+                    source_label: "MCP server docs".to_owned(),
+                    recovery_hint: Some("refresh MCP or run check".to_owned()),
+                },
                 ReadinessReason::WorkspaceUnknownDirty { event_id: None },
                 ReadinessReason::CheckMutatedVerificationScope {
                     check_spec_id: "long-check-that-changed-files".to_owned(),
@@ -159,7 +170,7 @@ fn task_sidebar_compact_labels_cover_verification_reason_edges() {
             ],
             7,
         ),
-        Some("unknown...".to_owned())
+        Some("MCP ser...".to_owned())
     );
     assert_eq!(
         readiness_reason_summary(

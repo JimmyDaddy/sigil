@@ -851,11 +851,18 @@ impl AppState {
             }
             AppAction::CompactNow => WorkerCommand::CompactNow,
             AppAction::CheckChangedFilesDiagnostics => WorkerCommand::CheckChangedFilesDiagnostics,
-            AppAction::CleanMutationArtifacts => WorkerCommand::CleanMutationArtifacts,
+            AppAction::CleanMutationArtifacts { target } => {
+                WorkerCommand::CleanMutationArtifacts { target }
+            }
             AppAction::DeleteMutationArtifact { artifact_id } => {
                 WorkerCommand::DeleteMutationArtifact { artifact_id }
             }
-            AppAction::TrustWorkspace => WorkerCommand::TrustWorkspace,
+            AppAction::ApproveVerificationCheck { check_spec_id } => {
+                WorkerCommand::ApproveVerificationCheck { check_spec_id }
+            }
+            AppAction::SandboxVerificationCheck { check_spec_id } => {
+                WorkerCommand::SandboxVerificationCheck { check_spec_id }
+            }
             AppAction::ActivateLazyMcp { server_name } => {
                 WorkerCommand::ActivateLazyMcp { server_name }
             }
@@ -869,6 +876,7 @@ impl AppState {
                 WorkerCommand::SwitchSession { session_log_path }
             }
             AppAction::SetupCompleted { .. }
+            | AppAction::TrustWorkspace
             | AppAction::ConfigSaved { .. }
             | AppAction::RuntimeConfigUpdated { .. }
             | AppAction::CopyToClipboard { .. } => unreachable!(

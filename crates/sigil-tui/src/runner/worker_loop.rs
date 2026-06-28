@@ -11,25 +11,26 @@ use sigil_kernel::{
     AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRunInput,
     AgentRunOptions, AgentRunResult, AgentThreadId, AgentThreadStatus,
     AgentThreadStatusChangedEntry, AgentToolDelegate, CheckDiscoverySource, CheckPromotion,
-    CompletionCriteria, ControlEntry, ConversationInputEditedEntry, ConversationInputKind,
-    ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
-    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
-    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
-    ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, EventHandler, EvidenceScope,
-    ExecutionMutationProfile, JsonlSessionStore, ModelMessage, MutationArtifactLifecycleRecorded,
-    MutationArtifactLifecycleStatus, MutationArtifactRetentionReport, MutationEventRecorder,
-    PlanApprovalExpiry, PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry,
-    ProviderCapabilities, ReasoningEffort, RootConfig, RunEvent, SandboxProfileRequirement,
-    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
-    SkillDescriptor, SkillRunMode, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry,
-    TaskStepId, TaskStepSpec, TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry,
-    TerminalTaskId, ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry,
-    ToolExecutionStatus, ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject,
-    ToolSubjectAudit, VerificationPolicy, VerificationPolicyChangedEntry, VerificationScope,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
-    default_user_config_dir, discover_candidate_checks_with_user_config, plan_text_hash,
-    plan_workspace_paths, saturating_elapsed, stable_workspace_id,
+    CheckSpec, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
+    ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
+    ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
+    ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
+    ConversationInputTarget, ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    DiscoveredCheck, EventHandler, EvidenceScope, ExecutionMutationProfile, JsonlSessionStore,
+    ModelMessage, MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
+    MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
+    PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, ProviderCapabilities,
+    ReasoningEffort, RootConfig, RunEvent, SandboxProfileRequirement, SequentialTaskOrchestrator,
+    SequentialTaskRequest, Session, SessionLogEntry, SessionRef, SkillDescriptor, SkillRunMode,
+    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus,
+    TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
+    TaskStepStatus, TaskSubagentElicitationRouteEntry, TerminalTaskEntry, TerminalTaskId,
+    ToolApproval, ToolCall, ToolContext, ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolResultStatus, ToolSubject, ToolSubjectAudit,
+    VerificationPolicy, VerificationPolicyChangedEntry, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, default_user_config_dir,
+    discover_candidate_checks_with_user_config, plan_text_hash, plan_workspace_paths,
+    saturating_elapsed, stable_event_uuid, stable_workspace_id,
 };
 
 use crate::{
@@ -1492,34 +1493,7 @@ pub(super) fn run_worker_loop<P>(
                     }
                 }
             }
-            Ok(WorkerCommand::TrustWorkspace) => {
-                if active_run.is_some() {
-                    let _ = message_tx.send(WorkerMessage::Notice(
-                        "wait for the active run before trusting workspace".to_owned(),
-                    ));
-                    continue;
-                }
-                match trust_workspace(&options.workspace_root, &mut current_session) {
-                    Ok(TrustWorkspaceOutcome::AlreadyTrusted { workspace_id }) => {
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
-                            "workspace already trusted: {workspace_id}"
-                        )));
-                    }
-                    Ok(TrustWorkspaceOutcome::Trusted { entry }) => {
-                        let _ = message_tx.send(WorkerMessage::Event(Box::new(RunEvent::Control(
-                            ControlEntry::WorkspaceTrustDecision(entry.clone()),
-                        ))));
-                        let _ = message_tx.send(WorkerMessage::Notice(format!(
-                            "workspace trusted: {}",
-                            entry.workspace_id
-                        )));
-                    }
-                    Err(error) => {
-                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
-                    }
-                }
-            }
-            Ok(WorkerCommand::CleanMutationArtifacts) => {
+            Ok(WorkerCommand::CleanMutationArtifacts { target }) => {
                 if active_run.is_some() {
                     let _ = message_tx.send(WorkerMessage::Notice(
                         "wait for the active run before cleaning mutation artifacts".to_owned(),
@@ -1530,6 +1504,7 @@ pub(super) fn run_worker_loop<P>(
                     &root_config,
                     &current_session_log_path,
                     &current_session,
+                    &target,
                 ) {
                     Ok(report) => {
                         let _ = message_tx.send(WorkerMessage::Notice(
@@ -1557,6 +1532,72 @@ pub(super) fn run_worker_loop<P>(
                         let _ = message_tx.send(WorkerMessage::Notice(
                             format_mutation_artifact_delete_report(&payload),
                         ));
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::ApproveVerificationCheck { check_spec_id }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before approving verification checks".to_owned(),
+                    ));
+                    continue;
+                }
+                match promote_workspace_verification_check(
+                    &options.workspace_root,
+                    &root_config,
+                    &mut current_session,
+                    &check_spec_id,
+                    VerificationCheckPromotionKind::Approve,
+                ) {
+                    Ok(VerificationCheckPromotionOutcome::AlreadyPromoted { check_spec_id }) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "verification check already approved: {check_spec_id}"
+                        )));
+                    }
+                    Ok(VerificationCheckPromotionOutcome::Promoted { entry }) => {
+                        let check_spec_id = entry.trusted_check.check_spec.check_spec_id.clone();
+                        let _ = message_tx.send(WorkerMessage::Event(Box::new(RunEvent::Control(
+                            ControlEntry::CheckSpecRecorded(*entry),
+                        ))));
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "verification check approved: {check_spec_id}"
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                    }
+                }
+            }
+            Ok(WorkerCommand::SandboxVerificationCheck { check_spec_id }) => {
+                if active_run.is_some() {
+                    let _ = message_tx.send(WorkerMessage::Notice(
+                        "wait for the active run before sandboxing verification checks".to_owned(),
+                    ));
+                    continue;
+                }
+                match promote_workspace_verification_check(
+                    &options.workspace_root,
+                    &root_config,
+                    &mut current_session,
+                    &check_spec_id,
+                    VerificationCheckPromotionKind::Sandbox,
+                ) {
+                    Ok(VerificationCheckPromotionOutcome::AlreadyPromoted { check_spec_id }) => {
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "verification check already sandboxed: {check_spec_id}"
+                        )));
+                    }
+                    Ok(VerificationCheckPromotionOutcome::Promoted { entry }) => {
+                        let check_spec_id = entry.trusted_check.check_spec.check_spec_id.clone();
+                        let _ = message_tx.send(WorkerMessage::Event(Box::new(RunEvent::Control(
+                            ControlEntry::CheckSpecRecorded(*entry),
+                        ))));
+                        let _ = message_tx.send(WorkerMessage::Notice(format!(
+                            "verification check sandboxed: {check_spec_id}"
+                        )));
                     }
                     Err(error) => {
                         let _ = message_tx.send(WorkerMessage::RunFailed(error));
@@ -1719,6 +1760,21 @@ pub(super) fn run_worker_loop<P>(
                 ) {
                     Ok(mut session) => {
                         mark_stale_dispatching_conversation_queue_items(&mut session, &message_tx);
+                        if current_session.as_ref().is_some_and(|session| {
+                            session_workspace_is_trusted(session, &workspace_root)
+                        }) {
+                            match ensure_session_workspace_trust(
+                                &mut session,
+                                &workspace_root,
+                                "trusted workspace carried into session",
+                            ) {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                    continue;
+                                }
+                            }
+                        }
                         let entries = session.entries().to_vec();
                         current_session_log_path = session_log_path.clone();
                         let provider_name = session.provider_name().to_owned();
@@ -1751,6 +1807,21 @@ pub(super) fn run_worker_loop<P>(
                 ) {
                     Ok(mut session) => {
                         mark_stale_dispatching_conversation_queue_items(&mut session, &message_tx);
+                        if current_session.as_ref().is_some_and(|session| {
+                            session_workspace_is_trusted(session, &workspace_root)
+                        }) {
+                            match ensure_session_workspace_trust(
+                                &mut session,
+                                &workspace_root,
+                                "trusted workspace carried into new session",
+                            ) {
+                                Ok(()) => {}
+                                Err(error) => {
+                                    let _ = message_tx.send(WorkerMessage::RunFailed(error));
+                                    continue;
+                                }
+                            }
+                        }
                         let entries = session.entries().to_vec();
                         current_session_log_path = session_log_path.clone();
                         let provider_name = session.provider_name().to_owned();
@@ -2346,6 +2417,7 @@ pub(super) fn materialize_task_verification_config(
     let trust_event_id = trust_entry
         .and_then(|entry| entry.decided_by_event_id.clone())
         .unwrap_or_else(|| workspace_trust_snapshot_id.clone());
+    let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
     let discovered = discover_candidate_checks_with_user_config(
         workspace_root,
         workspace_trust_snapshot_id,
@@ -2357,18 +2429,29 @@ pub(super) fn materialize_task_verification_config(
     for candidate in discovered {
         let source = candidate.candidate.source;
         let candidate_source_event_id = candidate.candidate.source_event_id.clone();
-        let promotion = match source {
-            CheckDiscoverySource::UserExplicitConfig => CheckPromotion::ExplicitUserConfig {
-                config_event_id: source_event_id.clone(),
+        let promoted = match source {
+            CheckDiscoverySource::UserExplicitConfig => {
+                let promotion = CheckPromotion::ExplicitUserConfig {
+                    config_event_id: source_event_id.clone(),
+                };
+                candidate.promote(DEFAULT_TASK_VERIFICATION_SCOPE_HASH, promotion)
+            }
+            _ if workspace_is_trusted => {
+                let promotion = CheckPromotion::WorkspaceTrusted {
+                    trust_event_id: trust_event_id.clone(),
+                };
+                candidate.promote(DEFAULT_TASK_VERIFICATION_SCOPE_HASH, promotion)
+            }
+            _ => match workspace_promoted_check_for_candidate(
+                &projection,
+                &workspace_scope,
+                &candidate,
+            ) {
+                Some(trusted) => Ok(trusted),
+                None => continue,
             },
-            _ if workspace_is_trusted => CheckPromotion::WorkspaceTrusted {
-                trust_event_id: trust_event_id.clone(),
-            },
-            _ => continue,
         };
-        let trusted = candidate
-            .promote(DEFAULT_TASK_VERIFICATION_SCOPE_HASH, promotion)
-            .map_err(|error| format!("{error:#}"))?;
+        let trusted = promoted.map_err(|error| format!("{error:#}"))?;
         entries.push(sigil_kernel::CheckSpecRecordedEntry::new(
             scope.clone(),
             trusted,
@@ -2398,24 +2481,18 @@ pub(super) fn materialize_task_verification_config(
         .iter()
         .map(|entry| entry.trusted_check.check_spec.clone())
         .collect::<Vec<_>>();
-    let workspace_trust_requirement = if entries.iter().any(|entry| {
-        matches!(
-            entry.trusted_check.promoted_by,
-            CheckPromotion::WorkspaceTrusted { .. }
-        )
-    }) {
-        WorkspaceTrustRequirement::Trusted
-    } else {
-        WorkspaceTrustRequirement::None
-    };
+    let workspace_trust_requirement = check_spec_entries_workspace_trust_requirement(&entries);
     let policy = VerificationPolicy {
         required_checks,
         completion_criteria: CompletionCriteria::AllRequiredChecks,
-        verification_scope: VerificationScope::all_tracked(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
+        verification_scope: root_config
+            .verification
+            .scope_for_hash(DEFAULT_TASK_VERIFICATION_SCOPE_HASH),
         sandbox_profile: SandboxProfileRequirement::None,
         workspace_trust_requirement,
         allow_unverified_completion: false,
         timeout_ms: None,
+        auto_run: root_config.verification.auto_run,
     };
     let policy_entry = VerificationPolicyChangedEntry::new(scope.clone(), policy, source_event_id)
         .map_err(|error| format!("{error:#}"))?;
@@ -2437,19 +2514,66 @@ pub(super) fn materialize_task_verification_config(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum TrustWorkspaceOutcome {
-    Trusted { entry: WorkspaceTrustDecisionEntry },
-    AlreadyTrusted { workspace_id: String },
+fn workspace_promoted_check_for_candidate(
+    projection: &sigil_kernel::VerificationStateProjection,
+    workspace_scope: &EvidenceScope,
+    candidate: &DiscoveredCheck,
+) -> Option<sigil_kernel::TrustedCheckSpec> {
+    let entry = projection.check_spec(workspace_scope, &candidate.suggested_check_spec_id)?;
+    let expected = CheckSpec::new(
+        candidate.suggested_check_spec_id.clone(),
+        candidate.candidate.command.clone(),
+        candidate.effect,
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    );
+    let trusted = &entry.trusted_check;
+    if trusted.source != candidate.candidate.source {
+        return None;
+    }
+    if trusted.check_spec.check_spec_hash != expected.check_spec_hash {
+        return None;
+    }
+    Some(trusted.clone())
 }
 
-pub(super) fn trust_workspace(
-    workspace_root: &Path,
-    current_session: &mut Option<Session>,
-) -> std::result::Result<TrustWorkspaceOutcome, String> {
-    let Some(session) = current_session.as_mut() else {
-        return Err("session state is unavailable".to_owned());
+fn check_spec_entries_workspace_trust_requirement(
+    entries: &[CheckSpecRecordedEntry],
+) -> WorkspaceTrustRequirement {
+    if entries.iter().any(|entry| {
+        matches!(
+            entry.trusted_check.promoted_by,
+            CheckPromotion::WorkspaceTrusted { .. }
+        )
+    }) {
+        return WorkspaceTrustRequirement::Trusted;
+    }
+    if entries.iter().any(|entry| {
+        matches!(
+            entry.trusted_check.promoted_by,
+            CheckPromotion::UserApproved { .. } | CheckPromotion::Sandboxed { .. }
+        )
+    }) {
+        return WorkspaceTrustRequirement::ApprovalOrSandbox;
+    }
+    WorkspaceTrustRequirement::None
+}
+
+fn session_workspace_is_trusted(session: &Session, workspace_root: &Path) -> bool {
+    let Ok(workspace_id) = stable_workspace_id(workspace_root) else {
+        return false;
     };
+    session
+        .verification_state_projection()
+        .workspace_trust
+        .get(&workspace_id)
+        .is_some_and(|entry| entry.trust == WorkspaceTrust::Trusted)
+}
+
+fn ensure_session_workspace_trust(
+    session: &mut Session,
+    workspace_root: &Path,
+    reason: &str,
+) -> std::result::Result<(), String> {
     let workspace_id = stable_workspace_id(workspace_root).map_err(|error| format!("{error:#}"))?;
     let projection = session.verification_state_projection();
     if projection
@@ -2457,28 +2581,160 @@ pub(super) fn trust_workspace(
         .get(&workspace_id)
         .is_some_and(|entry| entry.trust == WorkspaceTrust::Trusted)
     {
-        return Ok(TrustWorkspaceOutcome::AlreadyTrusted { workspace_id });
+        return Ok(());
     }
 
-    let seed = format!("{}:{}", workspace_id, unix_time_ms());
+    let session_path = session
+        .store_path()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "memory".to_owned());
+    let seed = format!("{workspace_id}:{session_path}:{reason}");
     let digest = Sha256::digest(seed.as_bytes());
     let entry = WorkspaceTrustDecisionEntry {
-        workspace_id: workspace_id.clone(),
+        workspace_id,
         workspace_trust_snapshot_id: format!("workspace-trust:sha256:{digest:x}"),
         trust: WorkspaceTrust::Trusted,
         decided_by_event_id: None,
-        reason: Some("trusted by user through /trust-workspace".to_owned()),
+        reason: Some(reason.to_owned()),
     };
     session
-        .append_control(ControlEntry::WorkspaceTrustDecision(entry.clone()))
+        .append_control(ControlEntry::WorkspaceTrustDecision(entry))
         .map_err(|error| format!("failed to append workspace trust decision: {error:#}"))?;
-    Ok(TrustWorkspaceOutcome::Trusted { entry })
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum VerificationCheckPromotionKind {
+    Approve,
+    Sandbox,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum VerificationCheckPromotionOutcome {
+    Promoted { entry: Box<CheckSpecRecordedEntry> },
+    AlreadyPromoted { check_spec_id: String },
+}
+
+pub(super) fn promote_workspace_verification_check(
+    workspace_root: &Path,
+    root_config: &RootConfig,
+    current_session: &mut Option<Session>,
+    check_spec_id: &str,
+    kind: VerificationCheckPromotionKind,
+) -> std::result::Result<VerificationCheckPromotionOutcome, String> {
+    let Some(session) = current_session.as_mut() else {
+        return Err("session state is unavailable".to_owned());
+    };
+    let workspace_id = stable_workspace_id(workspace_root).map_err(|error| format!("{error:#}"))?;
+    let projection = session.verification_state_projection();
+    let trust_snapshot_id = projection
+        .workspace_trust
+        .get(&workspace_id)
+        .map(|entry| entry.workspace_trust_snapshot_id.clone())
+        .unwrap_or_else(|| format!("workspace-trust:unknown:{workspace_id}"));
+    let discovered = discover_candidate_checks_with_user_config(
+        workspace_root,
+        trust_snapshot_id,
+        "config:verification-promotion",
+        &root_config.verification,
+    )
+    .map_err(|error| format!("{error:#}"))?;
+    let Some(candidate) = discovered
+        .into_iter()
+        .find(|candidate| candidate.suggested_check_spec_id == check_spec_id)
+    else {
+        return Err(format!("verification check not found: {check_spec_id}"));
+    };
+    if !candidate.candidate.source.requires_trust_promotion() {
+        return Err(format!(
+            "verification check does not require repo-local promotion: {check_spec_id}"
+        ));
+    }
+
+    let expected = CheckSpec::new(
+        candidate.suggested_check_spec_id.clone(),
+        candidate.candidate.command.clone(),
+        candidate.effect,
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    );
+    let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
+    if projection
+        .check_spec(&workspace_scope, check_spec_id)
+        .is_some_and(|entry| {
+            entry.trusted_check.check_spec.check_spec_hash == expected.check_spec_hash
+                && promotion_matches_kind(&entry.trusted_check.promoted_by, kind)
+        })
+    {
+        return Ok(VerificationCheckPromotionOutcome::AlreadyPromoted {
+            check_spec_id: check_spec_id.to_owned(),
+        });
+    }
+
+    let sequence = session
+        .next_stream_sequence_hint()
+        .map_err(|error| format!("{error:#}"))?;
+    let source_event_id =
+        verification_check_promotion_event_id(&workspace_id, &expected, kind, sequence);
+    let promotion = match kind {
+        VerificationCheckPromotionKind::Approve => CheckPromotion::UserApproved {
+            approval_event_id: source_event_id.clone(),
+        },
+        VerificationCheckPromotionKind::Sandbox => CheckPromotion::Sandboxed {
+            sandbox_decision_id: source_event_id.clone(),
+        },
+    };
+    let trusted = candidate
+        .promote(DEFAULT_TASK_VERIFICATION_SCOPE_HASH, promotion)
+        .map_err(|error| format!("{error:#}"))?;
+    let entry = CheckSpecRecordedEntry::new(workspace_scope, trusted, source_event_id);
+    session
+        .append_control(ControlEntry::CheckSpecRecorded(entry.clone()))
+        .map_err(|error| format!("failed to append verification check promotion: {error:#}"))?;
+    Ok(VerificationCheckPromotionOutcome::Promoted {
+        entry: Box::new(entry),
+    })
+}
+
+fn promotion_matches_kind(
+    promotion: &CheckPromotion,
+    kind: VerificationCheckPromotionKind,
+) -> bool {
+    matches!(
+        (promotion, kind),
+        (
+            CheckPromotion::UserApproved { .. },
+            VerificationCheckPromotionKind::Approve
+        ) | (
+            CheckPromotion::Sandboxed { .. },
+            VerificationCheckPromotionKind::Sandbox
+        )
+    )
+}
+
+fn verification_check_promotion_event_id(
+    workspace_id: &str,
+    check: &CheckSpec,
+    kind: VerificationCheckPromotionKind,
+    sequence: u64,
+) -> String {
+    let kind_label = match kind {
+        VerificationCheckPromotionKind::Approve => "approve",
+        VerificationCheckPromotionKind::Sandbox => "sandbox",
+    };
+    stable_event_uuid(
+        "sigil-verification-check-promotion",
+        &format!(
+            "{workspace_id}:{kind_label}:{}:{}:{sequence}",
+            check.check_spec_id, check.check_spec_hash
+        ),
+    )
 }
 
 pub(super) fn clean_mutation_artifacts(
     root_config: &RootConfig,
     current_session_log_path: &Path,
     current_session: &Option<Session>,
+    target: &sigil_kernel::MutationArtifactCleanupTarget,
 ) -> std::result::Result<MutationArtifactRetentionReport, String> {
     if current_session.is_none() {
         return Err("session state is unavailable".to_owned());
@@ -2487,7 +2743,10 @@ pub(super) fn clean_mutation_artifacts(
         .map_err(|error| format!("failed to open mutation artifact recorder: {error:#}"))?;
     let recorder = MutationEventRecorder::new(store);
     recorder
-        .enforce_artifact_retention(&root_config.storage.mutation_artifact_retention.to_policy())
+        .enforce_artifact_cleanup(
+            target,
+            &root_config.storage.mutation_artifact_retention.to_policy(),
+        )
         .map_err(|error| format!("failed to clean mutation artifacts: {error:#}"))
 }
 
@@ -2511,10 +2770,11 @@ pub(super) fn delete_mutation_artifact(
 
 fn format_mutation_artifact_cleanup_report(report: &MutationArtifactRetentionReport) -> String {
     format!(
-        "mutation artifact cleanup: scanned {} artifacts ({} bytes), expired {}, unavailable {}, recorded {} lifecycle events",
+        "mutation artifact cleanup: scanned {} artifacts ({} bytes), expired {}, deleted {}, unavailable {}, recorded {} lifecycle events",
         report.scanned_artifacts,
         report.scanned_bytes,
         report.expired_artifacts,
+        report.deleted_artifacts,
         report.unavailable_artifacts,
         report.lifecycle_events.len()
     )

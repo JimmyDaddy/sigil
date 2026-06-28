@@ -142,8 +142,12 @@ fn plan_actions_map_to_worker_commands() {
     ));
 
     assert!(matches!(
-        app.into_worker_command(AppAction::CleanMutationArtifacts),
-        WorkerCommand::CleanMutationArtifacts
+        app.into_worker_command(AppAction::CleanMutationArtifacts {
+            target: sigil_kernel::MutationArtifactCleanupTarget::Recommended,
+        }),
+        WorkerCommand::CleanMutationArtifacts {
+            target: sigil_kernel::MutationArtifactCleanupTarget::Recommended,
+        }
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::DeleteMutationArtifact {
@@ -153,8 +157,18 @@ fn plan_actions_map_to_worker_commands() {
             if artifact_id == "mutation-artifact:sha256:abc"
     ));
     assert!(matches!(
-        app.into_worker_command(AppAction::TrustWorkspace),
-        WorkerCommand::TrustWorkspace
+        app.into_worker_command(AppAction::ApproveVerificationCheck {
+            check_spec_id: "cargo-test".to_owned(),
+        }),
+        WorkerCommand::ApproveVerificationCheck { ref check_spec_id }
+            if check_spec_id == "cargo-test"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::SandboxVerificationCheck {
+            check_spec_id: "cargo-test".to_owned(),
+        }),
+        WorkerCommand::SandboxVerificationCheck { ref check_spec_id }
+            if check_spec_id == "cargo-test"
     ));
 }
 
@@ -986,11 +1000,13 @@ fn worker_messages_cover_run_finished_notice_session_switch_and_failure_reset() 
     );
     app.mutation_artifact_retention_preview = MutationArtifactRetentionPreview::Pending;
     app.handle_worker_message(WorkerMessage::Notice(
-        "mutation artifact cleanup: expired=0 deleted=0".to_owned(),
+        "mutation artifact cleanup: scanned 0 artifacts (0 bytes), expired 0, deleted 0, unavailable 0, recorded 0 lifecycle events".to_owned(),
     ))?;
     assert_eq!(
         app.last_notice(),
-        Some("mutation artifact cleanup: expired=0 deleted=0")
+        Some(
+            "mutation artifact cleanup: scanned 0 artifacts (0 bytes), expired 0, deleted 0, unavailable 0, recorded 0 lifecycle events"
+        )
     );
     assert!(matches!(
         app.mutation_artifact_retention_preview,
@@ -1957,8 +1973,12 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
         WorkerCommand::CheckChangedFilesDiagnostics
     ));
     assert!(matches!(
-        app.into_worker_command(AppAction::CleanMutationArtifacts),
-        WorkerCommand::CleanMutationArtifacts
+        app.into_worker_command(AppAction::CleanMutationArtifacts {
+            target: sigil_kernel::MutationArtifactCleanupTarget::Recommended,
+        }),
+        WorkerCommand::CleanMutationArtifacts {
+            target: sigil_kernel::MutationArtifactCleanupTarget::Recommended,
+        }
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::DeleteMutationArtifact {
@@ -1968,8 +1988,18 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
             if artifact_id == "mutation-artifact:sha256:def"
     ));
     assert!(matches!(
-        app.into_worker_command(AppAction::TrustWorkspace),
-        WorkerCommand::TrustWorkspace
+        app.into_worker_command(AppAction::ApproveVerificationCheck {
+            check_spec_id: "cargo-test".to_owned(),
+        }),
+        WorkerCommand::ApproveVerificationCheck { ref check_spec_id }
+            if check_spec_id == "cargo-test"
+    ));
+    assert!(matches!(
+        app.into_worker_command(AppAction::SandboxVerificationCheck {
+            check_spec_id: "cargo-test".to_owned(),
+        }),
+        WorkerCommand::SandboxVerificationCheck { ref check_spec_id }
+            if check_spec_id == "cargo-test"
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::StartNewSession {

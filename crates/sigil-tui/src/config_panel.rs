@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow, bail};
 use sigil_kernel::{
     ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, McpServerConfig,
     PluginManifestSnapshot, RootConfig, SkillDescriptor, SkillRunMode, SyntaxThemeId, ThemeId,
-    UsageCostCurrency,
+    UsageCostCurrency, VerificationAutoRunPolicy,
 };
 use sigil_provider_anthropic::AnthropicProviderConfig;
 use sigil_provider_deepseek::{DeepSeekProviderConfig, StrictToolsMode};
@@ -81,12 +81,12 @@ impl ConfigSection {
         match self {
             Self::Provider => "provider",
             Self::Storage => "storage",
-            Self::Permissions => "policy",
+            Self::Permissions => "permissions",
             Self::Memory => "memory",
-            Self::Compaction => "context",
-            Self::CodeIntelligence => "code",
+            Self::Compaction => "compaction",
+            Self::CodeIntelligence => "code intel",
             Self::Terminal => "terminal",
-            Self::Appearance => "theme",
+            Self::Appearance => "appearance",
             Self::Agents => "agents",
             Self::Skills => "skills",
             Self::Plugins => "plugins",
@@ -98,7 +98,7 @@ impl ConfigSection {
         match self {
             Self::Provider => "provider settings",
             Self::Storage => "local state paths",
-            Self::Permissions => "approval rules",
+            Self::Permissions => "safety settings",
             Self::Memory => "memory status",
             Self::Compaction => "context and thresholds",
             Self::CodeIntelligence => "LSP readiness",
@@ -150,6 +150,7 @@ pub(crate) enum ConfigField {
     ProviderBaseUrl,
     ProviderFimModel,
     PermissionsDefaultMode,
+    VerificationAutoRun,
     MemoryEnabled,
     CompactionEnabled,
     CompactionSoftThresholdRatio,
@@ -158,22 +159,42 @@ pub(crate) enum ConfigField {
     CompactionTailMessages,
     CodeIntelEnabled,
     CodeIntelStartup,
+    // Discovery details stay in sigil.toml / doctor; the default TUI keeps only
+    // the main code-intelligence mode controls.
+    #[allow(dead_code)]
     CodeIntelDiscoveryEnabled,
+    #[allow(dead_code)]
     CodeIntelDiscoveryReportMissing,
+    // Terminal compatibility knobs stay in sigil.toml / doctor guidance rather
+    // than the default configuration flow.
+    #[allow(dead_code)]
     TerminalMouseCapture,
+    #[allow(dead_code)]
     TerminalOsc52Clipboard,
+    #[allow(dead_code)]
     TerminalScrollSensitivity,
     AppearanceTheme,
     AppearanceSyntaxTheme,
     AppearanceUsageCostCurrency,
+    // Fine-grained color-token editing stays in sigil.toml. The default TUI
+    // exposes coarse theme choices and previews.
+    #[allow(dead_code)]
     AppearanceColorGroup,
+    #[allow(dead_code)]
     AppearanceColorToken,
+    #[allow(dead_code)]
     AppearanceColorOverride,
     SkillId,
     PluginId,
+    // MCP server editing stays in sigil.toml; these variants remain for
+    // config-file draft validation coverage, not the default TUI field list.
+    #[allow(dead_code)]
     McpName,
+    #[allow(dead_code)]
     McpCommand,
+    #[allow(dead_code)]
     McpArgsCsv,
+    #[allow(dead_code)]
     McpStartupTimeoutSecs,
 }
 
@@ -186,7 +207,7 @@ impl ConfigField {
         Self::ProviderName,
     ];
     const STORAGE_FIELDS: [Self; 0] = [];
-    const PERMISSION_FIELDS: [Self; 1] = [Self::PermissionsDefaultMode];
+    const PERMISSION_FIELDS: [Self; 2] = [Self::PermissionsDefaultMode, Self::VerificationAutoRun];
     const MEMORY_FIELDS: [Self; 1] = [Self::MemoryEnabled];
     const COMPACTION_FIELDS: [Self; 5] = [
         Self::CompactionEnabled,
@@ -195,33 +216,16 @@ impl ConfigField {
         Self::CompactionHardThresholdRatio,
         Self::CompactionTailMessages,
     ];
-    const CODE_INTELLIGENCE_FIELDS: [Self; 4] = [
-        Self::CodeIntelEnabled,
-        Self::CodeIntelStartup,
-        Self::CodeIntelDiscoveryEnabled,
-        Self::CodeIntelDiscoveryReportMissing,
-    ];
-    const TERMINAL_FIELDS: [Self; 3] = [
-        Self::TerminalMouseCapture,
-        Self::TerminalOsc52Clipboard,
-        Self::TerminalScrollSensitivity,
-    ];
-    const APPEARANCE_FIELDS: [Self; 6] = [
+    const CODE_INTELLIGENCE_FIELDS: [Self; 2] = [Self::CodeIntelEnabled, Self::CodeIntelStartup];
+    const TERMINAL_FIELDS: [Self; 0] = [];
+    const APPEARANCE_FIELDS: [Self; 3] = [
         Self::AppearanceTheme,
         Self::AppearanceSyntaxTheme,
         Self::AppearanceUsageCostCurrency,
-        Self::AppearanceColorGroup,
-        Self::AppearanceColorToken,
-        Self::AppearanceColorOverride,
     ];
     const SKILL_FIELDS: [Self; 1] = [Self::SkillId];
     const PLUGIN_FIELDS: [Self; 1] = [Self::PluginId];
-    const MCP_FIELDS: [Self; 4] = [
-        Self::McpName,
-        Self::McpCommand,
-        Self::McpArgsCsv,
-        Self::McpStartupTimeoutSecs,
-    ];
+    const MCP_FIELDS: [Self; 0] = [];
 
     pub(crate) fn fields_for_section(section: ConfigSection) -> &'static [Self] {
         match section {
@@ -251,7 +255,8 @@ impl ConfigField {
             Self::ProviderApiKey => "api_key",
             Self::ProviderBaseUrl => "base_url",
             Self::ProviderFimModel => "fim_model",
-            Self::PermissionsDefaultMode => "default_mode",
+            Self::PermissionsDefaultMode => "mode",
+            Self::VerificationAutoRun => "checks",
             Self::MemoryEnabled => "enabled",
             Self::CompactionEnabled => "enabled",
             Self::CompactionSoftThresholdRatio => "soft_threshold",
@@ -287,7 +292,8 @@ impl ConfigField {
             Self::ProviderApiKey => "API key",
             Self::ProviderBaseUrl => "Endpoint",
             Self::ProviderFimModel => "FIM model",
-            Self::PermissionsDefaultMode => "Default mode",
+            Self::PermissionsDefaultMode => "Mode",
+            Self::VerificationAutoRun => "Checks",
             Self::MemoryEnabled => "Memory",
             Self::CompactionEnabled => "Auto compact",
             Self::CompactionSoftThresholdRatio => "Soft threshold",
@@ -334,7 +340,10 @@ impl ConfigField {
                 "DeepSeek-only model used by prefix/FIM helpers. Chat runs use Model."
             }
             Self::PermissionsDefaultMode => {
-                "Fallback approval mode for tool calls not covered by a more specific rule."
+                "Default safety posture for tool calls that do not have a more specific rule."
+            }
+            Self::VerificationAutoRun => {
+                "Controls whether trusted project checks may start automatically after writes."
             }
             Self::MemoryEnabled => {
                 "Loads workspace memory documents once at startup for stable session context."
@@ -394,7 +403,7 @@ impl ConfigField {
                 "Optional #RRGGBB override for the selected color token. Empty value inherits from the current theme."
             }
             Self::SkillId => {
-                "Selected reusable skill. Up/Down moves through skills; footer actions load or invoke it."
+                "Selected reusable skill. Up/Down moves through skills; footer action uses it."
             }
             Self::PluginId => {
                 "Selected plugin manifest. Up/Down moves through plugins; footer actions approve or deny the manifest hash."
@@ -431,6 +440,7 @@ impl ConfigField {
             Self::ProviderName => "Enter cycle",
             Self::ProviderApiKey => "Enter input",
             Self::PermissionsDefaultMode
+            | Self::VerificationAutoRun
             | Self::CodeIntelStartup
             | Self::AppearanceTheme
             | Self::AppearanceSyntaxTheme => "Enter cycle",
@@ -457,16 +467,16 @@ pub(crate) enum ConfigFooterAction {
     Save,
     SaveAndClose,
     CleanMutationArtifacts,
-    DeleteMutationArtifact,
-    TrustWorkspace,
     ActivateMcp,
     TrustAgent,
     BlockAgent,
+    #[cfg(test)]
     ToggleAgentEnabled,
+    #[cfg(test)]
     ToggleAgentUser,
+    #[cfg(test)]
     ToggleAgentModel,
-    LoadSkill,
-    InvokeSkill,
+    UseSkill,
     ApprovePlugin,
     DenyPlugin,
     Close,
@@ -474,34 +484,21 @@ pub(crate) enum ConfigFooterAction {
 
 impl ConfigFooterAction {
     const DEFAULT_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
-    const STORAGE_ORDER: [Self; 5] = [
+    const STORAGE_ORDER: [Self; 4] = [
         Self::Save,
         Self::SaveAndClose,
         Self::CleanMutationArtifacts,
-        Self::DeleteMutationArtifact,
         Self::Close,
     ];
-    const PERMISSIONS_ORDER: [Self; 4] = [
-        Self::Save,
-        Self::SaveAndClose,
-        Self::TrustWorkspace,
-        Self::Close,
-    ];
+    const PERMISSIONS_ORDER: [Self; 3] = [Self::Save, Self::SaveAndClose, Self::Close];
     const MCP_ORDER: [Self; 4] = [
         Self::Save,
         Self::SaveAndClose,
         Self::ActivateMcp,
         Self::Close,
     ];
-    const AGENTS_ORDER: [Self; 6] = [
-        Self::TrustAgent,
-        Self::BlockAgent,
-        Self::ToggleAgentEnabled,
-        Self::ToggleAgentUser,
-        Self::ToggleAgentModel,
-        Self::Close,
-    ];
-    const SKILLS_ORDER: [Self; 3] = [Self::LoadSkill, Self::InvokeSkill, Self::Close];
+    const AGENTS_ORDER: [Self; 3] = [Self::TrustAgent, Self::BlockAgent, Self::Close];
+    const SKILLS_ORDER: [Self; 2] = [Self::UseSkill, Self::Close];
     const PLUGINS_ORDER: [Self; 3] = [Self::ApprovePlugin, Self::DenyPlugin, Self::Close];
 
     pub(crate) fn actions_for_section(section: ConfigSection) -> &'static [Self] {
@@ -530,16 +527,16 @@ impl ConfigFooterAction {
             Self::Save => "save",
             Self::SaveAndClose => "save+close",
             Self::CleanMutationArtifacts => "clean",
-            Self::DeleteMutationArtifact => "delete",
-            Self::TrustWorkspace => "trust",
             Self::ActivateMcp => "activate",
             Self::TrustAgent => "trust",
-            Self::BlockAgent => "block",
+            Self::BlockAgent => "disable",
+            #[cfg(test)]
             Self::ToggleAgentEnabled => "enable",
+            #[cfg(test)]
             Self::ToggleAgentUser => "user",
+            #[cfg(test)]
             Self::ToggleAgentModel => "model",
-            Self::LoadSkill => "load",
-            Self::InvokeSkill => "invoke",
+            Self::UseSkill => "use",
             Self::ApprovePlugin => "approve",
             Self::DenyPlugin => "deny",
             Self::Close => "close",
@@ -551,16 +548,16 @@ impl ConfigFooterAction {
             Self::Save => "save",
             Self::SaveAndClose => "save_and_close",
             Self::CleanMutationArtifacts => "clean_artifacts",
-            Self::DeleteMutationArtifact => "delete_artifact",
-            Self::TrustWorkspace => "trust_workspace",
             Self::ActivateMcp => "activate_mcp",
             Self::TrustAgent => "trust_agent",
-            Self::BlockAgent => "block_agent",
+            Self::BlockAgent => "disable_agent",
+            #[cfg(test)]
             Self::ToggleAgentEnabled => "toggle_agent_enabled",
+            #[cfg(test)]
             Self::ToggleAgentUser => "toggle_agent_user",
+            #[cfg(test)]
             Self::ToggleAgentModel => "toggle_agent_model",
-            Self::LoadSkill => "load_skill",
-            Self::InvokeSkill => "invoke_skill",
+            Self::UseSkill => "use_skill",
             Self::ApprovePlugin => "approve_plugin",
             Self::DenyPlugin => "deny_plugin",
             Self::Close => "close",
@@ -672,6 +669,7 @@ pub(crate) struct ConfigDraft {
     pub(crate) provider_fim_model: String,
     pub(crate) provider_request_timeout_secs: String,
     pub(crate) permission_default_mode: ApprovalMode,
+    pub(crate) verification_auto_run: VerificationAutoRunPolicy,
     pub(crate) memory_enabled: bool,
     pub(crate) compaction_enabled: bool,
     pub(crate) compaction_soft_threshold_ratio: String,
@@ -785,6 +783,7 @@ impl ConfigDraft {
             provider_fim_model: deepseek_provider.fim_model,
             provider_request_timeout_secs: current_provider_draft.request_timeout_secs,
             permission_default_mode: root_config.permission.default_mode,
+            verification_auto_run: root_config.verification.auto_run,
             memory_enabled: root_config.memory.enabled,
             compaction_enabled: root_config.compaction.enabled,
             compaction_soft_threshold_ratio: root_config
@@ -951,6 +950,7 @@ impl ConfigDraft {
         root_config.agent.provider = provider_name.to_owned();
         root_config.agent.model = model.to_owned();
         root_config.permission.default_mode = self.permission_default_mode;
+        root_config.verification.auto_run = self.verification_auto_run;
         root_config.memory.enabled = self.memory_enabled;
         root_config.compaction.enabled = self.compaction_enabled;
         root_config.compaction.soft_threshold_ratio = soft_threshold_ratio;
@@ -1165,6 +1165,7 @@ impl ConfigDraft {
             .is_some()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn reset_all_appearance_color_overrides(&mut self) -> bool {
         if self.base_root_config.appearance.colors.is_empty() {
             return false;
@@ -1190,6 +1191,7 @@ impl ConfigDraft {
         removed
     }
 
+    #[allow(dead_code)]
     pub(crate) fn selected_appearance_color_group_override_count(&self) -> usize {
         self.selected_appearance_color_group()
             .tokens
@@ -1643,6 +1645,7 @@ impl ConfigState {
         None
     }
 
+    #[allow(dead_code)]
     pub(crate) fn add_mcp_server(&mut self) {
         let next_index = self.draft.mcp_servers.len() + 1;
         self.draft.mcp_servers.push(McpServerDraft {
@@ -1654,11 +1657,12 @@ impl ConfigState {
         self.selected_mcp_server_index = self.draft.mcp_servers.len() - 1;
         if self.selected_section == ConfigSection::Mcp {
             self.footer_selected = false;
-            self.selected_field = Some(ConfigField::McpName);
+            self.selected_field = None;
         }
         self.dirty = true;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn remove_selected_mcp_server(&mut self) -> bool {
         if self.draft.mcp_servers.is_empty() {
             return false;
@@ -1727,6 +1731,7 @@ impl ConfigState {
                 .selected_mcp_server()
                 .map(|server| server.startup_timeout_secs.as_str()),
             ConfigField::PermissionsDefaultMode
+            | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
             | ConfigField::CodeIntelEnabled
@@ -1778,6 +1783,7 @@ impl ConfigState {
                 .selected_mcp_server_mut()
                 .map(|server| &mut server.startup_timeout_secs),
             ConfigField::PermissionsDefaultMode
+            | ConfigField::VerificationAutoRun
             | ConfigField::MemoryEnabled
             | ConfigField::CompactionEnabled
             | ConfigField::CodeIntelEnabled
@@ -1822,7 +1828,10 @@ impl ConfigState {
                     .unwrap_or_else(|| "none".to_owned());
             }
             ConfigField::PermissionsDefaultMode => {
-                return self.draft.permission_default_mode.as_str().to_owned();
+                return permission_mode_label(self.draft.permission_default_mode).to_owned();
+            }
+            ConfigField::VerificationAutoRun => {
+                return verification_auto_run_label(self.draft.verification_auto_run).to_owned();
             }
             ConfigField::MemoryEnabled => {
                 return bool_label(self.draft.memory_enabled).to_owned();
@@ -2073,6 +2082,7 @@ pub(crate) fn config_field_accepts_char(field: ConfigField, character: char) -> 
         ConfigField::ProviderApiKey
         | ConfigField::ProviderName
         | ConfigField::PermissionsDefaultMode
+        | ConfigField::VerificationAutoRun
         | ConfigField::MemoryEnabled
         | ConfigField::CompactionEnabled
         | ConfigField::CodeIntelEnabled
@@ -2098,6 +2108,22 @@ fn mask_secret(value: &str) -> String {
 
 fn bool_label(enabled: bool) -> &'static str {
     if enabled { "yes" } else { "no" }
+}
+
+fn permission_mode_label(mode: sigil_kernel::ApprovalMode) -> &'static str {
+    match mode {
+        sigil_kernel::ApprovalMode::Ask => "standard",
+        sigil_kernel::ApprovalMode::Allow => "full access",
+        sigil_kernel::ApprovalMode::Deny => "locked down",
+    }
+}
+
+fn verification_auto_run_label(policy: VerificationAutoRunPolicy) -> &'static str {
+    match policy {
+        VerificationAutoRunPolicy::Manual => "manual",
+        VerificationAutoRunPolicy::TrustedOnly => "auto trusted",
+        VerificationAutoRunPolicy::Never => "off",
+    }
 }
 
 fn display_ratio(value: &str) -> String {

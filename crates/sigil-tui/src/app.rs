@@ -24,6 +24,7 @@ pub(crate) mod task_sidebar;
 mod timeline_flow;
 mod tool_card_interaction;
 mod worker_bridge;
+mod workspace_trust_flow;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -31,9 +32,10 @@ use ratatui::text::Line;
 use sigil_kernel::{
     AgentThreadId, ApprovalMode, CompactionConfig, CompactionRecord, CompactionThresholdStatus,
     ConversationInputKind, ConversationInputQueueId, ConversationInputTarget, MemoryConfig,
-    MutationArtifactInventoryItem, MutationArtifactRetentionReport, PlanApprovalPermission,
-    ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig, SessionLogEntry,
-    SessionStats, StorageConfig, ToolPreviewSnapshot, plan_text_hash, resolve_workspace_root,
+    MutationArtifactCleanupTarget, MutationArtifactInventoryItem, MutationArtifactRetentionReport,
+    PlanApprovalPermission, ReasoningEffort, RootConfig, SecretRedactor, Session, SessionConfig,
+    SessionLogEntry, SessionStats, StorageConfig, ToolPreviewSnapshot, plan_text_hash,
+    resolve_workspace_root,
 };
 use sigil_runtime::{SigilPaths, resolve_sigil_paths};
 use uuid::Uuid;
@@ -64,6 +66,7 @@ pub(crate) use crate::timeline::{
     LiveActivitySummary, RunPhase, SessionHistoryRow, SidebarCard, ThinkingBlockMode,
     ToolActivityCacheEntry,
 };
+pub(crate) use crate::workspace_trust::WorkspaceTrustGateState;
 
 use self::config_flow::cycle_approval_mode;
 use self::formatting::*;
@@ -267,6 +270,7 @@ pub struct AppState {
     config_snapshot: Option<RootConfig>,
     secret_redactor: SecretRedactor,
     setup_state: Option<SetupState>,
+    workspace_trust_gate_state: Option<WorkspaceTrustGateState>,
     config_state: Option<ConfigState>,
     modal_state: Option<ModalState>,
     session_view_mode: SessionViewMode,
@@ -414,11 +418,19 @@ pub enum AppAction {
     },
     CompactNow,
     CheckChangedFilesDiagnostics,
-    CleanMutationArtifacts,
+    CleanMutationArtifacts {
+        target: MutationArtifactCleanupTarget,
+    },
     DeleteMutationArtifact {
         artifact_id: String,
     },
     TrustWorkspace,
+    ApproveVerificationCheck {
+        check_spec_id: String,
+    },
+    SandboxVerificationCheck {
+        check_spec_id: String,
+    },
     ActivateLazyMcp {
         server_name: Option<String>,
     },
@@ -506,6 +518,7 @@ impl AppState {
             config_snapshot: Some(root_config.clone()),
             secret_redactor: sigil_runtime::secret_redactor_for_root_config(root_config),
             setup_state: None,
+            workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
             session_view_mode: SessionViewMode::Provider,
@@ -643,6 +656,7 @@ impl AppState {
             config_snapshot: None,
             secret_redactor: SecretRedactor::default(),
             setup_state: Some(SetupState::new(config_path, startup_error.clone())),
+            workspace_trust_gate_state: None,
             config_state: None,
             modal_state: None,
             session_view_mode: SessionViewMode::Provider,
@@ -890,6 +904,9 @@ impl AppState {
     }
 
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Result<Option<AppAction>> {
+        if self.is_workspace_trust_gate_mode() {
+            return self.handle_workspace_trust_gate_key_event(key);
+        }
         if self.is_setup_mode() {
             return self.handle_setup_key_event(key);
         }
@@ -1660,14 +1677,6 @@ impl AppState {
                 let session_log_path = self.new_session_log_path();
                 Ok(Some(AppAction::StartNewSession { session_log_path }))
             }
-            "/trust-workspace" => {
-                if self.is_busy {
-                    self.push_timeline(TimelineRole::Notice, "busy; trust workspace later");
-                    return Ok(None);
-                }
-                self.last_notice = Some("trusting workspace".to_owned());
-                Ok(Some(AppAction::TrustWorkspace))
-            }
             "/plan" => {
                 if self.is_busy {
                     self.push_timeline(TimelineRole::Notice, "busy; plan later");
@@ -1873,11 +1882,8 @@ impl AppState {
         };
         let item_kind = slash_skill_display_kind(&skill);
         if self.is_busy {
-            self.push_timeline(
-                TimelineRole::Notice,
-                format!("busy; invoke {item_kind} later"),
-            );
-            self.last_notice = Some(format!("busy; invoke {item_kind} later"));
+            self.push_timeline(TimelineRole::Notice, format!("busy; use {item_kind} later"));
+            self.last_notice = Some(format!("busy; use {item_kind} later"));
             return Ok(None);
         }
         if !skill.enabled {
@@ -1920,7 +1926,7 @@ impl AppState {
         let arguments = command.arg.trim().to_owned();
         match skill.run_as {
             sigil_kernel::SkillRunMode::Inline => {
-                self.last_notice = Some(format!("invoking skill {skill_id}"));
+                self.last_notice = Some(format!("using skill {skill_id}"));
                 self.push_phase_marker(format!("thinking|{}", self.model_name));
                 Ok(Some(AppAction::InvokeInlineSkill {
                     skill_id: skill_id.to_owned(),

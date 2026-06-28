@@ -2,19 +2,21 @@ use std::{collections::BTreeMap, sync::mpsc};
 
 use sigil_kernel::{
     AgentConfig, CodeIntelligenceConfig, CompactionConfig, ControlEntry, DurableEventType,
-    JsonlSessionStore, McpServerConfig, MemoryConfig, MutationArtifactLifecycleRecorded,
-    MutationArtifactLifecycleStatus, MutationEventRecorder, PermissionConfig, RootConfig, RunEvent,
-    Session, SessionConfig, SessionStreamRecord, StorageConfig, TaskConfig, TaskId, ToolEffect,
-    VerificationCheckConfig, VerificationConfig, WorkspaceConfig, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, bytes_hash, config::TerminalConfig, stable_workspace_id,
+    JsonlSessionStore, McpServerConfig, MemoryConfig, MutationArtifactCleanupRequested,
+    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus, MutationEventRecorder,
+    PermissionConfig, RootConfig, RunEvent, Session, SessionConfig, SessionStreamRecord,
+    StorageConfig, TaskConfig, TaskId, ToolEffect, VerificationCheckConfig, VerificationConfig,
+    WorkspaceConfig, WorkspaceTrust, WorkspaceTrustDecisionEntry, bytes_hash,
+    config::TerminalConfig, stable_workspace_id,
 };
 
 use crate::runner::{
     event_bridge::ChannelEventHandler,
     protocol::WorkerMessage,
     worker_loop::{
-        TrustWorkspaceOutcome, clean_mutation_artifacts, delete_mutation_artifact,
-        materialize_task_verification_config, trust_workspace,
+        VerificationCheckPromotionKind, VerificationCheckPromotionOutcome,
+        clean_mutation_artifacts, delete_mutation_artifact, materialize_task_verification_config,
+        promote_workspace_verification_check,
     },
 };
 
@@ -22,7 +24,7 @@ use crate::runner::{
 fn materialize_task_verification_config_records_specs_policy_and_events() {
     let temp = tempfile::tempdir().expect("tempdir");
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    let root_config = root_config_with_checks(
+    let mut root_config = root_config_with_checks(
         temp.path(),
         vec![VerificationCheckConfig {
             id: "cargo-test".to_owned(),
@@ -32,6 +34,7 @@ fn materialize_task_verification_config_records_specs_policy_and_events() {
             effect: ToolEffect::ReadOnly,
         }],
     );
+    root_config.verification.scope_profile = sigil_kernel::VerificationScopeProfile::Node;
     let (tx, rx) = mpsc::channel();
     let mut handler = ChannelEventHandler::new(tx);
     let task_id = TaskId::new("task-1").expect("task id");
@@ -53,11 +56,16 @@ fn materialize_task_verification_config_records_specs_policy_and_events() {
             .is_some_and(|entry| entry.trusted_check.source
                 == sigil_kernel::CheckDiscoverySource::UserExplicitConfig)
     );
-    assert!(projection.latest_policy(&scope).is_some_and(
-        |entry| entry.policy.required_checks.len() == 1
+    assert!(projection.latest_policy(&scope).is_some_and(|entry| {
+        entry.policy.required_checks.len() == 1
             && entry.policy.workspace_trust_requirement
                 == sigil_kernel::WorkspaceTrustRequirement::None
-    ));
+            && entry
+                .policy
+                .verification_scope
+                .exclude
+                .contains(&".next/**".to_owned())
+    }));
     let controls = rx
         .try_iter()
         .filter_map(|message| match message {
@@ -205,79 +213,127 @@ fn materialize_task_verification_config_promotes_repo_checks_for_trusted_workspa
 }
 
 #[test]
-fn trust_workspace_records_decision_and_is_idempotent() {
+fn materialize_task_verification_config_uses_workspace_check_promotion() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let workspace_id = stable_workspace_id(temp.path()).expect("workspace id");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write Cargo.toml");
+    let root_config = root_config_with_checks(temp.path(), Vec::new());
     let mut current_session = Some(Session::new("deepseek", "deepseek-v4-flash"));
 
-    let outcome = trust_workspace(temp.path(), &mut current_session).expect("trust workspace");
-
-    let entry = match outcome {
-        TrustWorkspaceOutcome::Trusted { entry } => entry,
-        TrustWorkspaceOutcome::AlreadyTrusted { .. } => {
-            panic!("first trust should append a decision")
+    let promoted = promote_workspace_verification_check(
+        temp.path(),
+        &root_config,
+        &mut current_session,
+        "cargo-test",
+        VerificationCheckPromotionKind::Approve,
+    )
+    .expect("approve repo-local check");
+    let entry = match promoted {
+        VerificationCheckPromotionOutcome::Promoted { entry } => *entry,
+        VerificationCheckPromotionOutcome::AlreadyPromoted { .. } => {
+            panic!("first approval should append a check spec")
         }
     };
-    assert_eq!(entry.workspace_id, workspace_id);
-    assert_eq!(entry.trust, WorkspaceTrust::Trusted);
-    assert!(
-        entry
-            .workspace_trust_snapshot_id
-            .starts_with("workspace-trust:")
-    );
-    assert_eq!(
-        entry.reason.as_deref(),
-        Some("trusted by user through /trust-workspace")
-    );
-    let session = current_session.as_ref().expect("session remains available");
+    assert!(matches!(
+        entry.scope,
+        sigil_kernel::EvidenceScope::Workspace(_)
+    ));
+    assert!(matches!(
+        entry.trusted_check.promoted_by,
+        sigil_kernel::CheckPromotion::UserApproved { .. }
+    ));
+
+    let mut session = current_session.expect("session");
+    let (tx, rx) = mpsc::channel();
+    let mut handler = ChannelEventHandler::new(tx);
+    let task_id = TaskId::new("task-1").expect("task id");
+
+    materialize_task_verification_config(
+        &mut session,
+        &mut handler,
+        &root_config,
+        temp.path(),
+        &task_id,
+    )
+    .expect("approved repo check materializes");
+
     let projection = session.verification_state_projection();
+    let task_scope = sigil_kernel::EvidenceScope::Task("task-1".to_owned());
+    let check = projection
+        .check_spec(&task_scope, "cargo-test")
+        .expect("approved workspace check should materialize into task");
+    assert!(matches!(
+        check.trusted_check.promoted_by,
+        sigil_kernel::CheckPromotion::UserApproved { .. }
+    ));
     assert!(
         projection
-            .workspace_trust
-            .get(&workspace_id)
-            .is_some_and(|entry| entry.trust == WorkspaceTrust::Trusted)
+            .latest_policy(&task_scope)
+            .is_some_and(|entry| entry.policy.workspace_trust_requirement
+                == sigil_kernel::WorkspaceTrustRequirement::ApprovalOrSandbox)
     );
-    let trust_count = session
-        .entries()
-        .iter()
-        .filter(|entry| {
-            matches!(
-                entry,
-                sigil_kernel::SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(_))
-            )
+    let controls = rx
+        .try_iter()
+        .filter_map(|message| match message {
+            WorkerMessage::Event(event) => match *event {
+                RunEvent::Control(control) => Some(control),
+                _ => None,
+            },
+            _ => None,
         })
-        .count();
-    assert_eq!(trust_count, 1);
-
-    let second = trust_workspace(temp.path(), &mut current_session)
-        .expect("trust workspace remains idempotent");
-
+        .collect::<Vec<_>>();
     assert!(matches!(
-        second,
-        TrustWorkspaceOutcome::AlreadyTrusted { workspace_id: ref id } if id == &workspace_id
+        controls.as_slice(),
+        [
+            ControlEntry::CheckSpecRecorded(_),
+            ControlEntry::VerificationPolicyChanged(_)
+        ]
     ));
-    let session = current_session.as_ref().expect("session remains available");
-    let trust_count = session
-        .entries()
-        .iter()
-        .filter(|entry| {
-            matches!(
-                entry,
-                sigil_kernel::SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(_))
-            )
-        })
-        .count();
-    assert_eq!(trust_count, 1);
 }
 
 #[test]
-fn trust_workspace_requires_available_session() {
+fn promote_workspace_verification_check_supports_sandbox_and_idempotence() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let mut current_session = None;
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("write Cargo.toml");
+    let root_config = root_config_with_checks(temp.path(), Vec::new());
+    let mut current_session = Some(Session::new("deepseek", "deepseek-v4-flash"));
 
-    let error = trust_workspace(temp.path(), &mut current_session).expect_err("missing session");
+    let promoted = promote_workspace_verification_check(
+        temp.path(),
+        &root_config,
+        &mut current_session,
+        "cargo-test",
+        VerificationCheckPromotionKind::Sandbox,
+    )
+    .expect("sandbox repo-local check");
+    let VerificationCheckPromotionOutcome::Promoted { entry } = promoted else {
+        panic!("sandbox promotion should append a check spec");
+    };
+    assert!(matches!(
+        entry.trusted_check.promoted_by,
+        sigil_kernel::CheckPromotion::Sandboxed { .. }
+    ));
 
-    assert!(error.contains("session state is unavailable"));
+    let repeated = promote_workspace_verification_check(
+        temp.path(),
+        &root_config,
+        &mut current_session,
+        "cargo-test",
+        VerificationCheckPromotionKind::Sandbox,
+    )
+    .expect("idempotent sandbox promotion");
+    assert!(matches!(
+        repeated,
+        VerificationCheckPromotionOutcome::AlreadyPromoted { ref check_spec_id }
+            if check_spec_id == "cargo-test"
+    ));
 }
 
 #[test]
@@ -309,13 +365,41 @@ fn clean_mutation_artifacts_applies_retention_policy_and_records_lifecycle() -> 
     let current_session =
         Some(Session::new("deepseek", "deepseek-v4-flash").with_store(store.clone()));
 
-    let report = clean_mutation_artifacts(&root_config, &session_path, &current_session)
-        .expect("cleanup should apply retention");
+    let report = clean_mutation_artifacts(
+        &root_config,
+        &session_path,
+        &current_session,
+        &sigil_kernel::MutationArtifactCleanupTarget::Recommended,
+    )
+    .expect("cleanup should apply retention");
 
     assert_eq!(report.scanned_artifacts, 1);
     assert_eq!(report.expired_artifacts, 1);
     assert_eq!(report.unavailable_artifacts, 0);
     assert_eq!(report.lifecycle_events.len(), 1);
+    let cleanup_requests = JsonlSessionStore::read_event_records(&session_path)?
+        .into_iter()
+        .filter_map(|record| match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_type
+                    == DurableEventType::MutationArtifactCleanupRequested.as_str() =>
+            {
+                Some(
+                    serde_json::from_value::<MutationArtifactCleanupRequested>(event.payload)
+                        .expect("cleanup request payload should decode"),
+                )
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        cleanup_requests.as_slice(),
+        [MutationArtifactCleanupRequested {
+            target: sigil_kernel::MutationArtifactCleanupTarget::Recommended,
+            candidate_artifacts: 1,
+            ..
+        }]
+    ));
     let lifecycle_records = JsonlSessionStore::read_event_records(&session_path)?
         .into_iter()
         .filter_map(|record| match record {
@@ -401,7 +485,11 @@ fn root_config_with_checks(
         compaction: CompactionConfig::default(),
         code_intelligence: CodeIntelligenceConfig::default(),
         terminal: TerminalConfig::default(),
-        verification: VerificationConfig { checks },
+        verification: VerificationConfig {
+            auto_run: sigil_kernel::VerificationAutoRunPolicy::Manual,
+            checks,
+            ..VerificationConfig::default()
+        },
         appearance: Default::default(),
         task: TaskConfig::default(),
         providers: BTreeMap::new(),

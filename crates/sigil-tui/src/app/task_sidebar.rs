@@ -680,6 +680,16 @@ fn readiness_reason_compact_label(reason: &sigil_kernel::ReadinessReason) -> Opt
             "stale {}",
             verification_stale_reason_compact_label(&cause.reason)
         )),
+        sigil_kernel::ReadinessReason::WorkspaceMutationSource {
+            source_label,
+            recovery_hint,
+            ..
+        } => Some(
+            recovery_hint
+                .as_deref()
+                .map(|hint| format!("{source_label}: {hint}"))
+                .unwrap_or_else(|| source_label.clone()),
+        ),
         sigil_kernel::ReadinessReason::WorkspaceUnknownDirty { event_id } => {
             let event = event_id
                 .as_deref()
@@ -761,7 +771,7 @@ fn required_action_label(action: &RequiredAction) -> String {
             format!("check approval {check_spec_id}")
         }
         RequiredAction::TrustWorkspace => "workspace trust required".to_owned(),
-        RequiredAction::ResolveUnknownDirty => "resolve unknown workspace change".to_owned(),
+        RequiredAction::ResolveUnknownDirty => "refresh source or run check".to_owned(),
         RequiredAction::ReRunNonWritingCheck { check_spec_id } => {
             format!("rerun non-writing check {check_spec_id}")
         }

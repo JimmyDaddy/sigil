@@ -66,12 +66,6 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         completes_with_space: false,
     },
     SlashCommandSpec {
-        canonical: "/trust-workspace",
-        aliases: &[],
-        description: "trust repo-local verification discovery",
-        completes_with_space: false,
-    },
-    SlashCommandSpec {
         canonical: "/plan",
         aliases: &[],
         description: "enter plan mode or run one plan prompt",

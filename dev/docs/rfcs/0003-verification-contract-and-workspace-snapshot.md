@@ -175,6 +175,15 @@ struct TrustedCheckSpec {
 
 Untrusted repo-local sources can only produce `CandidateCheck`. They become `TrustedCheckSpec` only through user/global policy promotion, a recorded workspace trust decision, explicit approval or a sandbox decision satisfying policy.
 
+Product-surface ownership:
+
+- First workspace entry owns the coarse workspace trust decision. Normal TUI use starts only after the user trusts the workspace or exits.
+- `/config` owns long-lived verification policy and repo-local summaries: workspace trust state display, repo-local check counts, auto-run policy and scope/profile settings.
+- Task sidebar, task strip and session audit own current-run blocking actions: run check, retry failed check, show stale/missing reasons and guide the user to review trust when a candidate check is not yet promotable.
+- Approval modal owns one-time high-risk execution decisions such as shell, write tools and MCP actions; it must not become a full policy editor.
+- Kernel remains the enforcement boundary. UI affordances may request trust, approval or run-check actions, but policy merge, trust staleness, check-spec hash changes and sandbox/approval applicability are computed by kernel state.
+- A task surface may link or focus the relevant `/config` review item, but should not duplicate the complete repo-local trust management UI.
+
 ## 7. Verification Scope and Snapshot
 
 Verification checks bind to a content snapshot, not to wall-clock time.
@@ -438,6 +447,12 @@ TUI should show:
 - whether command execution required approval or sandbox
 - Narrow TUI surfaces compact verification reasons as: first actionable/stale reason plus `+N more`; full session audit still preserves full reason labels in the durable `ReadinessEvaluated` entry.
 
+TUI ownership rules:
+
+- `/config` is a review and policy-management surface, not the control center for every verification action.
+- Task and session surfaces should keep the user on the current workflow for run/retry actions; only long-lived trust or policy changes should route to `/config`.
+- Single-use approval prompts stay in the approval modal and must write durable approval/provenance events consumed by the verification reducer.
+
 Protocol should expose both:
 
 ```text
@@ -532,24 +547,29 @@ Required deterministic tests:
 - 已修正 check runner 执行前 workspace trust gate：`run_verification_check` 会同时识别 request 级 approval/sandbox decision 和 `TrustedCheckSpec` promotion 自带的 approval/sandbox decision，避免已审批或已 sandboxed 的 repo-local trusted check 被错误拒绝。
 - 已在 session audit 中展示 workspace trust provenance：`WorkspaceTrustDecision` 会显示 trust snapshot、deciding event 和 reason，便于用户追溯 repo-local check promotion 的来源。
 - 已在 TUI 中展示 verification missing/passed/stale 等状态，并补 slash command 高亮、timeline command token 和 MCP failure 展示回归测试。
-- 已在 `/config` 的 Permissions 页补充 verification trust 摘要与 footer trust action：展示当前 workspace trust、用户配置 checks、repo-local candidate checks，并可直接触发 workspace trust promotion action。
-- 已增强 `/config` Permissions 的 repo-local verification check review 信息：候选检查会展示 source、command、effect、cwd、source path 和 promotion requirement，用户在 trust workspace 前能看到 repo-local check 将以什么能力执行。
+- 已将 workspace trust 改为首次进入 workspace 的启动 gate：未信任 workspace 不能进入正式 TUI、加载 repo-local instructions 或提升 repo-local checks；`/config` Permissions 只展示 trust 状态、用户配置 checks 和 repo-local candidate checks，不再提供 workspace trust footer action。
+- 已在 `/config` 的 Permissions 页补充 repo-local instruction trust 摘要：`SIGIL.md`、`AGENTS.md`、`CLAUDE.md` 和 `SIGIL.local.md` 在 workspace 未信任时显示为 untrusted data，workspace trust 后显示为 trusted instructions。
+- 已简化 `/config` Permissions 的 repo-local verification 展示：只展示 repo-local check 数量与长期策略摘要，具体 run/retry/review 入口归属 task sidebar / strip，避免把设置页做成一次性执行审批面。
 - 已在 TUI task sidebar / strip / session audit 中补充 workspace trust / check approval 的用户可读解释：`TrustWorkspace` 会显示 `workspace trust required`，`ApproveCheckExecution` 会显示对应 check approval；task sidebar 的 `action:` 行和 session audit 的 required action 摘要都改为用户可读短语，不再暴露内部 action token。
+- 已移除 `/config` Permissions 的 repo-local check footer approval UX：底层 approval/sandbox promotion action 保留给 task status surface 和后续真实 sandbox backend / advanced surface，避免当前主流程误导用户。
+- 已将 workspace-scope check promotion 接入 task readiness：approved / sandboxed promotion 会生成 `ApprovalOrSandbox` trust requirement，并把 promotion id 绑定到 check run / receipt；check spec 变化时旧 workspace promotion 不再匹配当前候选 check。
 - 已在 TUI task sidebar / strip 中展示最新 `VerificationCheckRun` queued/running/terminal 状态和失败原因；当已有 check run lifecycle evidence 时，不再只显示静态 `run_check` action。
 - 已在 TUI task sidebar / strip 中补充窄宽度 verification reason compact 展示：显示第一个 stale/actionable reason，并用 `+N more` 汇总其余原因；session audit 仍保留完整 reason labels。
 - 已补充 check runner 失败后的最小 retry affordance：queued/running 会隐藏重复 run action，terminal failed/errored/inconclusive/succeeded 等历史 run 不会遮蔽当前 `run_check` required action，用户能看到失败原因和重新运行入口。
+- 已补充配置化 check auto-run policy：`manual` 为默认低摩擦策略，只展示 run/retry action；`trusted_only` 才会自动启动 trusted checks；`never` 禁止自动启动。`/config` Permissions 可查看/切换该策略，task materialize 会把策略写入 task/step policy，子 policy 只能收紧不能放宽。
 - 已将 check runner timeout / exit failure reason 写入 `VerificationReceipt`，并由 terminal `VerificationCheckRun` 继承；TUI 可直接展示系统产生的 `check timed out ...` / exit-code reason，而不是只显示泛化 failed 状态。
 - 已将 policy timeout 写入 `VerificationCheckRun` queued/running/terminal lifecycle audit，并在 task sidebar / strip / session detail 中展示，用户能看到 check-run 采用的 timeout 配置。
 - 已将 workspace snapshot 大文件阈值纳入 `VerificationScope.max_file_bytes`，并作为 policy-bound scope coverage 参与验证范围覆盖判断；默认值仍沿用 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES`。
+- 已补充 verification scope profile MVP：`auto` / `rust` / `node` / `python` / `docs` 预设可生成对应 `VerificationScope`，`[verification]` 可通过 `scope_profile`、`extra_scope_excludes` 和 `generated_roots` 做低频 override；`/config` Permissions 只读展示当前 profile、关键 excludes、generated roots 与 advanced override 数量，不新增普通用户操作面。
 - 已确认当前 plugin integration 仅产生静态 manifest review/projection data；尚无 plugin hook command execution runtime，plugin-declared MCP server 也未自动进入 active startup/refresh path。未来启用这些 plugin-owned external process 时必须先产生 RFC-0002 unknown-dirty mutation evidence，verification reducer 才能消费。
 
 Productization remains：
 
-- 完成 check runner 产品化：approval/sandbox promotion UI、自动执行策略和更完整的失败重试交互；runner lifecycle audit primitive、核心 trust gate、最小 queue/status UI、timeout visibility、terminal failure reason 和 retry affordance 已落地。
+- 完成 check runner 产品化：更完整的失败重试交互；runner lifecycle audit primitive、核心 trust gate、repo-local approval UI、backend sandbox promotion plumbing、最小 queue/status UI、timeout visibility、terminal failure reason、retry affordance 和配置化 auto-run policy 已落地。
 - 启用 plugin hook command runtime 或自动合并 plugin-declared MCP servers 时，必须复用 RFC-0002 external-process unknown-dirty recorder；当前代码尚不存在这些 plugin-owned process execution 面。
-- 完成 MCP ready 后进程状态 UX / restart recovery；当前核心语义已确保 startup/refresh 尝试会污染旧 verification。
-- 扩展 verification scope profile：当前默认 profile 已固定常见 build/cache/secret-like excludes；额外生成目录、项目专用依赖缓存和写型检查后的二次非写检查策略需要更多真实项目测试。
-- 完成 workspace trust UX：repo-local checks 的完整 approve/sandbox flow、未信任 workspace 的配置/指令降级展示和更完整的 trust review 面；基础 audit provenance、`/config` candidate/trust 摘要、repo-local check review metadata、Permissions footer trust action、task sidebar/strip 与 session audit 的 trust/approval 解释已落地。
+- MCP lifecycle verification UX bridge 已落地：`WorkspaceMutationDetected(tool_name="mcp_server:<name>")` 会投影为用户可读的 `MCP server <name>` source reason 和 `refresh MCP or run check` recovery hint；task sidebar / strip / session detail 不再只显示内部 unknown-dirty token。
+- 扩展 verification scope profile 的后续工作只剩真实项目校准：默认/profile presets、配置文件 override 和 TUI 只读摘要已落地；更多语言专用生成目录或依赖缓存应按项目证据追加，避免把普通用户操作面做复杂。
+- 完成 workspace trust UX：首次进入 workspace gate、基础 audit provenance、`/config` trust/long-term policy 摘要、repo-local instruction 降级展示、task sidebar/strip 与 session audit 的 trust/approval 解释已落地。
 - 完成 child verification / worktree merge 产品链路：child receipt import、merge review UI、parent re-check 引导和跨 session trace 展示仍需产品化；核心 reducer 已保证 child passed 不会在 parent merge 后直接转移。
 - 继续把后续新增 historical/projected state 接入 RFC-0001 durable replay；现有核心 task、verification、agent thread、terminal、changeset、plan、skill、plugin、profile trust/policy、continuation 和 queue projection 已具备 mixed-format stream replay 入口。
 

@@ -59,6 +59,15 @@ fn test_config() -> RootConfig {
     }
 }
 
+fn test_config_for_workspace(workspace_root: &Path) -> RootConfig {
+    RootConfig {
+        workspace: WorkspaceConfig {
+            root: workspace_root.display().to_string(),
+        },
+        ..test_config()
+    }
+}
+
 #[test]
 fn osc52_clipboard_sequence_encodes_text() {
     assert_eq!(base64_encode(b"h"), "aA==");
@@ -1025,16 +1034,19 @@ fn build_initial_app_enters_setup_mode_when_config_load_fails() -> Result<()> {
 }
 
 #[test]
-fn build_initial_app_spawns_worker_for_loaded_config() -> Result<()> {
+fn build_initial_app_enters_trust_gate_for_loaded_untrusted_config() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root_config = test_config_for_workspace(temp.path());
     let (app, worker) = build_initial_app(
-        PathBuf::from("."),
-        PathBuf::from("sigil.toml"),
-        Ok(test_config()),
+        temp.path().to_path_buf(),
+        temp.path().join("sigil.toml"),
+        Ok(root_config),
         |_root_config, _app| Ok(fake_worker_runtime().0),
     )?;
 
     assert!(!app.is_setup_mode());
-    assert!(worker.is_some());
+    assert!(app.is_workspace_trust_gate_mode());
+    assert!(worker.is_none());
     Ok(())
 }
 

@@ -1509,7 +1509,7 @@ fn required_action_label(action: &sigil_kernel::RequiredAction) -> String {
         }
         sigil_kernel::RequiredAction::TrustWorkspace => "workspace trust required".to_owned(),
         sigil_kernel::RequiredAction::ResolveUnknownDirty => {
-            "resolve unknown workspace change".to_owned()
+            "refresh source or run check".to_owned()
         }
         sigil_kernel::RequiredAction::ReRunNonWritingCheck { check_spec_id } => {
             format!("rerun non-writing check {check_spec_id}")
@@ -1559,6 +1559,14 @@ fn readiness_reason_label(reason: &sigil_kernel::ReadinessReason) -> String {
                 verification_stale_reason_label(&cause.reason)
             )
         }
+        sigil_kernel::ReadinessReason::WorkspaceMutationSource {
+            source_label,
+            recovery_hint,
+            ..
+        } => recovery_hint
+            .as_deref()
+            .map(|hint| format!("{source_label}: {hint}"))
+            .unwrap_or_else(|| source_label.clone()),
         sigil_kernel::ReadinessReason::WorkspaceUnknownDirty { event_id } => event_id
             .as_deref()
             .map(|event_id| format!("workspace_unknown_dirty:{event_id}"))
@@ -1636,6 +1644,7 @@ fn check_promotion_label(promotion: &sigil_kernel::CheckPromotion) -> &'static s
 fn evidence_scope_label(scope: &sigil_kernel::EvidenceScope) -> String {
     match scope {
         sigil_kernel::EvidenceScope::Run(id) => format!("run:{id}"),
+        sigil_kernel::EvidenceScope::Workspace(id) => format!("workspace:{id}"),
         sigil_kernel::EvidenceScope::Task(id) => format!("task:{id}"),
         sigil_kernel::EvidenceScope::Step(id) => format!("step:{id}"),
         sigil_kernel::EvidenceScope::Agent(id) => format!("agent:{id}"),

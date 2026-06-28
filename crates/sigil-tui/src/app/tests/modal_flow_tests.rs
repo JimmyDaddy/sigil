@@ -763,7 +763,7 @@ fn config_text_field_uses_modal_and_applies_value() -> Result<()> {
 }
 
 #[test]
-fn config_color_override_modal_applies_valid_and_rejects_invalid_values() -> Result<()> {
+fn config_color_override_modal_stays_config_file_only() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     {
@@ -772,56 +772,25 @@ fn config_color_override_modal_applies_valid_and_rejects_invalid_values() -> Res
             .as_mut()
             .expect("config state should still exist");
         state.set_section(ConfigSection::Appearance);
-        assert!(state.focus_field(ConfigField::AppearanceColorOverride));
+        assert!(!state.focus_field(ConfigField::AppearanceColorOverride));
     }
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(app.config_is_editing());
-    assert_eq!(app.modal_title(), Some("Override"));
-    for character in "#0a0B0c".chars() {
-        let _ =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
     assert!(!app.config_is_editing());
-    assert_eq!(app.last_notice(), Some("updated color_override"));
     let state = app
         .config_state
         .as_ref()
         .expect("config state should still exist");
-    assert_eq!(
-        state.draft.selected_appearance_color_override(),
-        Some("#0A0B0C")
-    );
-    assert!(state.dirty);
+    assert!(matches!(
+        state.selected_field,
+        Some(ConfigField::AppearanceTheme)
+            | Some(ConfigField::AppearanceSyntaxTheme)
+            | Some(ConfigField::AppearanceUsageCostCurrency)
+    ));
 
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should still exist");
-        assert!(state.focus_field(ConfigField::AppearanceColorOverride));
-        state.draft.reset_selected_appearance_color_override();
-        state.dirty = false;
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    for character in "#123".chars() {
-        let _ =
-            app.handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))?;
-    }
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert_eq!(
-        app.last_notice(),
-        Some("invalid color override: color override must be #RRGGBB")
-    );
-    let state = app
-        .config_state
-        .as_ref()
-        .expect("config state should still exist");
-    assert!(state.draft.selected_appearance_color_override().is_none());
-    assert!(!state.dirty);
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("Fine-grained color token overrides are edited in sigil.toml"));
+    assert!(!detail.contains("Color token:"));
+    assert!(!detail.contains("Color group:"));
     Ok(())
 }
 

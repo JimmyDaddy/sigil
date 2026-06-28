@@ -2105,6 +2105,8 @@ fn agent_run_workspace_mutation_evidence(
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id.clone(),
                         source_event_type: DurableEventType::MutationCommitted.as_str().to_owned(),
+                        source_label: None,
+                        recovery_hint: None,
                         scope_hash: scope.scope_hash.clone(),
                         recorded_at_stream_sequence: event.stream_sequence,
                         from_workspace_snapshot_id: None,
@@ -2126,6 +2128,8 @@ fn agent_run_workspace_mutation_evidence(
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id.clone(),
                         source_event_type: DurableEventType::MutationReconciled.as_str().to_owned(),
+                        source_label: None,
+                        recovery_hint: None,
                         scope_hash: scope.scope_hash.clone(),
                         recorded_at_stream_sequence: event.stream_sequence,
                         from_workspace_snapshot_id: None,
@@ -2151,6 +2155,8 @@ fn agent_run_workspace_mutation_evidence(
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id.clone(),
                         source_event_type: DurableEventType::CheckpointRestored.as_str().to_owned(),
+                        source_label: None,
+                        recovery_hint: None,
                         scope_hash: scope.scope_hash.clone(),
                         recorded_at_stream_sequence: event.stream_sequence,
                         from_workspace_snapshot_id: None,
@@ -2170,18 +2176,11 @@ fn agent_run_workspace_mutation_evidence(
                     } else if !payload.unknown_dirty {
                         return None;
                     }
-                    Some(WorkspaceMutationEvidence {
-                        event_id: event.event_id.clone(),
-                        source_event_type: DurableEventType::WorkspaceMutationDetected
-                            .as_str()
-                            .to_owned(),
-                        scope_hash: payload.scope_hash,
-                        recorded_at_stream_sequence: event.stream_sequence,
-                        from_workspace_snapshot_id: payload.from_workspace_snapshot_id,
-                        to_workspace_snapshot_id: payload.to_workspace_snapshot_id,
-                        tool_effect: payload.tool_effect,
-                        unknown_dirty: payload.unknown_dirty,
-                    })
+                    Some(WorkspaceMutationEvidence::from_detected_event(
+                        event.event_id.clone(),
+                        event.stream_sequence,
+                        payload,
+                    ))
                 }
                 _ => None,
             }
@@ -2289,6 +2288,8 @@ fn running_execution_evidence(
     WorkspaceMutationEvidence {
         event_id,
         source_event_type: source_event_type.to_owned(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash,
         recorded_at_stream_sequence: stream_sequence,
         from_workspace_snapshot_id: profile.pre_execution_snapshot_id,

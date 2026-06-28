@@ -1,15 +1,18 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ControlEntry, ModelMessage, PathTrustZone, PermissionConfirmation, PermissionRisk,
-    ProviderContinuationState, ToolCall, ToolOperation, ToolPreview, ToolResult, ToolSpec,
-    ToolSubject, UsageStats,
+    ChangeSet, ChangeSetResult, ControlEntry, ModelMessage, MutationCommitted, MutationPrepared,
+    PathTrustZone, PermissionConfirmation, PermissionRisk, ProviderContinuationState,
+    SessionLogEntry, TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview, ToolResult, ToolSpec,
+    ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationRecordedEntry,
+    WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -66,6 +69,7 @@ pub enum DurableEventType {
     WriteCommitted,
     WorkspaceMutationDetected,
     CheckpointRestored,
+    MutationArtifactCleanupRequested,
     MutationArtifactLifecycleRecorded,
     CommandFinished,
     CheckFinished,
@@ -110,6 +114,7 @@ impl DurableEventType {
             Self::WriteCommitted => "write_committed",
             Self::WorkspaceMutationDetected => "workspace_mutation_detected",
             Self::CheckpointRestored => "checkpoint_restored",
+            Self::MutationArtifactCleanupRequested => "mutation_artifact_cleanup_requested",
             Self::MutationArtifactLifecycleRecorded => "mutation_artifact_lifecycle_recorded",
             Self::CommandFinished => "command_finished",
             Self::CheckFinished => "check_finished",
@@ -154,6 +159,7 @@ impl DurableEventType {
             "write_committed" => Self::WriteCommitted,
             "workspace_mutation_detected" => Self::WorkspaceMutationDetected,
             "checkpoint_restored" => Self::CheckpointRestored,
+            "mutation_artifact_cleanup_requested" => Self::MutationArtifactCleanupRequested,
             "mutation_artifact_lifecycle_recorded" => Self::MutationArtifactLifecycleRecorded,
             "command_finished" => Self::CommandFinished,
             "check_finished" => Self::CheckFinished,
@@ -235,6 +241,7 @@ pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
     DurableEventType::WriteCommitted,
     DurableEventType::WorkspaceMutationDetected,
     DurableEventType::CheckpointRestored,
+    DurableEventType::MutationArtifactCleanupRequested,
     DurableEventType::MutationArtifactLifecycleRecorded,
     DurableEventType::CommandFinished,
     DurableEventType::CheckFinished,
@@ -471,6 +478,7 @@ pub enum DurableDomainEvent {
     WriteCommitted(DomainPayload),
     WorkspaceMutationDetected(DomainPayload),
     CheckpointRestored(DomainPayload),
+    MutationArtifactCleanupRequested(DomainPayload),
     MutationArtifactLifecycleRecorded(DomainPayload),
     CommandFinished(DomainPayload),
     CheckFinished(DomainPayload),
@@ -515,6 +523,9 @@ impl DurableDomainEvent {
             Self::WriteCommitted(_) => DurableEventType::WriteCommitted,
             Self::WorkspaceMutationDetected(_) => DurableEventType::WorkspaceMutationDetected,
             Self::CheckpointRestored(_) => DurableEventType::CheckpointRestored,
+            Self::MutationArtifactCleanupRequested(_) => {
+                DurableEventType::MutationArtifactCleanupRequested
+            }
             Self::MutationArtifactLifecycleRecorded(_) => {
                 DurableEventType::MutationArtifactLifecycleRecorded
             }
@@ -565,6 +576,7 @@ impl DurableDomainEvent {
             | Self::WriteCommitted(payload)
             | Self::WorkspaceMutationDetected(payload)
             | Self::CheckpointRestored(payload)
+            | Self::MutationArtifactCleanupRequested(payload)
             | Self::MutationArtifactLifecycleRecorded(payload)
             | Self::CommandFinished(payload)
             | Self::CheckFinished(payload)
@@ -609,6 +621,27 @@ pub enum StoredEventDecode {
     UnknownNonCritical(StoredEvent),
 }
 
+#[derive(Debug)]
+pub enum TypedStoredEventDecode {
+    Known(Box<TypedDomainEvent>),
+    UnknownNonCritical(Box<StoredEvent>),
+}
+
+#[derive(Debug, Clone)]
+pub enum TypedDomainEvent {
+    MutationPrepared(MutationPrepared),
+    MutationCommitted(MutationCommitted),
+    WorkspaceMutationDetected(WorkspaceMutationDetected),
+    VerificationRecorded(VerificationRecordedEntry),
+    VerificationCheckRun(VerificationCheckRunEntry),
+    TaskStatusChanged(ControlEntry),
+    AgentThread(ControlEntry),
+    TerminalTask(TerminalTaskEntry),
+    ChangeSetProposed(ChangeSet),
+    ChangeSetApplied(ChangeSetResult),
+    Other(DomainEvent),
+}
+
 pub fn decode_stored_event(event: StoredEvent) -> Result<StoredEventDecode> {
     event.verify_record_checksum()?;
     let Some(event_type) = event.event_kind() else {
@@ -627,6 +660,126 @@ pub fn decode_stored_event(event: StoredEvent) -> Result<StoredEventDecode> {
     Ok(StoredEventDecode::Known(domain_event_from_payload(
         event_type, payload,
     )))
+}
+
+pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventDecode> {
+    event.verify_record_checksum()?;
+    let Some(event_type) = event.event_kind() else {
+        return match event.event_class {
+            EventClass::NonCritical => {
+                Ok(TypedStoredEventDecode::UnknownNonCritical(Box::new(event)))
+            }
+            EventClass::Critical => bail!("unknown critical event {}", event.event_type),
+        };
+    };
+    if event_type == DurableEventType::Legacy {
+        bail!("legacy is an upcast-only event type and cannot be decoded from StoredEvent");
+    }
+    let typed = match event_type {
+        DurableEventType::MutationPrepared => {
+            TypedDomainEvent::MutationPrepared(decode_event_payload(&event)?)
+        }
+        DurableEventType::MutationCommitted => {
+            TypedDomainEvent::MutationCommitted(decode_event_payload(&event)?)
+        }
+        DurableEventType::WorkspaceMutationDetected => {
+            TypedDomainEvent::WorkspaceMutationDetected(decode_event_payload(&event)?)
+        }
+        DurableEventType::VerificationRecorded => {
+            TypedDomainEvent::VerificationRecorded(decode_verification_recorded(&event)?)
+        }
+        DurableEventType::VerificationCheckRun => {
+            TypedDomainEvent::VerificationCheckRun(decode_verification_check_run(&event)?)
+        }
+        DurableEventType::TaskStatusChanged => {
+            let control = decode_control_entry(&event)?;
+            match control {
+                ControlEntry::TaskRun(_)
+                | ControlEntry::TaskPlan(_)
+                | ControlEntry::TaskStep(_) => TypedDomainEvent::TaskStatusChanged(control),
+                _ => bail!("task status event carried non-task control payload"),
+            }
+        }
+        DurableEventType::SessionEntryRecorded => {
+            if let Some(control) = maybe_decode_control_entry(&event)? {
+                match control {
+                    ControlEntry::AgentThreadStarted(_)
+                    | ControlEntry::AgentThreadStatusChanged(_)
+                    | ControlEntry::AgentThreadMessageRouted(_)
+                    | ControlEntry::AgentThreadResultRecorded(_)
+                    | ControlEntry::AgentThreadDisplayName(_)
+                    | ControlEntry::AgentThreadClosed(_) => TypedDomainEvent::AgentThread(control),
+                    ControlEntry::TerminalTask(entry) => TypedDomainEvent::TerminalTask(entry),
+                    ControlEntry::ChangeSetProposed(change_set) => {
+                        TypedDomainEvent::ChangeSetProposed(change_set)
+                    }
+                    ControlEntry::ChangeSetApplied(result) => {
+                        TypedDomainEvent::ChangeSetApplied(result)
+                    }
+                    _ => typed_other_event(event_type, event)?,
+                }
+            } else {
+                typed_other_event(event_type, event)?
+            }
+        }
+        _ => typed_other_event(event_type, event)?,
+    };
+    Ok(TypedStoredEventDecode::Known(Box::new(typed)))
+}
+
+fn typed_other_event(event_type: DurableEventType, event: StoredEvent) -> Result<TypedDomainEvent> {
+    let payload = DomainPayload {
+        event_version: event.event_version,
+        payload: event.payload,
+    };
+    Ok(TypedDomainEvent::Other(domain_event_from_payload(
+        event_type, payload,
+    )))
+}
+
+fn decode_event_payload<T>(event: &StoredEvent) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(event.payload.clone())
+        .with_context(|| format!("failed to decode {} typed payload", event.event_type))
+}
+
+fn decode_verification_recorded(event: &StoredEvent) -> Result<VerificationRecordedEntry> {
+    match decode_control_entry(event)? {
+        ControlEntry::VerificationRecorded(entry) => Ok(entry),
+        _ => bail!("verification recorded event carried non-verification payload"),
+    }
+}
+
+fn decode_verification_check_run(event: &StoredEvent) -> Result<VerificationCheckRunEntry> {
+    match decode_control_entry(event)? {
+        ControlEntry::VerificationCheckRun(entry) => Ok(entry),
+        _ => bail!("verification check run event carried non-check-run payload"),
+    }
+}
+
+fn decode_control_entry(event: &StoredEvent) -> Result<ControlEntry> {
+    maybe_decode_control_entry(event)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} event did not contain a control session entry",
+            event.event_type
+        )
+    })
+}
+
+fn maybe_decode_control_entry(event: &StoredEvent) -> Result<Option<ControlEntry>> {
+    let Some(value) = event.payload.get("session_log_entry") else {
+        return Ok(None);
+    };
+    let entry: SessionLogEntry = serde_json::from_value(value.clone())
+        .with_context(|| format!("failed to decode {} session entry", event.event_type))?;
+    match entry {
+        SessionLogEntry::Control(control) => Ok(Some(control)),
+        SessionLogEntry::User(_)
+        | SessionLogEntry::Assistant(_)
+        | SessionLogEntry::ToolResult(_) => Ok(None),
+    }
 }
 
 fn domain_event_from_payload(
@@ -659,6 +812,9 @@ fn domain_event_from_payload(
             DurableDomainEvent::WorkspaceMutationDetected(payload)
         }
         DurableEventType::CheckpointRestored => DurableDomainEvent::CheckpointRestored(payload),
+        DurableEventType::MutationArtifactCleanupRequested => {
+            DurableDomainEvent::MutationArtifactCleanupRequested(payload)
+        }
         DurableEventType::MutationArtifactLifecycleRecorded => {
             DurableDomainEvent::MutationArtifactLifecycleRecorded(payload)
         }

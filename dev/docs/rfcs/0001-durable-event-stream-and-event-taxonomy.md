@@ -484,11 +484,13 @@ Required deterministic tests:
 - 已新增 `RunStatusChanged` / `RunFinalized` 基础 durable event，并在 agent terminal/max-turn 路径中记录。
 - 已加强 session append / tail recovery 的 sync 策略：recovery-critical event 写入会 sync session file；新建 session log、tail recovery quarantine/intent 创建和清理会同步父目录，降低目录项丢失造成的恢复不一致窗口。
 - 已将 session stream 健康诊断接入共享 doctor 面：CLI `sigil doctor` 与 TUI `/doctor` 会扫描当前 session log dir 中最近的 JSONL stream，使用 RFC-0001 reader 校验 checksum/sequence/session id，并展示 record、legacy/stored、last sequence 与 tail recovery 摘要；损坏流会作为 error 暴露而不是静默跳过。
+- 已新增 typed durable decode seam：`decode_typed_stored_event` 会把 mutation、verification、task、agent thread、terminal 和 changeset family 收敛为强类型 `TypedDomainEvent`，并继续对 unknown critical event fail closed。
+- 已新增 projection-facing typed record API：`SessionStreamRecord::typed_domain_event_record` 输出 typed event 和 `ProjectionCursor`，后续 typed reducer / projection store 可在不重新解析 JSON 的情况下消费 cursor-bound event。
 
 Productization remains：
 
 - 将 projection cursor 规则接入未来持久 projection store 的事务边界，例如 SQLite/materialized view。
-- 为所有 durable event owner 补齐强类型 payload struct 与 upcaster，逐步减少泛型 JSON payload 的 reducer 接触面。
+- 为尚未收敛的 durable event owner 继续补齐强类型 payload struct 与 upcaster，逐步减少泛型 JSON payload 的 reducer 接触面；当前 payload version 仍只有 v1，第一次引入 v2 payload 时必须补对应 version upcaster 测试。
 - 在 protocol/server 阶段实现 durable cursor / `Last-Event-ID` replay；transient event replay 保持非承诺。
 - 如果真实 session 中出现合理的大型 durable payload，再单独评估 1 MiB / 64 层 event limit 是否需要配置化；当前限制已作为 core guard 生效。
 

@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use crate::{
     CheckpointRestored, DurableEventType, EventClass, JsonlSessionStore, ModelMessage,
+    MutationArtifactCleanupRequested, MutationArtifactCleanupTarget,
     MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
     MutationArtifactRetentionPolicy, MutationBatchStatus, MutationEventRecorder,
     MutationObservedState, MutationPrepared, MutationReconciled, MutationResolution,
@@ -15,7 +16,7 @@ use crate::{
     WorkspaceMutationDetectionReason, WorkspaceMutationScan, bytes_hash,
     create_directory_with_mutation, delete_directory_with_mutation, delete_file_with_mutation,
     delete_file_with_mutation_in_batch, file_content_hash,
-    restore_file_from_snapshot_with_mutation, write_file_with_mutation,
+    restore_file_from_snapshot_with_mutation, stable_workspace_id, write_file_with_mutation,
     write_file_with_mutation_in_batch,
 };
 
@@ -81,6 +82,20 @@ fn artifact_lifecycle_payloads(
     for record in JsonlSessionStore::read_event_records(store.path())? {
         if let SessionStreamRecord::Stored(event) = record
             && event.event_type == DurableEventType::MutationArtifactLifecycleRecorded.as_str()
+        {
+            payloads.push(serde_json::from_value(event.payload)?);
+        }
+    }
+    Ok(payloads)
+}
+
+fn artifact_cleanup_request_payloads(
+    store: &JsonlSessionStore,
+) -> Result<Vec<MutationArtifactCleanupRequested>> {
+    let mut payloads = Vec::new();
+    for record in JsonlSessionStore::read_event_records(store.path())? {
+        if let SessionStreamRecord::Stored(event) = record
+            && event.event_type == DurableEventType::MutationArtifactCleanupRequested.as_str()
         {
             payloads.push(serde_json::from_value(event.payload)?);
         }
@@ -485,6 +500,7 @@ fn mutation_artifact_retention_preview_is_read_only() -> Result<()> {
     assert_eq!(report.unavailable_artifacts, 0);
     assert!(report.lifecycle_events.is_empty());
     assert!(artifact_lifecycle_payloads(&store)?.is_empty());
+    assert!(artifact_cleanup_request_payloads(&store)?.is_empty());
     assert_eq!(artifact_files(&artifact_root)?.len(), 6);
 
     let bytes_report = recorder.preview_artifact_retention_at(
@@ -527,6 +543,124 @@ fn mutation_artifact_inventory_lists_metadata_without_mutation() -> Result<()> {
 }
 
 #[test]
+fn mutation_artifact_retention_public_wrappers_record_cleanup_request() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let artifact_id = captured_artifact_id(&recorder, &workspace, "note.txt", "old", "new")?;
+
+    let preview =
+        recorder.preview_artifact_retention(&MutationArtifactRetentionPolicy::default())?;
+
+    assert_eq!(preview.scanned_artifacts, 1);
+    assert_eq!(preview.expired_artifacts, 0);
+    assert!(preview.lifecycle_events.is_empty());
+    assert!(artifact_cleanup_request_payloads(&store)?.is_empty());
+    assert_eq!(artifact_files(&artifact_root)?.len(), 2);
+
+    let report = recorder.enforce_artifact_retention(&MutationArtifactRetentionPolicy {
+        max_artifacts: Some(0),
+        max_bytes: None,
+        expire_older_than_ms: None,
+    })?;
+
+    assert_eq!(report.scanned_artifacts, 1);
+    assert_eq!(report.expired_artifacts, 1);
+    assert_eq!(report.lifecycle_events.len(), 1);
+    assert!(artifact_files(&artifact_root)?.is_empty());
+    let cleanup_requests = artifact_cleanup_request_payloads(&store)?;
+    assert_eq!(cleanup_requests.len(), 1);
+    assert_eq!(cleanup_requests[0].candidate_artifacts, 1);
+    let lifecycle_payloads = artifact_lifecycle_payloads(&store)?;
+    assert_eq!(lifecycle_payloads.len(), 1);
+    assert_eq!(lifecycle_payloads[0].artifact_id, artifact_id);
+    assert_eq!(
+        lifecycle_payloads[0].status,
+        MutationArtifactLifecycleStatus::Expired
+    );
+    Ok(())
+}
+
+#[test]
+fn mutation_artifact_cleanup_expired_and_unavailable_targets_cover_selection_modes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::with_artifact_root(store.clone(), &artifact_root);
+    let old_artifact =
+        captured_artifact_id(&recorder, &workspace, "old.txt", "old-one", "new-one")?;
+    let fresh_artifact =
+        captured_artifact_id(&recorder, &workspace, "fresh.txt", "old-two", "new-two")?;
+    set_artifact_created_at_ms(&artifact_root, &old_artifact, 1)?;
+    set_artifact_created_at_ms(&artifact_root, &fresh_artifact, 30)?;
+
+    let expired_preview = recorder.preview_artifact_cleanup_at(
+        &MutationArtifactCleanupTarget::Expired,
+        &MutationArtifactRetentionPolicy {
+            max_artifacts: None,
+            max_bytes: None,
+            expire_older_than_ms: Some(10),
+        },
+        20,
+    )?;
+    assert_eq!(expired_preview.scanned_artifacts, 2);
+    assert_eq!(expired_preview.expired_artifacts, 1);
+
+    let quota_preview = recorder.preview_artifact_cleanup_at(
+        &MutationArtifactCleanupTarget::Expired,
+        &MutationArtifactRetentionPolicy {
+            max_artifacts: Some(0),
+            max_bytes: None,
+            expire_older_than_ms: None,
+        },
+        20,
+    )?;
+    assert_eq!(quota_preview.expired_artifacts, 2);
+
+    let unavailable_artifact_root = temp.path().join("unavailable-artifacts");
+    let unavailable_store = JsonlSessionStore::new(temp.path().join("unavailable.jsonl"))?;
+    let unavailable_recorder = MutationEventRecorder::with_artifact_root(
+        unavailable_store.clone(),
+        &unavailable_artifact_root,
+    );
+    let unavailable_artifact = captured_artifact_id(
+        &unavailable_recorder,
+        &workspace,
+        "missing.txt",
+        "old",
+        "new",
+    )?;
+    for path in artifact_files(&unavailable_artifact_root)?
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("blob"))
+    {
+        fs::remove_file(path)?;
+    }
+
+    let unavailable_report = unavailable_recorder.enforce_artifact_cleanup_at(
+        &MutationArtifactCleanupTarget::Unavailable,
+        &MutationArtifactRetentionPolicy::default(),
+        20,
+    )?;
+
+    assert_eq!(unavailable_report.unavailable_artifacts, 1);
+    assert_eq!(unavailable_report.lifecycle_events.len(), 1);
+    let lifecycle_payloads = artifact_lifecycle_payloads(&unavailable_store)?;
+    assert_eq!(lifecycle_payloads.len(), 1);
+    assert_eq!(lifecycle_payloads[0].artifact_id, unavailable_artifact);
+    assert_eq!(
+        lifecycle_payloads[0].status,
+        MutationArtifactLifecycleStatus::Unavailable
+    );
+    Ok(())
+}
+
+#[test]
 fn mutation_artifact_retention_scanner_applies_age_and_quota() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
@@ -557,6 +691,14 @@ fn mutation_artifact_retention_scanner_applies_age_and_quota() -> Result<()> {
     assert_eq!(report.expired_artifacts, 2);
     assert_eq!(report.unavailable_artifacts, 0);
     assert_eq!(report.lifecycle_events.len(), 2);
+    let requests = artifact_cleanup_request_payloads(&store)?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].target,
+        MutationArtifactCleanupTarget::Recommended
+    );
+    assert_eq!(requests[0].scanned_artifacts, 3);
+    assert_eq!(requests[0].candidate_artifacts, 2);
     let payloads = artifact_lifecycle_payloads(&store)?;
     assert_eq!(payloads.len(), 2);
     assert_eq!(payloads[0].artifact_id, old_artifact);
@@ -616,6 +758,62 @@ fn mutation_artifact_retention_scanner_records_unavailable_content() -> Result<(
     assert_eq!(
         payloads[0].reason,
         "retention scan found unavailable content"
+    );
+    Ok(())
+}
+
+#[test]
+fn mutation_artifact_cleanup_targets_select_coarse_groups() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let artifact_root = temp.path().join("artifacts");
+    fs::create_dir(&workspace)?;
+    let primary_store = JsonlSessionStore::new(temp.path().join("primary.jsonl"))?;
+    let primary = MutationEventRecorder::with_artifact_root(primary_store.clone(), &artifact_root);
+    let artifact_id = captured_artifact_id(&primary, &workspace, "note.txt", "old", "new")?;
+    let workspace_id = stable_workspace_id(&workspace)?;
+
+    let workspace_preview = primary.preview_artifact_cleanup(
+        &MutationArtifactCleanupTarget::Workspace(workspace_id),
+        &MutationArtifactRetentionPolicy::default(),
+    )?;
+
+    assert_eq!(workspace_preview.scanned_artifacts, 1);
+    assert_eq!(workspace_preview.deleted_artifacts, 1);
+    assert_eq!(workspace_preview.deleted_bytes, 3);
+    assert_eq!(workspace_preview.expired_artifacts, 0);
+    assert_eq!(workspace_preview.unavailable_artifacts, 0);
+    assert!(workspace_preview.lifecycle_events.is_empty());
+    assert!(artifact_lifecycle_payloads(&primary_store)?.is_empty());
+
+    let secondary_store = JsonlSessionStore::new(temp.path().join("secondary.jsonl"))?;
+    let secondary =
+        MutationEventRecorder::with_artifact_root(secondary_store.clone(), &artifact_root);
+    let unreferenced_preview = secondary.preview_artifact_cleanup(
+        &MutationArtifactCleanupTarget::Unreferenced,
+        &MutationArtifactRetentionPolicy::default(),
+    )?;
+
+    assert_eq!(unreferenced_preview.scanned_artifacts, 1);
+    assert_eq!(unreferenced_preview.deleted_artifacts, 1);
+    assert_eq!(unreferenced_preview.deleted_bytes, 3);
+
+    let report = secondary.enforce_artifact_cleanup(
+        &MutationArtifactCleanupTarget::Unreferenced,
+        &MutationArtifactRetentionPolicy::default(),
+    )?;
+
+    assert_eq!(report.deleted_artifacts, 1);
+    assert_eq!(report.deleted_bytes, 3);
+    assert_eq!(report.lifecycle_events.len(), 1);
+    assert!(artifact_files(&artifact_root)?.is_empty());
+    let payloads = artifact_lifecycle_payloads(&secondary_store)?;
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].artifact_id, artifact_id);
+    assert_eq!(payloads[0].status, MutationArtifactLifecycleStatus::Deleted);
+    assert_eq!(
+        payloads[0].reason,
+        "artifact metadata is not referenced by session events"
     );
     Ok(())
 }
@@ -1959,6 +2157,43 @@ fn workspace_mutation_scan_unavailable_records_unknown_dirty() -> Result<()> {
     assert!(payload.unknown_dirty);
     assert!(payload.from_workspace_snapshot_id.is_none());
     assert!(payload.to_workspace_snapshot_id.is_none());
+    Ok(())
+}
+
+#[test]
+fn workspace_mutation_scan_unavailable_after_preserves_before_snapshot() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let recorder = MutationEventRecorder::new(store);
+    let before = WorkspaceMutationScan {
+        workspace_id: "workspace-1".to_owned(),
+        scope_hash: "scope-main".to_owned(),
+        scope: VerificationScope::all_tracked("scope-main"),
+        workspace_revision: 7,
+        workspace_snapshot_id: Some("snapshot-before".to_owned()),
+        workspace_knowledge: WorkspaceKnowledge::Clean(7),
+    };
+
+    let event = recorder.record_workspace_scan_unavailable_after(
+        &before,
+        "call-shell",
+        "bash",
+        ToolEffect::Unknown,
+    )?;
+    let payload: WorkspaceMutationDetected = serde_json::from_value(event.payload)?;
+
+    assert_eq!(
+        payload.reason,
+        WorkspaceMutationDetectionReason::ScanUnavailable
+    );
+    assert_eq!(
+        payload.from_workspace_snapshot_id.as_deref(),
+        Some("snapshot-before")
+    );
+    assert!(payload.to_workspace_snapshot_id.is_none());
+    assert_eq!(payload.base_workspace_revision, 7);
+    assert_eq!(payload.workspace_revision, 8);
+    assert!(payload.unknown_dirty);
     Ok(())
 }
 

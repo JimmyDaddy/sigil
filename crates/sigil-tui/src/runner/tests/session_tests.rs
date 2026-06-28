@@ -3,7 +3,8 @@ use std::{fs, thread, time::Duration};
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
     Agent, ControlEntry, DurableEventType, JsonlSessionStore, ModelMessage, ReasoningEffort,
-    SessionLogEntry, SessionStreamRecord, ToolRegistry,
+    SessionLogEntry, SessionStreamRecord, ToolRegistry, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, stable_workspace_id,
 };
 use tempfile::tempdir;
 
@@ -90,6 +91,66 @@ fn start_new_session_creates_empty_session_with_current_identity() -> Result<()>
     ));
     let entries = JsonlSessionStore::read_entries(&new_log_path)?;
     assert_eq!(entries.len(), 1);
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn start_new_session_carries_workspace_trust_decision() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let workspace_id = stable_workspace_id(&workspace_root)?;
+    let current_log_path = temp.path().join(".sigil/sessions/session-current.jsonl");
+    let new_log_path = temp.path().join(".sigil/sessions/session-new.jsonl");
+    let root_config = test_root_config(&workspace_root, "default-provider", "default-model");
+    let provider = PlannedProvider::new(vec![]);
+    let agent = Agent::new(provider, ToolRegistry::new());
+    let current_store = JsonlSessionStore::new(&current_log_path)?;
+    current_store.append(&SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "default-provider".to_owned(),
+        model_name: "default-model".to_owned(),
+    }))?;
+    current_store.append(&SessionLogEntry::Control(
+        ControlEntry::WorkspaceTrustDecision(WorkspaceTrustDecisionEntry {
+            workspace_id: workspace_id.clone(),
+            workspace_trust_snapshot_id: format!("workspace-trust:{workspace_id}"),
+            trust: WorkspaceTrust::Trusted,
+            decided_by_event_id: Some("event-trust".to_owned()),
+            reason: Some("test startup trust".to_owned()),
+        }),
+    ))?;
+
+    let worker = spawn_test_worker(root_config, current_log_path, agent, workspace_root)?;
+    worker.send(WorkerCommand::StartNewSession {
+        session_log_path: new_log_path.clone(),
+    })?;
+    let started =
+        worker.recv_until(|message| matches!(message, WorkerMessage::NewSessionStarted { .. }))?;
+
+    assert!(matches!(
+        started,
+        WorkerMessage::NewSessionStarted {
+            ref session_log_path,
+            ref entries,
+            ..
+        } if session_log_path == &new_log_path
+            && entries.iter().any(|entry| matches!(
+                entry,
+                SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(decision))
+                    if decision.workspace_id == workspace_id
+                        && decision.trust == WorkspaceTrust::Trusted
+                        && decision.reason.as_deref()
+                            == Some("trusted workspace carried into new session")
+            ))
+    ));
+    let entries = JsonlSessionStore::read_entries(&new_log_path)?;
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        SessionLogEntry::Control(ControlEntry::WorkspaceTrustDecision(decision))
+            if decision.workspace_id == workspace_id
+                && decision.trust == WorkspaceTrust::Trusted
+    )));
 
     worker.shutdown()?;
     Ok(())

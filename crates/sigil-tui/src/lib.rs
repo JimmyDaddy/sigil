@@ -21,3 +21,4 @@ pub(crate) mod slash;
 pub(crate) mod timeline;
 pub mod ui;
 pub(crate) mod view_model;
+pub(crate) mod workspace_trust;

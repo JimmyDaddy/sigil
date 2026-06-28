@@ -553,8 +553,8 @@ fn render_config_custom_color_override_updates_preview_surface() -> anyhow::Resu
     );
     let rendered = rendered_content(&terminal);
     assert!(rendered.contains("preview page"));
-    assert!(rendered.contains("Color token"));
-    assert!(rendered.contains("Ctrl-R clears all"));
+    assert!(rendered.contains("Overrides"));
+    assert!(rendered.contains("Fine-grained color token overrides are edited in sigil.toml"));
     Ok(())
 }
 
@@ -1008,6 +1008,20 @@ fn render_status_setup_mode_uses_setup_copy() -> anyhow::Result<()> {
     let setup_rendered = rendered_content(&terminal);
     assert!(setup_rendered.contains("Sigil setup"));
     assert!(setup_rendered.contains("quick setup"));
+    Ok(())
+}
+
+#[test]
+fn render_status_workspace_trust_mode_uses_trust_copy() -> anyhow::Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.enter_workspace_trust_gate()?;
+    let backend = TestBackend::new(100, 4);
+    let mut terminal = Terminal::new(backend)?;
+
+    terminal.draw(|frame| render_status(frame, frame.area(), &app))?;
+    let rendered = rendered_content(&terminal);
+    assert!(rendered.contains("Workspace trust"));
+    assert!(rendered.contains("review workspace"));
     Ok(())
 }
 

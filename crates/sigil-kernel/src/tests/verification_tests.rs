@@ -12,16 +12,17 @@ use crate::{
     EvidenceReceipt, EvidenceScope, FileType, JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
     ReadinessInput, ReadinessProjectionMode, ReadinessReason, ReceiptStatus, RedactionState,
     RequiredAction, RunStatus, SandboxProfileRequirement, Session, SessionLogEntry,
-    SessionStreamRecord, SnapshotEntryState, ToolEffect, VerificationBinding,
-    VerificationCheckConfig, VerificationCheckRunEntry, VerificationCheckRunRequest,
-    VerificationCheckRunStatus, VerificationConfig, VerificationPolicy, VerificationReceipt,
-    VerificationScope, VerificationSkipDecision, VerificationStaleCause, VerificationStaleReason,
-    VerificationStateProjection, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationEvidence, WorkspaceSnapshotEntry, WorkspaceSnapshotManifestV1, WorkspaceTrust,
-    WorkspaceTrustRequirement, build_workspace_snapshot, build_workspace_snapshot_for_event,
-    check_specs_from_user_config, discover_candidate_checks,
-    discover_candidate_checks_with_user_config, evaluate_readiness, run_verification_check,
-    session::ControlEntry,
+    SessionStreamRecord, SnapshotEntryState, ToolEffect, VerificationAutoRunPolicy,
+    VerificationBinding, VerificationCheckConfig, VerificationCheckRunEntry,
+    VerificationCheckRunRequest, VerificationCheckRunStatus, VerificationConfig,
+    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationSkipDecision,
+    VerificationStaleCause, VerificationStaleReason, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceMutationEvidence, WorkspaceSnapshotEntry,
+    WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
+    build_workspace_snapshot, build_workspace_snapshot_for_event, check_specs_from_user_config,
+    discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
+    run_verification_check, session::ControlEntry,
 };
 
 #[test]
@@ -101,6 +102,8 @@ fn verification_policy_scope_trust_and_effect_helpers_cover_edges() -> Result<()
     assert!(super::default_scope_excludes().contains(&"target/**".to_owned()));
     assert!(!super::default_scope_excludes().contains(&".sigil/**".to_owned()));
     assert!(super::default_scope_excludes().contains(&".sigil/sessions/**".to_owned()));
+    assert!(super::default_scope_excludes().contains(&".next/**".to_owned()));
+    assert!(super::default_scope_excludes().contains(&"__pycache__/**".to_owned()));
     let repo_scope = VerificationScope::all_tracked("scope-main");
     let src_scope = VerificationScope {
         scope_hash: "scope-src".to_owned(),
@@ -183,6 +186,29 @@ fn verification_policy_scope_trust_and_effect_helpers_cover_edges() -> Result<()
     )?;
     assert_eq!(decoded.effect, ToolEffect::ReadOnly);
     Ok(())
+}
+
+#[test]
+fn verification_scope_profiles_apply_language_cache_excludes_without_hiding_skills() {
+    let node_scope =
+        VerificationScope::profiled("scope-node", crate::VerificationScopeProfile::Node);
+    assert!(node_scope.exclude.contains(&"node_modules/**".to_owned()));
+    assert!(node_scope.exclude.contains(&".next/**".to_owned()));
+    assert!(
+        !node_scope
+            .exclude
+            .iter()
+            .any(|pattern| pattern == ".sigil/**" || pattern == ".sigil/skills/**")
+    );
+
+    let python_scope =
+        VerificationScope::profiled("scope-python", crate::VerificationScopeProfile::Python);
+    assert!(python_scope.exclude.contains(&"__pycache__/**".to_owned()));
+    assert!(python_scope.exclude.contains(&".venv/**".to_owned()));
+
+    let docs_scope =
+        VerificationScope::profiled("scope-docs", crate::VerificationScopeProfile::Docs);
+    assert!(docs_scope.generated_roots.contains(&PathBuf::from("site")));
 }
 
 #[test]
@@ -1394,6 +1420,8 @@ fn write_after_successful_check_maps_to_stale() {
     input.mutations.push(WorkspaceMutationEvidence {
         event_id: "event-write-2".to_owned(),
         source_event_type: "mutation_committed".to_owned(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash: "scope-main".to_owned(),
         recorded_at_stream_sequence: 13,
         from_workspace_snapshot_id: Some(snapshot),
@@ -1763,6 +1791,7 @@ fn user_configured_checks_are_discovered_before_repo_checks_and_can_promote_expl
     let temp = tempfile::tempdir().expect("tempdir");
     fs::write(temp.path().join("Cargo.toml"), "[package]\nname = 'demo'\n").expect("cargo file");
     let user_config = VerificationConfig {
+        auto_run: VerificationAutoRunPolicy::Manual,
         checks: vec![VerificationCheckConfig {
             id: "user-check".to_owned(),
             command: "cargo".to_owned(),
@@ -1770,6 +1799,7 @@ fn user_configured_checks_are_discovered_before_repo_checks_and_can_promote_expl
             cwd: None,
             effect: ToolEffect::ReadOnly,
         }],
+        ..VerificationConfig::default()
     };
 
     let checks = discover_candidate_checks_with_user_config(
@@ -1803,6 +1833,7 @@ fn user_config_discovery_validates_empty_checks_and_normalizes_cwd_edges() {
     let temp = tempfile::tempdir().expect("tempdir");
     fs::create_dir(temp.path().join("crates")).expect("cwd dir");
     let empty = VerificationConfig {
+        auto_run: VerificationAutoRunPolicy::Manual,
         checks: vec![VerificationCheckConfig {
             id: " ".to_owned(),
             command: "cargo".to_owned(),
@@ -1810,6 +1841,7 @@ fn user_config_discovery_validates_empty_checks_and_normalizes_cwd_edges() {
             cwd: None,
             effect: ToolEffect::ReadOnly,
         }],
+        ..VerificationConfig::default()
     };
     let error =
         discover_candidate_checks_with_user_config(temp.path(), "trust-1", "event-config", &empty)
@@ -1817,6 +1849,7 @@ fn user_config_discovery_validates_empty_checks_and_normalizes_cwd_edges() {
     assert!(error.to_string().contains("empty id or command"));
 
     let cwd_edges = VerificationConfig {
+        auto_run: VerificationAutoRunPolicy::Manual,
         checks: vec![
             VerificationCheckConfig {
                 id: "empty-cwd".to_owned(),
@@ -1840,6 +1873,7 @@ fn user_config_discovery_validates_empty_checks_and_normalizes_cwd_edges() {
                 effect: ToolEffect::ReadOnly,
             },
         ],
+        ..VerificationConfig::default()
     };
     let checks = discover_candidate_checks_with_user_config(
         temp.path(),
@@ -1861,6 +1895,7 @@ fn user_config_discovery_validates_empty_checks_and_normalizes_cwd_edges() {
 fn user_configured_check_specs_are_trusted_and_deduplicate_ids() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let user_config = VerificationConfig {
+        auto_run: VerificationAutoRunPolicy::Manual,
         checks: vec![
             VerificationCheckConfig {
                 id: "check".to_owned(),
@@ -1877,6 +1912,7 @@ fn user_configured_check_specs_are_trusted_and_deduplicate_ids() -> Result<()> {
                 effect: ToolEffect::ReadOnly,
             },
         ],
+        ..VerificationConfig::default()
     };
 
     let entries = check_specs_from_user_config(
@@ -1897,6 +1933,7 @@ fn user_configured_check_specs_are_trusted_and_deduplicate_ids() -> Result<()> {
     }));
 
     let invalid = VerificationConfig {
+        auto_run: VerificationAutoRunPolicy::Manual,
         checks: vec![VerificationCheckConfig {
             id: " ".to_owned(),
             command: "cargo".to_owned(),
@@ -1904,6 +1941,7 @@ fn user_configured_check_specs_are_trusted_and_deduplicate_ids() -> Result<()> {
             cwd: None,
             effect: ToolEffect::ReadOnly,
         }],
+        ..VerificationConfig::default()
     };
     let error = check_specs_from_user_config(
         temp.path(),
@@ -2021,6 +2059,7 @@ fn verification_config_cwd_must_stay_workspace_relative() {
     let temp = tempfile::tempdir().expect("tempdir");
     let outside = tempfile::tempdir().expect("outside tempdir");
     let absolute = VerificationConfig {
+        auto_run: VerificationAutoRunPolicy::Manual,
         checks: vec![VerificationCheckConfig {
             id: "bad".to_owned(),
             command: "cargo".to_owned(),
@@ -2028,6 +2067,7 @@ fn verification_config_cwd_must_stay_workspace_relative() {
             cwd: Some(outside.path().to_path_buf()),
             effect: ToolEffect::ReadOnly,
         }],
+        ..VerificationConfig::default()
     };
     let error = discover_candidate_checks_with_user_config(
         temp.path(),
@@ -2039,6 +2079,7 @@ fn verification_config_cwd_must_stay_workspace_relative() {
     assert!(error.to_string().contains("workspace-relative"));
 
     let parent = VerificationConfig {
+        auto_run: VerificationAutoRunPolicy::Manual,
         checks: vec![VerificationCheckConfig {
             id: "bad".to_owned(),
             command: "cargo".to_owned(),
@@ -2046,6 +2087,7 @@ fn verification_config_cwd_must_stay_workspace_relative() {
             cwd: Some(PathBuf::from("../outside")),
             effect: ToolEffect::ReadOnly,
         }],
+        ..VerificationConfig::default()
     };
     let error =
         discover_candidate_checks_with_user_config(temp.path(), "trust-1", "event-config", &parent)
@@ -2058,6 +2100,7 @@ fn verification_config_cwd_must_stay_workspace_relative() {
 
         symlink(outside.path(), temp.path().join("linked-outside")).expect("symlink");
         let symlinked = VerificationConfig {
+            auto_run: VerificationAutoRunPolicy::Manual,
             checks: vec![VerificationCheckConfig {
                 id: "bad".to_owned(),
                 command: "cargo".to_owned(),
@@ -2065,6 +2108,7 @@ fn verification_config_cwd_must_stay_workspace_relative() {
                 cwd: Some(PathBuf::from("linked-outside")),
                 effect: ToolEffect::ReadOnly,
             }],
+            ..VerificationConfig::default()
         };
         let error = discover_candidate_checks_with_user_config(
             temp.path(),
@@ -2194,6 +2238,8 @@ fn unknown_shell_mutation_maps_to_unknown_dirty_and_stale_when_prior_passed_exis
     input.mutations.push(WorkspaceMutationEvidence {
         event_id: "event-shell".to_owned(),
         source_event_type: "workspace_mutation_detected".to_owned(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash: "scope-main".to_owned(),
         recorded_at_stream_sequence: 9,
         from_workspace_snapshot_id: Some("snapshot-old".to_owned()),
@@ -2228,6 +2274,8 @@ fn unknown_dirty_without_prior_pass_is_inconclusive() {
     input.mutations.push(WorkspaceMutationEvidence {
         event_id: "event-shell".to_owned(),
         source_event_type: "workspace_mutation_detected".to_owned(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash: "scope-main".to_owned(),
         recorded_at_stream_sequence: 9,
         from_workspace_snapshot_id: None,
@@ -2242,6 +2290,61 @@ fn unknown_dirty_without_prior_pass_is_inconclusive() {
         evaluation.verification_verdict,
         VerificationVerdict::Inconclusive
     );
+    assert!(
+        evaluation
+            .required_actions
+            .contains(&RequiredAction::ResolveUnknownDirty)
+    );
+}
+
+#[test]
+fn mcp_unknown_dirty_adds_user_visible_source_reason() {
+    let check = check_spec("cargo-test");
+    let mut input = ReadinessInput::new_run(
+        RunStatus::Completed,
+        policy_with_checks(vec![check.clone()]),
+    );
+    input.workspace_knowledge = WorkspaceKnowledge::UnknownDirty;
+    input.current_workspace_snapshot_id = Some("snapshot-current".to_owned());
+    input
+        .mutations
+        .push(WorkspaceMutationEvidence::from_detected_event(
+            "event-mcp".to_owned(),
+            9,
+            WorkspaceMutationDetected {
+                operation_id: "operation-mcp".to_owned(),
+                tool_call_id: None,
+                tool_name: "mcp_server:docs".to_owned(),
+                tool_effect: ToolEffect::Unknown,
+                workspace_id: "workspace-main".to_owned(),
+                scope_hash: "scope-main".to_owned(),
+                from_workspace_snapshot_id: None,
+                to_workspace_snapshot_id: None,
+                base_workspace_revision: 0,
+                workspace_revision: 1,
+                reason: WorkspaceMutationDetectionReason::DeclaredWriteEffect,
+                unknown_dirty: true,
+            },
+        ));
+
+    let evaluation = evaluate_readiness(&input);
+
+    assert_eq!(
+        evaluation.verification_verdict,
+        VerificationVerdict::Inconclusive
+    );
+    assert!(evaluation.reasons.iter().any(|reason| {
+        matches!(
+            reason,
+            ReadinessReason::WorkspaceMutationSource {
+                event_id,
+                source_label,
+                recovery_hint: Some(hint),
+            } if event_id == "event-mcp"
+                && source_label == "MCP server docs"
+                && hint == "refresh MCP or run check"
+        )
+    }));
     assert!(
         evaluation
             .required_actions
@@ -2464,6 +2567,7 @@ fn policy_merge_covers_duplicate_child_ids_and_timeout_edges() {
         workspace_trust_requirement: WorkspaceTrustRequirement::None,
         allow_unverified_completion: true,
         timeout_ms: None,
+        auto_run: VerificationAutoRunPolicy::Manual,
     };
     let child = VerificationPolicy {
         required_checks: vec![
@@ -2481,12 +2585,37 @@ fn policy_merge_covers_duplicate_child_ids_and_timeout_edges() {
         workspace_trust_requirement: WorkspaceTrustRequirement::None,
         allow_unverified_completion: true,
         timeout_ms: Some(10_000),
+        auto_run: VerificationAutoRunPolicy::Manual,
     };
 
     let merged = parent.merge_child(&child).expect("child tightens parent");
 
     assert_eq!(merged.required_checks.len(), 1);
     assert_eq!(merged.timeout_ms, Some(10_000));
+    assert_eq!(merged.auto_run, VerificationAutoRunPolicy::Manual);
+
+    let trusted_child = VerificationPolicy {
+        auto_run: VerificationAutoRunPolicy::TrustedOnly,
+        ..merged.clone()
+    };
+    assert_eq!(
+        merged
+            .merge_child(&trusted_child)
+            .expect("trusted-only cannot relax manual auto-run")
+            .auto_run,
+        VerificationAutoRunPolicy::Manual
+    );
+    let never_parent = VerificationPolicy {
+        auto_run: VerificationAutoRunPolicy::Never,
+        ..merged.clone()
+    };
+    assert_eq!(
+        never_parent
+            .merge_child(&trusted_child)
+            .expect("manual child cannot relax never auto-run")
+            .auto_run,
+        VerificationAutoRunPolicy::Never
+    );
 
     let no_timeout = VerificationPolicy {
         timeout_ms: None,
@@ -2519,6 +2648,7 @@ fn policy_inheritance_cannot_relax_parent_requirements() {
         workspace_trust_requirement: WorkspaceTrustRequirement::Trusted,
         allow_unverified_completion: false,
         timeout_ms: Some(60_000),
+        auto_run: VerificationAutoRunPolicy::Manual,
     };
     let relaxed_scope = VerificationPolicy {
         verification_scope: VerificationScope {
@@ -2568,6 +2698,7 @@ fn policy_inheritance_cannot_relax_parent_requirements() {
         workspace_trust_requirement: WorkspaceTrustRequirement::Trusted,
         allow_unverified_completion: false,
         timeout_ms: Some(30_000),
+        auto_run: VerificationAutoRunPolicy::Manual,
     };
     let merged = parent
         .merge_child(&tightened)
@@ -3160,6 +3291,7 @@ fn policy_with_checks(required_checks: Vec<CheckSpec>) -> VerificationPolicy {
         workspace_trust_requirement: WorkspaceTrustRequirement::None,
         allow_unverified_completion: false,
         timeout_ms: None,
+        auto_run: VerificationAutoRunPolicy::Manual,
     }
 }
 
@@ -3176,6 +3308,8 @@ fn workspace_mutation(event_id: &str, sequence: u64) -> WorkspaceMutationEvidenc
     WorkspaceMutationEvidence {
         event_id: event_id.to_owned(),
         source_event_type: "mutation_committed".to_owned(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash: "scope-main".to_owned(),
         recorded_at_stream_sequence: sequence,
         from_workspace_snapshot_id: None,

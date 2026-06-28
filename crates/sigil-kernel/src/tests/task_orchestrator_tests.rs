@@ -23,9 +23,10 @@ use crate::{
     TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
     Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolEffect,
     ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, write_file_with_mutation,
+    ToolResultMeta, ToolSpec, VerificationAutoRunPolicy, VerificationVerdict,
+    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    write_file_with_mutation,
 };
 
 use super::{
@@ -33,8 +34,8 @@ use super::{
     latest_relevant_successful_verification_sequence, planner_prompt,
     relevant_verification_receipts, route_id_for_call, run_status_from_step_status,
     run_task_step_verification_checks, step_status_after_readiness, step_status_from_outcome,
-    step_terminal_reason, task_status_from_step_status, task_step_default_policy,
-    task_step_readiness,
+    step_terminal_reason, task_status_from_step_status, task_step_auto_run_policy,
+    task_step_default_policy, task_step_readiness,
 };
 
 struct PlannerProvider;
@@ -613,6 +614,7 @@ async fn sequential_task_orchestrator_runs_configured_check_after_mutating_step(
             "event-config",
         ),
     ))?;
+    append_trusted_only_policy_for_task(&mut session, "task_1")?;
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(MutatingTool));
     let orchestrator = SequentialTaskOrchestrator::new(
@@ -1270,6 +1272,7 @@ async fn direct_child_session_runs_configured_check_after_mutating_write() -> Re
             "event-config",
         ),
     ))?;
+    append_trusted_only_policy_for_task(&mut session, "task_skill")?;
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(MutatingTool));
     let orchestrator = SequentialTaskOrchestrator::new(
@@ -2680,6 +2683,60 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
 }
 
 #[test]
+fn task_step_auto_run_policy_defaults_manual_and_reads_recorded_policy() -> Result<()> {
+    let request = SequentialTaskRequest {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "edit a file".to_owned(),
+    };
+    let step = TaskStepSpec {
+        step_id: TaskStepId::new("step_1")?,
+        title: "edit".to_owned(),
+        display_name: None,
+        detail: Some("write note".to_owned()),
+        role: crate::AgentRole::Executor,
+    };
+    let temp = tempfile::tempdir()?;
+    let mut options = options();
+    options.workspace_root = temp.path().to_path_buf();
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+
+    assert_eq!(
+        task_step_auto_run_policy(&session, &request, &step, &options)?,
+        VerificationAutoRunPolicy::Manual
+    );
+
+    let mut task_policy = crate::VerificationPolicy::no_checks_required("task_step_default");
+    task_policy.auto_run = VerificationAutoRunPolicy::TrustedOnly;
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        crate::VerificationPolicyChangedEntry::new(
+            EvidenceScope::Task("task_1".to_owned()),
+            task_policy,
+            "event-policy-task",
+        )?,
+    ))?;
+    assert_eq!(
+        task_step_auto_run_policy(&session, &request, &step, &options)?,
+        VerificationAutoRunPolicy::TrustedOnly
+    );
+
+    let mut step_policy = crate::VerificationPolicy::no_checks_required("task_step_default");
+    step_policy.auto_run = VerificationAutoRunPolicy::Never;
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        crate::VerificationPolicyChangedEntry::new(
+            EvidenceScope::Step("task_1:step_1".to_owned()),
+            step_policy,
+            "event-policy-step",
+        )?,
+    ))?;
+    assert_eq!(
+        task_step_auto_run_policy(&session, &request, &step, &options)?,
+        VerificationAutoRunPolicy::Never
+    );
+    Ok(())
+}
+
+#[test]
 fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result<()> {
     let request = SequentialTaskRequest {
         task_id: TaskId::new("task_1")?,
@@ -3383,6 +3440,24 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
             unknown_dirty: false,
         })?,
     )?;
+    let mcp_detected = store.append_event(
+        DurableEventType::WorkspaceMutationDetected,
+        EventClass::Critical,
+        serde_json::to_value(WorkspaceMutationDetected {
+            operation_id: "op-mcp".to_owned(),
+            tool_call_id: None,
+            tool_name: "mcp_server:docs".to_owned(),
+            tool_effect: ToolEffect::Unknown,
+            workspace_id: "workspace-1".to_owned(),
+            scope_hash: "scope-main".to_owned(),
+            from_workspace_snapshot_id: None,
+            to_workspace_snapshot_id: None,
+            base_workspace_revision: 4,
+            workspace_revision: 5,
+            reason: WorkspaceMutationDetectionReason::DeclaredWriteEffect,
+            unknown_dirty: true,
+        })?,
+    )?;
     let restored = store.append_event(
         DurableEventType::CheckpointRestored,
         EventClass::Critical,
@@ -3430,7 +3505,7 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
         0,
     )?;
 
-    assert_eq!(evidence.len(), 7);
+    assert_eq!(evidence.len(), 8);
     assert_eq!(evidence[0].event_id, committed.event_id);
     assert_eq!(
         evidence[0].to_workspace_snapshot_id.as_deref(),
@@ -3453,27 +3528,34 @@ fn durable_workspace_mutation_evidence_replays_stored_events_and_skips_legacy() 
         Some("snapshot-after")
     );
     assert!(!evidence[3].unknown_dirty);
-    assert_eq!(evidence[4].event_id, restored.event_id);
-    assert_eq!(evidence[4].source_event_type, "checkpoint_restored");
+    assert_eq!(evidence[4].event_id, mcp_detected.event_id);
+    assert_eq!(evidence[4].source_label.as_deref(), Some("MCP server docs"));
     assert_eq!(
-        evidence[4].to_workspace_snapshot_id.as_deref(),
+        evidence[4].recovery_hint.as_deref(),
+        Some("refresh MCP or run check")
+    );
+    assert!(evidence[4].unknown_dirty);
+    assert_eq!(evidence[5].event_id, restored.event_id);
+    assert_eq!(evidence[5].source_event_type, "checkpoint_restored");
+    assert_eq!(
+        evidence[5].to_workspace_snapshot_id.as_deref(),
         Some("snapshot-restored")
     );
-    assert!(!evidence[4].unknown_dirty);
-    assert_eq!(evidence[5].event_id, child_merge.event_id);
-    assert_eq!(evidence[5].source_event_type, "child_changeset_merged");
+    assert!(!evidence[5].unknown_dirty);
+    assert_eq!(evidence[6].event_id, child_merge.event_id);
+    assert_eq!(evidence[6].source_event_type, "child_changeset_merged");
     assert_eq!(
-        evidence[5].from_workspace_snapshot_id.as_deref(),
+        evidence[6].from_workspace_snapshot_id.as_deref(),
         Some("snapshot-parent-before")
     );
     assert_eq!(
-        evidence[5].to_workspace_snapshot_id.as_deref(),
+        evidence[6].to_workspace_snapshot_id.as_deref(),
         Some("snapshot-parent-after")
     );
-    assert!(!evidence[5].unknown_dirty);
-    assert_eq!(evidence[6].event_id, agent_merge_unknown.event_id);
-    assert_eq!(evidence[6].source_event_type, "agent_merge_applied");
-    assert!(evidence[6].unknown_dirty);
+    assert!(!evidence[6].unknown_dirty);
+    assert_eq!(evidence[7].event_id, agent_merge_unknown.event_id);
+    assert_eq!(evidence[7].source_event_type, "agent_merge_applied");
+    assert!(evidence[7].unknown_dirty);
     Ok(())
 }
 
@@ -3634,6 +3716,7 @@ fn latest_relevant_successful_verification_sequence_ignores_unrelated_receipts()
         workspace_trust_requirement: crate::WorkspaceTrustRequirement::None,
         allow_unverified_completion: false,
         timeout_ms: None,
+        auto_run: crate::VerificationAutoRunPolicy::Manual,
     };
     let policy_hash = policy.stable_hash()?;
     let relevant_scope = EvidenceScope::Task("task_1".to_owned());
@@ -3688,6 +3771,26 @@ fn latest_relevant_successful_verification_sequence_ignores_unrelated_receipts()
     Ok(())
 }
 
+fn append_trusted_only_policy_for_task(session: &mut Session, task_id: &str) -> Result<()> {
+    let task_scope = EvidenceScope::Task(task_id.to_owned());
+    let required_checks = session
+        .verification_state_projection()
+        .check_specs_for_scopes(std::slice::from_ref(&task_scope))
+        .into_iter()
+        .map(|entry| entry.trusted_check.check_spec.clone())
+        .collect::<Vec<_>>();
+    let mut policy =
+        crate::VerificationPolicy::no_checks_required(DEFAULT_TASK_VERIFICATION_SCOPE_HASH);
+    policy.required_checks = required_checks;
+    policy.completion_criteria = crate::CompletionCriteria::AllRequiredChecks;
+    policy.allow_unverified_completion = false;
+    policy.auto_run = VerificationAutoRunPolicy::TrustedOnly;
+    session.append_control(ControlEntry::VerificationPolicyChanged(
+        crate::VerificationPolicyChangedEntry::new(task_scope, policy, "event-auto-run-policy")?,
+    ))?;
+    Ok(())
+}
+
 #[test]
 fn task_step_default_policy_preserves_repo_check_trust_requirement() -> Result<()> {
     let trusted = CandidateCheck {
@@ -3711,12 +3814,13 @@ fn task_step_default_policy_preserves_repo_check_trust_requirement() -> Result<(
     let mut session = Session::new("planner", "model");
     let task_scope = EvidenceScope::Task("task_1".to_owned());
     let step_scope = EvidenceScope::Step("task_1:step_1".to_owned());
+    let workspace_scope = EvidenceScope::Workspace("workspace-main".to_owned());
     session.append_control(ControlEntry::CheckSpecRecorded(
         CheckSpecRecordedEntry::new(task_scope.clone(), trusted, "event-discovery"),
     ))?;
     let projection = session.verification_state_projection();
 
-    let policy = task_step_default_policy(&projection, &step_scope, &task_scope);
+    let policy = task_step_default_policy(&projection, &step_scope, &task_scope, &workspace_scope);
 
     assert_eq!(
         policy.workspace_trust_requirement,

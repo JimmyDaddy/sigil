@@ -146,31 +146,19 @@ fn config_footer_action_navigation_wraps() {
     );
     assert_eq!(
         ConfigFooterAction::CleanMutationArtifacts.next_for_section(ConfigSection::Storage),
-        ConfigFooterAction::DeleteMutationArtifact
-    );
-    assert_eq!(
-        ConfigFooterAction::Close.previous_for_section(ConfigSection::Storage),
-        ConfigFooterAction::DeleteMutationArtifact
-    );
-    assert_eq!(
-        ConfigFooterAction::DeleteMutationArtifact.next_for_section(ConfigSection::Storage),
         ConfigFooterAction::Close
     );
     assert_eq!(
-        ConfigFooterAction::DeleteMutationArtifact.previous_for_section(ConfigSection::Storage),
+        ConfigFooterAction::Close.previous_for_section(ConfigSection::Storage),
         ConfigFooterAction::CleanMutationArtifacts
     );
     assert_eq!(
         ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Permissions),
-        ConfigFooterAction::TrustWorkspace
-    );
-    assert_eq!(
-        ConfigFooterAction::TrustWorkspace.next_for_section(ConfigSection::Permissions),
         ConfigFooterAction::Close
     );
     assert_eq!(
         ConfigFooterAction::Close.previous_for_section(ConfigSection::Permissions),
-        ConfigFooterAction::TrustWorkspace
+        ConfigFooterAction::SaveAndClose
     );
     assert_eq!(
         ConfigFooterAction::SaveAndClose.next_for_section(ConfigSection::Mcp),
@@ -181,19 +169,19 @@ fn config_footer_action_navigation_wraps() {
         ConfigFooterAction::Close
     );
     assert_eq!(
-        ConfigFooterAction::LoadSkill.next_for_section(ConfigSection::Skills),
-        ConfigFooterAction::InvokeSkill
+        ConfigFooterAction::UseSkill.next_for_section(ConfigSection::Skills),
+        ConfigFooterAction::Close
     );
     assert_eq!(
         ConfigFooterAction::Close.next_for_section(ConfigSection::Skills),
-        ConfigFooterAction::LoadSkill
+        ConfigFooterAction::UseSkill
     );
     assert_eq!(
         ConfigFooterAction::TrustAgent.next_for_section(ConfigSection::Agents),
         ConfigFooterAction::BlockAgent
     );
     assert_eq!(
-        ConfigFooterAction::ToggleAgentModel.next_for_section(ConfigSection::Agents),
+        ConfigFooterAction::BlockAgent.next_for_section(ConfigSection::Agents),
         ConfigFooterAction::Close
     );
     assert_eq!(
@@ -455,7 +443,7 @@ fn default_provider_field_draft_uses_provider_specific_defaults() {
 
 #[test]
 fn config_field_metadata_covers_all_user_facing_fields() {
-    assert_eq!(ConfigSection::Permissions.summary(), "approval rules");
+    assert_eq!(ConfigSection::Permissions.summary(), "safety settings");
     assert_eq!(ConfigSection::Storage.summary(), "local state paths");
     assert_eq!(ConfigSection::Provider.flow_index(), Some(0));
     assert_eq!(ConfigSection::Storage.flow_index(), Some(1));
@@ -468,21 +456,29 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     assert_eq!(ConfigSection::Mcp.flow_index(), Some(11));
     assert_eq!(ConfigField::fields_for_section(ConfigSection::Storage), &[]);
     assert_eq!(
-        ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
+        ConfigField::fields_for_section(ConfigSection::Permissions),
         &[
-            ConfigField::CodeIntelEnabled,
-            ConfigField::CodeIntelStartup,
-            ConfigField::CodeIntelDiscoveryEnabled,
-            ConfigField::CodeIntelDiscoveryReportMissing,
+            ConfigField::PermissionsDefaultMode,
+            ConfigField::VerificationAutoRun,
+        ]
+    );
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::CodeIntelligence),
+        &[ConfigField::CodeIntelEnabled, ConfigField::CodeIntelStartup]
+    );
+    assert_eq!(
+        ConfigField::fields_for_section(ConfigSection::Compaction),
+        &[
+            ConfigField::CompactionEnabled,
+            ConfigField::CompactionContextWindowTokens,
+            ConfigField::CompactionSoftThresholdRatio,
+            ConfigField::CompactionHardThresholdRatio,
+            ConfigField::CompactionTailMessages,
         ]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Terminal),
-        &[
-            ConfigField::TerminalMouseCapture,
-            ConfigField::TerminalOsc52Clipboard,
-            ConfigField::TerminalScrollSensitivity,
-        ]
+        &[]
     );
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Appearance),
@@ -490,20 +486,9 @@ fn config_field_metadata_covers_all_user_facing_fields() {
             ConfigField::AppearanceTheme,
             ConfigField::AppearanceSyntaxTheme,
             ConfigField::AppearanceUsageCostCurrency,
-            ConfigField::AppearanceColorGroup,
-            ConfigField::AppearanceColorToken,
-            ConfigField::AppearanceColorOverride,
         ]
     );
-    assert_eq!(
-        ConfigField::fields_for_section(ConfigSection::Mcp),
-        &[
-            ConfigField::McpName,
-            ConfigField::McpCommand,
-            ConfigField::McpArgsCsv,
-            ConfigField::McpStartupTimeoutSecs,
-        ]
-    );
+    assert_eq!(ConfigField::fields_for_section(ConfigSection::Mcp), &[]);
     assert_eq!(
         ConfigField::fields_for_section(ConfigSection::Agents),
         &[ConfigField::SkillId]
@@ -518,6 +503,8 @@ fn config_field_metadata_covers_all_user_facing_fields() {
     );
 
     assert_eq!(ConfigField::McpCommand.label(), "command");
+    assert_eq!(ConfigField::PermissionsDefaultMode.label(), "mode");
+    assert_eq!(ConfigField::VerificationAutoRun.label(), "checks");
     assert_eq!(ConfigField::SkillId.label(), "skill");
     assert_eq!(ConfigField::PluginId.label(), "plugin");
     assert_eq!(ConfigField::McpArgsCsv.label(), "args_csv");
@@ -539,6 +526,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         "color_override"
     );
     assert_eq!(ConfigField::ProviderApiKey.action_label(), "Enter input");
+    assert_eq!(
+        ConfigField::VerificationAutoRun.action_label(),
+        "Enter cycle"
+    );
     assert_eq!(ConfigField::CodeIntelStartup.action_label(), "Enter cycle");
     assert_eq!(ConfigField::CodeIntelEnabled.action_label(), "Enter toggle");
     assert_eq!(
@@ -581,22 +572,13 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigFooterAction::CleanMutationArtifacts.field_label(),
         "clean_artifacts"
     );
-    assert_eq!(
-        ConfigFooterAction::DeleteMutationArtifact.button_label(),
-        "delete"
-    );
-    assert_eq!(
-        ConfigFooterAction::DeleteMutationArtifact.field_label(),
-        "delete_artifact"
-    );
-    assert_eq!(ConfigFooterAction::TrustWorkspace.button_label(), "trust");
-    assert_eq!(
-        ConfigFooterAction::TrustWorkspace.field_label(),
-        "trust_workspace"
-    );
     assert_eq!(ConfigFooterAction::TrustAgent.button_label(), "trust");
     assert_eq!(ConfigFooterAction::TrustAgent.field_label(), "trust_agent");
-    assert_eq!(ConfigFooterAction::BlockAgent.field_label(), "block_agent");
+    assert_eq!(ConfigFooterAction::BlockAgent.button_label(), "disable");
+    assert_eq!(
+        ConfigFooterAction::BlockAgent.field_label(),
+        "disable_agent"
+    );
     assert_eq!(
         ConfigFooterAction::ToggleAgentEnabled.field_label(),
         "toggle_agent_enabled"
@@ -609,13 +591,10 @@ fn config_field_metadata_covers_all_user_facing_fields() {
         ConfigFooterAction::ToggleAgentModel.field_label(),
         "toggle_agent_model"
     );
-    assert_eq!(ConfigFooterAction::LoadSkill.button_label(), "load");
+    assert_eq!(ConfigFooterAction::UseSkill.button_label(), "use");
+    assert_eq!(ConfigFooterAction::UseSkill.field_label(), "use_skill");
     assert_eq!(ConfigFooterAction::ApprovePlugin.button_label(), "approve");
     assert_eq!(ConfigFooterAction::DenyPlugin.field_label(), "deny_plugin");
-    assert_eq!(
-        ConfigFooterAction::InvokeSkill.field_label(),
-        "invoke_skill"
-    );
     assert_eq!(
         ConfigFooterAction::SaveAndClose.field_label(),
         "save_and_close"
@@ -875,7 +854,7 @@ fn config_state_handles_mcp_collection_navigation_and_mutation() {
 
     state.add_mcp_server();
     assert!(state.dirty);
-    assert_eq!(state.selected_field, Some(ConfigField::McpName));
+    assert_eq!(state.selected_field, None);
     assert_eq!(state.selected_mcp_server_index, 0);
     assert_eq!(
         state.field_text_value(ConfigField::McpStartupTimeoutSecs),
@@ -1538,4 +1517,35 @@ fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::
 
     assert_eq!(display_ratio("not-a-number"), "not-a-number");
     Ok(())
+}
+
+#[test]
+fn config_display_helpers_cover_permission_and_verification_labels() {
+    assert!(
+        ConfigField::VerificationAutoRun
+            .help_text()
+            .contains("trusted project checks")
+    );
+
+    let mut config = test_root_config();
+    config.permission.default_mode = sigil_kernel::ApprovalMode::Allow;
+    config.verification.auto_run = sigil_kernel::VerificationAutoRunPolicy::TrustedOnly;
+    let mut state = ConfigState::from_root_config(&config);
+
+    assert_eq!(
+        state.display_value(ConfigField::PermissionsDefaultMode),
+        "full access"
+    );
+    assert_eq!(
+        state.display_value(ConfigField::VerificationAutoRun),
+        "auto trusted"
+    );
+
+    state.draft.permission_default_mode = sigil_kernel::ApprovalMode::Deny;
+    state.draft.verification_auto_run = sigil_kernel::VerificationAutoRunPolicy::Never;
+    assert_eq!(
+        state.display_value(ConfigField::PermissionsDefaultMode),
+        "locked down"
+    );
+    assert_eq!(state.display_value(ConfigField::VerificationAutoRun), "off");
 }

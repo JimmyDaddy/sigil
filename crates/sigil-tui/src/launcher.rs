@@ -344,9 +344,16 @@ where
     let app = match load_result {
         Ok(root_config) => {
             let mut app = AppState::from_root_config(&config_path, &root_config);
-            app.restore_latest_session_from_disk(&root_config);
-            worker = Some(spawn_worker_fn(root_config, &app)?);
-            flush_pending_worker_commands(&mut app, &mut worker)?;
+            if app.workspace_is_trusted_from_history() {
+                app.restore_latest_session_from_disk(&root_config);
+                app.ensure_current_workspace_trust_decision(
+                    "trusted workspace carried into session",
+                )?;
+                worker = Some(spawn_worker_fn(root_config, &app)?);
+                flush_pending_worker_commands(&mut app, &mut worker)?;
+            } else {
+                app.enter_workspace_trust_gate()?;
+            }
             app
         }
         Err(error) => AppState::from_setup(config_path.clone(), cwd, Some(error.to_string())),
@@ -369,8 +376,19 @@ where
             root_config,
         } => {
             *app = AppState::from_root_config(&config_path, &root_config);
-            app.restore_latest_session_from_disk(&root_config);
+            app.ensure_current_workspace_trust_decision("trusted by user during quick setup")?;
             *worker = Some(spawn_worker_fn(*root_config, app)?);
+        }
+        AppAction::TrustWorkspace => {
+            if let Some(runtime) = worker.take() {
+                let _ = runtime.worker_tx.send(AppState::shutdown_command());
+            }
+            app.confirm_workspace_trust_gate()?;
+            let Some(root_config) = app.root_config_snapshot().cloned() else {
+                report_worker_unavailable(app, "agent worker stopped; runtime config unavailable")?;
+                return Ok(());
+            };
+            *worker = Some(spawn_worker_fn(root_config, app)?);
         }
         AppAction::ConfigSaved { root_config }
         | AppAction::RuntimeConfigUpdated { root_config } => {

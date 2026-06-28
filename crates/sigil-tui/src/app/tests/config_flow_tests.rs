@@ -39,10 +39,14 @@ fn config_storage_section_shows_resolved_paths_readonly() {
     assert!(detail.contains("Max bytes: 512 MiB"));
     assert!(detail.contains("Expire older than: 30 days"));
     assert!(detail.contains("Current artifacts: 0 (0 bytes)"));
-    assert!(detail.contains("Cleanup preview: expire 0, unavailable 0"));
-    assert!(detail.contains("Cleanup bytes: 0 bytes"));
+    assert!(detail.contains("Cleanup preview: expire 0, delete 0, unavailable 0"));
+    assert!(detail.contains("Cleanup bytes: expire 0 bytes, delete 0 bytes"));
+    assert!(!detail.contains("Maintenance: clean recommended"));
     assert!(detail.contains("i No mutation artifacts found"));
-    assert!(detail.contains("i footer clean/delete records mutation artifact lifecycle events"));
+    assert!(
+        detail
+            .contains("i footer clean records lifecycle events; artifact details are audit/debug")
+    );
     assert!(detail.contains("SIGIL_STATE_HOME"));
     assert_eq!(app.config_selected_field_label(), None);
 }
@@ -60,7 +64,7 @@ fn config_storage_footer_dispatches_mutation_artifact_cleanup() -> Result<()> {
 
     assert_eq!(
         app.config_footer_action_labels(),
-        vec!["save", "save+close", "clean", "delete", "close"]
+        vec!["save", "save+close", "clean", "close"]
     );
     assert_eq!(app.config_selected_field_label(), Some("clean_artifacts"));
     assert!(
@@ -71,13 +75,21 @@ fn config_storage_footer_dispatches_mutation_artifact_cleanup() -> Result<()> {
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
-    assert!(matches!(action, Some(AppAction::CleanMutationArtifacts)));
-    assert_eq!(app.last_notice(), Some("cleaning mutation artifacts"));
+    assert!(matches!(
+        action,
+        Some(AppAction::CleanMutationArtifacts {
+            target: sigil_kernel::MutationArtifactCleanupTarget::Recommended,
+        })
+    ));
+    assert_eq!(
+        app.last_notice(),
+        Some("cleaning recommended mutation artifacts")
+    );
     Ok(())
 }
 
 #[test]
-fn config_storage_footer_dispatches_selected_artifact_delete() -> Result<()> {
+fn config_storage_footer_keeps_artifact_delete_out_of_primary_actions() -> Result<()> {
     let temp = tempfile::tempdir().expect("tempdir should create");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace)?;
@@ -102,23 +114,18 @@ fn config_storage_footer_dispatches_selected_artifact_delete() -> Result<()> {
         .as_mut()
         .expect("config state should still exist");
     state.set_section(ConfigSection::Storage);
-    state.focus_footer(ConfigFooterAction::DeleteMutationArtifact);
 
     let detail = app.config_detail_lines().join("\n");
-    assert!(detail.contains("> note.txt · 3 bytes · available · artifact:"));
-    assert_eq!(app.config_selected_field_label(), Some("delete_artifact"));
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(matches!(
-        action,
-        Some(AppAction::DeleteMutationArtifact { ref artifact_id })
-            if artifact_id.starts_with("mutation-artifact:sha256:")
-    ));
+    assert!(detail.contains("> note.txt · 3 bytes · available"));
     assert!(
-        app.last_notice()
-            .is_some_and(|notice| notice.starts_with("deleting mutation artifact artifact:"))
+        detail
+            .contains("i footer clean records lifecycle events; artifact details are audit/debug")
     );
+    assert_eq!(
+        app.config_footer_action_labels(),
+        vec!["save", "save+close", "clean", "close"]
+    );
+    assert!(!app.config_footer_action_labels().contains(&"delete"));
     Ok(())
 }
 
@@ -163,6 +170,56 @@ fn config_storage_section_shows_artifact_retention_overrides() {
 }
 
 #[test]
+fn config_storage_clean_keeps_target_selection_out_of_primary_flow() -> Result<()> {
+    let temp = tempfile::tempdir().expect("tempdir should create");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace)?;
+    let target = workspace.join("note.txt");
+    std::fs::write(&target, "old")?;
+    let config = config_for_workspace(&workspace);
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
+    let store = JsonlSessionStore::new(app.session_log_path.clone())?;
+    let recorder = sigil_kernel::MutationEventRecorder::new(store);
+    let coordinator = recorder.coordinator(&workspace, "tool-call-target", None)?;
+    let new_content = b"new";
+    let prepared = coordinator.prepare_file(
+        "note.txt",
+        target.clone(),
+        Some(sigil_kernel::bytes_hash(new_content)),
+    )?;
+    coordinator.commit_write(&prepared, new_content)?;
+
+    app.open_config_panel();
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .set_section(ConfigSection::Storage);
+
+    let detail = app.config_detail_lines().join("\n");
+    assert!(detail.contains("Cleanup preview: expire 0, delete 0, unavailable 0"));
+    assert!(!detail.contains("Cleanup target"));
+    assert_eq!(app.config_selected_field_label(), None);
+    app.config_state
+        .as_mut()
+        .expect("config state should exist")
+        .focus_footer(ConfigFooterAction::CleanMutationArtifacts);
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+
+    assert!(matches!(
+        action,
+        Some(AppAction::CleanMutationArtifacts {
+            target: sigil_kernel::MutationArtifactCleanupTarget::Recommended,
+        })
+    ));
+    assert_eq!(
+        app.last_notice(),
+        Some("cleaning recommended mutation artifacts")
+    );
+    Ok(())
+}
+
+#[test]
 fn config_storage_section_shows_artifact_retention_preview() -> Result<()> {
     let temp = tempfile::tempdir().expect("tempdir should create");
     let workspace = temp.path().join("workspace");
@@ -197,17 +254,16 @@ fn config_storage_section_shows_artifact_retention_preview() -> Result<()> {
     let detail = app.config_detail_lines().join("\n");
 
     assert!(detail.contains("Current artifacts: 1 (3 bytes)"));
-    assert!(detail.contains("Cleanup preview: expire 1, unavailable 0"));
-    assert!(detail.contains("Cleanup bytes: 3 bytes"));
+    assert!(detail.contains("Cleanup preview: expire 1, delete 0, unavailable 0"));
+    assert!(detail.contains("Maintenance: clean recommended (1 artifacts, 3 bytes)"));
+    assert!(detail.contains("Cleanup bytes: expire 3 bytes, delete 0 bytes"));
     assert!(detail.contains("[artifact list]"));
-    assert!(detail.contains("> note.txt · 3 bytes · available · artifact:"));
+    assert!(detail.contains("> note.txt · 3 bytes · available"));
     assert!(detail.contains("[selected artifact]"));
     assert!(detail.contains("Selected: 1 of 1"));
-    assert!(detail.contains("Artifact: artifact:"));
-    assert!(detail.contains("Artifact id: mutation-artifact:sha256:"));
     assert!(detail.contains("Size: 3 bytes"));
     assert!(detail.contains("Availability: available"));
-    assert!(detail.contains("Operation 1:"));
+    assert!(detail.contains("Restore impact: snapshot content available"));
     assert!(detail.contains("Source 1: note.txt"));
     Ok(())
 }
@@ -261,8 +317,8 @@ fn config_storage_up_down_moves_artifact_selection() -> Result<()> {
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("artifact 2/2"));
     let detail = app.config_detail_lines().join("\n");
-    assert!(detail.contains("- first.txt · 3 bytes · available · artifact:"));
-    assert!(detail.contains("> second.txt · 3 bytes · available · artifact:"));
+    assert!(detail.contains("- first.txt · 3 bytes · available"));
+    assert!(detail.contains("> second.txt · 3 bytes · available"));
     assert!(detail.contains("Selected: 2 of 2"));
     assert!(detail.contains("Source 1: second.txt"));
 
@@ -508,11 +564,7 @@ fn config_mcp_footer_activate_returns_lazy_activation_action() -> Result<()> {
     app.config_state
         .as_mut()
         .expect("config state should still exist")
-        .selected_field = Some(ConfigField::McpStartupTimeoutSecs);
-
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
+        .focus_footer(ConfigFooterAction::ActivateMcp);
     assert_eq!(app.config_selected_field_label(), Some("activate_mcp"));
     let detail = app.config_detail_lines().join("\n");
     assert!(detail.contains("Runtime"));
@@ -681,7 +733,7 @@ fn config_left_right_switches_steps() -> Result<()> {
     // Right again to reach Permissions (step 3 now, was step 2 before Storage was added).
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Permissions"));
-    assert_eq!(app.config_selected_field_label(), Some("Default mode"));
+    assert_eq!(app.config_selected_field_label(), Some("Mode"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Storage"));
@@ -745,7 +797,7 @@ fn config_provider_flow_hides_advanced_provider_fields() {
     assert_eq!(lines[0], "Provider 1/12 · provider settings");
     assert_eq!(
         lines[1],
-        "[provider] storage policy memory context code terminal theme agents skills plugins mcp"
+        "[provider] storage permissions memory compaction code intel terminal appearance agents skills plugins mcp"
     );
     assert_eq!(lines[2], "");
     assert!(detail.contains("[model]"));
@@ -776,54 +828,68 @@ fn config_permissions_step_uses_policy_summary_and_details() {
 
     let detail = app.config_detail_lines().join("\n");
 
-    assert!(detail.contains("[policy]"));
-    assert!(detail.contains("Default mode"));
-    assert!(detail.contains("[rules]"));
-    assert!(detail.contains("- Rule overrides"));
-    assert!(detail.contains("i All unmatched tools use the default mode above"));
-    assert!(detail.contains("[verification trust]"));
+    assert!(detail.contains("[permissions]"));
+    assert!(detail.contains("Mode: standard"));
+    assert!(detail.contains("Checks: manual"));
+    assert!(detail.contains("[workspace]"));
     assert!(detail.contains("Workspace trust: unknown"));
     assert!(detail.contains("User checks: 0 configured"));
+    assert!(detail.contains("Repo instructions: 0 files · untrusted data"));
+    assert!(detail.contains("Repo checks:"));
+    assert!(
+        detail.contains(
+            "i Task status owns run/retry actions; config only sets the long-term policy"
+        )
+    );
+    assert!(detail.contains("[advanced]"));
+    assert!(detail.contains("- Rule overrides"));
+    assert!(detail.contains("i All unmatched tools use the default mode above"));
+    assert!(detail.contains("Profile: auto (recommended build/cache excludes)"));
+    assert!(detail.contains("Key excludes: target/**, node_modules/**"));
+    assert!(detail.contains("Generated roots: none"));
+    assert!(detail.contains("Advanced overrides: 0 excludes, 0 generated roots"));
     assert!(detail.contains("[details]"));
-    assert!(detail.contains("selected: Default mode"));
-    assert!(detail.contains("key: default_mode"));
+    assert!(detail.contains("selected: Mode"));
+    assert!(detail.contains("key: mode"));
     assert!(detail.contains("controls: Tab section"));
     assert!(!detail.lines().any(|line| line.starts_with("overrides:")));
     assert!(!detail.contains("subject="));
-    assert!(
-        app.config_nav_lines()
-            .join("\n")
-            .contains("Permissions: footer trust workspace")
-    );
+    let nav = app.config_nav_lines().join("\n");
+    assert!(nav.contains("Permissions: Enter cycle mode/checks"));
+    assert!(nav.contains("Permissions: task checks run from task status"));
+    assert!(!nav.contains("footer approve"));
 }
 
 #[test]
-fn config_permissions_footer_dispatches_workspace_trust() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+fn config_permissions_footer_does_not_expose_repo_check_approval() -> Result<()> {
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        temp.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    let config = config_for_workspace(temp.path());
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.open_config_panel();
     let state = app
         .config_state
         .as_mut()
         .expect("config state should still exist");
     state.set_section(ConfigSection::Permissions);
-    state.focus_footer(ConfigFooterAction::TrustWorkspace);
 
-    assert_eq!(
-        app.config_footer_action_labels(),
-        vec!["save", "save+close", "trust", "close"]
+    assert!(
+        !ConfigFooterAction::actions_for_section(ConfigSection::Permissions)
+            .iter()
+            .any(|action| action.field_label() == "approve_check")
     );
-    assert_eq!(app.config_selected_field_label(), Some("trust_workspace"));
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(matches!(action, Some(AppAction::TrustWorkspace)));
-    assert_eq!(app.last_notice(), Some("trusting workspace"));
     Ok(())
 }
 
 #[test]
 fn config_permissions_step_shows_repo_verification_trust_promotion() {
     let temp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(temp.path().join("AGENTS.md"), "repo instructions\n").expect("write AGENTS.md");
+    std::fs::write(temp.path().join("SIGIL.md"), "sigil instructions\n").expect("write SIGIL.md");
     std::fs::write(
         temp.path().join("Cargo.toml"),
         "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -840,16 +906,14 @@ fn config_permissions_step_shows_repo_verification_trust_promotion() {
     let untrusted_detail = app.config_detail_lines().join("\n");
 
     assert!(untrusted_detail.contains("Workspace trust: unknown"));
-    assert!(untrusted_detail.contains("Repo candidates: 1 require trust"));
-    assert!(untrusted_detail.contains("- cargo-test · cargo · cargo test"));
+    assert!(untrusted_detail.contains("Repo instructions: 2 files · untrusted data"));
+    assert!(untrusted_detail.contains("Repo checks: 1 found · review required"));
     assert!(
-        untrusted_detail
-            .contains("effect=read_only · cwd=workspace · source=Cargo.toml · promotion=workspace-trust/approval/sandbox")
+        untrusted_detail.contains(
+            "i Task status owns run/retry actions; config only sets the long-term policy"
+        )
     );
-    assert!(
-        untrusted_detail
-            .contains("i Use /trust-workspace to promote repo-local checks before /task continue")
-    );
+    assert!(!untrusted_detail.contains("> cargo-test · cargo · cargo test"));
 
     let workspace_id = sigil_kernel::stable_workspace_id(temp.path()).expect("workspace id");
     app.current_session_entries.push(SessionLogEntry::Control(
@@ -865,9 +929,9 @@ fn config_permissions_step_shows_repo_verification_trust_promotion() {
     let trusted_detail = app.config_detail_lines().join("\n");
 
     assert!(trusted_detail.contains("Workspace trust: trusted"));
-    assert!(trusted_detail.contains("Repo candidates: 1 require trust"));
-    assert!(trusted_detail.contains("effect=read_only · cwd=workspace"));
-    assert!(trusted_detail.contains("i Repo-local checks are promoted for future /task runs"));
+    assert!(trusted_detail.contains("Repo instructions: 2 files · trusted instructions"));
+    assert!(trusted_detail.contains("Repo checks: 1 found · available to task checks"));
+    assert!(!trusted_detail.contains("effect=read_only · cwd=workspace"));
 }
 
 #[test]
@@ -883,10 +947,14 @@ fn config_permissions_step_handles_empty_and_many_repo_verification_candidates()
         .set_section(ConfigSection::Permissions);
 
     let empty_detail = empty_app.config_detail_lines().join("\n");
-    assert!(empty_detail.contains("Repo candidates: 0 require trust"));
-    assert!(empty_detail.contains("i No repo-local verification checks discovered"));
+    assert!(empty_detail.contains("Repo instructions: 0 files · untrusted data"));
+    assert!(empty_detail.contains("Repo checks: none found"));
 
     let repo = tempfile::tempdir().expect("repo workspace");
+    std::fs::write(repo.path().join("SIGIL.md"), "sigil rules").expect("sigil instructions");
+    std::fs::write(repo.path().join("AGENTS.md"), "agent rules").expect("agent instructions");
+    std::fs::write(repo.path().join("CLAUDE.md"), "claude rules").expect("claude instructions");
+    std::fs::write(repo.path().join("SIGIL.local.md"), "local rules").expect("local instructions");
     std::fs::create_dir_all(repo.path().join(".sigil")).expect("sigil dir");
     std::fs::write(
         repo.path().join(".sigil/verification.toml"),
@@ -925,11 +993,9 @@ fn config_permissions_step_handles_empty_and_many_repo_verification_candidates()
         .set_section(ConfigSection::Permissions);
 
     let repo_detail = repo_app.config_detail_lines().join("\n");
-    assert!(repo_detail.contains("Repo candidates: 10 require trust"));
-    assert!(
-        repo_detail.contains("- docs-check · .sigil/verification · cargo test -p sigil-kernel")
-    );
-    assert!(repo_detail.contains("... 7 more repo-local checks"));
+    assert!(repo_detail.contains("Repo instructions: 4 files · untrusted data"));
+    assert!(repo_detail.contains("Repo checks: 10 found · review required"));
+    assert!(!repo_detail.contains("> docs-check · .sigil/verification"));
 }
 
 #[test]
@@ -967,7 +1033,7 @@ fn config_permissions_step_reports_workspace_verification_discovery_error() {
         .set_section(ConfigSection::Permissions);
 
     let malformed_detail = malformed_app.config_detail_lines().join("\n");
-    assert!(malformed_detail.contains("Repo candidates: unavailable"));
+    assert!(malformed_detail.contains("Repo checks: unavailable"));
     assert!(malformed_detail.contains("Verification discovery failed:"));
 }
 
@@ -1017,13 +1083,13 @@ fn repo_verification_candidate_promotion_flags_mutating_checks() {
         crate::app::config_flow::repo_check_promotion_requirement(
             sigil_kernel::ToolEffect::WorkspaceWrite
         ),
-        "workspace-trust/approval/sandbox+rerun-readonly-check"
+        "workspace-trust/approval+rerun-readonly-check"
     );
     assert_eq!(
         crate::app::config_flow::repo_check_promotion_requirement(
             sigil_kernel::ToolEffect::ReadOnly
         ),
-        "workspace-trust/approval/sandbox"
+        "workspace-trust/approval"
     );
 }
 
@@ -1065,16 +1131,15 @@ fn config_mcp_step_uses_server_summary_when_empty() {
     assert!(detail.contains("- Configured"));
     assert!(detail.contains("0 servers"));
     assert!(detail.contains("i No MCP servers configured"));
-    assert!(detail.contains("i Ctrl-N adds a required eager self-hosted server"));
-    assert!(detail.contains("mcp: Ctrl-N add · Ctrl-D drop · PgUp/PgDn server"));
+    assert!(detail.contains("i Add MCP servers in ~/.sigil/sigil.toml"));
+    assert!(detail.contains("mcp: PgUp/PgDn server · footer activate/refresh"));
     assert!(!detail.contains("servers:"));
     assert!(!detail.contains("args_csv:"));
 
     let nav = app.config_nav_lines().join("\n");
-    assert!(nav.contains("MCP: Ctrl-N add"));
-    assert!(nav.contains("MCP: Ctrl-D drop"));
     assert!(nav.contains("MCP: PgUp/PgDn switch"));
     assert!(nav.contains("MCP: footer activate/refresh"));
+    assert!(nav.contains("MCP: edit servers in sigil.toml"));
 }
 
 #[test]
@@ -1092,6 +1157,9 @@ fn config_compaction_step_shows_effective_context_window_source() {
     assert!(detail.contains("- Effective window"));
     assert!(detail.contains("1,000,000 tokens  source=provider"));
     assert!(detail.contains("Fallback window"));
+    assert!(detail.contains("Soft threshold"));
+    assert!(detail.contains("Hard threshold"));
+    assert!(detail.contains("Tail messages"));
     assert!(detail.contains("[details]"));
     assert!(detail.contains("selected: Auto compact"));
     assert!(!detail.contains("context_window_tokens"));
@@ -1174,13 +1242,13 @@ fn config_terminal_step_shows_controls_and_compatibility() {
 
     assert!(detail.contains("Terminal 7/12 · terminal integration"));
     assert!(detail.contains("[interaction]"));
-    assert!(detail.contains("Mouse capture: yes"));
-    assert!(detail.contains("OSC52 clipboard: yes"));
-    assert!(detail.contains("Scroll sensitivity: 3 rows"));
+    assert!(detail.contains("- Mouse capture: yes"));
+    assert!(detail.contains("- OSC52 clipboard: yes"));
+    assert!(detail.contains("- Scroll sensitivity: 3 rows"));
     assert!(detail.contains("[compatibility]"));
-    assert!(detail.contains("Turn mouse_capture off"));
-    assert!(detail.contains("Turn osc52_clipboard off"));
-    assert!(detail.contains("Requests terminal mouse events"));
+    assert!(detail.contains("Terminal compatibility settings are edited in sigil.toml"));
+    assert!(detail.contains("Use defaults unless your terminal"));
+    assert!(!detail.contains("Requests terminal mouse events"));
 }
 
 #[test]
@@ -1202,8 +1270,7 @@ fn config_appearance_step_shows_theme_and_scope() {
 
     assert!(detail.contains("Appearance 8/12 · TUI theme"));
     assert!(nav.contains("Appearance: Enter cycle"));
-    assert!(nav.contains("Appearance: Backspace reset"));
-    assert!(nav.contains("Appearance: Ctrl-R clear all"));
+    assert!(nav.contains("Appearance: color overrides in sigil.toml"));
     assert!(detail.contains("[theme]"));
     assert!(detail.contains("Theme: gruvbox_dark  [Enter cycle]"));
     assert!(detail.contains("- Name: Gruvbox Dark"));
@@ -1211,12 +1278,11 @@ fn config_appearance_step_shows_theme_and_scope() {
     assert!(detail.contains("- Syntax source: auto -> Gruvbox Dark"));
     assert!(detail.contains("sigil_dark, solarized_dark, solarized_light"));
     assert!(detail.contains("- Overrides: 1 colors"));
-    assert!(detail.contains("Color group: surfaces"));
-    assert!(detail.contains("- Group overrides: 1 of 12"));
-    assert!(detail.contains("Color token: surface_base"));
-    assert!(detail.contains("Override: #282828"));
-    assert!(detail.contains("Backspace/Delete clears the selected token override"));
-    assert!(detail.contains("Ctrl-R clears all overrides"));
+    assert!(detail.contains("Fine-grained color token overrides are edited in sigil.toml"));
+    assert!(!detail.contains("Color group:"));
+    assert!(!detail.contains("Color token:"));
+    assert!(!detail.contains("Override:"));
+    assert!(!detail.contains("Ctrl-R clears all overrides"));
     assert!(detail.contains("[diagnostics]"));
     assert!(detail.contains("- Status: ok"));
     assert!(detail.contains("[preview]"));
@@ -1262,71 +1328,7 @@ fn config_appearance_step_shows_live_diagnostics_for_bad_draft() {
 }
 
 #[test]
-fn config_appearance_color_override_edit_save_and_reset() -> Result<()> {
-    let temp = tempdir()?;
-    let config_path = temp.path().join("sigil.toml");
-    let config = test_config();
-    let mut app = AppState::from_root_config(&config_path, &config);
-    app.open_config_panel();
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should still exist");
-        state.set_section(ConfigSection::Appearance);
-        assert!(state.focus_field(ConfigField::AppearanceColorOverride));
-    }
-
-    app.handle_config_paste_text("#010203");
-
-    assert_eq!(app.last_notice(), Some("updated color_override"));
-    let state = app
-        .config_state
-        .as_ref()
-        .expect("config state should still exist");
-    assert_eq!(
-        state.draft.selected_appearance_color_override(),
-        Some("#010203")
-    );
-    assert!(state.dirty);
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
-    let Some(AppAction::ConfigSaved { root_config }) = action else {
-        panic!("color override save should return config saved action");
-    };
-    assert_eq!(
-        root_config.appearance.colors.get("surface_base"),
-        Some("#010203")
-    );
-    let rendered = std::fs::read_to_string(&config_path)?;
-    assert!(rendered.contains("[appearance.colors]"));
-    assert!(rendered.contains("surface_base = \"#010203\""));
-
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should still exist");
-        assert!(state.focus_field(ConfigField::AppearanceColorOverride));
-    }
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("reset color surface_base"));
-    assert!(
-        app.config_state
-            .as_ref()
-            .expect("config state should still exist")
-            .draft
-            .selected_appearance_color_override()
-            .is_none()
-    );
-
-    Ok(())
-}
-
-#[test]
-fn config_appearance_rejects_invalid_color_override() {
+fn config_appearance_keeps_color_token_editing_out_of_primary_flow() {
     let config = test_config();
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
     app.open_config_panel();
@@ -1336,12 +1338,15 @@ fn config_appearance_rejects_invalid_color_override() {
             .as_mut()
             .expect("config state should still exist");
         state.set_section(ConfigSection::Appearance);
-        assert!(state.focus_field(ConfigField::AppearanceColorOverride));
+        assert!(!state.focus_field(ConfigField::AppearanceColorGroup));
+        assert!(!state.focus_field(ConfigField::AppearanceColorToken));
+        assert!(!state.focus_field(ConfigField::AppearanceColorOverride));
     }
 
-    app.handle_config_paste_text("#123");
+    app.handle_config_paste_text("#010203");
 
-    assert_eq!(
+    assert_ne!(app.last_notice(), Some("updated color_override"));
+    assert_ne!(
         app.last_notice(),
         Some("invalid color override: color override must be #RRGGBB")
     );
@@ -1356,7 +1361,7 @@ fn config_appearance_rejects_invalid_color_override() {
 }
 
 #[test]
-fn config_appearance_ctrl_r_resets_all_color_overrides() -> Result<()> {
+fn config_appearance_ctrl_r_does_not_reset_color_overrides() -> Result<()> {
     let mut config = test_config();
     let mut colors = std::collections::BTreeMap::new();
     colors.insert("surface_base".to_owned(), "#010203".to_owned());
@@ -1372,18 +1377,29 @@ fn config_appearance_ctrl_r_resets_all_color_overrides() -> Result<()> {
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))?;
 
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("reset all color overrides"));
+    assert_eq!(
+        app.last_notice(),
+        Some("color overrides are edited in sigil.toml")
+    );
     let state = app
         .config_state
         .as_ref()
         .expect("config state should still exist");
-    assert!(state.draft.base_root_config.appearance.colors.is_empty());
-    assert!(state.dirty);
+    assert_eq!(
+        state
+            .draft
+            .base_root_config
+            .appearance
+            .colors
+            .get("surface_base"),
+        Some("#010203")
+    );
+    assert!(!state.dirty);
     Ok(())
 }
 
 #[test]
-fn config_appearance_color_shortcuts_cover_noop_and_token_edges() -> Result<()> {
+fn config_appearance_color_shortcuts_cover_noop_paths() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
 
@@ -1404,13 +1420,16 @@ fn config_appearance_color_shortcuts_cover_noop_and_token_edges() -> Result<()> 
             .as_mut()
             .expect("config state should still exist");
         state.set_section(ConfigSection::Appearance);
-        assert!(state.focus_field(ConfigField::AppearanceColorToken));
+        assert!(state.focus_field(ConfigField::AppearanceTheme));
     }
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))?;
 
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("color overrides already empty"));
+    assert_eq!(
+        app.last_notice(),
+        Some("color overrides are edited in sigil.toml")
+    );
     assert!(
         !app.config_state
             .as_ref()
@@ -1418,79 +1437,12 @@ fn config_appearance_color_shortcuts_cover_noop_and_token_edges() -> Result<()> 
             .dirty
     );
 
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("color token -> surface_rail"));
-    assert_eq!(
-        app.config_state
-            .as_ref()
-            .expect("config state should still exist")
-            .draft
-            .selected_appearance_color_token(),
-        "surface_rail"
-    );
-
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
     assert_eq!(
         app.last_notice(),
-        Some("color surface_rail already inherits")
-    );
-
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should still exist");
-        state
-            .draft
-            .set_selected_appearance_color_override("#010203".to_owned())?;
-    }
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("reset color surface_rail"));
-    let state = app
-        .config_state
-        .as_ref()
-        .expect("config state should still exist");
-    assert!(state.draft.selected_appearance_color_override().is_none());
-    assert!(state.dirty);
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("color surface_rail already inherits")
-    );
-
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should still exist");
-        assert!(state.focus_field(ConfigField::AppearanceColorGroup));
-        state
-            .draft
-            .set_selected_appearance_color_override("#010203".to_owned())?;
-    }
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("reset 1 color overrides in surfaces")
-    );
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE))?;
-
-    assert!(action.is_none());
-    assert_eq!(
-        app.last_notice(),
-        Some("color group surfaces already inherits")
+        Some("color overrides are edited in sigil.toml")
     );
     Ok(())
 }
@@ -1510,13 +1462,13 @@ fn config_appearance_group_enter_and_reset_guards_are_noops() -> Result<()> {
             .as_mut()
             .expect("config state should still exist");
         state.set_section(ConfigSection::Appearance);
-        assert!(state.focus_field(ConfigField::AppearanceColorGroup));
+        assert!(!state.focus_field(ConfigField::AppearanceColorGroup));
     }
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("color group -> borders"));
+    assert_ne!(app.last_notice(), Some("color group -> borders"));
     assert_eq!(
         app.config_state
             .as_ref()
@@ -1524,7 +1476,7 @@ fn config_appearance_group_enter_and_reset_guards_are_noops() -> Result<()> {
             .draft
             .selected_appearance_color_group()
             .key,
-        "borders"
+        "surfaces"
     );
 
     {
@@ -1543,7 +1495,7 @@ fn config_appearance_group_enter_and_reset_guards_are_noops() -> Result<()> {
 }
 
 #[test]
-fn config_appearance_color_field_context_lines_explain_token_and_override() {
+fn config_appearance_field_context_lines_explain_supported_theme_controls() {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.open_config_panel();
     {
@@ -1552,48 +1504,21 @@ fn config_appearance_color_field_context_lines_explain_token_and_override() {
             .as_mut()
             .expect("config state should still exist");
         state.set_section(ConfigSection::Appearance);
-        assert!(state.focus_field(ConfigField::AppearanceColorToken));
-    }
-
-    let token_detail = app.config_detail_lines().join("\n");
-
-    assert!(token_detail.contains("appearance: Enter cycles token in group"));
-
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should still exist");
-        assert!(state.focus_field(ConfigField::AppearanceColorGroup));
-    }
-
-    let group_detail = app.config_detail_lines().join("\n");
-
-    assert!(group_detail.contains("appearance: Enter cycles group"));
-
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should still exist");
-        assert!(state.focus_field(ConfigField::AppearanceColorOverride));
-    }
-
-    let override_detail = app.config_detail_lines().join("\n");
-
-    assert!(override_detail.contains("appearance: empty value inherits"));
-
-    {
-        let state = app
-            .config_state
-            .as_mut()
-            .expect("config state should still exist");
         assert!(state.focus_field(ConfigField::AppearanceSyntaxTheme));
     }
 
     let syntax_detail = app.config_detail_lines().join("\n");
 
     assert!(syntax_detail.contains("auto follows the selected TUI theme"));
+    assert!(syntax_detail.contains("Fine-grained color token overrides are edited in sigil.toml"));
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should still exist");
+        assert!(!state.focus_field(ConfigField::AppearanceColorOverride));
+    }
 }
 
 #[test]
@@ -1807,15 +1732,15 @@ slash_names = ["review-agent"]
     assert!(detail.contains("- Nicknames: Repo Review"));
     assert!(detail.contains("- Aliases: rr"));
     assert!(detail.contains("- Slash: /review-agent"));
-    assert!(detail.contains("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/policy"));
+    assert!(detail.contains("agents: Up/Down agent · PgUp/PgDn wrap · footer trust/disable"));
 
     let nav = app.config_nav_lines().join("\n");
     assert!(nav.contains("Agents: Up/Down select"));
     assert!(nav.contains("Agents: PgUp/PgDn wrap"));
-    assert!(nav.contains("Agents: footer trust/policy"));
+    assert!(nav.contains("Agents: footer trust/disable"));
     assert_eq!(
         app.config_footer_action_labels(),
-        vec!["trust", "block", "enable", "user", "model", "close"]
+        vec!["trust", "disable", "close"]
     );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))?;
@@ -2023,7 +1948,7 @@ allowed_tools = ["grep"]
         .focus_footer(ConfigFooterAction::BlockAgent);
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("agent review blocked"));
+    assert_eq!(app.last_notice(), Some("agent review disabled"));
     assert!(app.current_session_entries.iter().any(|entry| matches!(
         entry,
         SessionLogEntry::Control(ControlEntry::AgentProfileTrustDecision(trust))
@@ -2102,8 +2027,8 @@ trust: trusted
     assert!(next_detail.contains("> beta: trusted · inline · workspace · /beta"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))?;
-    assert_eq!(app.config_selected_footer_action_label(), Some("load"));
-    assert_eq!(app.last_notice(), Some("action load_skill"));
+    assert_eq!(app.config_selected_footer_action_label(), Some("use"));
+    assert_eq!(app.last_notice(), Some("action use_skill"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))?;
     assert_eq!(
@@ -2203,12 +2128,12 @@ fn config_skills_step_renders_empty_discovery_and_warnings() -> Result<()> {
     assert!(detail.contains("Reusable inline skills are discovered"));
     assert!(detail.contains("[warnings]"));
     assert!(detail.contains("... 1 more warnings"));
-    assert!(detail.contains("skills: Up/Down skill · PgUp/PgDn wrap · footer load/invoke"));
+    assert!(detail.contains("skills: Up/Down skill · PgUp/PgDn wrap · footer use"));
     Ok(())
 }
 
 #[test]
-fn config_skills_load_footer_submits_load_prompt() -> Result<()> {
+fn config_skills_use_footer_opens_optional_instruction_modal() -> Result<()> {
     let temp = tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -2230,17 +2155,13 @@ trust: trusted
         .as_mut()
         .expect("config state should exist");
     state.set_section(ConfigSection::Skills);
-    state.focus_footer(ConfigFooterAction::LoadSkill);
+    state.focus_footer(ConfigFooterAction::UseSkill);
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
-    let Some(AppAction::SubmitPrompt(prompt)) = action else {
-        panic!("expected load prompt action");
-    };
-    assert!(prompt.contains("`load_skill`"));
-    assert!(prompt.contains("`review`"));
-    assert_eq!(app.last_notice(), Some("loading skill review"));
-    assert!(!app.is_config_mode());
+    assert!(action.is_none());
+    assert_eq!(app.modal_title(), Some("Use Skill"));
+    assert!(app.is_config_mode());
     Ok(())
 }
 
@@ -2269,11 +2190,11 @@ trust: trusted
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Skills);
-        state.focus_footer(ConfigFooterAction::LoadSkill);
+        state.focus_footer(ConfigFooterAction::UseSkill);
     }
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; load skill later"));
+    assert_eq!(app.last_notice(), Some("busy; use skill later"));
 
     app.is_busy = false;
     {
@@ -2282,7 +2203,7 @@ trust: trusted
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Provider);
-        state.focus_footer(ConfigFooterAction::LoadSkill);
+        state.focus_footer(ConfigFooterAction::UseSkill);
     }
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
@@ -2304,7 +2225,7 @@ trust: trusted
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Skills);
-        state.focus_footer(ConfigFooterAction::LoadSkill);
+        state.focus_footer(ConfigFooterAction::UseSkill);
     }
     let action = empty_app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
@@ -2335,14 +2256,14 @@ trust: trusted
         .as_mut()
         .expect("config state should exist");
     state.set_section(ConfigSection::Skills);
-    state.focus_footer(ConfigFooterAction::InvokeSkill);
+    state.focus_footer(ConfigFooterAction::UseSkill);
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(action.is_none());
-    assert_eq!(app.modal_title(), Some("Skill Arguments"));
+    assert_eq!(app.modal_title(), Some("Use Skill"));
     let modal = app.modal_lines().join("\n");
-    assert!(modal.contains("Arguments passed to the selected skill invocation."));
-    assert!(modal.contains("arguments: |"));
+    assert!(modal.contains("Optional instructions for how to use the selected skill."));
+    assert!(modal.contains("instructions: |"));
     assert!(!modal.contains("key:"));
 
     for character in "crates/sigil-tui".chars() {
@@ -2357,7 +2278,7 @@ trust: trusted
     assert!(prompt.contains("`load_skill`"));
     assert!(prompt.contains("`review`"));
     assert!(prompt.contains("crates/sigil-tui"));
-    assert_eq!(app.last_notice(), Some("invoking skill review"));
+    assert_eq!(app.last_notice(), Some("using skill review"));
     assert!(!app.is_config_mode());
     Ok(())
 }
@@ -2385,7 +2306,7 @@ trust: trusted
         .as_mut()
         .expect("config state should exist");
     state.set_section(ConfigSection::Skills);
-    state.focus_footer(ConfigFooterAction::InvokeSkill);
+    state.focus_footer(ConfigFooterAction::UseSkill);
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
@@ -2394,15 +2315,15 @@ trust: trusted
         panic!("expected invoke prompt action");
     };
     assert!(prompt.contains("No additional arguments were provided."));
-    assert_eq!(app.last_notice(), Some("invoking skill review"));
+    assert_eq!(app.last_notice(), Some("using skill review"));
     Ok(())
 }
 
 #[test]
 fn config_skills_invoke_modal_shortcuts_submit_prompt_actions() -> Result<()> {
     for (key_code, expected_notice) in [
-        (KeyCode::F(2), "invoking skill review"),
-        (KeyCode::F(3), "invoking skill review"),
+        (KeyCode::F(2), "using skill review"),
+        (KeyCode::F(3), "using skill review"),
     ] {
         let temp = tempdir()?;
         let workspace = temp.path().join("workspace");
@@ -2425,7 +2346,7 @@ trust: trusted
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Skills);
-        state.focus_footer(ConfigFooterAction::InvokeSkill);
+        state.focus_footer(ConfigFooterAction::UseSkill);
 
         let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
         assert!(action.is_none());
@@ -2469,7 +2390,7 @@ description: Needs review before use.
         .as_mut()
         .expect("config state should exist");
     state.set_section(ConfigSection::Skills);
-    state.focus_footer(ConfigFooterAction::LoadSkill);
+    state.focus_footer(ConfigFooterAction::UseSkill);
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
 
@@ -3160,13 +3081,45 @@ fn runtime_permission_toggle_persists_default_mode_to_config() -> Result<()> {
 }
 
 #[test]
-fn config_can_add_and_persist_mcp_server() -> Result<()> {
+fn config_verification_auto_run_persists_to_config() -> Result<()> {
     let temp = tempdir()?;
     let config_path = temp.path().join("sigil.toml");
-    test_config().save(&config_path)?;
+    let root_config = test_config();
+    root_config.save(&config_path)?;
 
+    let mut app = AppState::from_root_config(&config_path, &root_config);
+    app.open_config_panel();
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        state.set_section(ConfigSection::Permissions);
+        state.selected_field = Some(ConfigField::VerificationAutoRun);
+    }
+
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    assert!(action.is_none());
+    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
+
+    let Some(AppAction::ConfigSaved { root_config }) = action else {
+        panic!("expected config save action");
+    };
+    assert_eq!(
+        root_config.verification.auto_run,
+        sigil_kernel::VerificationAutoRunPolicy::TrustedOnly
+    );
+    let saved = RootConfig::load(&config_path)?;
+    assert_eq!(
+        saved.verification.auto_run,
+        sigil_kernel::VerificationAutoRunPolicy::TrustedOnly
+    );
+    Ok(())
+}
+
+#[test]
+fn config_mcp_server_creation_stays_config_file_only() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.config_path = config_path.clone();
     app.open_config_panel();
     {
         let state = app
@@ -3178,80 +3131,20 @@ fn config_can_add_and_persist_mcp_server() -> Result<()> {
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
     assert!(action.is_none());
+    assert_eq!(app.last_notice(), Some("edit MCP servers in sigil.toml"));
     let state = app
         .config_state
-        .as_mut()
+        .as_ref()
         .expect("config state should still exist");
-    assert_eq!(state.draft.mcp_servers.len(), 1);
-    state.draft.mcp_servers[0].name = "filesystem".to_owned();
-    state.draft.mcp_servers[0].command = "npx".to_owned();
-    state.draft.mcp_servers[0].args_csv =
-        "-y, @modelcontextprotocol/server-filesystem, .".to_owned();
-    state.draft.mcp_servers[0].startup_timeout_secs = "15".to_owned();
+    assert!(state.draft.mcp_servers.is_empty());
 
     let detail = app.config_detail_lines().join("\n");
-    assert!(detail.contains("[server]"));
-    assert!(detail.contains("Name"));
-    assert!(detail.contains("Command"));
-    assert!(detail.contains("Arguments"));
-    assert!(detail.contains("[lifecycle]"));
-    assert!(detail.contains("Required"));
-    assert!(detail.contains("Startup"));
-    assert!(detail.contains("Trust"));
-    assert!(detail.contains("Secrets"));
+    assert!(detail.contains("No MCP servers configured"));
+    assert!(detail.contains("Add MCP servers in ~/.sigil/sigil.toml"));
+    assert!(detail.contains("MCP command, args, and timeout are edited in the config file"));
+    assert!(!detail.contains("Command"));
+    assert!(!detail.contains("Arguments"));
     assert!(!detail.contains("args_csv:"));
-
-    let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))?;
-
-    let Some(AppAction::ConfigSaved { root_config }) = action else {
-        panic!("expected config save action");
-    };
-    assert_eq!(root_config.mcp_servers.len(), 1);
-    assert_eq!(root_config.mcp_servers[0].name, "filesystem");
-    assert_eq!(root_config.mcp_servers[0].command, "npx");
-    assert_eq!(
-        root_config.mcp_servers[0].args,
-        vec![
-            "-y".to_owned(),
-            "@modelcontextprotocol/server-filesystem".to_owned(),
-            ".".to_owned()
-        ]
-    );
-    assert_eq!(root_config.mcp_servers[0].startup_timeout_secs, 15);
-    assert!(root_config.mcp_servers[0].required);
-    assert_eq!(root_config.mcp_servers[0].startup, McpServerStartup::Eager);
-    assert_eq!(
-        root_config.mcp_servers[0].trust.trust_class,
-        McpTrustClass::SelfHosted
-    );
-    assert_eq!(
-        root_config.mcp_servers[0].trust.approval_default,
-        ApprovalMode::Ask
-    );
-
-    let saved = RootConfig::load(&config_path)?;
-    assert_eq!(saved.mcp_servers.len(), 1);
-    assert_eq!(saved.mcp_servers[0].name, "filesystem");
-    assert_eq!(saved.mcp_servers[0].command, "npx");
-    assert_eq!(
-        saved.mcp_servers[0].args,
-        vec![
-            "-y".to_owned(),
-            "@modelcontextprotocol/server-filesystem".to_owned(),
-            ".".to_owned()
-        ]
-    );
-    assert_eq!(saved.mcp_servers[0].startup_timeout_secs, 15);
-    assert!(saved.mcp_servers[0].required);
-    assert_eq!(saved.mcp_servers[0].startup, McpServerStartup::Eager);
-    assert_eq!(
-        saved.mcp_servers[0].trust.trust_class,
-        McpTrustClass::SelfHosted
-    );
-    assert_eq!(
-        saved.mcp_servers[0].trust.approval_default,
-        ApprovalMode::Ask
-    );
     Ok(())
 }
 
@@ -3760,11 +3653,17 @@ fn config_ctrl_shortcuts_and_page_navigation_cover_edge_branches() -> Result<()>
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("Ctrl-N: MCP only"));
+    assert_eq!(
+        app.last_notice(),
+        Some("MCP server editing uses sigil.toml")
+    );
 
     let action = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("Ctrl-D: MCP only"));
+    assert_eq!(
+        app.last_notice(),
+        Some("MCP server editing uses sigil.toml")
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))?;
     assert_eq!(app.config_section_title(), Some("Storage"));
@@ -3849,6 +3748,24 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .config_state
             .as_mut()
             .expect("config state should exist");
+        state.set_section(ConfigSection::Permissions);
+        state.selected_field = Some(ConfigField::VerificationAutoRun);
+    }
+    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
+    let state = app
+        .config_state
+        .as_ref()
+        .expect("config state should exist");
+    assert_eq!(
+        state.draft.verification_auto_run,
+        sigil_kernel::VerificationAutoRunPolicy::TrustedOnly
+    );
+
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
         state.set_section(ConfigSection::Memory);
         state.selected_field = Some(ConfigField::MemoryEnabled);
     }
@@ -3908,32 +3825,14 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .code_intelligence_startup,
         sigil_kernel::CodeIntelStartup::Eager
     );
-
-    app.config_state
-        .as_mut()
-        .expect("config state should exist")
-        .selected_field = Some(ConfigField::CodeIntelDiscoveryEnabled);
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(
-        !app.config_state
-            .as_ref()
-            .expect("config state should exist")
-            .draft
-            .code_intelligence_discovery_enabled
-    );
-
-    app.config_state
-        .as_mut()
-        .expect("config state should exist")
-        .selected_field = Some(ConfigField::CodeIntelDiscoveryReportMissing);
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
-    assert!(
-        !app.config_state
-            .as_ref()
-            .expect("config state should exist")
-            .draft
-            .code_intelligence_discovery_report_missing
-    );
+    {
+        let state = app
+            .config_state
+            .as_mut()
+            .expect("config state should exist");
+        assert!(!state.focus_field(ConfigField::CodeIntelDiscoveryEnabled));
+        assert!(!state.focus_field(ConfigField::CodeIntelDiscoveryReportMissing));
+    }
 
     {
         let state = app
@@ -3941,24 +3840,20 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
             .as_mut()
             .expect("config state should exist");
         state.set_section(ConfigSection::Terminal);
-        state.selected_field = Some(ConfigField::TerminalMouseCapture);
+        assert_eq!(state.selected_field, None);
+        assert!(!state.focus_field(ConfigField::TerminalMouseCapture));
+        assert!(!state.focus_field(ConfigField::TerminalOsc52Clipboard));
     }
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(
-        !app.config_state
+        app.config_state
             .as_ref()
             .expect("config state should exist")
             .draft
             .terminal_mouse_capture
     );
-
-    app.config_state
-        .as_mut()
-        .expect("config state should exist")
-        .selected_field = Some(ConfigField::TerminalOsc52Clipboard);
-    let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert!(
-        !app.config_state
+        app.config_state
             .as_ref()
             .expect("config state should exist")
             .draft
@@ -4007,7 +3902,7 @@ fn config_enter_toggles_fields_and_opens_additional_modals() -> Result<()> {
     app.config_state
         .as_mut()
         .expect("config state should exist")
-        .selected_field = Some(ConfigField::CompactionTailMessages);
+        .selected_field = Some(ConfigField::ProviderBaseUrl);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE))?;
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE))?;
     let ModalState::TextInput(state) = app.modal_state.as_ref().expect("text modal should open")
@@ -4086,10 +3981,16 @@ fn config_mcp_shortcuts_outside_mcp_section_show_guidance() -> Result<()> {
     assert_eq!(app.config_section_title(), Some("Provider"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("Ctrl-N: MCP only"));
+    assert_eq!(
+        app.last_notice(),
+        Some("MCP server editing uses sigil.toml")
+    );
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("Ctrl-D: MCP only"));
+    assert_eq!(
+        app.last_notice(),
+        Some("MCP server editing uses sigil.toml")
+    );
     Ok(())
 }
 
@@ -4103,12 +4004,12 @@ fn config_remaining_edge_branches_cover_footer_guards_and_mcp_empty_paths() -> R
         .expect("config state should exist")
         .set_section(ConfigSection::Mcp);
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("no MCP server"));
+    assert_eq!(app.last_notice(), Some("edit MCP servers in sigil.toml"));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("added MCP server"));
+    assert_eq!(app.last_notice(), Some("edit MCP servers in sigil.toml"));
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL))?;
-    assert_eq!(app.last_notice(), Some("removed MCP server"));
+    assert_eq!(app.last_notice(), Some("edit MCP servers in sigil.toml"));
 
     {
         let state = app

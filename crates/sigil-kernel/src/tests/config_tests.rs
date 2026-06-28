@@ -809,11 +809,27 @@ model = "deepseek-v4-flash"
     let default_config: RootConfig =
         toml::from_str(default_raw).expect("default verification config should parse");
     assert!(default_config.verification.checks.is_empty());
+    assert_eq!(
+        default_config.verification.auto_run,
+        crate::VerificationAutoRunPolicy::Manual
+    );
+    assert_eq!(
+        default_config.verification.scope_profile,
+        crate::VerificationScopeProfile::Auto
+    );
+    assert!(default_config.verification.extra_scope_excludes.is_empty());
+    assert!(default_config.verification.generated_roots.is_empty());
 
     let raw = r#"
 [agent]
 provider = "deepseek"
 model = "deepseek-v4-flash"
+
+[verification]
+auto_run = "trusted_only"
+scope_profile = "node"
+extra_scope_excludes = ["tmp/generated/**"]
+generated_roots = ["generated"]
 
 [[verification.checks]]
 id = "cargo-test"
@@ -825,6 +841,30 @@ effect = "read_only"
 
     let config: RootConfig = toml::from_str(raw).expect("verification config should parse");
 
+    assert_eq!(
+        config.verification.auto_run,
+        crate::VerificationAutoRunPolicy::TrustedOnly
+    );
+    assert_eq!(
+        config.verification.scope_profile,
+        crate::VerificationScopeProfile::Node
+    );
+    assert_eq!(
+        config.verification.extra_scope_excludes,
+        vec!["tmp/generated/**".to_owned()]
+    );
+    assert_eq!(
+        config.verification.generated_roots,
+        vec![std::path::PathBuf::from("generated")]
+    );
+    let scope = config.verification.scope_for_hash("scope-main");
+    assert!(scope.exclude.contains(&".next/**".to_owned()));
+    assert!(scope.exclude.contains(&"tmp/generated/**".to_owned()));
+    assert!(
+        scope
+            .generated_roots
+            .contains(&std::path::PathBuf::from("generated"))
+    );
     assert_eq!(config.verification.checks.len(), 1);
     assert_eq!(config.verification.checks[0].id, "cargo-test");
     assert_eq!(config.verification.checks[0].command, "cargo");

@@ -3,8 +3,9 @@ use std::path::PathBuf;
 use sigil_kernel::{
     AgentRunResult, AgentThreadId, AgentThreadStatusChangedEntry, CompactionRecord,
     ConversationInputKind, ConversationInputQueueId, ConversationInputTarget,
-    ConversationQueueItemProjection, PlanApprovalPermission, PlanApprovedEntry, ReasoningEffort,
-    RunEvent, SessionLogEntry, TaskRunStatus, TerminalTaskEntry,
+    ConversationQueueItemProjection, MutationArtifactCleanupTarget, PlanApprovalPermission,
+    PlanApprovedEntry, ReasoningEffort, RunEvent, SessionLogEntry, TaskRunStatus,
+    TerminalTaskEntry,
 };
 use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::{
@@ -110,11 +111,18 @@ pub enum WorkerCommand {
     },
     CompactNow,
     CheckChangedFilesDiagnostics,
-    CleanMutationArtifacts,
+    CleanMutationArtifacts {
+        target: MutationArtifactCleanupTarget,
+    },
     DeleteMutationArtifact {
         artifact_id: String,
     },
-    TrustWorkspace,
+    ApproveVerificationCheck {
+        check_spec_id: String,
+    },
+    SandboxVerificationCheck {
+        check_spec_id: String,
+    },
     RefreshProviderBalance {
         request_id: u64,
         provider_config: DeepSeekProviderConfig,

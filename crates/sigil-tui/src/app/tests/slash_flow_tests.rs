@@ -92,36 +92,6 @@ fn task_command_dispatches_durable_task_when_idle() -> Result<()> {
 }
 
 #[test]
-fn trust_workspace_command_dispatches_when_idle() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.input = "/trust-workspace".to_owned();
-
-    let action = app.submit_input()?;
-
-    assert!(matches!(action, Some(AppAction::TrustWorkspace)));
-    assert!(!app.is_busy);
-    assert_eq!(app.last_notice(), Some("trusting workspace"));
-    assert_eq!(app.input, "");
-    assert!(!app.has_slash_selector());
-    Ok(())
-}
-
-#[test]
-fn trust_workspace_command_reports_busy_without_dispatching() -> Result<()> {
-    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.is_busy = true;
-    app.input = "/trust-workspace".to_owned();
-
-    let action = app.submit_input()?;
-
-    assert!(action.is_none());
-    assert!(app.timeline.iter().any(|entry| {
-        entry.role == TimelineRole::Notice && entry.text == "busy; trust workspace later"
-    }));
-    Ok(())
-}
-
-#[test]
 fn empty_plan_command_enters_one_shot_plan_mode() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.input = "/plan".to_owned();
@@ -1059,7 +1029,7 @@ user-invocable: false
         "/busy-skill",
     )?;
     assert!(busy.is_none());
-    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
+    assert_eq!(app.last_notice(), Some("busy; use skill later"));
     app.is_busy = false;
 
     let disabled = app.execute_skill_slash_command(

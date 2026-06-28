@@ -28,6 +28,8 @@ mod timeline_flow_tests;
 mod tool_card_interaction_tests;
 #[cfg(not(sigil_tui_test_slice_app_input_flow))]
 mod worker_bridge_tests;
+#[cfg(not(sigil_tui_test_slice_app_input_flow))]
+mod workspace_trust_flow_tests;
 
 use std::path::Path;
 
@@ -36,12 +38,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, ApprovalMode, CompactionConfig, CompactionRecord, ControlEntry, EventHandler,
-    JsonlSessionStore, McpServerStartup, McpTrustClass, MemoryConfig, ModelMessage,
-    PermissionConfig, ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry,
-    ToolAccess, ToolCall, ToolCategory, ToolEgressEntry, ToolError, ToolErrorKind,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewCapability,
-    ToolPreviewSnapshot, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectAudit,
-    ToolSubjectKind, ToolSubjectScope, UsageStats, WorkspaceConfig,
+    JsonlSessionStore, McpServerStartup, MemoryConfig, ModelMessage, PermissionConfig,
+    ReasoningEffort, RootConfig, RunEvent, SessionConfig, SessionLogEntry, ToolAccess, ToolCall,
+    ToolCategory, ToolEgressEntry, ToolError, ToolErrorKind, ToolExecutionEntry,
+    ToolExecutionStatus, ToolPreview, ToolPreviewCapability, ToolPreviewSnapshot, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope,
+    UsageStats, WorkspaceConfig,
 };
 use sigil_runtime::{McpElicitationAction, McpElicitationRequest};
 use tempfile::tempdir;

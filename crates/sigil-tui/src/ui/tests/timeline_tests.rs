@@ -876,7 +876,7 @@ fn render_timeline_entry_lines_highlights_user_slash_command_token() {
     let theme = theme::Theme::default();
     let user = TimelineEntry {
         role: TimelineRole::User,
-        text: "/trust-workspace".to_owned(),
+        text: "/task fix typo".to_owned(),
     };
     let lines = render_timeline_entry_lines_with_options(
         &user,
@@ -891,7 +891,7 @@ fn render_timeline_entry_lines_highlights_user_slash_command_token() {
     let command = lines
         .iter()
         .flat_map(|line| line.spans.iter())
-        .find(|span| span.content.as_ref() == "/trust-workspace")
+        .find(|span| span.content.as_ref() == "/task")
         .expect("slash command token should render as its own span");
     assert_eq!(command.style.fg, Some(theme.palette.accent_info));
     assert_eq!(command.style.bg, Some(user_message_bg()));

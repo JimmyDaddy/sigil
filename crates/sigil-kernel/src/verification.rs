@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DurableEventType, EventClass, EventId, Session, SessionId, StoredEvent,
+    WorkspaceMutationDetected,
     session::{ControlEntry, SessionLogEntry},
     stable_event_uuid,
 };
@@ -125,6 +126,45 @@ impl VisibleCompletionState {
     }
 }
 
+/// User-selected policy for starting verification checks without an explicit run action.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationAutoRunPolicy {
+    /// Never start checks automatically; task/session surfaces still expose run/retry actions.
+    #[default]
+    Manual,
+    /// Start only checks that are already trusted by user config, workspace trust or promotion.
+    TrustedOnly,
+    /// Never start checks automatically, even when all checks are trusted.
+    Never,
+}
+
+impl VerificationAutoRunPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::TrustedOnly => "trusted_only",
+            Self::Never => "never",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Manual => Self::TrustedOnly,
+            Self::TrustedOnly => Self::Never,
+            Self::Never => Self::Manual,
+        }
+    }
+
+    fn most_restrictive(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Never, _) | (_, Self::Never) => Self::Never,
+            (Self::Manual, _) | (_, Self::Manual) => Self::Manual,
+            (Self::TrustedOnly, Self::TrustedOnly) => Self::TrustedOnly,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct VerificationPolicy {
@@ -137,6 +177,8 @@ pub struct VerificationPolicy {
     pub allow_unverified_completion: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub auto_run: VerificationAutoRunPolicy,
 }
 
 impl VerificationPolicy {
@@ -149,6 +191,7 @@ impl VerificationPolicy {
             workspace_trust_requirement: WorkspaceTrustRequirement::None,
             allow_unverified_completion: true,
             timeout_ms: None,
+            auto_run: VerificationAutoRunPolicy::Manual,
         }
     }
 
@@ -190,6 +233,7 @@ impl VerificationPolicy {
             allow_unverified_completion: self.allow_unverified_completion
                 && child.allow_unverified_completion,
             timeout_ms: min_optional_timeout(self.timeout_ms, child.timeout_ms),
+            auto_run: self.auto_run.most_restrictive(child.auto_run),
         })
     }
 }
@@ -270,13 +314,17 @@ pub struct VerificationScope {
 
 impl VerificationScope {
     pub fn all_tracked(scope_hash: impl Into<String>) -> Self {
+        Self::profiled(scope_hash, VerificationScopeProfile::Auto)
+    }
+
+    pub fn profiled(scope_hash: impl Into<String>, profile: VerificationScopeProfile) -> Self {
         Self {
             scope_hash: scope_hash.into(),
             include: Vec::new(),
-            exclude: default_scope_excludes(),
+            exclude: profile.default_excludes(),
             tracked_files_only: true,
             max_file_bytes: MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
-            generated_roots: Vec::new(),
+            generated_roots: profile.generated_roots(),
         }
     }
 
@@ -297,6 +345,85 @@ impl VerificationScope {
         let tracking_covers = !self.tracked_files_only || required.tracked_files_only;
         let max_file_bytes_covers = self.max_file_bytes >= required.max_file_bytes;
         include_covers && exclude_covers && tracking_covers && max_file_bytes_covers
+    }
+}
+
+/// Coarse verification-scope presets for common project layouts.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationScopeProfile {
+    #[default]
+    Auto,
+    Rust,
+    Node,
+    Python,
+    Docs,
+}
+
+impl VerificationScopeProfile {
+    pub const ALL: [Self; 5] = [Self::Auto, Self::Rust, Self::Node, Self::Python, Self::Docs];
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Rust => "rust",
+            Self::Node => "node",
+            Self::Python => "python",
+            Self::Docs => "docs",
+        }
+    }
+
+    #[must_use]
+    pub fn default_excludes(self) -> Vec<String> {
+        let mut excludes = default_scope_excludes();
+        match self {
+            Self::Auto | Self::Rust => {}
+            Self::Node => {
+                extend_unique(&mut excludes, &[".next/**", ".nuxt/**", ".turbo/**"]);
+            }
+            Self::Python => {
+                extend_unique(
+                    &mut excludes,
+                    &[
+                        "__pycache__/**",
+                        ".mypy_cache/**",
+                        ".ruff_cache/**",
+                        ".venv/**",
+                        "venv/**",
+                    ],
+                );
+            }
+            Self::Docs => {
+                extend_unique(&mut excludes, &["site/**", ".docusaurus/**"]);
+            }
+        }
+        excludes
+    }
+
+    #[must_use]
+    pub fn generated_roots(self) -> Vec<PathBuf> {
+        match self {
+            Self::Auto | Self::Rust => Vec::new(),
+            Self::Node => vec![PathBuf::from(".next"), PathBuf::from(".nuxt")],
+            Self::Python => vec![
+                PathBuf::from("__pycache__"),
+                PathBuf::from(".mypy_cache"),
+                PathBuf::from(".ruff_cache"),
+            ],
+            Self::Docs => vec![PathBuf::from("site"), PathBuf::from(".docusaurus")],
+        }
+    }
+
+    #[must_use]
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::Auto => "recommended build/cache excludes",
+            Self::Rust => "Rust target cache excludes",
+            Self::Node => "Node package/cache/build excludes",
+            Self::Python => "Python cache/venv excludes",
+            Self::Docs => "docs site output excludes",
+        }
     }
 }
 
@@ -324,13 +451,29 @@ pub fn default_scope_excludes() -> Vec<String> {
         "node_modules/**",
         "dist/**",
         "coverage/**",
+        ".next/**",
+        ".nuxt/**",
+        ".turbo/**",
         ".pytest_cache/**",
+        ".mypy_cache/**",
+        ".ruff_cache/**",
+        "__pycache__/**",
+        ".venv/**",
+        "venv/**",
         ".env",
         ".env.*",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect()
+}
+
+fn extend_unique(values: &mut Vec<String>, extra: &[&str]) {
+    for value in extra {
+        if !values.iter().any(|existing| existing == value) {
+            values.push((*value).to_owned());
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -412,13 +555,51 @@ impl CheckCommand {
 #[serde(rename_all = "snake_case")]
 pub struct VerificationConfig {
     #[serde(default)]
+    pub auto_run: VerificationAutoRunPolicy,
+    #[serde(default)]
+    pub scope_profile: VerificationScopeProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_scope_excludes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_roots: Vec<PathBuf>,
+    #[serde(default)]
     pub checks: Vec<VerificationCheckConfig>,
 }
 
 impl VerificationConfig {
-    /// Returns true when no user-level verification checks are configured.
+    /// Returns true when no user-level verification behavior is configured.
     pub fn is_empty(&self) -> bool {
-        self.checks.is_empty()
+        self.auto_run == VerificationAutoRunPolicy::Manual
+            && self.scope_profile == VerificationScopeProfile::Auto
+            && self.extra_scope_excludes.is_empty()
+            && self.generated_roots.is_empty()
+            && self.checks.is_empty()
+    }
+
+    #[must_use]
+    pub fn scope_for_hash(
+        &self,
+        scope_hash: impl Into<VerificationScopeHash>,
+    ) -> VerificationScope {
+        let mut scope = VerificationScope::profiled(scope_hash, self.scope_profile);
+        extend_unique(
+            &mut scope.exclude,
+            &self
+                .extra_scope_excludes
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+        for root in &self.generated_roots {
+            if !scope
+                .generated_roots
+                .iter()
+                .any(|existing| existing == root)
+            {
+                scope.generated_roots.push(root.clone());
+            }
+        }
+        scope
     }
 }
 
@@ -533,6 +714,7 @@ impl CandidateCheck {
         Ok(TrustedCheckSpec {
             check_spec,
             source: self.source,
+            workspace_trust_snapshot_id: self.workspace_trust_snapshot_id,
             promoted_by: promotion,
             approval_event_id,
             sandbox_decision_id,
@@ -607,6 +789,8 @@ pub struct TrustedCheckSpec {
     pub check_spec: CheckSpec,
     #[serde(default = "default_check_discovery_source")]
     pub source: CheckDiscoverySource,
+    #[serde(default)]
+    pub workspace_trust_snapshot_id: WorkspaceTrustSnapshotId,
     pub promoted_by: CheckPromotion,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_event_id: Option<EventId>,
@@ -1433,6 +1617,8 @@ fn build_workspace_snapshot_inner(
             |(event_id, recorded_at_stream_sequence)| WorkspaceMutationEvidence {
                 event_id,
                 source_event_type: "workspace_snapshot_incomplete".to_owned(),
+                source_label: None,
+                recovery_hint: None,
                 scope_hash: scope.scope_hash.clone(),
                 recorded_at_stream_sequence,
                 from_workspace_snapshot_id: None,
@@ -1897,6 +2083,7 @@ impl EvidenceReceipt {
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum EvidenceScope {
     Run(String),
+    Workspace(WorkspaceId),
     Task(String),
     Step(String),
     Agent(String),
@@ -2553,6 +2740,10 @@ fn receipt_matches_current_context(
 pub struct WorkspaceMutationEvidence {
     pub event_id: EventId,
     pub source_event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
     pub scope_hash: VerificationScopeHash,
     pub recorded_at_stream_sequence: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2564,9 +2755,52 @@ pub struct WorkspaceMutationEvidence {
 }
 
 impl WorkspaceMutationEvidence {
+    pub fn from_detected_event(
+        event_id: EventId,
+        recorded_at_stream_sequence: u64,
+        payload: WorkspaceMutationDetected,
+    ) -> Self {
+        let (source_label, recovery_hint) = unknown_mutation_source_context(&payload.tool_name);
+        Self {
+            event_id,
+            source_event_type: DurableEventType::WorkspaceMutationDetected
+                .as_str()
+                .to_owned(),
+            source_label,
+            recovery_hint,
+            scope_hash: payload.scope_hash,
+            recorded_at_stream_sequence,
+            from_workspace_snapshot_id: payload.from_workspace_snapshot_id,
+            to_workspace_snapshot_id: payload.to_workspace_snapshot_id,
+            tool_effect: payload.tool_effect,
+            unknown_dirty: payload.unknown_dirty,
+        }
+    }
+
     pub fn invalidates_scope(&self, scope: &VerificationScope) -> bool {
         self.unknown_dirty || self.scope_hash == scope.scope_hash
     }
+
+    fn source_readiness_reason(&self) -> Option<ReadinessReason> {
+        if !self.unknown_dirty {
+            return None;
+        }
+        Some(ReadinessReason::WorkspaceMutationSource {
+            event_id: self.event_id.clone(),
+            source_label: self.source_label.clone()?,
+            recovery_hint: self.recovery_hint.clone(),
+        })
+    }
+}
+
+fn unknown_mutation_source_context(tool_name: &str) -> (Option<String>, Option<String>) {
+    if let Some(server_name) = tool_name.strip_prefix("mcp_server:") {
+        return (
+            Some(format!("MCP server {server_name}")),
+            Some("refresh MCP or run check".to_owned()),
+        );
+    }
+    (None, None)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2804,19 +3038,47 @@ impl VerificationStateProjection {
 pub enum ReadinessReason {
     LegacyEvidenceUnavailable,
     NoVerificationRequired,
-    FinalAssistantTextIgnored { event_id: EventId },
-    RecoveredToolError { event_id: EventId },
+    FinalAssistantTextIgnored {
+        event_id: EventId,
+    },
+    RecoveredToolError {
+        event_id: EventId,
+    },
     WorkspaceTrustUnsatisfied,
-    PendingCheckReducedForTerminalRun { check_spec_id: CheckSpecId },
-    MissingRequiredCheck { check_spec_id: CheckSpecId },
-    VerificationPassed { receipt_id: ReceiptId },
-    VerificationFailed { receipt_id: ReceiptId },
-    VerificationSkipped { event_id: EventId },
+    PendingCheckReducedForTerminalRun {
+        check_spec_id: CheckSpecId,
+    },
+    MissingRequiredCheck {
+        check_spec_id: CheckSpecId,
+    },
+    VerificationPassed {
+        receipt_id: ReceiptId,
+    },
+    VerificationFailed {
+        receipt_id: ReceiptId,
+    },
+    VerificationSkipped {
+        event_id: EventId,
+    },
     VerificationStale(VerificationStaleCause),
-    WorkspaceUnknownDirty { event_id: Option<EventId> },
-    CheckMutatedVerificationScope { check_spec_id: CheckSpecId },
-    ReceiptScopeMismatch { receipt_id: ReceiptId },
-    ReceiptSnapshotMismatch { receipt_id: ReceiptId },
+    WorkspaceMutationSource {
+        event_id: EventId,
+        source_label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recovery_hint: Option<String>,
+    },
+    WorkspaceUnknownDirty {
+        event_id: Option<EventId>,
+    },
+    CheckMutatedVerificationScope {
+        check_spec_id: CheckSpecId,
+    },
+    ReceiptScopeMismatch {
+        receipt_id: ReceiptId,
+    },
+    ReceiptSnapshotMismatch {
+        receipt_id: ReceiptId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2929,11 +3191,16 @@ pub fn evaluate_readiness(input: &ReadinessInput) -> ReadinessEvaluation {
         .iter()
         .any(|receipt| receipt.check_status == ReceiptStatus::Succeeded);
     if input.workspace_knowledge.is_unknown_dirty() {
-        let event_id = input
+        let unknown_dirty_mutation = input
             .mutations
             .iter()
-            .find(|mutation| mutation.unknown_dirty)
-            .map(|mutation| mutation.event_id.clone());
+            .find(|mutation| mutation.unknown_dirty);
+        if let Some(reason) =
+            unknown_dirty_mutation.and_then(WorkspaceMutationEvidence::source_readiness_reason)
+        {
+            reasons.push(reason);
+        }
+        let event_id = unknown_dirty_mutation.map(|mutation| mutation.event_id.clone());
         reasons.push(ReadinessReason::WorkspaceUnknownDirty {
             event_id: event_id.clone(),
         });
@@ -3173,12 +3440,17 @@ fn missing_for_mutation(
     mut required_actions: Vec<RequiredAction>,
 ) -> ReadinessEvaluation {
     if input.workspace_knowledge.is_unknown_dirty() {
+        let unknown_dirty_mutation = input
+            .mutations
+            .iter()
+            .find(|mutation| mutation.unknown_dirty);
+        if let Some(reason) =
+            unknown_dirty_mutation.and_then(WorkspaceMutationEvidence::source_readiness_reason)
+        {
+            reasons.push(reason);
+        }
         reasons.push(ReadinessReason::WorkspaceUnknownDirty {
-            event_id: input
-                .mutations
-                .iter()
-                .find(|mutation| mutation.unknown_dirty)
-                .map(|mutation| mutation.event_id.clone()),
+            event_id: unknown_dirty_mutation.map(|mutation| mutation.event_id.clone()),
         });
         required_actions.push(RequiredAction::ResolveUnknownDirty);
         return finalize_new_run(

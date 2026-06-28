@@ -479,7 +479,7 @@ fn verification_audit_label_helpers_cover_all_variants() {
         ),
         (
             sigil_kernel::RequiredAction::ResolveUnknownDirty,
-            "resolve unknown workspace change",
+            "refresh source or run check",
         ),
         (
             sigil_kernel::RequiredAction::ProvideVerificationConfig,
@@ -537,6 +537,11 @@ fn verification_audit_label_helpers_cover_all_variants() {
         sigil_kernel::ReadinessReason::VerificationSkipped {
             event_id: "event-a".to_owned(),
         },
+        sigil_kernel::ReadinessReason::WorkspaceMutationSource {
+            event_id: "event-a".to_owned(),
+            source_label: "MCP server docs".to_owned(),
+            recovery_hint: Some("refresh MCP or run check".to_owned()),
+        },
         sigil_kernel::ReadinessReason::WorkspaceUnknownDirty { event_id: None },
         sigil_kernel::ReadinessReason::WorkspaceUnknownDirty {
             event_id: Some("event-a".to_owned()),
@@ -553,6 +558,14 @@ fn verification_audit_label_helpers_cover_all_variants() {
     ] {
         assert!(!readiness_reason_label(&reason).is_empty());
     }
+    assert_eq!(
+        readiness_reason_label(&sigil_kernel::ReadinessReason::WorkspaceMutationSource {
+            event_id: "event-a".to_owned(),
+            source_label: "MCP server docs".to_owned(),
+            recovery_hint: Some("refresh MCP or run check".to_owned()),
+        }),
+        "MCP server docs: refresh MCP or run check"
+    );
 
     for (trust, label) in [
         (sigil_kernel::WorkspaceTrust::Unknown, "unknown"),

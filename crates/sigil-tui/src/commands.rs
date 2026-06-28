@@ -12,7 +12,6 @@ pub(crate) enum UiCommand {
     OpenConfig,
     OpenDoctor,
     StartNewSession,
-    TrustWorkspace,
     CompactNow,
     CycleAgentView,
     CycleAgentViewPrevious,
@@ -118,14 +117,6 @@ pub(crate) const COMMAND_SPECS: &[UiCommandSpec] = &[
         slash: Some("/new"),
         label: "New session",
         help: "Start a fresh session.",
-        surface: CommandSurface::Slash,
-    },
-    UiCommandSpec {
-        command: UiCommand::TrustWorkspace,
-        keys: &[],
-        slash: Some("/trust-workspace"),
-        label: "Trust workspace",
-        help: "Trust this workspace for repository-local verification discovery.",
         surface: CommandSurface::Slash,
     },
     UiCommandSpec {

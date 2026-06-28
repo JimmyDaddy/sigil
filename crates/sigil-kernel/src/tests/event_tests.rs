@@ -27,8 +27,8 @@ use crate::{
     ProviderContinuationState, PublicControlEvent, PublicRunEvent, PublicRunEventKind,
     ReadinessEvaluatedEntry, ReadinessEvaluation, ReasoningEffort, ReceiptStatus, RedactionState,
     ReducerDisposition, RequiredAction, ResponseHandle, RunEvent, RunStatus,
-    SandboxProfileRequirement, SessionRef, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
-    SkillRunMode, SkillSource, SkillTrustState, StoredEvent, StoredEventDecode,
+    SandboxProfileRequirement, SessionLogEntry, SessionRef, SkillDescriptor, SkillIndexSnapshot,
+    SkillLoadEntry, SkillRunMode, SkillSource, SkillTrustState, StoredEvent, StoredEventDecode,
     TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
     TaskPlanEntry, TaskPlanStatus, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
     TaskStepEntry, TaskStepId, TaskStepStatus, TaskSubagentApprovalRouteEntry,
@@ -36,13 +36,14 @@ use crate::{
     TerminalTaskStatus, ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolCall,
     ToolCategory, ToolEffect, ToolEgressEntry, ToolExecutionEntry, ToolExecutionStatus,
     ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, UsageStats, VerificationBinding,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
-    VerificationScope, VerificationVerdict, VisibleCompletionState, WorkspaceRootSnapshot,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, decode_stored_event,
-    is_transient_run_event, projection_apply_decision, projection_apply_decision_for_record,
-    reducer_disposition,
+    ToolResultMeta, ToolSpec, ToolSubject, TypedDomainEvent, TypedStoredEventDecode, UsageStats,
+    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
+    VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationVerdict,
+    VisibleCompletionState, WorkspaceMutationDetected, WorkspaceMutationDetectionReason,
+    WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
+    decode_stored_event, decode_typed_stored_event, is_transient_run_event,
+    projection_apply_decision, projection_apply_decision_for_record, reducer_disposition,
 };
 
 #[test]
@@ -230,6 +231,48 @@ fn stored_event_unknown_class_rules_fail_closed_when_required() {
 }
 
 #[test]
+fn typed_stored_event_decode_handles_unknown_and_legacy_boundaries() {
+    let unknown = StoredEvent::new_raw(
+        "new_noncritical_event",
+        EventClass::NonCritical,
+        "event-unknown-typed".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({"value": 1}),
+    )
+    .expect("non-critical unknown event should serialize");
+    let decoded = decode_typed_stored_event(unknown).expect("non-critical unknown should decode");
+    assert!(matches!(
+        decoded,
+        TypedStoredEventDecode::UnknownNonCritical(_)
+    ));
+
+    let critical = StoredEvent::new_raw(
+        "new_critical_event",
+        EventClass::Critical,
+        "event-critical-typed".to_owned(),
+        "session-1".to_owned(),
+        2,
+        json!({"value": 1}),
+    )
+    .expect("critical unknown event should serialize");
+    let error = decode_typed_stored_event(critical).expect_err("critical unknown should fail");
+    assert!(error.to_string().contains("unknown critical event"));
+
+    let legacy = StoredEvent::new_raw(
+        DurableEventType::Legacy.as_str(),
+        EventClass::Critical,
+        "event-legacy-typed".to_owned(),
+        "session-1".to_owned(),
+        3,
+        json!({}),
+    )
+    .expect("legacy event envelope can be constructed for decode validation");
+    let error = decode_typed_stored_event(legacy).expect_err("legacy should not decode from v2");
+    assert!(error.to_string().contains("upcast-only"));
+}
+
+#[test]
 fn stored_event_rejects_missing_event_type_and_unknown_critical_on_wire() {
     let missing_event_type = json!({
         "schema_version": 1,
@@ -336,6 +379,297 @@ fn stored_event_decode_returns_strong_domain_event_variant() {
 }
 
 #[test]
+fn typed_event_decode_covers_mutation_and_verification_family() {
+    let prepared = StoredEvent::new(
+        DurableEventType::MutationPrepared,
+        EventClass::Critical,
+        "event-mutation-prepared".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({
+            "operation_id": "op-1",
+            "tool_call_id": "tool-call-1",
+            "causation_event_id": "event-tool-started",
+            "subject": { "file": { "path": "src/lib.rs", "file_type": "file" } },
+            "before_hash": "sha256:before",
+            "intended_after_hash": "sha256:after",
+            "snapshot_coverage": { "no_prior_content": null },
+            "workspace_id": "workspace-1",
+            "base_workspace_revision": 1,
+            "sync_class": "recovery_critical"
+        }),
+    )
+    .expect("mutation prepared event should build");
+
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(prepared).expect("typed mutation should decode")
+    else {
+        panic!("expected typed mutation prepared");
+    };
+    let TypedDomainEvent::MutationPrepared(payload) = *event else {
+        panic!("expected typed mutation prepared");
+    };
+    assert_eq!(payload.operation_id, "op-1");
+
+    let check = event_check_spec();
+    let run = VerificationCheckRunEntry::new(
+        "run-1".to_owned(),
+        EvidenceScope::Task("task-1".to_owned()),
+        &check,
+        VerificationCheckRunStatus::Queued,
+    );
+    let run_event = stored_control_event(
+        DurableEventType::VerificationCheckRun,
+        ControlEntry::VerificationCheckRun(run),
+        2,
+    );
+
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(run_event).expect("typed check run should decode")
+    else {
+        panic!("expected typed verification check run");
+    };
+    let TypedDomainEvent::VerificationCheckRun(run) = *event else {
+        panic!("expected typed verification check run");
+    };
+    assert_eq!(run.run_id, "run-1");
+
+    let receipt = VerificationReceipt {
+        receipt: EvidenceReceipt {
+            receipt_id: "receipt-1".to_owned(),
+            source_session_id: "session-1".to_owned(),
+            source_event_id: "event-check".to_owned(),
+            source_event_type: DurableEventType::CheckFinished.as_str().to_owned(),
+            scope: EvidenceScope::Task("task-1".to_owned()),
+            producer_tool_call: None,
+            workspace_revision: Some(1),
+            workspace_snapshot_id: Some("snapshot-1".to_owned()),
+            policy_hash: Some("policy-1".to_owned()),
+            changeset_id: None,
+            status: ReceiptStatus::Succeeded,
+            artifact_refs: Vec::new(),
+            redaction_state: RedactionState::None,
+            recorded_at_stream_sequence: 2,
+        },
+        check_spec_id: check.check_spec_id,
+        check_status: ReceiptStatus::Succeeded,
+        binding: VerificationBinding {
+            workspace_id: "workspace-1".to_owned(),
+            workspace_snapshot_id: "snapshot-1".to_owned(),
+            verification_scope_hash: "scope-main".to_owned(),
+            check_spec_hash: "check-hash".to_owned(),
+            environment_fingerprint: "env-1".to_owned(),
+            sandbox_profile_hash: "sandbox-1".to_owned(),
+            workspace_trust_snapshot_id: "trust-1".to_owned(),
+            approval_event_id: None,
+            sandbox_decision_id: None,
+        },
+        failure_reason: None,
+        mutates_verification_scope: false,
+    };
+    let recorded_event = stored_control_event(
+        DurableEventType::VerificationRecorded,
+        ControlEntry::VerificationRecorded(VerificationRecordedEntry { receipt }),
+        3,
+    );
+
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(recorded_event).expect("typed receipt should decode")
+    else {
+        panic!("expected typed verification receipt");
+    };
+    let TypedDomainEvent::VerificationRecorded(recorded) = *event else {
+        panic!("expected typed verification receipt");
+    };
+    assert_eq!(recorded.receipt.receipt.receipt_id, "receipt-1");
+
+    let detected = WorkspaceMutationDetected {
+        operation_id: "op-detected".to_owned(),
+        tool_call_id: Some("tool-call-bash".to_owned()),
+        tool_name: "bash".to_owned(),
+        tool_effect: ToolEffect::Unknown,
+        workspace_id: "workspace-1".to_owned(),
+        scope_hash: "scope-main".to_owned(),
+        from_workspace_snapshot_id: Some("snapshot-before".to_owned()),
+        to_workspace_snapshot_id: None,
+        base_workspace_revision: 3,
+        workspace_revision: 4,
+        reason: WorkspaceMutationDetectionReason::ScanUnavailable,
+        unknown_dirty: true,
+    };
+    let detected_event = StoredEvent::new(
+        DurableEventType::WorkspaceMutationDetected,
+        EventClass::Critical,
+        "event-workspace-mutation".to_owned(),
+        "session-1".to_owned(),
+        4,
+        serde_json::to_value(&detected).expect("workspace mutation serializes"),
+    )
+    .expect("workspace mutation event should build");
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(detected_event).expect("workspace mutation should decode")
+    else {
+        panic!("expected typed workspace mutation detected");
+    };
+    let TypedDomainEvent::WorkspaceMutationDetected(payload) = *event else {
+        panic!("expected typed workspace mutation detected");
+    };
+    assert_eq!(payload.operation_id, "op-detected");
+}
+
+#[test]
+fn typed_event_decode_covers_task_agent_terminal_and_changeset_family() {
+    let task_event = stored_control_event(
+        DurableEventType::TaskStatusChanged,
+        ControlEntry::TaskRun(task_run_entry()),
+        1,
+    );
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(task_event).expect("task event decodes")
+    else {
+        panic!("expected typed task event");
+    };
+    assert!(matches!(
+        *event,
+        TypedDomainEvent::TaskStatusChanged(ControlEntry::TaskRun(_))
+    ));
+
+    let agent_event = stored_control_event(
+        DurableEventType::SessionEntryRecorded,
+        ControlEntry::AgentThreadStarted(AgentThreadStartedEntry {
+            thread_id: agent_thread_id(),
+            parent_thread_id: Some(AgentThreadId::new("main").expect("valid thread id")),
+            parent_session_ref: session_ref(),
+            thread_session_ref: agent_session_ref(),
+            profile_id: agent_profile_id(),
+            profile_snapshot_id: agent_snapshot_id(),
+            run_context: agent_run_context(),
+            objective: "inspect kernel".to_owned(),
+            prompt_hash: "sha256:prompt".to_owned(),
+            invocation_mode: AgentInvocationMode::Foreground,
+            invocation_source: AgentInvocationSource::Chat,
+            display_name: Some("kernel map".to_owned()),
+            created_at_ms: Some(42),
+        }),
+        2,
+    );
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(agent_event).expect("agent event decodes")
+    else {
+        panic!("expected typed agent event");
+    };
+    assert!(matches!(
+        *event,
+        TypedDomainEvent::AgentThread(ControlEntry::AgentThreadStarted(_))
+    ));
+
+    let terminal_event = stored_control_event(
+        DurableEventType::SessionEntryRecorded,
+        ControlEntry::TerminalTask(sample_terminal_task_entry()),
+        3,
+    );
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(terminal_event).expect("terminal event decodes")
+    else {
+        panic!("expected typed terminal event");
+    };
+    assert!(matches!(*event, TypedDomainEvent::TerminalTask(_)));
+
+    let changeset_event = stored_control_event(
+        DurableEventType::SessionEntryRecorded,
+        ControlEntry::ChangeSetProposed(sample_change_set()),
+        4,
+    );
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(changeset_event).expect("changeset event decodes")
+    else {
+        panic!("expected typed changeset event");
+    };
+    assert!(matches!(*event, TypedDomainEvent::ChangeSetProposed(_)));
+
+    let changeset_applied_event = stored_control_event(
+        DurableEventType::SessionEntryRecorded,
+        ControlEntry::ChangeSetApplied(ChangeSetResult {
+            id: ChangeSetId::new("change-1").expect("valid change set id"),
+            status: ChangeSetResultStatus::Applied,
+            file_results: Vec::new(),
+            message: None,
+        }),
+        5,
+    );
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(changeset_applied_event).expect("changeset result decodes")
+    else {
+        panic!("expected typed changeset applied");
+    };
+    assert!(matches!(
+        *event,
+        TypedDomainEvent::ChangeSetApplied(ChangeSetResult {
+            status: ChangeSetResultStatus::Applied,
+            ..
+        })
+    ));
+
+    let check = event_check_spec();
+    let run = VerificationCheckRunEntry::new(
+        "run-non-task".to_owned(),
+        EvidenceScope::Task("task-1".to_owned()),
+        &check,
+        VerificationCheckRunStatus::Queued,
+    );
+    let non_task_status_event = stored_control_event(
+        DurableEventType::TaskStatusChanged,
+        ControlEntry::VerificationCheckRun(run),
+        6,
+    );
+    let error = decode_typed_stored_event(non_task_status_event)
+        .expect_err("task status event should reject non-task control payload");
+    assert!(error.to_string().contains("non-task control payload"));
+}
+
+#[test]
+fn typed_event_decode_covers_other_event_fallbacks() {
+    let command_event = StoredEvent::new(
+        DurableEventType::CommandFinished,
+        EventClass::Critical,
+        "event-command-finished".to_owned(),
+        "session-1".to_owned(),
+        1,
+        json!({"command": "cargo test"}),
+    )
+    .expect("command finished event should build");
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(command_event).expect("command event should decode")
+    else {
+        panic!("expected typed other event");
+    };
+    assert!(matches!(
+        *event,
+        TypedDomainEvent::Other(DurableDomainEvent::CommandFinished(_))
+    ));
+
+    let session_entry_without_control = StoredEvent::new(
+        DurableEventType::SessionEntryRecorded,
+        EventClass::NonCritical,
+        "event-session-entry-other".to_owned(),
+        "session-1".to_owned(),
+        2,
+        json!({"not_session_log_entry": true}),
+    )
+    .expect("session entry event should build");
+    let TypedStoredEventDecode::Known(event) =
+        decode_typed_stored_event(session_entry_without_control)
+            .expect("session entry fallback should decode")
+    else {
+        panic!("expected typed other event");
+    };
+    assert!(matches!(
+        *event,
+        TypedDomainEvent::Other(DurableDomainEvent::SessionEntryRecorded(_))
+    ));
+}
+
+#[test]
 fn stored_event_decode_rejects_legacy_stored_event() {
     let event = StoredEvent::new_raw(
         DurableEventType::Legacy.as_str(),
@@ -406,6 +740,16 @@ fn stored_event_decode_covers_every_known_domain_variant() {
         .and_then(|payload| payload.payload.get("event_type"))
         .and_then(|value| value.as_str()),
         Some(DurableEventType::CheckFinished.as_str())
+    );
+    assert_eq!(
+        DurableDomainEvent::MutationArtifactCleanupRequested(crate::event::DomainPayload {
+            event_version: 1,
+            payload: json!({
+                "event_type": DurableEventType::MutationArtifactCleanupRequested.as_str()
+            }),
+        })
+        .event_type(),
+        DurableEventType::MutationArtifactCleanupRequested
     );
 }
 
@@ -1602,6 +1946,53 @@ fn event_check_spec() -> CheckSpec {
     )
 }
 
+fn stored_control_event(
+    event_type: DurableEventType,
+    control: ControlEntry,
+    stream_sequence: u64,
+) -> StoredEvent {
+    StoredEvent::new(
+        event_type,
+        event_type
+            .expected_event_class()
+            .expect("known durable event type should have expected class"),
+        format!("event-{}", stream_sequence),
+        "session-1".to_owned(),
+        stream_sequence,
+        json!({ "session_log_entry": SessionLogEntry::Control(control) }),
+    )
+    .expect("control event should build")
+}
+
+fn sample_terminal_task_entry() -> TerminalTaskEntry {
+    TerminalTaskEntry {
+        handle: TerminalTaskHandle {
+            task_id: TerminalTaskId::new("terminal-1").expect("valid terminal task id"),
+            command: "cargo test".to_owned(),
+            cwd: ".".into(),
+            shell: "zsh".to_owned(),
+            log_path: ".sigil/terminal/terminal-1/output.log".into(),
+            created_at_ms: 100,
+        },
+        status: TerminalTaskStatus::Running,
+        output_preview: Some("running".to_owned()),
+        output_hash: Some("sha256:abc".to_owned()),
+        output_truncated: false,
+        updated_at_ms: 120,
+    }
+}
+
+fn sample_change_set() -> ChangeSet {
+    ChangeSet {
+        id: ChangeSetId::new("change-1").expect("valid change set id"),
+        title: "Update README".to_owned(),
+        summary: "Update project overview".to_owned(),
+        risk: ChangeSetRisk::Low,
+        files: Vec::new(),
+        validations: Vec::new(),
+    }
+}
+
 fn event_verification_policy() -> VerificationPolicy {
     VerificationPolicy {
         required_checks: vec![event_check_spec()],
@@ -1611,6 +2002,7 @@ fn event_verification_policy() -> VerificationPolicy {
         workspace_trust_requirement: WorkspaceTrustRequirement::None,
         allow_unverified_completion: false,
         timeout_ms: None,
+        auto_run: VerificationAutoRunPolicy::Manual,
     }
 }
 

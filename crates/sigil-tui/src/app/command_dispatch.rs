@@ -121,7 +121,6 @@ impl AppState {
             | UiCommand::OpenConfig
             | UiCommand::OpenDoctor
             | UiCommand::StartNewSession
-            | UiCommand::TrustWorkspace
             | UiCommand::CompactNow
             | UiCommand::CycleAgentView
             | UiCommand::CycleAgentViewPrevious

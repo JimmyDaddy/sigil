@@ -34,8 +34,9 @@ use crate::{
     event::{
         DomainEvent, DurableEventType, EventClass, EventSyncClass, LegacyEvent,
         ProjectionApplyDecision, ProjectionCursor, StoredEvent, StoredEventDecode,
-        decode_stored_event, is_v2_stored_event_value, projection_apply_decision_for_record,
-        stable_event_hash, stable_event_uuid,
+        TypedDomainEvent, TypedStoredEventDecode, decode_stored_event, decode_typed_stored_event,
+        is_v2_stored_event_value, projection_apply_decision_for_record, stable_event_hash,
+        stable_event_uuid,
     },
     memory::{apply_memory_report, materialize_memory},
     mutation::{ExecutionMutationProfile, MutationEventRecorder},
@@ -147,6 +148,20 @@ impl SessionStreamRecord {
             cursor: self.projection_cursor(SESSION_ENTRY_PROJECTION_SCHEMA_VERSION),
         }))
     }
+
+    pub fn typed_domain_event_record(&self) -> Result<Option<TypedDomainEventRecord>> {
+        let Self::Stored(event) = self else {
+            return Ok(None);
+        };
+        let typed_event = match decode_typed_stored_event(event.clone())? {
+            TypedStoredEventDecode::Known(event) => Some(*event),
+            TypedStoredEventDecode::UnknownNonCritical(_) => None,
+        };
+        Ok(typed_event.map(|event| TypedDomainEventRecord {
+            event,
+            cursor: self.projection_cursor(SESSION_ENTRY_PROJECTION_SCHEMA_VERSION),
+        }))
+    }
 }
 
 pub const SESSION_ENTRY_PROJECTION_SCHEMA_VERSION: u16 = 1;
@@ -168,6 +183,13 @@ pub const VERIFICATION_STATE_PROJECTION_SCHEMA_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq)]
 pub struct DomainEventRecord {
     pub event: DomainEvent,
+    pub cursor: ProjectionCursor,
+}
+
+/// One strongly typed reducer-facing v2 event plus the cursor position proving its source.
+#[derive(Debug, Clone)]
+pub struct TypedDomainEventRecord {
+    pub event: TypedDomainEvent,
     pub cursor: ProjectionCursor,
 }
 

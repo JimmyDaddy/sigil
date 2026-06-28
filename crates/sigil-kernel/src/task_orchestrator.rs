@@ -15,9 +15,9 @@ use crate::{
     MutationReconciled, MutationResolution, Provider, ReadinessEvaluatedEntry, ReadinessInput,
     RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry, SessionStreamRecord,
     StoredEvent, ToolApproval, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResultMeta,
-    ToolSpec, VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
-    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationVerdict,
-    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    ToolSpec, VerificationAutoRunPolicy, VerificationCheckRunEntry, VerificationCheckRunRequest,
+    VerificationCheckRunStatus, VerificationPolicy, VerificationReceipt, VerificationScope,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
     WorkspaceMutationEvidence, WorkspaceTrust, build_workspace_snapshot_for_event,
     evaluate_readiness, run_verification_check,
     session::ControlEntry,
@@ -384,6 +384,8 @@ where
             )
             .await?;
             if initial_status == TaskStepStatus::Completed
+                && task_step_auto_run_policy(session, &request, &step, &step_options)?
+                    == VerificationAutoRunPolicy::TrustedOnly
                 && run_task_step_verification_checks(
                     session,
                     handler,
@@ -605,6 +607,8 @@ where
         )
         .await?;
         if initial_status == TaskStepStatus::Completed
+            && task_step_auto_run_policy(session, &request, &step, &readiness_options)?
+                == VerificationAutoRunPolicy::TrustedOnly
             && run_task_step_verification_checks(
                 session,
                 handler,
@@ -1029,17 +1033,20 @@ where
     let projection = session.verification_state_projection();
     let step_scope = task_step_evidence_scope(&request.task_id, &step.step_id);
     let task_scope = EvidenceScope::Task(request.task_id.as_str().to_owned());
+    let workspace_id = stable_workspace_id(&options.workspace_root)?;
+    let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
     let policy_entry = projection
         .latest_policy(&step_scope)
         .or_else(|| projection.latest_policy(&task_scope));
     let policy = policy_entry
         .map(|entry| entry.policy.clone())
-        .unwrap_or_else(|| task_step_default_policy(&projection, &step_scope, &task_scope));
+        .unwrap_or_else(|| {
+            task_step_default_policy(&projection, &step_scope, &task_scope, &workspace_scope)
+        });
     let policy_hash = match policy_entry {
         Some(entry) => Some(entry.policy_hash.clone()),
         None => Some(policy.stable_hash()?),
     };
-    let workspace_id = stable_workspace_id(&options.workspace_root)?;
     let trust_entry = projection.workspace_trust.get(&workspace_id);
     let workspace_trust = trust_entry
         .map(|entry| entry.trust)
@@ -1047,7 +1054,7 @@ where
     let workspace_trust_snapshot_id = trust_entry
         .map(|entry| entry.workspace_trust_snapshot_id.clone())
         .unwrap_or_else(|| "unknown".to_owned());
-    let scopes = [step_scope.clone(), task_scope];
+    let scopes = [step_scope.clone(), task_scope, workspace_scope];
     for check_id in check_ids {
         let check_entry = scopes
             .iter()
@@ -1144,6 +1151,27 @@ where
     Ok(true)
 }
 
+fn task_step_auto_run_policy(
+    session: &Session,
+    request: &SequentialTaskRequest,
+    step: &TaskStepSpec,
+    options: &AgentRunOptions,
+) -> Result<VerificationAutoRunPolicy> {
+    let projection = session.verification_state_projection();
+    let step_scope = task_step_evidence_scope(&request.task_id, &step.step_id);
+    let task_scope = EvidenceScope::Task(request.task_id.as_str().to_owned());
+    let workspace_id = stable_workspace_id(&options.workspace_root)?;
+    let workspace_scope = EvidenceScope::Workspace(workspace_id);
+    Ok(projection
+        .latest_policy(&step_scope)
+        .or_else(|| projection.latest_policy(&task_scope))
+        .map(|entry| entry.policy.auto_run)
+        .unwrap_or_else(|| {
+            task_step_default_policy(&projection, &step_scope, &task_scope, &workspace_scope)
+                .auto_run
+        }))
+}
+
 fn task_step_readiness(
     session: &Session,
     request: &SequentialTaskRequest,
@@ -1154,6 +1182,8 @@ fn task_step_readiness(
 ) -> Result<ReadinessEvaluatedEntry> {
     let scope = task_step_evidence_scope(&request.task_id, &step.step_id);
     let task_scope = EvidenceScope::Task(request.task_id.as_str().to_owned());
+    let workspace_id = stable_workspace_id(&options.workspace_root)?;
+    let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
     let projection = session.verification_state_projection();
     let source_stream_sequence = session.next_stream_sequence_hint().unwrap_or(1);
     let mut policy = projection
@@ -1164,7 +1194,9 @@ fn task_step_readiness(
                 .latest_policy(&task_scope)
                 .map(|entry| entry.policy.clone())
         })
-        .unwrap_or_else(|| task_step_default_policy(&projection, &scope, &task_scope));
+        .unwrap_or_else(|| {
+            task_step_default_policy(&projection, &scope, &task_scope, &workspace_scope)
+        });
     let baseline_policy_hash = policy.stable_hash()?;
     let latest_successful_verification_sequence = latest_relevant_successful_verification_sequence(
         &projection,
@@ -1196,12 +1228,17 @@ fn task_step_readiness(
     }
     let policy_hash = policy.stable_hash()?;
     let mut input = ReadinessInput::new_run(run_status_from_step_status(status), policy);
-    let workspace_id = stable_workspace_id(&options.workspace_root)?;
     input.workspace_trust = projection
         .workspace_trust
         .get(&workspace_id)
         .map(|entry| entry.trust)
         .unwrap_or(WorkspaceTrust::Unknown);
+    let trust_ids = check_scope_trust_ids(
+        &projection,
+        &[scope.clone(), task_scope.clone(), workspace_scope.clone()],
+    );
+    input.workspace_trust_approval_event_id = trust_ids.approval_event_id;
+    input.workspace_trust_sandbox_decision_id = trust_ids.sandbox_decision_id;
     if step_has_workspace_mutation {
         let snapshot_event_id = format!(
             "readiness-snapshot:{}:{}",
@@ -1348,9 +1385,14 @@ fn task_step_default_policy(
     projection: &crate::VerificationStateProjection,
     step_scope: &EvidenceScope,
     task_scope: &EvidenceScope,
+    workspace_scope: &EvidenceScope,
 ) -> VerificationPolicy {
     let check_entries = projection
-        .check_specs_for_scopes(&[step_scope.clone(), task_scope.clone()])
+        .check_specs_for_scopes(&[
+            step_scope.clone(),
+            task_scope.clone(),
+            workspace_scope.clone(),
+        ])
         .into_iter()
         .collect::<Vec<_>>();
     let checks = check_entries
@@ -1360,16 +1402,7 @@ fn task_step_default_policy(
     if checks.is_empty() {
         return VerificationPolicy::no_checks_required(task_step_verification_scope_hash());
     }
-    let workspace_trust_requirement = if check_entries.iter().any(|entry| {
-        matches!(
-            entry.trusted_check.promoted_by,
-            CheckPromotion::WorkspaceTrusted { .. }
-        )
-    }) {
-        crate::WorkspaceTrustRequirement::Trusted
-    } else {
-        crate::WorkspaceTrustRequirement::None
-    };
+    let workspace_trust_requirement = check_entries_workspace_trust_requirement(&check_entries);
     VerificationPolicy {
         required_checks: checks,
         completion_criteria: CompletionCriteria::AllRequiredChecks,
@@ -1378,7 +1411,53 @@ fn task_step_default_policy(
         workspace_trust_requirement,
         allow_unverified_completion: false,
         timeout_ms: None,
+        auto_run: crate::VerificationAutoRunPolicy::Manual,
     }
+}
+
+struct CheckScopeTrustIds {
+    approval_event_id: Option<String>,
+    sandbox_decision_id: Option<String>,
+}
+
+fn check_scope_trust_ids(
+    projection: &crate::VerificationStateProjection,
+    scopes: &[EvidenceScope],
+) -> CheckScopeTrustIds {
+    let mut approval_event_id = None;
+    let mut sandbox_decision_id = None;
+    for entry in projection.check_specs_for_scopes(scopes) {
+        approval_event_id =
+            approval_event_id.or_else(|| entry.trusted_check.approval_event_id.clone());
+        sandbox_decision_id =
+            sandbox_decision_id.or_else(|| entry.trusted_check.sandbox_decision_id.clone());
+    }
+    CheckScopeTrustIds {
+        approval_event_id,
+        sandbox_decision_id,
+    }
+}
+
+fn check_entries_workspace_trust_requirement(
+    check_entries: &[&crate::CheckSpecRecordedEntry],
+) -> crate::WorkspaceTrustRequirement {
+    if check_entries.iter().any(|entry| {
+        matches!(
+            entry.trusted_check.promoted_by,
+            CheckPromotion::WorkspaceTrusted { .. }
+        )
+    }) {
+        return crate::WorkspaceTrustRequirement::Trusted;
+    }
+    if check_entries.iter().any(|entry| {
+        matches!(
+            entry.trusted_check.promoted_by,
+            CheckPromotion::UserApproved { .. } | CheckPromotion::Sandboxed { .. }
+        )
+    }) {
+        return crate::WorkspaceTrustRequirement::ApprovalOrSandbox;
+    }
+    crate::WorkspaceTrustRequirement::None
 }
 
 fn relevant_verification_receipts(
@@ -1474,6 +1553,8 @@ fn durable_workspace_mutation_evidence(
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id,
                         source_event_type: DurableEventType::MutationCommitted.as_str().to_owned(),
+                        source_label: None,
+                        recovery_hint: None,
                         scope_hash: scope.scope_hash.clone(),
                         recorded_at_stream_sequence: event.stream_sequence,
                         from_workspace_snapshot_id: None,
@@ -1498,6 +1579,8 @@ fn durable_workspace_mutation_evidence(
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id,
                         source_event_type: DurableEventType::MutationReconciled.as_str().to_owned(),
+                        source_label: None,
+                        recovery_hint: None,
                         scope_hash: scope.scope_hash.clone(),
                         recorded_at_stream_sequence: event.stream_sequence,
                         from_workspace_snapshot_id: None,
@@ -1524,6 +1607,8 @@ fn durable_workspace_mutation_evidence(
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id,
                         source_event_type: DurableEventType::CheckpointRestored.as_str().to_owned(),
+                        source_label: None,
+                        recovery_hint: None,
                         scope_hash: scope.scope_hash.clone(),
                         recorded_at_stream_sequence: event.stream_sequence,
                         from_workspace_snapshot_id: None,
@@ -1544,24 +1629,19 @@ fn durable_workspace_mutation_evidence(
                         ) {
                             return None;
                         }
-                        return Some(WorkspaceMutationEvidence {
-                            event_id: event.event_id,
-                            source_event_type: DurableEventType::WorkspaceMutationDetected
-                                .as_str()
-                                .to_owned(),
-                            scope_hash: payload.scope_hash,
-                            recorded_at_stream_sequence: event.stream_sequence,
-                            from_workspace_snapshot_id: payload.from_workspace_snapshot_id,
-                            to_workspace_snapshot_id: payload.to_workspace_snapshot_id,
-                            tool_effect: payload.tool_effect,
-                            unknown_dirty: payload.unknown_dirty,
-                        });
+                        return Some(WorkspaceMutationEvidence::from_detected_event(
+                            event.event_id,
+                            event.stream_sequence,
+                            payload,
+                        ));
                     }
                     Some(WorkspaceMutationEvidence {
                         event_id: event.event_id,
                         source_event_type: DurableEventType::WorkspaceMutationDetected
                             .as_str()
                             .to_owned(),
+                        source_label: None,
+                        recovery_hint: None,
                         scope_hash: scope.scope_hash.clone(),
                         recorded_at_stream_sequence: event.stream_sequence,
                         from_workspace_snapshot_id: None,
@@ -1709,6 +1789,8 @@ fn running_profile_evidence(
     WorkspaceMutationEvidence {
         event_id: running.event_id.clone(),
         source_event_type: source_event_type.to_owned(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash,
         recorded_at_stream_sequence: running.stream_sequence,
         from_workspace_snapshot_id: running.profile.pre_execution_snapshot_id.clone(),
@@ -1768,6 +1850,8 @@ fn merge_workspace_mutation_evidence(
     WorkspaceMutationEvidence {
         event_id: event.event_id.clone(),
         source_event_type: event.event_type.clone(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash: scope.scope_hash.clone(),
         recorded_at_stream_sequence: event.stream_sequence,
         from_workspace_snapshot_id,
@@ -1835,6 +1919,8 @@ fn changed_files_mutation_evidence(
             step.step_id.as_str()
         ),
         source_event_type: "task_step_changed_files".to_owned(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash: scope_hash.to_owned(),
         recorded_at_stream_sequence,
         from_workspace_snapshot_id: from_workspace_snapshot_id.map(str::to_owned),
@@ -1857,6 +1943,8 @@ fn durable_mutation_replay_failed_evidence(
             step.step_id.as_str()
         ),
         source_event_type: "durable_mutation_replay_failed".to_owned(),
+        source_label: None,
+        recovery_hint: None,
         scope_hash: scope_hash.to_owned(),
         recorded_at_stream_sequence,
         from_workspace_snapshot_id: None,

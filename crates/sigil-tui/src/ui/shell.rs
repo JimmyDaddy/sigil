@@ -30,7 +30,7 @@ use super::{
 
 pub fn render(frame: &mut Frame, app: &AppState) {
     let theme = theme::resolve_for_app(app);
-    if app.is_setup_mode() {
+    if app.is_setup_mode() || app.is_workspace_trust_gate_mode() {
         render_setup(frame, app);
         return;
     }
@@ -141,16 +141,29 @@ fn footer_context_width(footer: &FooterViewModel, available_width: u16) -> u16 {
 pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
     let current_theme = theme::resolve_for_app(app);
     let palette = &current_theme.palette;
-    if app.is_setup_mode() {
+    if app.is_setup_mode() || app.is_workspace_trust_gate_mode() {
+        let (mode_title, mode_subtitle, default_notice) = if app.is_workspace_trust_gate_mode() {
+            (
+                " Workspace trust ",
+                " review workspace ",
+                "press Enter to trust, Ctrl-C to quit",
+            )
+        } else {
+            (
+                " Sigil setup ",
+                " quick setup ",
+                "trust folder, set auth, save",
+            )
+        };
         let title = Line::from(vec![
             Span::styled(
-                " Sigil setup ",
+                mode_title,
                 Style::default()
                     .fg(palette.button_selected_fg)
                     .bg(palette.button_selected_bg)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" quick setup "),
+            Span::raw(mode_subtitle),
         ]);
         let secondary = Line::from(vec![Span::raw(format!(
             "ws={}  cfg={}",
@@ -158,7 +171,7 @@ pub(super) fn render_status(frame: &mut Frame, area: Rect, app: &AppState) {
             short_path_label(&app.config_path)
         ))]);
         let tertiary = Line::from(vec![Span::styled(
-            app.last_notice().unwrap_or("trust folder, set auth, save"),
+            app.last_notice().unwrap_or(default_notice),
             Style::default().fg(palette.config_warning),
         )]);
         let paragraph = Paragraph::new(Text::from(vec![title, secondary, tertiary]))

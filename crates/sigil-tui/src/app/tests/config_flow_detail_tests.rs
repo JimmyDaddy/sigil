@@ -82,7 +82,7 @@ fn detail_helpers_cover_selection_rows_and_hint_rendering() {
     state.selected_section = ConfigSection::Mcp;
     state.selected_field = None;
     let mcp_details = render_config_selection_details(&state).join("\n");
-    assert!(mcp_details.contains("mcp: Ctrl-N add"));
+    assert!(mcp_details.contains("mcp: PgUp/PgDn server"));
 
     state.selected_section = ConfigSection::Agents;
     state.selected_field = None;
@@ -165,7 +165,7 @@ fn config_nav_and_paste_edges_cover_agents_skills_and_noops() {
     app.config_state
         .as_mut()
         .expect("config state should exist")
-        .selected_field = Some(ConfigField::McpName);
+        .selected_field = None;
     app.handle_config_paste_text("filesystem");
     assert_ne!(app.last_notice(), Some("updated name"));
 }
@@ -507,11 +507,9 @@ fn skill_detail_helpers_cover_edge_labels_and_prompts() {
     assert!(detail.contains("- Allowed tools: all"));
     assert!(detail.contains("- Disallowed tools: prefixes=mcp:"));
     assert!(detail.contains("- Paths: none"));
-    assert!(detail.contains("- Load: is disabled"));
-    assert!(detail.contains("- Invoke: is disabled"));
+    assert!(detail.contains("- Use: is disabled"));
     assert_eq!(skill_action_label(None), "available");
     assert_eq!(short_hash("123456789012"), "123456789012");
-    assert!(skill_load_prompt(&skill).contains("`review`"));
     assert!(skill_invoke_prompt(&skill, "  ").contains("No additional arguments"));
 
     skill.enabled = true;
@@ -605,7 +603,7 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
     let root_config = test_config();
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
 
-    let action = app.load_selected_skill()?;
+    let action = app.open_selected_skill_arguments()?;
     assert!(action.is_none());
     assert_eq!(app.last_notice(), Some("config is unavailable"));
 
@@ -637,7 +635,7 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
     app.is_busy = true;
     let action = app.open_selected_skill_arguments()?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
+    assert_eq!(app.last_notice(), Some("busy; use skill later"));
 
     app.is_busy = false;
     let action = app.open_selected_skill_arguments()?;
@@ -647,7 +645,7 @@ fn skill_action_methods_cover_guard_edges() -> Result<()> {
     app.is_busy = true;
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;
     assert!(action.is_none());
-    assert_eq!(app.last_notice(), Some("busy; invoke skill later"));
+    assert_eq!(app.last_notice(), Some("busy; use skill later"));
 
     app.is_busy = false;
     let action = app.submit_selected_skill_invocation("target module".to_owned())?;

@@ -28,12 +28,13 @@ use crate::{
     TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
     ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry, ToolExecutionEntry,
     ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
-    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats, VerificationBinding,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
-    VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
-    VerificationScope, VerificationStateProjection, VerificationVerdict, VisibleCompletionState,
-    WorkspaceMutationDetected, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WorkspaceTrustRequirement, provider::ModelMessage, stable_event_hash,
+    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats,
+    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
+    VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
+    VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot,
+    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, provider::ModelMessage,
+    stable_event_hash,
 };
 
 use super::{
@@ -111,6 +112,7 @@ fn sample_verification_policy() -> VerificationPolicy {
         workspace_trust_requirement: WorkspaceTrustRequirement::None,
         allow_unverified_completion: false,
         timeout_ms: Some(60_000),
+        auto_run: VerificationAutoRunPolicy::Manual,
     }
 }
 
@@ -2604,6 +2606,72 @@ fn task_projection_record_helper_fails_closed_on_unknown_critical_event() -> Res
     );
     assert!(projection.tasks.is_empty());
     assert!(cursor.is_none());
+    Ok(())
+}
+
+#[test]
+fn typed_domain_event_record_decodes_projection_cursor() -> Result<()> {
+    let event = StoredEvent::new(
+        DurableEventType::MutationCommitted,
+        EventClass::Critical,
+        "event-mutation-commit".to_owned(),
+        "session-typed".to_owned(),
+        7,
+        serde_json::json!({
+            "operation_id": "op-1",
+            "workspace_id": "workspace-1",
+            "observed_after_hash": "sha256:after",
+            "workspace_revision": 3,
+            "workspace_snapshot_id": "snapshot-3",
+            "committed_subject": {
+                "file": {
+                    "path": "README.md",
+                    "file_type": "file"
+                }
+            }
+        }),
+    )?;
+    let record = SessionStreamRecord::Stored(event);
+
+    let typed = record
+        .typed_domain_event_record()?
+        .expect("typed event should be exposed");
+
+    assert!(matches!(
+        typed.event,
+        TypedDomainEvent::MutationCommitted(ref payload)
+            if payload.operation_id == "op-1" && payload.workspace_revision == 3
+    ));
+    assert_eq!(typed.cursor.session_id, "session-typed");
+    assert_eq!(typed.cursor.last_applied_stream_sequence, 7);
+    assert_eq!(typed.cursor.last_applied_event_id, "event-mutation-commit");
+    Ok(())
+}
+
+#[test]
+fn typed_domain_event_record_ignores_legacy_and_unknown_noncritical() -> Result<()> {
+    let legacy = SessionStreamRecord::Legacy {
+        event: LegacyEvent {
+            event_id: "event-legacy".to_owned(),
+            session_id: "session-typed".to_owned(),
+            stream_sequence: 1,
+            raw_line_hash: "sha256:legacy".to_owned(),
+            payload: serde_json::json!({"legacy": true}),
+        },
+        entry: Box::new(SessionLogEntry::User(ModelMessage::user("legacy"))),
+    };
+    assert!(legacy.typed_domain_event_record()?.is_none());
+
+    let future = StoredEvent::new_raw(
+        "future_noncritical_event",
+        EventClass::NonCritical,
+        "event-future".to_owned(),
+        "session-typed".to_owned(),
+        2,
+        serde_json::json!({"value": "ignore"}),
+    )?;
+    let record = SessionStreamRecord::Stored(future);
+    assert!(record.typed_domain_event_record()?.is_none());
     Ok(())
 }
 

@@ -103,7 +103,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel => "Model ID",
             Self::ConfigField(field) => field.display_label(),
-            Self::SkillArguments => "Skill Arguments",
+            Self::SkillArguments => "Use Skill",
         }
     }
 
@@ -111,7 +111,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel => "Custom model id.",
             Self::ConfigField(field) => field.help_text(),
-            Self::SkillArguments => "Arguments passed to the selected skill invocation.",
+            Self::SkillArguments => "Optional instructions for how to use the selected skill.",
         }
     }
 
@@ -119,7 +119,7 @@ impl TextInputTarget {
         match self {
             Self::SetupModel => "model",
             Self::ConfigField(_) => "value",
-            Self::SkillArguments => "arguments",
+            Self::SkillArguments => "instructions",
         }
     }
 

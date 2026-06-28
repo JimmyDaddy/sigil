@@ -51,8 +51,12 @@ pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
         ])
         .split(outer[1]);
 
-    let detail = app
-        .setup_lines()
+    let (title, lines) = if app.is_workspace_trust_gate_mode() {
+        ("Workspace Trust", app.workspace_trust_gate_lines())
+    } else {
+        ("Setup", app.setup_lines())
+    };
+    let detail = lines
         .into_iter()
         .map(|line| render_setup_line_with_palette(&line, palette))
         .collect::<Vec<_>>();
@@ -60,7 +64,7 @@ pub(super) fn render_setup(frame: &mut Frame, app: &AppState) {
     let detail_widget = Paragraph::new(Text::from(detail))
         .block(
             Block::default()
-                .title("Setup")
+                .title(title)
                 .title_style(
                     Style::default()
                         .fg(palette.button_selected_fg)
@@ -1909,7 +1913,7 @@ fn render_setup_line_with_palette(line: &str, palette: &ThemePalette) -> Line<'s
     if line.starts_with("defaults:") {
         return Line::styled(line.to_owned(), Style::default().fg(palette.text_muted));
     }
-    if line == "Quick setup" {
+    if line == "Quick setup" || line == "Workspace trust" {
         return Line::styled(
             line.to_owned(),
             Style::default()
@@ -2430,7 +2434,7 @@ fn config_line_is_meta(line: &str) -> bool {
         "env:",
         "All unmatched",
         "No MCP servers",
-        "Ctrl-N",
+        "MCP:",
     ]
     .iter()
     .any(|prefix| line.starts_with(prefix))

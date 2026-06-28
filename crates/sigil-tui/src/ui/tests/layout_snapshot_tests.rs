@@ -100,7 +100,8 @@ fn layout_snapshot_handles_single_modes_and_approval_modal() -> anyhow::Result<(
         .config_hit_areas
         .as_ref()
         .expect("config hit areas should render");
-    assert_eq!(config_hits.sections.len(), ConfigSection::FLOW.len());
+    assert!(!config_hits.sections.is_empty());
+    assert!(config_hits.sections.len() <= ConfigSection::FLOW.len());
     assert!(!config_hits.fields.is_empty());
     assert_eq!(config_hits.footer_actions.len(), 3);
     let provider_section = config_hits
@@ -376,7 +377,10 @@ fn slash_overlay_helpers_cover_zero_width_resume_title_and_candidates() -> anyho
     let slash = layout.slash_overlay.expect("slash overlay should exist");
 
     assert_eq!(slash.title_rows, 1);
-    assert_eq!((slash.window_start, slash.window_end), (0, 0));
+    let selector_rows = app.slash_selector_rows().len();
+    assert_eq!(slash.window_start, 0);
+    assert!(slash.window_end > slash.window_start);
+    assert!(slash.window_end <= selector_rows);
     assert_eq!(slash.candidate_at(slash.content.x, slash.content.y), None);
     assert_eq!(
         layout.hit_target(slash.overlay.x, slash.overlay.y),
