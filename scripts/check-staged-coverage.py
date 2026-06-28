@@ -25,7 +25,7 @@ COVERAGE_IGNORE_RE = (
     re.compile(COVERAGE_IGNORE_FILENAME_REGEX) if COVERAGE_IGNORE_FILENAME_REGEX else None
 )
 RUST_ITEM_DECL_RE = re.compile(
-    r"^(?:pub(?:\([^)]+\))?\s+)?(?:struct|enum|union)\s+[A-Z][A-Za-z0-9_]*"
+    r"^(?:pub(?:\([^)]+\))?\s+)?(?:struct|enum|union|trait)\s+[A-Z][A-Za-z0-9_]*"
 )
 RUST_USE_DECL_RE = re.compile(r"^(?:pub(?:\([^)]+\))?\s+)?use\s+")
 RUST_CONST_DECL_RE = re.compile(

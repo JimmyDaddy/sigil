@@ -19,13 +19,14 @@ use sha2::{Digest, Sha256};
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
-    ChangeSetValidationKind, ChangeSetValidationStatus, CommittedFileMutation, FileType,
-    MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject,
-    TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffStats,
-    ToolErrorKind, ToolOperation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
-    delete_file_with_mutation, delete_file_with_mutation_in_batch, write_file_with_mutation,
-    write_file_with_mutation_in_batch,
+    ChangeSetValidationKind, ChangeSetValidationStatus, CommittedFileMutation, ExecutionBackend,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture, ExecutionReceipt,
+    ExecutionRequest, FileType, MutationBatchId, MutationBatchStatus, MutationEventRecorder,
+    MutationSubject, TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess, ToolCategory,
+    ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation, ToolPreview, ToolPreviewCapability,
+    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    ToolSubjectScope, delete_file_with_mutation, delete_file_with_mutation_in_batch,
+    write_file_with_mutation, write_file_with_mutation_in_batch,
 };
 use similar::TextDiff;
 use tokio::{process::Command, task, time::Duration};
@@ -78,6 +79,7 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
 
 pub fn register_builtin_tools_with_paths(registry: &mut ToolRegistry, paths: BuiltinToolPaths) {
     let terminal_managers = Arc::new(TerminalProcessManagers::default());
+    let execution_backend: Arc<dyn ExecutionBackend> = Arc::new(LocalExecutionBackend);
     let terminal_tasks_root = paths.terminal_tasks_root;
     let terminal_tasks_label_root = paths.terminal_tasks_label_root;
     registry.register(Arc::new(ReadFileTool));
@@ -94,6 +96,7 @@ pub fn register_builtin_tools_with_paths(registry: &mut ToolRegistry, paths: Bui
     registry.register(Arc::new(BashTool {
         scratch_root: paths.scratch_root.clone(),
         scratch_label: paths.scratch_label.clone(),
+        backend: Arc::clone(&execution_backend),
     }));
     registry.register(Arc::new(TerminalStartTool {
         managers: Arc::clone(&terminal_managers),
@@ -138,6 +141,7 @@ struct GrepTool;
 struct BashTool {
     scratch_root: PathBuf,
     scratch_label: String,
+    backend: Arc<dyn ExecutionBackend>,
 }
 struct TerminalStartTool {
     managers: Arc<TerminalProcessManagers>,
@@ -165,6 +169,62 @@ struct TerminalCancelTool {
     managers: Arc<TerminalProcessManagers>,
     artifact_root: PathBuf,
     artifact_label_root: PathBuf,
+}
+
+#[derive(Debug, Default)]
+pub struct LocalExecutionBackend;
+
+impl ExecutionBackend for LocalExecutionBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Local
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities::default()
+    }
+
+    fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
+        Box::pin(local_execute(self.kind(), self.capabilities(), request))
+    }
+}
+
+async fn local_execute(
+    backend: ExecutionBackendKind,
+    capabilities: ExecutionBackendCapabilities,
+    request: ExecutionRequest,
+) -> Result<ExecutionReceipt> {
+    let mut command = Command::new(&request.program);
+    command
+        .args(&request.args)
+        .current_dir(&request.cwd)
+        .envs(&request.env)
+        .kill_on_drop(true);
+
+    let output =
+        match tokio::time::timeout(Duration::from_secs(request.timeout_secs), command.output())
+            .await
+        {
+            Ok(output) => output?,
+            Err(_) => {
+                return Ok(ExecutionReceipt {
+                    backend,
+                    capabilities,
+                    exit_code: None,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    timed_out: true,
+                });
+            }
+        };
+
+    Ok(ExecutionReceipt {
+        backend,
+        capabilities,
+        exit_code: output.status.code(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+        timed_out: false,
+    })
 }
 
 #[derive(Default)]
@@ -1318,70 +1378,88 @@ impl Tool for BashTool {
         tokio::fs::create_dir_all(&scratch_root)
             .await
             .with_context(|| format!("failed to create {}", self.scratch_label))?;
-        let mut child = Command::new("sh");
-        child
-            .arg("-lc")
-            .arg(command)
-            .current_dir(&ctx.workspace_root)
-            .env(SIGIL_SCRATCH_DIR_ENV, &scratch_root)
-            .kill_on_drop(true);
-        let output =
-            match tokio::time::timeout(Duration::from_secs(timeout_secs), child.output()).await {
-                Ok(output) => output?,
-                Err(_) => {
-                    return Ok(ToolResult::error(
-                        call_id,
-                        self.spec().name,
-                        ToolErrorKind::Timeout,
-                        "bash command timed out",
-                    ));
-                }
-            };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);
-        let limited_stdout = limit_text_head_tail(&stdout, limit_bytes);
-        let limited_stderr = limit_text_head_tail(&stderr, limit_bytes);
-        let mut content = String::new();
-        if !limited_stdout.content.is_empty() {
-            content.push_str(&limited_stdout.content);
+        let request =
+            bash_execution_request(command, &ctx.workspace_root, &scratch_root, timeout_secs);
+        let receipt = self.backend.execute(request).await?;
+        bash_tool_result_from_execution_receipt(call_id, self.spec().name, receipt)
+    }
+}
+
+fn bash_execution_request(
+    command: &str,
+    workspace_root: &Path,
+    scratch_root: &Path,
+    timeout_secs: u64,
+) -> ExecutionRequest {
+    ExecutionRequest {
+        program: "sh".to_owned(),
+        args: vec!["-lc".to_owned(), command.to_owned()],
+        cwd: workspace_root.to_path_buf(),
+        env: BTreeMap::from([(
+            SIGIL_SCRATCH_DIR_ENV.to_owned(),
+            scratch_root.to_string_lossy().into_owned(),
+        )]),
+        timeout_secs,
+    }
+}
+
+fn bash_tool_result_from_execution_receipt(
+    call_id: String,
+    tool_name: String,
+    receipt: ExecutionReceipt,
+) -> Result<ToolResult> {
+    if receipt.timed_out {
+        return Ok(ToolResult::error(
+            call_id,
+            tool_name,
+            ToolErrorKind::Timeout,
+            "bash command timed out",
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&receipt.stdout);
+    let stderr = String::from_utf8_lossy(&receipt.stderr);
+    let limit_bytes = DEFAULT_TEXT_LIMIT_BYTES.min(HARD_TEXT_LIMIT_BYTES);
+    let limited_stdout = limit_text_head_tail(&stdout, limit_bytes);
+    let limited_stderr = limit_text_head_tail(&stderr, limit_bytes);
+    let mut content = String::new();
+    if !limited_stdout.content.is_empty() {
+        content.push_str(&limited_stdout.content);
+    }
+    if !limited_stderr.content.is_empty() {
+        if !content.is_empty() {
+            content.push('\n');
         }
-        if !limited_stderr.content.is_empty() {
-            if !content.is_empty() {
-                content.push('\n');
-            }
-            content.push_str(&limited_stderr.content);
-        }
-        let metadata = ToolResultMeta {
-            exit_code: output.status.code(),
-            stdout_bytes: Some(output.stdout.len() as u64),
-            stderr_bytes: Some(output.stderr.len() as u64),
-            truncated: limited_stdout.truncated || limited_stderr.truncated,
-            omitted_bytes: Some(limited_stdout.omitted_bytes + limited_stderr.omitted_bytes),
-            limit_bytes: Some(limit_bytes as u64),
-            returned_bytes: Some(limited_stdout.returned_bytes + limited_stderr.returned_bytes),
-            total_bytes: Some(output.stdout.len() as u64 + output.stderr.len() as u64),
-            returned_lines: Some(limited_stdout.returned_lines + limited_stderr.returned_lines),
-            total_lines: Some(limited_stdout.total_lines + limited_stderr.total_lines),
-            ..ToolResultMeta::default()
-        };
-        if output.status.success() {
-            Ok(ToolResult::ok(call_id, self.spec().name, content, metadata))
-        } else {
-            let mut result = ToolResult::error(
-                call_id,
-                self.spec().name,
-                ToolErrorKind::ExitStatus,
-                if content.is_empty() {
-                    "bash command exited with non-zero status".to_owned()
-                } else {
-                    content.clone()
-                },
-            );
-            result.content = content;
-            result.metadata = metadata;
-            Ok(result)
-        }
+        content.push_str(&limited_stderr.content);
+    }
+    let metadata = ToolResultMeta {
+        exit_code: receipt.exit_code,
+        stdout_bytes: Some(receipt.stdout.len() as u64),
+        stderr_bytes: Some(receipt.stderr.len() as u64),
+        truncated: limited_stdout.truncated || limited_stderr.truncated,
+        omitted_bytes: Some(limited_stdout.omitted_bytes + limited_stderr.omitted_bytes),
+        limit_bytes: Some(limit_bytes as u64),
+        returned_bytes: Some(limited_stdout.returned_bytes + limited_stderr.returned_bytes),
+        total_bytes: Some(receipt.stdout.len() as u64 + receipt.stderr.len() as u64),
+        returned_lines: Some(limited_stdout.returned_lines + limited_stderr.returned_lines),
+        total_lines: Some(limited_stdout.total_lines + limited_stderr.total_lines),
+        ..ToolResultMeta::default()
+    };
+    if receipt.exit_code == Some(0) {
+        Ok(ToolResult::ok(call_id, tool_name, content, metadata))
+    } else {
+        let mut result = ToolResult::error(
+            call_id,
+            tool_name,
+            ToolErrorKind::ExitStatus,
+            if content.is_empty() {
+                "bash command exited with non-zero status".to_owned()
+            } else {
+                content.clone()
+            },
+        );
+        result.content = content;
+        result.metadata = metadata;
+        Ok(result)
     }
 }
 

@@ -76,6 +76,7 @@ class StagedCoverageHelpersTests(unittest.TestCase):
             ")]);",
             "pub struct OpenAiStreamEnvelope {",
             "pub enum ProviderMode {",
+            "pub trait ExecutionBackend: Send + Sync {",
             "#[derive(Debug)]",
             "}",
             "use std::path::PathBuf;",
@@ -141,6 +142,26 @@ impl TaskMode {
         self.assertTrue({1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 13, 14}.issubset(lines))
         self.assertNotIn(15, lines)
         self.assertNotIn(16, lines)
+
+    def test_declaration_line_map_marks_trait_declarations(self) -> None:
+        source = """\
+pub trait ExecutionBackend: Send + Sync {
+    fn kind(&self) -> ExecutionBackendKind;
+
+    async fn execute(&self, request: ExecutionRequest) -> Result<ExecutionReceipt>;
+}
+
+pub fn run() {
+    let receipt = execute();
+    receipt
+}
+"""
+
+        lines = check_staged_coverage.non_executable_declaration_lines(source)
+
+        self.assertTrue({1, 2, 3, 4, 5}.issubset(lines))
+        self.assertNotIn(8, lines)
+        self.assertNotIn(9, lines)
 
     def test_parse_staged_added_lines_tracks_new_line_numbers(self) -> None:
         diff = """\

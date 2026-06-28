@@ -5,6 +5,7 @@ pub mod changeset;
 pub mod config;
 pub mod conversation_queue;
 pub mod event;
+pub mod execution_backend;
 pub mod memory;
 pub mod mutation;
 pub mod permission;
@@ -76,6 +77,10 @@ pub use event::{
     TypedStoredEventDecode, decode_stored_event, decode_typed_stored_event, is_transient_run_event,
     projection_apply_decision, projection_apply_decision_for_record, reducer_disposition,
     stable_event_hash, stable_event_uuid,
+};
+pub use execution_backend::{
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture,
+    ExecutionReceipt, ExecutionRequest,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{

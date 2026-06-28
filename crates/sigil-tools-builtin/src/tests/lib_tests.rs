@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -8,17 +9,18 @@ use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
-    JsonlSessionStore, MutationEventRecorder, SessionStreamRecord, TerminalTaskId, Tool,
-    ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability,
-    ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionReceipt,
+    ExecutionRequest, JsonlSessionStore, MutationEventRecorder, SessionStreamRecord,
+    TerminalTaskId, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
+    ToolPreviewCapability, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
 use super::{
     ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
-    EditFileTool, GlobTool, GrepTool, ListTool, ReadFileTool, TerminalInputTool,
-    TerminalProcessManagers, TerminalStartRequest, TerminalStartTool, WriteFileTool,
-    register_builtin_tools, register_builtin_tools_with_paths,
+    EditFileTool, GlobTool, GrepTool, ListTool, LocalExecutionBackend, ReadFileTool,
+    TerminalInputTool, TerminalProcessManagers, TerminalStartRequest, TerminalStartTool,
+    WriteFileTool, register_builtin_tools, register_builtin_tools_with_paths,
 };
 
 use serial_test::serial;
@@ -29,7 +31,141 @@ fn bash_tool(test_root: &Path) -> BashTool {
     BashTool {
         scratch_root: test_root.join("scratch-cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
+        backend: Arc::new(LocalExecutionBackend),
     }
+}
+
+#[tokio::test]
+async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let backend = LocalExecutionBackend;
+    let capabilities = backend.capabilities();
+    assert!(!capabilities.filesystem_isolation);
+    assert!(!capabilities.network_isolation);
+    assert!(!capabilities.process_isolation);
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec!["-lc".to_owned(), "printf backend-ok".to_owned()],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_secs: 5,
+        })
+        .await?;
+
+    assert_eq!(receipt.backend, ExecutionBackendKind::Local);
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(String::from_utf8_lossy(&receipt.stdout), "backend-ok");
+    assert!(receipt.stderr.is_empty());
+    assert!(!receipt.timed_out);
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let backend = LocalExecutionBackend;
+
+    let timed_out = backend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec!["-lc".to_owned(), "sleep 2".to_owned()],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_secs: 1,
+        })
+        .await?;
+    assert!(timed_out.timed_out);
+    assert_eq!(timed_out.exit_code, None);
+    assert!(timed_out.stdout.is_empty());
+    assert!(timed_out.stderr.is_empty());
+
+    let spawn_error = backend
+        .execute(ExecutionRequest {
+            program: "sigil-missing-local-backend-command".to_owned(),
+            args: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_secs: 1,
+        })
+        .await
+        .expect_err("missing program should surface spawn error");
+    assert!(!spawn_error.to_string().is_empty());
+    Ok(())
+}
+
+#[test]
+fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
+    let workspace = PathBuf::from("/workspace");
+    let scratch = PathBuf::from("/scratch");
+    let request = super::bash_execution_request("printf ok", &workspace, &scratch, 9);
+    assert_eq!(request.program, "sh");
+    assert_eq!(request.args, vec!["-lc".to_owned(), "printf ok".to_owned()]);
+    assert_eq!(request.cwd, workspace);
+    assert_eq!(
+        request
+            .env
+            .get(super::SIGIL_SCRATCH_DIR_ENV)
+            .map(String::as_str),
+        Some("/scratch")
+    );
+    assert_eq!(request.timeout_secs, 9);
+
+    let timeout = super::bash_tool_result_from_execution_receipt(
+        "call-timeout".to_owned(),
+        "bash".to_owned(),
+        ExecutionReceipt {
+            backend: ExecutionBackendKind::Local,
+            capabilities: ExecutionBackendCapabilities::default(),
+            exit_code: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            timed_out: true,
+        },
+    )?;
+    let ToolResultStatus::Error(timeout_error) = timeout.status else {
+        panic!("expected timeout error result");
+    };
+    assert_eq!(timeout_error.kind, ToolErrorKind::Timeout);
+
+    let success = super::bash_tool_result_from_execution_receipt(
+        "call-ok".to_owned(),
+        "bash".to_owned(),
+        ExecutionReceipt {
+            backend: ExecutionBackendKind::Local,
+            capabilities: ExecutionBackendCapabilities::default(),
+            exit_code: Some(0),
+            stdout: b"stdout".to_vec(),
+            stderr: b"stderr".to_vec(),
+            timed_out: false,
+        },
+    )?;
+    assert!(matches!(success.status, ToolResultStatus::Ok));
+    assert_eq!(success.content, "stdout\nstderr");
+    assert_eq!(success.metadata.exit_code, Some(0));
+    assert_eq!(success.metadata.stdout_bytes, Some(6));
+    assert_eq!(success.metadata.stderr_bytes, Some(6));
+
+    let failed = super::bash_tool_result_from_execution_receipt(
+        "call-failed".to_owned(),
+        "bash".to_owned(),
+        ExecutionReceipt {
+            backend: ExecutionBackendKind::Local,
+            capabilities: ExecutionBackendCapabilities::default(),
+            exit_code: Some(7),
+            stdout: Vec::new(),
+            stderr: b"bad".to_vec(),
+            timed_out: false,
+        },
+    )?;
+    let ToolResultStatus::Error(error) = &failed.status else {
+        panic!("expected non-zero exit error result");
+    };
+    assert_eq!(error.kind, ToolErrorKind::ExitStatus);
+    assert_eq!(failed.metadata.exit_code, Some(7));
+    assert_eq!(failed.content, "bad");
+    Ok(())
 }
 
 fn register_builtin_tools_with_test_paths(
@@ -95,6 +231,7 @@ fn temporary_file_guidance_is_model_visible() {
         BashTool {
             scratch_root: scratch_root.clone(),
             scratch_label: "cache/tmp".to_owned(),
+            backend: Arc::new(LocalExecutionBackend),
         }
         .spec(),
         super::TerminalStartTool {
@@ -1161,6 +1298,7 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
     let tool = BashTool {
         scratch_root: temp.path().join("cache").join("tmp"),
         scratch_label: "cache/tmp".to_owned(),
+        backend: Arc::new(LocalExecutionBackend),
     };
     let ctx = ToolContext::new(workspace, 5);
 
@@ -1195,6 +1333,7 @@ async fn bash_and_terminal_start_report_scratch_dir_creation_errors() -> Result<
     let bash_error = BashTool {
         scratch_root: scratch_file.clone(),
         scratch_label: "scratch-file".to_owned(),
+        backend: Arc::new(LocalExecutionBackend),
     }
     .execute(ctx.clone(), "bash".to_owned(), json!({ "command": "true" }))
     .await
