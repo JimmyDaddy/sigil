@@ -11,16 +11,13 @@ use super::{
         format_terminal_task_block_redacted, format_tool_result_block_redacted, summarize_error,
     },
 };
-use crate::config_panel::{
-    DEEPSEEK_PROVIDER_KEY, default_deepseek_provider_config, normalize_provider_name,
-};
-use crate::provider_status::BalanceSnapshot;
-use crate::provider_status::resolve_provider_api_key;
+use crate::config_panel::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
 use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
 use sigil_kernel::{
     ControlEntry, EventHandler, RunEvent, ToolCall, ToolDiffBudget, ToolExecutionStatus,
     ToolPreviewSnapshot, ToolResult,
 };
+use sigil_runtime::{BalanceSnapshot, deepseek_provider_status_config};
 
 impl AppState {
     fn set_agent_wait_phase(&mut self, profile_id: &str) {
@@ -202,14 +199,13 @@ impl AppState {
             self.refresh_usage_sidebar_cache();
             return;
         }
-        let provider_config = sigil_runtime::resolve_deepseek_config(root_config)
-            .or_else(|_| default_deepseek_provider_config(&root_config.agent.model).resolved());
+        let provider_config = deepseek_provider_status_config(root_config);
         let Ok(provider_config) = provider_config else {
             self.balance_snapshot.status = "balance unavailable".to_owned();
             self.refresh_usage_sidebar_cache();
             return;
         };
-        if resolve_provider_api_key(&provider_config).is_none() {
+        if provider_config.api_key.is_none() {
             self.balance_snapshot.available = false;
             self.balance_snapshot.status = "missing auth".to_owned();
             self.refresh_usage_sidebar_cache();

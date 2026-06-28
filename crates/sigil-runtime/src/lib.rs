@@ -38,9 +38,13 @@ use sigil_provider_openai_compat::{
 pub mod agent_profile_registry;
 pub mod agent_supervisor;
 pub mod agent_tools;
+pub mod context_window;
 pub mod doctor;
 pub mod paths;
 pub mod plugins;
+pub mod provider_config;
+pub mod provider_status;
+pub mod session_control;
 pub mod skills;
 pub use agent_profile_registry::{
     AgentProfileIndexContext, AgentProfileRegistry, BUILD_PROFILE_ID, EXPLORE_PROFILE_ID,
@@ -59,6 +63,10 @@ pub use agent_tools::{
     register_agent_tools, register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
+pub use context_window::{
+    ContextWindowSource, ResolvedContextWindow, effective_compaction_config,
+    resolve_context_window_tokens,
+};
 pub use paths::{
     DEFAULT_ARTIFACTS_DIR, DEFAULT_CHANGESETS_DIR, DEFAULT_PROJECT_ASSETS_ROOT,
     DEFAULT_SCRATCH_DIR, DEFAULT_SESSIONS_DIR, DEFAULT_TERMINAL_TASKS_DIR,
@@ -72,6 +80,21 @@ pub use plugins::{
     discover_workspace_plugins, discover_workspace_plugins_with_project_assets_root,
     merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
 };
+pub use provider_config::{
+    ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DEFAULT_SETUP_API_KEY_ENV,
+    DEFAULT_SETUP_PROVIDER_KEY, DeepSeekProviderConfigFields, GEMINI_PROVIDER_KEY,
+    OPENAI_COMPAT_PROVIDER_KEY, ProviderConfigFields, ProviderStatusConfig,
+    ProviderStrictToolsMode, deepseek_provider_config_fields, deepseek_provider_status_config,
+    deepseek_provider_value_for_setup, default_provider_config_fields,
+    default_setup_provider_model, normalize_provider_name, provider_api_key_env_name,
+    provider_config_fields, provider_status_config_from_fields, set_active_provider_model,
+    set_provider_config_fields,
+};
+pub use provider_status::{
+    BalanceSnapshot, ProviderStatusTaskManager, ProviderStatusTaskResult,
+    fetch_provider_balance_snapshot, fetch_remote_model_ids,
+};
+pub use session_control::{append_session_control_entries, current_unix_time_ms};
 pub use skills::{
     LOAD_SKILL_TOOL_NAME, LoadedSkillContext, SkillDiscoveryReport, SkillDiscoveryWarning,
     SkillDiscoveryWarningKind, discover_skill_index, discover_skill_index_with_project_assets_root,

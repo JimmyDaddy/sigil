@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+use sigil_runtime::{DEFAULT_SETUP_API_KEY_ENV, default_setup_provider_model};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SetupField {
@@ -67,7 +67,7 @@ impl SetupState {
         Self {
             config_path,
             selected_field: SetupField::TrustCurrentFolder,
-            model: "deepseek-v4-flash".to_owned(),
+            model: default_setup_provider_model(),
             api_key: String::new(),
             trusted_current_folder: false,
             startup_error,
@@ -86,8 +86,8 @@ impl SetupState {
         if !self.api_key.trim().is_empty() {
             return "plaintext api_key pending save".to_owned();
         }
-        if env::var(SIGIL_API_KEY_ENV).is_ok() {
-            return format!("env {SIGIL_API_KEY_ENV}");
+        if env::var(DEFAULT_SETUP_API_KEY_ENV).is_ok() {
+            return format!("env {DEFAULT_SETUP_API_KEY_ENV}");
         }
 
         "missing".to_owned()

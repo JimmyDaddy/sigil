@@ -1303,6 +1303,50 @@ async fn message_agent_records_rejected_message_route_for_terminal_thread() -> R
 }
 
 #[tokio::test]
+async fn route_agent_message_appends_route_controls_to_session() -> Result<()> {
+    let (mut runtime, mut session, thread_id) = spawned_runtime_session().await?;
+
+    let (result, controls) = runtime
+        .route_agent_message(
+            &mut session,
+            thread_id.clone(),
+            "continue with more detail".to_owned(),
+            &run_options(std::env::temp_dir()),
+        )
+        .await?;
+
+    assert!(result.is_error());
+    assert!(result.control_entries.is_empty());
+    let routed = controls
+        .iter()
+        .filter_map(|entry| {
+            let ControlEntry::AgentThreadMessageRouted(route) = entry else {
+                return None;
+            };
+            Some(route)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(routed.len(), 2);
+    assert_eq!(routed[1].status, sigil_kernel::AgentRouteStatus::Rejected);
+    let projection = session.agent_thread_state_projection();
+    assert_eq!(
+        projection
+            .message_routes
+            .get(&routed[1].route_id)
+            .map(|route| route.status),
+        Some(sigil_kernel::AgentRouteStatus::Rejected)
+    );
+    assert_eq!(
+        projection
+            .message_routes
+            .get(&routed[1].route_id)
+            .map(|route| route.target_thread_id.clone()),
+        Some(thread_id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn message_agent_queues_followup_for_background_mailbox() -> Result<()> {
     let config = root_config();
     let mut registry = ToolRegistry::new();

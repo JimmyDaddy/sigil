@@ -38,7 +38,6 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 | `/doctor` | Run local setup diagnostics inside the transcript |
 | `/new` | Start a fresh session with the current provider and model |
 | `/resume` | Select and restore a previous session |
-| `/trust-workspace` | Trust repository-local verification discovery for the current workspace |
 | `/agent <main|child-id>` | Switch the main chat area between the parent session and child agent transcripts |
 | `/agent rename <child-id|current> <name>` | Persist a short display name for a child agent transcript |
 | `/queue` | Focus queued input |
@@ -53,7 +52,7 @@ When the composer is focused, `Up/Down` first handles prompt history or cursor m
 
 Aliases: `/m` for `/model`, `/e` for `/effort`, and `/q` or `/exit` for `/quit`.
 
-`/trust-workspace` records a workspace trust decision in the session audit log. It allows repository-local verification candidates to be promoted for task readiness, but it does not grant shell, plugin, MCP, or file-write permissions by itself.
+Workspace trust is handled by the startup workspace trust gate, not a slash command. Trust decisions are recorded in the session audit log. They allow repository-local verification candidates to be promoted for task readiness, but they do not grant shell, plugin, MCP, or file-write permissions by themselves.
 
 `/model`, `/effort`, `/resume`, `/agent`, and `/queue` show candidates. Use `Up/Down` to select, `Tab` to accept, and `Enter` to execute. `/agent rename` also shows child-agent candidates before the new name is typed.
 

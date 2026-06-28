@@ -2,19 +2,20 @@ use sigil_kernel::CompactionConfig;
 use sigil_provider_deepseek::deepseek_context_window_tokens;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ContextWindowSource {
+pub enum ContextWindowSource {
     Provider,
     Config,
     None,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ResolvedContextWindow {
-    pub(crate) tokens: Option<u32>,
-    pub(crate) source: ContextWindowSource,
+pub struct ResolvedContextWindow {
+    pub tokens: Option<u32>,
+    pub source: ContextWindowSource,
 }
 
-pub(crate) fn resolve_context_window_tokens(
+#[must_use]
+pub fn resolve_context_window_tokens(
     provider_name: &str,
     model_name: &str,
     configured_tokens: Option<u32>,
@@ -39,7 +40,8 @@ pub(crate) fn resolve_context_window_tokens(
     }
 }
 
-pub(crate) fn effective_compaction_config(
+#[must_use]
+pub fn effective_compaction_config(
     provider_name: &str,
     model_name: &str,
     base: &CompactionConfig,
@@ -51,12 +53,12 @@ pub(crate) fn effective_compaction_config(
 }
 
 fn provider_context_window_tokens(provider_name: &str, model_name: &str) -> Option<u32> {
-    match provider_name {
+    match crate::provider_config_key(provider_name) {
         "deepseek" => deepseek_context_window_tokens(model_name),
         _ => None,
     }
 }
 
-#[cfg(all(test, not(sigil_tui_test_slice_app_input_flow)))]
+#[cfg(test)]
 #[path = "tests/context_window_tests.rs"]
 mod tests;

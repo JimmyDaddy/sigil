@@ -11,13 +11,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig,
-    ExecutionBackendKind, ExecutionIsolationPolicy, InteractionMode, LanguageServerConfig,
-    McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ProviderCapabilities,
-    ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, SessionConfig,
-    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool, ToolAccess,
-    ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
+    AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig, ControlEntry,
+    ExecutionBackendKind, ExecutionIsolationPolicy, InteractionMode, JsonlSessionStore,
+    LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig,
+    ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig,
+    Session, SessionConfig, SessionLogEntry, SkillDescriptor, SkillRunMode, SkillSource,
+    SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory,
+    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
@@ -112,6 +113,66 @@ fn test_root_config(provider: &str) -> RootConfig {
         ]),
         mcp_servers: Vec::new(),
     }
+}
+
+#[test]
+fn append_session_control_entries_updates_in_memory_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let mut current_session = Some(
+        Session::new("deepseek", "deepseek-v4-pro")
+            .with_store(JsonlSessionStore::new(path.clone())?),
+    );
+
+    let entries = super::append_session_control_entries(
+        &path,
+        &mut current_session,
+        [ControlEntry::Note {
+            kind: "runtime_test".to_owned(),
+            data: json!({"value": 1}),
+        }],
+        "test note",
+    )?;
+
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(
+        &entries[0],
+        SessionLogEntry::Control(ControlEntry::Note { kind, .. }) if kind == "runtime_test"
+    ));
+    assert_eq!(
+        current_session
+            .as_ref()
+            .map(|session| session.entries().len()),
+        Some(1)
+    );
+    Ok(())
+}
+
+#[test]
+fn append_session_control_entries_persists_without_in_memory_session() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let mut current_session = None;
+
+    let entries = super::append_session_control_entries(
+        &path,
+        &mut current_session,
+        [ControlEntry::Note {
+            kind: "runtime_store_test".to_owned(),
+            data: json!({"value": 2}),
+        }],
+        "test note",
+    )?;
+
+    assert!(current_session.is_none());
+    assert_eq!(entries.len(), 1);
+    let reloaded = JsonlSessionStore::read_entries(&path)?;
+    assert_eq!(reloaded.len(), entries.len());
+    assert!(matches!(
+        &reloaded[0],
+        SessionLogEntry::Control(ControlEntry::Note { kind, .. }) if kind == "runtime_store_test"
+    ));
+    Ok(())
 }
 
 struct ExistingMcpTool;

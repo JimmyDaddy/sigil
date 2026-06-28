@@ -1,7 +1,7 @@
 use super::super::setup_flow::{build_setup_root_config, validate_setup_state};
 use super::*;
 use crate::setup::SetupState;
-use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
+use sigil_runtime::DEFAULT_SETUP_API_KEY_ENV;
 
 #[test]
 fn setup_lines_include_startup_error_and_missing_auth_summary() {
@@ -302,19 +302,21 @@ fn setup_validation_and_builder_reject_empty_model_and_auth() {
         "model cannot be empty"
     );
 
-    if std::env::var(SIGIL_API_KEY_ENV).is_err() {
+    if std::env::var(DEFAULT_SETUP_API_KEY_ENV).is_err() {
         state.model = "deepseek-v4-flash".to_owned();
         state.api_key.clear();
 
         assert_eq!(
             validate_setup_state(&state),
-            Some(format!("provide api_key or export {SIGIL_API_KEY_ENV}"))
+            Some(format!(
+                "provide api_key or export {DEFAULT_SETUP_API_KEY_ENV}"
+            ))
         );
         assert_eq!(
             build_setup_root_config(&state)
                 .expect_err("missing auth should fail")
                 .to_string(),
-            format!("provide api_key or export {SIGIL_API_KEY_ENV}")
+            format!("provide api_key or export {DEFAULT_SETUP_API_KEY_ENV}")
         );
     }
 
@@ -344,7 +346,7 @@ fn setup_screen_toggles_trust_and_opens_inline_field_modals() -> Result<()> {
     assert!(setup_lines.contains("Quick setup"));
     assert!(setup_lines.contains("auth=missing"));
     assert!(setup_lines.contains("load failed: invalid existing config"));
-    assert!(setup_lines.contains(&format!("env={SIGIL_API_KEY_ENV}")));
+    assert!(setup_lines.contains(&format!("env={DEFAULT_SETUP_API_KEY_ENV}")));
 
     let _ = app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))?;
     assert_eq!(app.last_notice(), Some("trust current folder on"));

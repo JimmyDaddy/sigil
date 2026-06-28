@@ -123,6 +123,9 @@
 - `app/formatting.rs` 只放跨 flow 复用的无副作用格式化 helper，单 flow 私有 helper 优先留在对应 flow 模块
 - renderer 优先读取 ViewModel 或明确 render options，不要为了展示逻辑直接扩散完整 `AppState` 依赖
 - setup/config 状态模型维护在 `setup.rs` / `config_panel.rs`，`app.rs` 只保留入口协调、持久化和跨状态行为
+- TUI 不直接依赖 provider crate 或 provider 专用 HTTP client；provider 配置草稿、状态请求/刷新任务、API key env label 和 context-window metadata 通过 `sigil-runtime` 的 provider-neutral API 进入
+- TUI runner 不要手写 model-visible agent tool call 来表达用户侧 agent message；使用 runtime 提供的 agent-message route helper，让 runtime 统一追加 `AgentThreadMessageRouted` 审计
+- TUI runner 追加普通 `ControlEntry` 时优先使用 runtime session-control append helper，不要在入口层重复实现“内存 session 或 JSONL store”写入分支
 - `runner.rs` 只作为 worker façade 和必要 re-export；worker protocol、spawn 装配、运行 loop、event/approval bridge、session/compaction flow 分别维护在 `runner/*`，runner 状态机测试维护在 `runner/tests/*`
 - `ui.rs` 只作为 `ui/*` 模块入口和必要 re-export；顶层 shell layout 放在 `ui/shell.rs`
 - theme、geometry、text、primitives 等共享 renderer 底座分别维护在 `ui/theme.rs`、`ui/geometry.rs`、`ui/text.rs`、`ui/primitives.rs`
@@ -135,6 +138,8 @@
 
 - 负责 TUI、CLI 和未来入口共享的 provider、tool registry、run options 装配
 - 入口层不应各自硬编码 DeepSeek provider、built-in tools 或 MCP 注册流程
+- provider-specific config parsing、provider status request DTO、provider status refresh task manager、API key env label 和 provider/model metadata resolver 由 runtime 统一提供 provider-neutral 表面，入口层只消费 DTO/view/result，不 import provider crate
+- agent-thread user action helper、session-control append helper 等跨入口运行时 glue 放在 runtime；入口层只做协议/消息转换和 UI 状态同步
 - runtime 只依赖 kernel、provider、tools、MCP 等下层 crate；kernel 不得反向依赖 runtime
 
 ## 4. 数据与状态规则

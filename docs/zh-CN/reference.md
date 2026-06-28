@@ -38,7 +38,6 @@
 | `/doctor` | 在 transcript 中运行本地 setup diagnostics |
 | `/new` | 使用当前 provider 和 model 开始新 session |
 | `/resume` | 选择并恢复历史 session |
-| `/trust-workspace` | 信任当前 workspace 的仓库本地 verification discovery |
 | `/agent <main|child-id>` | 在 parent session 和 child agent transcript 之间切换主聊天区 |
 | `/agent rename <child-id|current> <name>` | 为 child agent transcript 持久化一个短展示名 |
 | `/queue` | 聚焦 queued input |
@@ -53,7 +52,7 @@
 
 Aliases：`/m` 对应 `/model`，`/e` 对应 `/effort`，`/q` 或 `/exit` 对应 `/quit`。
 
-`/trust-workspace` 会把 workspace trust decision 记录进 session audit log。它允许仓库本地 verification 候选检查被提升为 task readiness 可用的检查，但不会单独授予 shell、plugin、MCP 或文件写入权限。
+Workspace trust 由启动时的 workspace trust gate 处理，不是 slash command。trust decision 会记录进 session audit log；它允许仓库本地 verification 候选检查被提升为 task readiness 可用的检查，但不会单独授予 shell、plugin、MCP 或文件写入权限。
 
 `/model`、`/effort`、`/resume`、`/agent` 和 `/queue` 会展示候选项。使用 `Up/Down` 选择，`Tab` 接受，`Enter` 执行。`/agent rename` 会在输入新名字前展示 child agent 候选项。
 

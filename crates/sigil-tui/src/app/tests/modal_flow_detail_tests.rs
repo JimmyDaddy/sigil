@@ -3,7 +3,7 @@ use crate::app::tests::common::test_config;
 use crate::config_panel::ConfigState;
 
 #[test]
-fn provider_config_for_model_picker_prefers_config_setup_and_snapshot() {
+fn provider_status_config_for_model_picker_prefers_config_setup_and_snapshot() {
     let root_config = test_config();
     let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config);
     app.config_state = Some(ConfigState::from_root_config(&root_config));
@@ -21,16 +21,18 @@ fn provider_config_for_model_picker_prefers_config_setup_and_snapshot() {
         state.draft.provider_request_timeout_secs = "45".to_owned();
     }
 
-    let provider = app.provider_config_for_model_picker(ModelPickerTarget::Provider, "picked");
+    let provider = app
+        .provider_status_config_for_model_picker(ModelPickerTarget::Provider, "picked")
+        .expect("provider status config should resolve");
     assert_eq!(provider.base_url, "https://models.example.com");
-    assert_eq!(provider.model, "picked");
-    assert_eq!(provider.fim_model, "base-fim");
     assert_eq!(provider.api_key.as_deref(), Some("config-secret"));
     assert_eq!(provider.request_timeout_secs, 45);
 
-    let fim = app.provider_config_for_model_picker(ModelPickerTarget::ProviderFim, "picked-fim");
-    assert_eq!(fim.model, "base-model");
-    assert_eq!(fim.fim_model, "picked-fim");
+    let fim = app
+        .provider_status_config_for_model_picker(ModelPickerTarget::ProviderFim, "picked-fim")
+        .expect("fim provider status config should resolve");
+    assert_eq!(fim.base_url, "https://models.example.com");
+    assert_eq!(fim.request_timeout_secs, 45);
 
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let mut setup_app = AppState::from_setup(
@@ -41,15 +43,16 @@ fn provider_config_for_model_picker_prefers_config_setup_and_snapshot() {
     if let Some(state) = setup_app.setup_state.as_mut() {
         state.api_key = "setup-secret".to_owned();
     }
-    let setup_provider =
-        setup_app.provider_config_for_model_picker(ModelPickerTarget::Setup, "setup-model");
-    assert_eq!(setup_provider.model, "setup-model");
+    let setup_provider = setup_app
+        .provider_status_config_for_model_picker(ModelPickerTarget::Setup, "setup-model")
+        .expect("setup provider status config should resolve");
     assert_eq!(setup_provider.api_key.as_deref(), Some("setup-secret"));
 
     let snapshot_provider =
         AppState::from_root_config(std::path::Path::new("sigil.toml"), &root_config)
-            .provider_config_for_model_picker(ModelPickerTarget::Provider, "snapshot");
-    assert_eq!(snapshot_provider.model, "snapshot");
+            .provider_status_config_for_model_picker(ModelPickerTarget::Provider, "snapshot")
+            .expect("snapshot provider status config should resolve");
+    assert!(!snapshot_provider.base_url.is_empty());
 }
 
 #[test]

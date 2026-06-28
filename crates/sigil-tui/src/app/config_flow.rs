@@ -1,10 +1,9 @@
 use crate::appearance_diagnostics::appearance_doctor_checks;
 use crate::config_panel::{
-    ANTHROPIC_PROVIDER_KEY, CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT,
-    CONFIG_FIELD_NAV_HINT, CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField,
-    ConfigFieldMove, ConfigFooterAction, ConfigSection, ConfigState, GEMINI_PROVIDER_KEY,
-    OPENAI_COMPAT_PROVIDER_KEY, config_field_accepts_char, render_config_readonly_row,
-    render_config_value_row,
+    CONFIG_ACTIONS_HINT, CONFIG_CONTROLS_HINT, CONFIG_EDIT_OR_TOGGLE_HINT, CONFIG_FIELD_NAV_HINT,
+    CONFIG_SAVE_HINT, CONFIG_SECTION_NAV_HINT, ConfigDraft, ConfigField, ConfigFieldMove,
+    ConfigFooterAction, ConfigSection, ConfigState, config_field_accepts_char,
+    render_config_readonly_row, render_config_value_row,
 };
 use crate::slash::SLASH_COMMANDS;
 use std::{
@@ -26,14 +25,11 @@ use sigil_kernel::{
     SyntaxThemeId, ThemeId, ToolRegistryScope, VerificationStateProjection, WorkspaceTrust,
     default_user_config_dir, discover_candidate_checks_with_user_config, stable_workspace_id,
 };
-use sigil_provider_anthropic::SIGIL_ANTHROPIC_API_KEY_ENV;
-use sigil_provider_deepseek::SIGIL_API_KEY_ENV;
-use sigil_provider_gemini::SIGIL_GEMINI_API_KEY_ENV;
-use sigil_provider_openai_compat::OPENAI_COMPATIBLE_API_KEY_ENV;
 use sigil_runtime::{
-    AgentProfileRegistry, ResolvedAgentProfile,
+    AgentProfileRegistry, ContextWindowSource, ResolvedAgentProfile,
     doctor::{DoctorCheck, DoctorStatus, build_code_intelligence_checks},
-    provider_capabilities_for_name, provider_capability_view,
+    provider_api_key_env_name, provider_capabilities_for_name, provider_capability_view,
+    resolve_context_window_tokens,
 };
 
 use super::{
@@ -46,7 +42,6 @@ use super::{
         TextInputTarget,
     },
 };
-use crate::context_window::{ContextWindowSource, resolve_context_window_tokens};
 
 impl AppState {
     pub fn config_section_title(&self) -> Option<&'static str> {
@@ -3350,15 +3345,6 @@ fn render_provider_capability_summary(config_state: &ConfigState) -> Vec<String>
         ),
         render_config_hint_row("Full capability summary is available in /doctor"),
     ]
-}
-
-fn provider_api_key_env_name(provider_name: &str) -> &'static str {
-    match provider_name {
-        OPENAI_COMPAT_PROVIDER_KEY => OPENAI_COMPATIBLE_API_KEY_ENV,
-        ANTHROPIC_PROVIDER_KEY => SIGIL_ANTHROPIC_API_KEY_ENV,
-        GEMINI_PROVIDER_KEY => SIGIL_GEMINI_API_KEY_ENV,
-        _ => SIGIL_API_KEY_ENV,
-    }
 }
 
 fn render_permission_rule_summary(config_state: &ConfigState) -> Vec<String> {

@@ -6,14 +6,14 @@ use sigil_kernel::{
     AgentConfig, CompactionConfig, MemoryConfig, PermissionConfig, RootConfig, SessionConfig,
     WorkspaceConfig,
 };
-use sigil_provider_deepseek::{DeepSeekProviderConfig, SIGIL_API_KEY_ENV};
+use sigil_runtime::{DEFAULT_SETUP_API_KEY_ENV, DEFAULT_SETUP_PROVIDER_KEY};
 
 use super::{
     AppAction, AppState, SetupField, SetupState,
     formatting::persisted_root_config,
     modal_flow::{ModelPickerTarget, SecretInputTarget, TextInputTarget},
 };
-use crate::config_panel::serialize_deepseek_provider_value;
+use sigil_runtime::deepseek_provider_value_for_setup;
 
 impl AppState {
     pub fn setup_lines(&self) -> Vec<String> {
@@ -60,7 +60,7 @@ impl AppState {
 
         lines.push(String::new());
         lines.push(format!(
-            "Tab move  Enter open/toggle  Ctrl-S save  Ctrl-C quit  env={SIGIL_API_KEY_ENV}"
+            "Tab move  Enter open/toggle  Ctrl-S save  Ctrl-C quit  env={DEFAULT_SETUP_API_KEY_ENV}"
         ));
         lines
     }
@@ -292,8 +292,10 @@ pub(super) fn validate_setup_state(state: &SetupState) -> Option<String> {
     if state.model.trim().is_empty() {
         return Some("model cannot be empty".to_owned());
     }
-    if state.api_key.trim().is_empty() && env::var(SIGIL_API_KEY_ENV).is_err() {
-        return Some(format!("provide api_key or export {SIGIL_API_KEY_ENV}"));
+    if state.api_key.trim().is_empty() && env::var(DEFAULT_SETUP_API_KEY_ENV).is_err() {
+        return Some(format!(
+            "provide api_key or export {DEFAULT_SETUP_API_KEY_ENV}"
+        ));
     }
 
     None
@@ -307,14 +309,14 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
     if model.is_empty() {
         bail!("model cannot be empty");
     }
-    if state.api_key.trim().is_empty() && env::var(SIGIL_API_KEY_ENV).is_err() {
-        bail!("provide api_key or export {SIGIL_API_KEY_ENV}");
+    if state.api_key.trim().is_empty() && env::var(DEFAULT_SETUP_API_KEY_ENV).is_err() {
+        bail!("provide api_key or export {DEFAULT_SETUP_API_KEY_ENV}");
     }
 
-    let mut provider_config = DeepSeekProviderConfig::default_for_model(model);
-    provider_config.api_key = (!state.api_key.trim().is_empty()).then(|| state.api_key.clone());
-
-    let provider_value = serialize_deepseek_provider_value(&provider_config)?;
+    let provider_value = deepseek_provider_value_for_setup(
+        model,
+        (!state.api_key.trim().is_empty()).then_some(state.api_key.as_str()),
+    )?;
     Ok(RootConfig {
         workspace: WorkspaceConfig {
             root: ".".to_owned(),
@@ -322,7 +324,7 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
         storage: Default::default(),
         session: SessionConfig::default(),
         agent: AgentConfig {
-            provider: "deepseek".to_owned(),
+            provider: DEFAULT_SETUP_PROVIDER_KEY.to_owned(),
             model: model.to_owned(),
             max_turns: None,
             tool_timeout_secs: 30,
@@ -343,7 +345,10 @@ pub(super) fn build_setup_root_config(state: &SetupState) -> Result<RootConfig> 
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
-        providers: std::collections::BTreeMap::from([("deepseek".to_owned(), provider_value)]),
+        providers: std::collections::BTreeMap::from([(
+            DEFAULT_SETUP_PROVIDER_KEY.to_owned(),
+            provider_value,
+        )]),
         mcp_servers: Vec::new(),
     })
 }

@@ -52,6 +52,8 @@
 
 当前实现已经从早期骨架进入“crate 边界稳定、crate 内按职责拆分”的阶段。本节描述的是当前代码事实，不再只是推荐草案；后续重构必须先判断是否继续维护这些 facade 与子模块边界。
 
+当前 provider 边界已经进一步收敛：`sigil-runtime` 统一持有 provider-specific config parsing、provider-neutral config draft DTO、provider status request DTO、provider status refresh task manager、API key env label、DeepSeek 余额/模型列表请求和 provider/model context-window metadata resolver；`sigil-tui` 只消费这些 DTO/view/result，不直接依赖 provider crate 或 HTTP client。后续新增 provider 或 provider 状态面时，先扩展 runtime 表面，再让入口层消费 provider-neutral 结果。
+
 ```text
 sigil/
   Cargo.toml
@@ -1151,7 +1153,7 @@ pub struct ProviderCapabilities {
 - `tokio`：async runtime
 - `futures` / `tokio-stream`：stream 组合
 - `serde`、`serde_json`、`toml`：配置和协议序列化
-- `reqwest`：provider HTTP client / TUI provider status client；MCP 当前走 stdio client
+- `reqwest`：provider HTTP client / runtime provider status client；MCP 当前走 stdio client
 - `async-trait`：第一阶段先解决 object-safe async trait 问题
 - `thiserror` + `anyhow`：错误分层
 - `tracing` + `tracing-subscriber`：结构化日志
@@ -1271,7 +1273,7 @@ pub struct ProviderCapabilities {
 
 这意味着 `kernel` 事件流在 phase 1 就要按 TUI 消费习惯设计，而不是先按“stdout 打印一堆日志”来塑形。
 
-当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛字段、bootstrap、顶层 key routing 和跨状态编排；输入焦点、slash selector、modal、setup/config、session/resume、timeline/scrollback、tool card interaction/focus、approval、worker bridge、command dispatch 分别维护在 `crates/sigil-tui/src/app/*`；状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`，共享 fixture 只放 `app/tests/common.rs`。setup/config、commands、context window、provider status、view model 等普通模块的测试维护在 `crates/sigil-tui/src/tests/*_tests.rs`；worker runner 通过 `runner.rs` façade 暴露协议和启动入口，worker protocol、spawn 装配、运行 loop、event/approval bridge、session/compaction flow 与 runner 状态机测试分别维护在 `crates/sigil-tui/src/runner/*` 和 `runner/tests/*_tests.rs`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，renderer 测试维护在 `ui/tests/*_tests.rs`。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
+当前实现还需要保持代码结构服务这个信息架构：`AppState` 作为 façade 收敛字段、bootstrap、顶层 key routing 和跨状态编排；输入焦点、slash selector、modal、setup/config、session/resume、timeline/scrollback、tool card interaction/focus、approval、worker bridge、command dispatch 分别维护在 `crates/sigil-tui/src/app/*`；状态流测试维护在 `crates/sigil-tui/src/app/tests/*_tests.rs`，共享 fixture 只放 `app/tests/common.rs`。setup/config、commands、view model 等 TUI 普通模块的测试维护在 `crates/sigil-tui/src/tests/*_tests.rs`；provider config/status/context-window 这类入口共享 helper 的测试维护在 `crates/sigil-runtime/src/tests/*_tests.rs`；worker runner 通过 `runner.rs` façade 暴露协议和启动入口，worker protocol、spawn 装配、运行 loop、event/approval bridge、session/compaction flow 与 runner 状态机测试分别维护在 `crates/sigil-tui/src/runner/*` 和 `runner/tests/*_tests.rs`；renderer 通过 ViewModel 或 render options 读取 UI 数据；`ui.rs` 只作为 `ui/*` 模块入口和必要 re-export，顶层 shell layout、theme/geometry/text 底座、timeline、tool card、markdown、approval、setup/config、modal 等渲染块分别维护在对应 `ui/*` 模块，renderer 测试维护在 `ui/tests/*_tests.rs`。用户交互面优先使用 TUI 焦点和快捷键：tool card 选择/展开走 `Ctrl-G`、`Alt-J/K`、`Ctrl-O` 与 `Esc`，不依赖 hidden slash command；新增快捷键和命令通过 `commands.rs` metadata 同步 info rail、keyboard help 和 README。Markdown 展示由 `ui/markdown.rs` 和 `MarkdownRenderOptions` 统一约束，assistant timeline、tool preview、approval modal 不各自维护解析规则。
 
 主题切换作为 TUI appearance 能力落在 `crates/sigil-tui/src/ui/theme/`，而不是拆成独立 crate。`sigil-kernel` 只承载可序列化的 `AppearanceConfig`、`ThemeId` 和 `[appearance.colors]` 原始字符串；`sigil-tui` 将其解析为 `ThemePalette`，再由 renderer 消费语义 token。内置主题包括 `sigil_dark`、`solarized_dark`、`solarized_light`、`gruvbox_dark`、`nord` 和 `high_contrast_dark`。颜色 override 只允许稳定语义 token 和 `#RRGGBB`，用于 TUI 外观，不进入 session/control state、approval 审计、tool payload 或 provider-visible context。`/config` 里的 Appearance draft 会优先供 renderer 解析，让用户在保存前即时预览完整 config palette，包括背景、边框、标题 chip、正文、弱化文字、选中行、状态和提示 token；保存后运行时 config snapshot 更新并重建 timeline render cache，避免旧消息缓存保留旧主题色。
 

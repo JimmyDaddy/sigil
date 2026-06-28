@@ -480,7 +480,7 @@ fn worker_messages_apply_balance_and_model_refresh() -> Result<()> {
     app.active_balance_refresh_id = Some(balance_request_id);
     app.handle_worker_message(WorkerMessage::ProviderBalanceRefreshed {
         request_id: balance_request_id,
-        snapshot: crate::provider_status::BalanceSnapshot {
+        snapshot: sigil_runtime::BalanceSnapshot {
             total: Some(2.0),
             currency: Some("USD".to_owned()),
             available: true,
@@ -549,7 +549,7 @@ fn pending_worker_commands_and_stale_provider_refreshes_are_noops() -> Result<()
     let previous_status = app.balance_snapshot.status.clone();
     app.handle_worker_message(WorkerMessage::ProviderBalanceRefreshed {
         request_id: 8,
-        snapshot: crate::provider_status::BalanceSnapshot {
+        snapshot: sigil_runtime::BalanceSnapshot {
             total: Some(1.0),
             currency: Some("USD".to_owned()),
             available: true,

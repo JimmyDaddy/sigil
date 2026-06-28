@@ -1733,7 +1733,7 @@ fn usage_display_shows_session_and_delta_costs() -> Result<()> {
 #[test]
 fn session_delta_stats_reset_on_session_switch_and_follow_balance_currency() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
-    app.balance_snapshot = crate::provider_status::BalanceSnapshot {
+    app.balance_snapshot = sigil_runtime::BalanceSnapshot {
         total: Some(12.34),
         currency: Some("CNY".to_owned()),
         available: true,
@@ -1822,7 +1822,7 @@ fn usage_display_prefers_configured_cost_currency_over_balance_currency() -> Res
     let mut config = test_config();
     config.appearance.usage_cost_currency = sigil_kernel::UsageCostCurrency::Cny;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &config);
-    app.balance_snapshot = crate::provider_status::BalanceSnapshot {
+    app.balance_snapshot = sigil_runtime::BalanceSnapshot {
         total: Some(3.25),
         currency: Some("USD".to_owned()),
         available: true,

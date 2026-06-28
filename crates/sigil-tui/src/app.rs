@@ -37,7 +37,10 @@ use sigil_kernel::{
     SessionLogEntry, SessionStats, StorageConfig, ToolPreviewSnapshot, plan_text_hash,
     resolve_workspace_root,
 };
-use sigil_runtime::{SigilPaths, resolve_sigil_paths};
+use sigil_runtime::{
+    BalanceSnapshot, ContextWindowSource, SigilPaths, effective_compaction_config,
+    resolve_context_window_tokens, resolve_sigil_paths, set_active_provider_model,
+};
 use uuid::Uuid;
 
 pub(crate) use crate::approval::{
@@ -46,17 +49,8 @@ pub(crate) use crate::approval::{
 };
 pub use crate::approval::{ApprovalDiffMode, PendingApproval};
 use crate::commands::{UiCommand, command_for_key_event};
-pub(crate) use crate::config_panel::{
-    ConfigState, OPENAI_COMPAT_PROVIDER_KEY, default_deepseek_provider_config,
-    default_openai_compat_provider_config, load_deepseek_provider_config,
-    load_openai_compat_provider_config, normalize_provider_name, serialize_deepseek_provider_value,
-    serialize_openai_compat_provider_value,
-};
-use crate::context_window::{
-    ContextWindowSource, effective_compaction_config, resolve_context_window_tokens,
-};
+pub(crate) use crate::config_panel::ConfigState;
 pub use crate::input::PaneFocus;
-use crate::provider_status::BalanceSnapshot;
 use crate::runner::{QueueMoveDirection, WorkerCommand};
 pub use crate::sessions::{SessionHistoryEntry, SessionViewMode};
 pub(crate) use crate::setup::{SetupField, SetupState};
@@ -2217,7 +2211,7 @@ impl AppState {
         )
     }
 
-    fn resolved_context_window(&self) -> crate::context_window::ResolvedContextWindow {
+    fn resolved_context_window(&self) -> sigil_runtime::ResolvedContextWindow {
         resolve_context_window_tokens(
             &self.provider_name,
             &self.model_name,
@@ -2410,24 +2404,7 @@ impl AppState {
         };
 
         let mut next_config = root_config.clone();
-        next_config.agent.model = model.clone();
-        if normalize_provider_name(&next_config.agent.provider) == OPENAI_COMPAT_PROVIDER_KEY {
-            let mut provider_config = load_openai_compat_provider_config(&next_config)
-                .unwrap_or_else(|| default_openai_compat_provider_config(&model));
-            provider_config.model = model.clone();
-            next_config.providers.insert(
-                OPENAI_COMPAT_PROVIDER_KEY.to_owned(),
-                serialize_openai_compat_provider_value(&provider_config)?,
-            );
-        } else {
-            let mut provider_config = load_deepseek_provider_config(&next_config)
-                .unwrap_or_else(|| default_deepseek_provider_config(&model));
-            provider_config.model = model.clone();
-            next_config.providers.insert(
-                "deepseek".to_owned(),
-                serialize_deepseek_provider_value(&provider_config)?,
-            );
-        }
+        set_active_provider_model(&mut next_config, &model)?;
 
         self.apply_runtime_config_snapshot(&next_config);
         self.reset_for_new_session(

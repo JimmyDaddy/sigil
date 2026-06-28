@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
@@ -10,14 +10,14 @@ use sigil_kernel::{
     Agent, AgentDelegationRequirement, AgentInvocationMode, AgentProfileId,
     AgentResultContinuationEntry, AgentResultContinuationStatus, AgentRole, AgentRunInput,
     AgentRunOptions, AgentRunResult, AgentThreadId, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentToolDelegate, CheckDiscoverySource, CheckPromotion,
-    CheckSpec, CheckSpecRecordedEntry, CompletionCriteria, ControlEntry,
-    ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
-    ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
-    ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
-    ConversationInputTarget, ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
-    DiscoveredCheck, EventHandler, EvidenceScope, ExecutionMutationProfile, JsonlSessionStore,
-    ModelMessage, MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
+    AgentThreadStatusChangedEntry, CheckDiscoverySource, CheckPromotion, CheckSpec,
+    CheckSpecRecordedEntry, CompletionCriteria, ControlEntry, ConversationInputEditedEntry,
+    ConversationInputKind, ConversationInputQueueControlAction, ConversationInputQueueControlEntry,
+    ConversationInputQueueId, ConversationInputQueuedEntry, ConversationInputReorderedEntry,
+    ConversationInputStatus, ConversationInputStatusEntry, ConversationInputTarget,
+    ConversationQueueProjection, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DiscoveredCheck,
+    EventHandler, EvidenceScope, ExecutionMutationProfile, JsonlSessionStore, ModelMessage,
+    MutationArtifactLifecycleRecorded, MutationArtifactLifecycleStatus,
     MutationArtifactRetentionReport, MutationEventRecorder, PlanApprovalExpiry,
     PlanApprovalPermission, PlanApprovalScope, PlanApprovedEntry, ProviderCapabilities,
     ReasoningEffort, RootConfig, RunEvent, SandboxProfileRequirement, SequentialTaskOrchestrator,
@@ -33,9 +33,9 @@ use sigil_kernel::{
     saturating_elapsed, stable_event_uuid, stable_workspace_id,
 };
 
-use crate::{
-    context_window::effective_compaction_config,
-    provider_status::{BalanceSnapshot, fetch_provider_balance_snapshot, fetch_remote_model_ids},
+use sigil_runtime::{
+    ProviderStatusTaskManager, ProviderStatusTaskResult, append_session_control_entries,
+    current_unix_time_ms, effective_compaction_config,
 };
 
 use super::{
@@ -91,8 +91,7 @@ pub(super) fn run_worker_loop<P>(
     let (task_result_tx, task_result_rx) = mpsc::channel::<RunTaskResult>();
     let (provider_status_tx, provider_status_rx) = mpsc::channel::<ProviderStatusTaskResult>();
     let mut active_run: Option<ActiveRun> = None;
-    let mut active_balance_refresh: Option<ActiveProviderStatusTask> = None;
-    let mut active_model_refresh: Option<ActiveProviderStatusTask> = None;
+    let mut provider_status_tasks = ProviderStatusTaskManager::new();
     let mut next_run_id = 1_u64;
     let mut discarded_run_ids = BTreeSet::new();
     let mut pending_mcp_refreshes = BTreeSet::new();
@@ -169,11 +168,7 @@ pub(super) fn run_worker_loop<P>(
                     request_id,
                     snapshot,
                 } => {
-                    if active_balance_refresh
-                        .as_ref()
-                        .is_some_and(|task| task.request_id == request_id)
-                    {
-                        active_balance_refresh = None;
+                    if provider_status_tasks.accept_balance_result(request_id) {
                         let _ = message_tx.send(WorkerMessage::ProviderBalanceRefreshed {
                             request_id,
                             snapshot,
@@ -185,11 +180,7 @@ pub(super) fn run_worker_loop<P>(
                     base_url,
                     result,
                 } => {
-                    if active_model_refresh
-                        .as_ref()
-                        .is_some_and(|task| task.request_id == request_id)
-                    {
-                        active_model_refresh = None;
+                    if provider_status_tasks.accept_models_result(request_id) {
                         let _ = message_tx.send(WorkerMessage::ProviderModelsRefreshed {
                             request_id,
                             base_url,
@@ -1608,53 +1599,26 @@ pub(super) fn run_worker_loop<P>(
                 request_id,
                 provider_config,
             }) => {
-                if let Some(task) = active_balance_refresh.take() {
-                    task.handle.abort();
-                }
-                let provider_status_tx = provider_status_tx.clone();
-                let handle = runtime.spawn(async move {
-                    let snapshot = fetch_provider_balance_snapshot(&provider_config)
-                        .await
-                        .unwrap_or(BalanceSnapshot {
-                            status: "balance unavailable".to_owned(),
-                            ..BalanceSnapshot::default()
-                        });
-                    let _ = provider_status_tx.send(ProviderStatusTaskResult::Balance {
-                        request_id,
-                        snapshot,
-                    });
-                });
-                active_balance_refresh = Some(ActiveProviderStatusTask { request_id, handle });
+                provider_status_tasks.refresh_balance(
+                    &runtime,
+                    request_id,
+                    provider_config,
+                    provider_status_tx.clone(),
+                );
             }
             Ok(WorkerCommand::RefreshProviderModels {
                 request_id,
                 provider_config,
             }) => {
-                if let Some(task) = active_model_refresh.take() {
-                    task.handle.abort();
-                }
-                let base_url = provider_config.base_url.clone();
-                let provider_status_tx = provider_status_tx.clone();
-                let handle = runtime.spawn(async move {
-                    let result = fetch_remote_model_ids(&provider_config)
-                        .await
-                        .map_err(|error| format!("{error:#}"));
-                    let _ = provider_status_tx.send(ProviderStatusTaskResult::Models {
-                        request_id,
-                        base_url,
-                        result,
-                    });
-                });
-                active_model_refresh = Some(ActiveProviderStatusTask { request_id, handle });
+                provider_status_tasks.refresh_models(
+                    &runtime,
+                    request_id,
+                    provider_config,
+                    provider_status_tx.clone(),
+                );
             }
             Ok(WorkerCommand::CancelProviderModelsRefresh { request_id }) => {
-                if active_model_refresh
-                    .as_ref()
-                    .is_some_and(|task| task.request_id == request_id)
-                    && let Some(task) = active_model_refresh.take()
-                {
-                    task.handle.abort();
-                }
+                provider_status_tasks.cancel_models_refresh(request_id);
             }
             Ok(WorkerCommand::ActivateLazyMcp { server_name }) => {
                 if active_run.is_some() {
@@ -1846,12 +1810,7 @@ pub(super) fn run_worker_loop<P>(
                     let _ = active_run.approval_tx.send(ApprovalSignal::Cancel);
                     active_run.handle.abort();
                 }
-                if let Some(task) = active_balance_refresh.take() {
-                    task.handle.abort();
-                }
-                if let Some(task) = active_model_refresh.take() {
-                    task.handle.abort();
-                }
+                provider_status_tasks.abort_all();
                 break;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -1859,12 +1818,7 @@ pub(super) fn run_worker_loop<P>(
         }
     }
 
-    if let Some(task) = active_balance_refresh.take() {
-        task.handle.abort();
-    }
-    if let Some(task) = active_model_refresh.take() {
-        task.handle.abort();
-    }
+    provider_status_tasks.abort_all();
 }
 
 struct WorkerAgentEventSink {
@@ -1890,7 +1844,7 @@ impl sigil_runtime::AgentToolBackgroundEventSink for WorkerAgentEventSink {
                 thread_id: thread_id.clone(),
                 status,
                 reason,
-                updated_at_ms: Some(unix_time_ms()),
+                updated_at_ms: Some(current_unix_time_ms()),
             },
         });
     }
@@ -3173,7 +3127,7 @@ fn queue_conversation_input(
         prompt_hash: conversation_prompt_hash(&prompt),
         prompt,
         reasoning_effort: Some(reasoning_effort),
-        created_at_ms: Some(unix_time_ms()),
+        created_at_ms: Some(current_unix_time_ms()),
     };
     let control = ControlEntry::ConversationInputQueued(entry);
     if let Some(session) = current_session.as_mut() {
@@ -3206,7 +3160,7 @@ fn cancel_queued_conversation_input(
                 queue_id,
                 status: ConversationInputStatus::Cancelled,
                 reason: Some("cancelled by user".to_owned()),
-                updated_at_ms: Some(unix_time_ms()),
+                updated_at_ms: Some(current_unix_time_ms()),
             },
         )],
     )
@@ -3232,7 +3186,7 @@ fn edit_queued_conversation_input(
                 prompt_hash: conversation_prompt_hash(&prompt),
                 prompt,
                 reasoning_effort: Some(reasoning_effort),
-                updated_at_ms: Some(unix_time_ms()),
+                updated_at_ms: Some(current_unix_time_ms()),
             },
         )],
     )
@@ -3268,7 +3222,7 @@ fn move_queued_conversation_input(
             ConversationInputReorderedEntry {
                 queue_id,
                 after_queue_id,
-                updated_at_ms: Some(unix_time_ms()),
+                updated_at_ms: Some(current_unix_time_ms()),
             },
         )],
     )
@@ -3288,7 +3242,7 @@ fn promote_queued_conversation_input(
             ConversationInputQueueControlEntry {
                 action: ConversationInputQueueControlAction::Resume,
                 reason: Some("next turn".to_owned()),
-                updated_at_ms: Some(unix_time_ms()),
+                updated_at_ms: Some(current_unix_time_ms()),
             },
         ));
     }
@@ -3296,7 +3250,7 @@ fn promote_queued_conversation_input(
         ConversationInputReorderedEntry {
             queue_id,
             after_queue_id: None,
-            updated_at_ms: Some(unix_time_ms()),
+            updated_at_ms: Some(current_unix_time_ms()),
         },
     ));
     append_conversation_queue_control_entries(session_log_path, current_session, controls)
@@ -3318,7 +3272,7 @@ fn set_conversation_queue_paused(
                     ConversationInputQueueControlAction::Resume
                 },
                 reason: Some("user control".to_owned()),
-                updated_at_ms: Some(unix_time_ms()),
+                updated_at_ms: Some(current_unix_time_ms()),
             },
         )],
     )
@@ -3366,32 +3320,7 @@ fn append_conversation_queue_control_entries(
         controls,
         "conversation queue",
     )
-}
-
-fn append_session_control_entries(
-    session_log_path: &Path,
-    current_session: &mut Option<Session>,
-    controls: Vec<ControlEntry>,
-    context: &str,
-) -> std::result::Result<Vec<SessionLogEntry>, String> {
-    if let Some(session) = current_session.as_mut() {
-        for control in controls {
-            session
-                .append_control(control)
-                .map_err(|error| format!("failed to append {context} control: {error:#}"))?;
-        }
-        return Ok(session.entries().to_vec());
-    }
-
-    let store = JsonlSessionStore::new(session_log_path.to_path_buf())
-        .map_err(|error| format!("failed to open session store for {context}: {error:#}"))?;
-    for control in controls {
-        store
-            .append(&SessionLogEntry::Control(control))
-            .map_err(|error| format!("failed to persist {context} control: {error:#}"))?;
-    }
-    JsonlSessionStore::read_entries(session_log_path)
-        .map_err(|error| format!("failed to reload {context} controls: {error:#}"))
+    .map_err(|error| format!("{error:#}"))
 }
 
 fn append_agent_result_continuation_status_entries(
@@ -3409,7 +3338,7 @@ fn append_agent_result_continuation_status_entries(
                 thread_id,
                 status,
                 reason: reason.map(str::to_owned),
-                updated_at_ms: Some(unix_time_ms()),
+                updated_at_ms: Some(current_unix_time_ms()),
             })
         })
         .collect::<Vec<_>>();
@@ -3419,6 +3348,7 @@ fn append_agent_result_continuation_status_entries(
         controls,
         "agent result continuation",
     )
+    .map_err(|error| format!("{error:#}"))
 }
 
 fn append_agent_result_continuation_status_and_notify(
@@ -3439,7 +3369,7 @@ fn append_agent_result_continuation_status_and_notify(
             thread_id: thread_id.clone(),
             status,
             reason: reason.map(str::to_owned),
-            updated_at_ms: Some(unix_time_ms()),
+            updated_at_ms: Some(current_unix_time_ms()),
         };
         if let Err(error) = session.append_control(ControlEntry::AgentResultContinuation(entry)) {
             let _ = message_tx.send(WorkerMessage::Notice(format!(
@@ -3534,7 +3464,7 @@ fn mark_stale_dispatching_conversation_queue_items(
             queue_id,
             status: ConversationInputStatus::Stale,
             reason: Some("stale after session restore without active run".to_owned()),
-            updated_at_ms: Some(unix_time_ms()),
+            updated_at_ms: Some(current_unix_time_ms()),
         };
         if let Err(error) =
             session.append_control(ControlEntry::ConversationInputStatusChanged(status))
@@ -3569,7 +3499,7 @@ fn append_queue_status_and_notify(
         queue_id,
         status,
         reason,
-        updated_at_ms: Some(unix_time_ms()),
+        updated_at_ms: Some(current_unix_time_ms()),
     };
     if let Err(error) = session.append_control(ControlEntry::ConversationInputStatusChanged(entry))
     {
@@ -3593,12 +3523,12 @@ fn append_queue_failure_and_pause_and_notify(
             queue_id,
             status: ConversationInputStatus::Rejected,
             reason: Some(reason),
-            updated_at_ms: Some(unix_time_ms()),
+            updated_at_ms: Some(current_unix_time_ms()),
         }),
         ControlEntry::ConversationInputQueueControl(ConversationInputQueueControlEntry {
             action: ConversationInputQueueControlAction::Pause,
             reason: Some("queued run failed".to_owned()),
-            updated_at_ms: Some(unix_time_ms()),
+            updated_at_ms: Some(current_unix_time_ms()),
         }),
     ];
     match append_conversation_queue_control_entries(session_log_path, current_session, controls) {
@@ -3627,7 +3557,7 @@ fn mark_next_conversation_queue_item_dispatching(
         queue_id,
         status: ConversationInputStatus::Dispatching,
         reason: Some("dispatching".to_owned()),
-        updated_at_ms: Some(unix_time_ms()),
+        updated_at_ms: Some(current_unix_time_ms()),
     };
     if let Err(error) = session.append_control(ControlEntry::ConversationInputStatusChanged(status))
     {
@@ -4083,23 +4013,6 @@ where
     })
 }
 
-struct ActiveProviderStatusTask {
-    request_id: u64,
-    handle: tokio::task::JoinHandle<()>,
-}
-
-enum ProviderStatusTaskResult {
-    Balance {
-        request_id: u64,
-        snapshot: BalanceSnapshot,
-    },
-    Models {
-        request_id: u64,
-        base_url: String,
-        result: std::result::Result<Vec<String>, String>,
-    },
-}
-
 pub(super) fn append_mcp_elicitation_audits(
     session: &mut Session,
     audit_buffer: &McpElicitationAuditBuffer,
@@ -4431,48 +4344,15 @@ fn message_agent_thread(
     let Some(session) = current_session.as_mut() else {
         return Err("session state is unavailable before agent message".to_owned());
     };
-    let call = ToolCall {
-        id: format!("tui-message-agent-{}", thread_id.as_str()),
-        name: sigil_runtime::MESSAGE_AGENT_TOOL_NAME.to_owned(),
-        args_json: serde_json::json!({
-            "thread_id": thread_id.as_str(),
-            "prompt": prompt,
-        })
-        .to_string(),
-    };
-    let mut handler = NoopEventHandler;
-    let mut approval = sigil_kernel::AutoApproveHandler;
     let mut agent_delegate = sigil_runtime::AgentToolRuntime::new(
         agent_supervisor.clone(),
         root_config.clone(),
         base_registry.clone(),
     )
     .with_background_runs(background_runs.clone());
-    let mut result = runtime
-        .block_on(agent_delegate.handle_agent_tool_call(
-            session,
-            &call,
-            options,
-            &mut handler,
-            &mut approval,
-        ))
-        .map_err(|error| format!("agent message failed: {error:#}"))?
-        .ok_or_else(|| "message_agent was not handled by runtime".to_owned())?;
-    let controls = std::mem::take(&mut result.control_entries);
-    for control in controls.iter().cloned() {
-        session
-            .append_control(control)
-            .map_err(|error| format!("failed to append agent message state: {error:#}"))?;
-    }
-    Ok((result, controls))
-}
-
-struct NoopEventHandler;
-
-impl sigil_kernel::EventHandler for NoopEventHandler {
-    fn handle(&mut self, _event: RunEvent) -> anyhow::Result<()> {
-        Ok(())
-    }
+    runtime
+        .block_on(agent_delegate.route_agent_message(session, thread_id, prompt, options))
+        .map_err(|error| format!("agent message failed: {error:#}"))
 }
 
 pub(super) struct PlanApprovalRequest {
@@ -4513,7 +4393,7 @@ pub(super) fn approve_plan(
     let entry = PlanApprovedEntry {
         plan_version: next_version,
         plan_hash: plan_text_hash(plan_text),
-        approved_at_ms: unix_time_ms(),
+        approved_at_ms: current_unix_time_ms(),
         permission: request.permission,
         scope: PlanApprovalScope {
             summary: scope_summary,
@@ -4528,13 +4408,6 @@ pub(super) fn approve_plan(
     let entries = session.entries().to_vec();
     *current_session = Some(session);
     Ok((entry, entries))
-}
-
-fn unix_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
-        .unwrap_or(0)
 }
 
 fn terminal_cancel_entry_from_result(

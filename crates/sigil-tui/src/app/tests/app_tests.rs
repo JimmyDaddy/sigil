@@ -1946,7 +1946,7 @@ fn slash_and_status_helpers_cover_usage_no_match_and_no_config_guards() -> Resul
     );
     assert_eq!(app.context_usage_hint(100), "threshold n/a");
     assert_eq!(
-        crate::app::context_window_source_label(crate::context_window::ContextWindowSource::None),
+        crate::app::context_window_source_label(sigil_runtime::ContextWindowSource::None),
         "n/a"
     );
     assert!(app.compaction_policy_line().starts_with("policy: soft"));

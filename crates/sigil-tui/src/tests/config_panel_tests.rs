@@ -1096,7 +1096,9 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     }];
 
     let config = draft.to_root_config()?;
-    let provider = load_deepseek_provider_config(&config).expect("provider should serialize");
+    let provider = config.providers["deepseek"]
+        .as_object()
+        .expect("provider should serialize as object");
 
     assert_eq!(config.agent.model, "deepseek-v4-pro");
     assert_eq!(
@@ -1105,19 +1107,9 @@ fn config_draft_serializes_provider_compaction_and_mcp_servers() -> anyhow::Resu
     );
     assert_eq!(config.compaction.context_window_tokens, Some(128000));
     assert_eq!(config.compaction.tail_messages, 8);
-    assert_eq!(provider.api_key, None);
-    assert_eq!(provider.base_url, "https://proxy.example.test");
-    assert_eq!(
-        provider.user_id_strategy.as_deref(),
-        Some("stable_per_end_user")
-    );
-    assert!(
-        config.providers["deepseek"]
-            .as_object()
-            .expect("provider should serialize as object")
-            .get("user_id_strategy")
-            .is_none()
-    );
+    assert!(provider.get("api_key").is_none());
+    assert_eq!(provider["base_url"], "https://proxy.example.test");
+    assert!(provider.get("user_id_strategy").is_none());
     assert_eq!(config.mcp_servers.len(), 1);
     assert_eq!(config.mcp_servers[0].args, vec!["server.js", "--stdio"]);
     assert_eq!(config.mcp_servers[0].startup_timeout_secs, 15);
@@ -1153,15 +1145,16 @@ fn config_draft_serializes_openai_compat_provider() -> anyhow::Result<()> {
     state.draft.provider_request_timeout_secs = "45".to_owned();
 
     let config = state.draft.to_root_config()?;
-    let provider =
-        load_openai_compat_provider_config(&config).expect("openai_compat should serialize");
+    let provider = config.providers[OPENAI_COMPAT_PROVIDER_KEY]
+        .as_object()
+        .expect("openai_compat should serialize as object");
 
     assert_eq!(config.agent.provider, OPENAI_COMPAT_PROVIDER_KEY);
     assert_eq!(config.agent.model, "gpt-new");
-    assert_eq!(provider.model, "gpt-new");
-    assert_eq!(provider.api_key.as_deref(), Some("new-key"));
-    assert_eq!(provider.base_url, "https://proxy.example.test/v1");
-    assert_eq!(provider.request_timeout_secs, 45);
+    assert_eq!(provider["model"], "gpt-new");
+    assert_eq!(provider["api_key"], "new-key");
+    assert_eq!(provider["base_url"], "https://proxy.example.test/v1");
+    assert_eq!(provider["request_timeout_secs"], 45);
     Ok(())
 }
 
@@ -1195,16 +1188,18 @@ fn config_draft_serializes_anthropic_provider() -> anyhow::Result<()> {
     state.draft.provider_request_timeout_secs = "45".to_owned();
 
     let config = state.draft.to_root_config()?;
-    let provider = load_anthropic_provider_config(&config).expect("anthropic should serialize");
+    let provider = config.providers[ANTHROPIC_PROVIDER_KEY]
+        .as_object()
+        .expect("anthropic should serialize as object");
 
     assert_eq!(config.agent.provider, ANTHROPIC_PROVIDER_KEY);
     assert_eq!(config.agent.model, "claude-new");
-    assert_eq!(provider.model, "claude-new");
-    assert_eq!(provider.api_key.as_deref(), Some("new-key"));
-    assert_eq!(provider.base_url, "https://proxy.example.test");
-    assert_eq!(provider.anthropic_version, "2023-06-01");
-    assert_eq!(provider.max_tokens, 1024);
-    assert_eq!(provider.request_timeout_secs, 45);
+    assert_eq!(provider["model"], "claude-new");
+    assert_eq!(provider["api_key"], "new-key");
+    assert_eq!(provider["base_url"], "https://proxy.example.test");
+    assert_eq!(provider["anthropic_version"], "2023-06-01");
+    assert_eq!(provider["max_tokens"], 1024);
+    assert_eq!(provider["request_timeout_secs"], 45);
     Ok(())
 }
 
@@ -1236,14 +1231,16 @@ fn config_draft_serializes_gemini_provider() -> anyhow::Result<()> {
     state.draft.provider_request_timeout_secs = "46".to_owned();
 
     let config = state.draft.to_root_config()?;
-    let provider = load_gemini_provider_config(&config).expect("gemini should serialize");
+    let provider = config.providers[GEMINI_PROVIDER_KEY]
+        .as_object()
+        .expect("gemini should serialize as object");
 
     assert_eq!(config.agent.provider, GEMINI_PROVIDER_KEY);
     assert_eq!(config.agent.model, "gemini-new");
-    assert_eq!(provider.model, "gemini-new");
-    assert_eq!(provider.api_key.as_deref(), Some("new-key"));
-    assert_eq!(provider.base_url, "https://proxy.example.test/v1beta");
-    assert_eq!(provider.request_timeout_secs, 46);
+    assert_eq!(provider["model"], "gemini-new");
+    assert_eq!(provider["api_key"], "new-key");
+    assert_eq!(provider["base_url"], "https://proxy.example.test/v1beta");
+    assert_eq!(provider["request_timeout_secs"], 46);
     Ok(())
 }
 
@@ -1464,8 +1461,7 @@ fn config_field_character_filter_matches_field_kind() {
 
 #[test]
 fn config_display_helpers_cover_bool_ratio_and_serialized_defaults() -> anyhow::Result<()> {
-    let provider = default_deepseek_provider_config("deepseek-v4-test");
-    let serialized = serialize_deepseek_provider_value(&provider)?;
+    let serialized = sigil_runtime::deepseek_provider_value_for_setup("deepseek-v4-test", None)?;
     assert_eq!(serialized["model"], "deepseek-v4-test");
     assert!(
         !serialized

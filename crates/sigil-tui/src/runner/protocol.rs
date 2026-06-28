@@ -7,14 +7,11 @@ use sigil_kernel::{
     PlanApprovedEntry, ReasoningEffort, RunEvent, SessionLogEntry, TaskRunStatus,
     TerminalTaskEntry,
 };
-use sigil_provider_deepseek::DeepSeekProviderConfig;
 use sigil_runtime::{
-    McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
-    McpProgressNotification,
+    BalanceSnapshot, McpElicitationRequest, McpElicitationResponse, McpListChangedNotification,
+    McpProgressNotification, ProviderStatusConfig,
 };
 use tokio::sync::oneshot;
-
-use crate::provider_status::BalanceSnapshot;
 
 pub(crate) type McpElicitationResponseTx = oneshot::Sender<McpElicitationResponse>;
 
@@ -125,11 +122,11 @@ pub enum WorkerCommand {
     },
     RefreshProviderBalance {
         request_id: u64,
-        provider_config: DeepSeekProviderConfig,
+        provider_config: ProviderStatusConfig,
     },
     RefreshProviderModels {
         request_id: u64,
-        provider_config: DeepSeekProviderConfig,
+        provider_config: ProviderStatusConfig,
     },
     CancelProviderModelsRefresh {
         request_id: u64,

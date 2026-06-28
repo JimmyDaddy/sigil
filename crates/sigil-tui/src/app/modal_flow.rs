@@ -1,16 +1,16 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sigil_provider_deepseek::DeepSeekProviderConfig;
-use sigil_runtime::{McpElicitationRequest, McpElicitationResponse};
+use sigil_runtime::{
+    DEEPSEEK_PROVIDER_KEY, McpElicitationRequest, McpElicitationResponse, ProviderConfigFields,
+    ProviderStatusConfig, deepseek_provider_status_config, default_provider_config_fields,
+    provider_status_config_from_fields,
+};
 
 use super::{
     AppState, PaneFocus, TimelineRole,
     formatting::{build_model_picker_options, non_empty_or},
 };
 use crate::commands::{keyboard_help_lines, metadata_slash_commands, metadata_slash_help_lines};
-use crate::config_panel::{
-    ConfigField, config_field_accepts_char, default_deepseek_provider_config,
-    load_deepseek_provider_config,
-};
+use crate::config_panel::{ConfigField, config_field_accepts_char};
 use crate::runner::WorkerCommand;
 use crate::slash::SLASH_COMMANDS;
 
@@ -361,10 +361,7 @@ impl AppState {
         current: &str,
     ) -> String {
         self.cancel_model_picker_refresh();
-        let provider_config = match self
-            .provider_config_for_model_picker(target, current)
-            .resolved()
-        {
+        let provider_config = match self.provider_status_config_for_model_picker(target, current) {
             Ok(config) => config,
             Err(error) => return format!("model list unavailable: {error}"),
         };
@@ -426,63 +423,54 @@ impl AppState {
     }
 
     #[cfg_attr(coverage, allow(dead_code))]
-    fn provider_config_for_model_picker(
+    fn provider_status_config_for_model_picker(
         &self,
         target: ModelPickerTarget,
         current: &str,
-    ) -> DeepSeekProviderConfig {
+    ) -> Result<ProviderStatusConfig, anyhow::Error> {
         if let Some(state) = &self.config_state {
-            let mut provider_config = match target {
-                ModelPickerTarget::ProviderFim => {
-                    DeepSeekProviderConfig::default_for_model(&state.draft.provider_model)
-                }
-                _ => DeepSeekProviderConfig::default_for_model(current.trim()),
+            let fallback_model = match target {
+                ModelPickerTarget::ProviderFim => state.draft.provider_model.trim(),
+                _ => current.trim(),
             };
-            provider_config.base_url =
-                non_empty_or(&state.draft.provider_base_url, &provider_config.base_url);
-            provider_config.beta_base_url = non_empty_or(
-                &state.draft.provider_beta_base_url,
-                &provider_config.beta_base_url,
-            );
-            provider_config.anthropic_base_url = non_empty_or(
-                &state.draft.provider_anthropic_base_url,
-                &provider_config.anthropic_base_url,
-            );
-            provider_config.api_key = (!state.draft.provider_api_key.trim().is_empty())
-                .then(|| state.draft.provider_api_key.trim().to_owned());
-            let default_user_id_strategy = provider_config.user_id_strategy.clone();
-            provider_config.user_id_strategy =
-                (!state.draft.provider_user_id_strategy.trim().is_empty())
-                    .then(|| state.draft.provider_user_id_strategy.trim().to_owned())
-                    .or(default_user_id_strategy);
-            provider_config.strict_tools_mode = state.draft.provider_strict_tools_mode;
-            provider_config.fim_model = match target {
-                ModelPickerTarget::ProviderFim => current.trim().to_owned(),
-                _ => non_empty_or(&state.draft.provider_fim_model, &provider_config.fim_model),
-            };
-            provider_config.request_timeout_secs = state
+            let defaults = default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, fallback_model);
+            let request_timeout_secs = state
                 .draft
                 .provider_request_timeout_secs
                 .trim()
                 .parse::<u64>()
                 .ok()
                 .filter(|value| *value > 0)
-                .unwrap_or(provider_config.request_timeout_secs);
-            return provider_config;
+                .map(|value| value.to_string())
+                .unwrap_or(defaults.request_timeout_secs);
+            let fields = ProviderConfigFields {
+                model: fallback_model.to_owned(),
+                api_key: state.draft.provider_api_key.trim().to_owned(),
+                base_url: non_empty_or(&state.draft.provider_base_url, &defaults.base_url),
+                request_timeout_secs,
+            };
+            return provider_status_config_from_fields(&fields);
         }
 
         if let Some(state) = &self.setup_state {
-            let mut provider_config = default_deepseek_provider_config(current);
-            provider_config.model = current.trim().to_owned();
-            provider_config.api_key =
-                (!state.api_key.trim().is_empty()).then(|| state.api_key.trim().to_owned());
-            return provider_config;
+            let defaults = default_provider_config_fields(DEEPSEEK_PROVIDER_KEY, current.trim());
+            let fields = ProviderConfigFields {
+                model: current.trim().to_owned(),
+                api_key: state.api_key.trim().to_owned(),
+                base_url: defaults.base_url,
+                request_timeout_secs: defaults.request_timeout_secs,
+            };
+            return provider_status_config_from_fields(&fields);
         }
 
-        self.config_snapshot
-            .as_ref()
-            .and_then(load_deepseek_provider_config)
-            .unwrap_or_else(|| default_deepseek_provider_config(current))
+        if let Some(root_config) = self.config_snapshot.as_ref() {
+            return deepseek_provider_status_config(root_config);
+        }
+
+        provider_status_config_from_fields(&default_provider_config_fields(
+            DEEPSEEK_PROVIDER_KEY,
+            current.trim(),
+        ))
     }
 
     pub(super) fn open_secret_input(&mut self, target: SecretInputTarget, current: &str) {

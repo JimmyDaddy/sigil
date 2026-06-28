@@ -11,15 +11,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentProfileId,
-    AgentRole, AgentRouteId, AgentRouteStatus, AgentRunOutcome, AgentThreadClosedEntry,
-    AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult,
-    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate,
-    AgentTrustState, AgentUsageSummary, ApprovalHandler, ApprovalMode, ControlEntry, EventHandler,
-    JsonlSessionStore, ModelMessage, PermissionConfig, PermissionPreset, Provider, RootConfig,
-    RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId, Tool,
-    ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolPreview,
-    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    saturating_elapsed,
+    AgentRole, AgentRouteId, AgentRouteStatus, AgentRunOptions, AgentRunOutcome,
+    AgentThreadClosedEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection,
+    AgentThreadResult, AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus,
+    AgentToolDelegate, AgentTrustState, AgentUsageSummary, ApprovalHandler, ApprovalMode,
+    ControlEntry, EventHandler, JsonlSessionStore, ModelMessage, PermissionConfig,
+    PermissionPreset, Provider, RootConfig, RunEvent, Session, SessionLogEntry, SessionRef,
+    TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
+    ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubject, saturating_elapsed,
 };
 
 use crate::{
@@ -438,6 +438,45 @@ impl AgentToolRuntime {
             status,
             result,
         })
+    }
+
+    pub async fn route_agent_message(
+        &mut self,
+        session: &mut Session,
+        thread_id: AgentThreadId,
+        prompt: String,
+        options: &AgentRunOptions,
+    ) -> Result<(ToolResult, Vec<ControlEntry>)> {
+        let call = ToolCall {
+            id: format!("runtime-message-agent-{}", thread_id.as_str()),
+            name: MESSAGE_AGENT_TOOL_NAME.to_owned(),
+            args_json: json!({
+                "thread_id": thread_id.as_str(),
+                "prompt": prompt,
+            })
+            .to_string(),
+        };
+        let mut handler = NoopAgentToolEventHandler;
+        let mut approval = sigil_kernel::AutoApproveHandler;
+        let mut result = self
+            .handle_agent_tool_call(session, &call, options, &mut handler, &mut approval)
+            .await?
+            .ok_or_else(|| anyhow!("message_agent was not handled by runtime"))?;
+        let controls = std::mem::take(&mut result.control_entries);
+        for control in controls.iter().cloned() {
+            session
+                .append_control(control)
+                .context("failed to append agent message state")?;
+        }
+        Ok((result, controls))
+    }
+}
+
+struct NoopAgentToolEventHandler;
+
+impl EventHandler for NoopAgentToolEventHandler {
+    fn handle(&mut self, _event: RunEvent) -> Result<()> {
+        Ok(())
     }
 }
 

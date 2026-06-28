@@ -1,18 +1,18 @@
 use serde_json::json;
-use sigil_provider_deepseek::{
-    DeepSeekProviderConfig, LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV, StrictToolsMode,
-};
 use std::{
     io::{Read, Write},
     net::TcpListener,
     thread,
 };
 
+use crate::ProviderStatusConfig;
+
 use super::{
-    BalanceSnapshot, build_provider_status_client, fetch_provider_balance_snapshot,
-    fetch_remote_model_ids, parse_balance_snapshot, parse_remote_model_ids,
-    provider_request_timeout_secs, provider_status_request_parts, provider_status_url,
-    require_provider_auth, resolve_provider_api_key,
+    BalanceSnapshot, ProviderStatusTaskManager, ProviderStatusTaskResult,
+    build_provider_status_client, fetch_provider_balance_snapshot, fetch_remote_model_ids,
+    parse_balance_snapshot, parse_remote_model_ids, provider_request_timeout_secs,
+    provider_status_request_parts, provider_status_url, require_provider_auth,
+    resolve_provider_api_key,
 };
 
 fn spawn_mock_http_server(
@@ -58,16 +58,10 @@ fn spawn_mock_http_server(
     (format!("http://{addr}"), handle)
 }
 
-fn provider_config(api_key: Option<&str>) -> DeepSeekProviderConfig {
-    DeepSeekProviderConfig {
+fn provider_config(api_key: Option<&str>) -> ProviderStatusConfig {
+    ProviderStatusConfig {
         base_url: "https://api.deepseek.com".to_owned(),
-        beta_base_url: "https://api.deepseek.com/beta".to_owned(),
-        anthropic_base_url: "https://api.deepseek.com/anthropic".to_owned(),
-        model: "deepseek-v4-flash".to_owned(),
         api_key: api_key.map(str::to_owned),
-        user_id_strategy: Some("stable_per_end_user".to_owned()),
-        strict_tools_mode: StrictToolsMode::Auto,
-        fim_model: "deepseek-v4-pro".to_owned(),
         request_timeout_secs: 1,
     }
 }
@@ -108,11 +102,6 @@ fn resolve_provider_api_key_uses_inline_config_secret() {
 
 #[tokio::test]
 async fn remote_model_fetch_fails_fast_without_auth() {
-    if std::env::var(SIGIL_API_KEY_ENV).is_ok()
-        || std::env::var(LEGACY_DEEPSEEK_API_KEY_ENV).is_ok()
-    {
-        return;
-    }
     let config = provider_config(None);
 
     let error = fetch_remote_model_ids(&config)
@@ -124,11 +113,6 @@ async fn remote_model_fetch_fails_fast_without_auth() {
 
 #[tokio::test]
 async fn balance_fetch_fails_fast_without_auth() {
-    if std::env::var(SIGIL_API_KEY_ENV).is_ok()
-        || std::env::var(LEGACY_DEEPSEEK_API_KEY_ENV).is_ok()
-    {
-        return;
-    }
     let config = provider_config(None);
 
     let error = fetch_provider_balance_snapshot(&config)
@@ -146,6 +130,67 @@ fn balance_snapshot_default_is_not_available() {
     assert_eq!(snapshot.currency, None);
     assert!(!snapshot.available);
     assert!(snapshot.status.is_empty());
+}
+
+#[test]
+fn provider_status_task_manager_accepts_only_active_balance_request() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime should start");
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let mut manager = ProviderStatusTaskManager::new();
+
+    manager.refresh_balance(&runtime, 42, provider_config(None), result_tx);
+    let result = result_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("balance task should send fallback snapshot");
+    match result {
+        ProviderStatusTaskResult::Balance {
+            request_id,
+            snapshot,
+        } => {
+            assert_eq!(request_id, 42);
+            assert_eq!(snapshot.status, "balance unavailable");
+        }
+        ProviderStatusTaskResult::Models { .. } => {
+            panic!("balance refresh should not send model result");
+        }
+    }
+
+    assert!(!manager.accept_balance_result(41));
+    assert!(manager.accept_balance_result(42));
+    assert!(!manager.accept_balance_result(42));
+}
+
+#[test]
+fn provider_status_task_manager_replaces_stale_model_refresh() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime should start");
+    let (result_tx, _result_rx) = std::sync::mpsc::channel();
+    let mut manager = ProviderStatusTaskManager::new();
+
+    manager.refresh_models(&runtime, 1, provider_config(None), result_tx.clone());
+    manager.refresh_models(&runtime, 2, provider_config(None), result_tx);
+
+    assert!(!manager.accept_models_result(1));
+    assert!(manager.accept_models_result(2));
+}
+
+#[test]
+fn provider_status_task_manager_cancels_matching_model_refresh_only() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime should start");
+    let (result_tx, _result_rx) = std::sync::mpsc::channel();
+    let mut manager = ProviderStatusTaskManager::new();
+
+    manager.refresh_models(&runtime, 7, provider_config(None), result_tx);
+    manager.cancel_models_refresh(8);
+    assert!(manager.accept_models_result(7));
+
+    manager.refresh_models(
+        &runtime,
+        9,
+        provider_config(None),
+        std::sync::mpsc::channel().0,
+    );
+    manager.cancel_models_refresh(9);
+    assert!(!manager.accept_models_result(9));
 }
 
 #[test]
@@ -231,16 +276,10 @@ fn parse_balance_snapshot_skips_invalid_entries_until_first_valid() {
     assert_eq!(snapshot.status, "CNY 88.12");
 }
 
-fn test_provider_config(timeout_secs: u64) -> DeepSeekProviderConfig {
-    DeepSeekProviderConfig {
+fn test_provider_config(timeout_secs: u64) -> ProviderStatusConfig {
+    ProviderStatusConfig {
         base_url: "https://example.com".to_owned(),
-        beta_base_url: "https://example.com/beta".to_owned(),
-        anthropic_base_url: "https://example.com/anthropic".to_owned(),
-        model: "deepseek-v4-flash".to_owned(),
-        fim_model: "deepseek-v4-pro".to_owned(),
         api_key: Some("test-key".to_owned()),
-        user_id_strategy: Some("stable_per_end_user".to_owned()),
-        strict_tools_mode: sigil_provider_deepseek::StrictToolsMode::Auto,
         request_timeout_secs: timeout_secs,
     }
 }
