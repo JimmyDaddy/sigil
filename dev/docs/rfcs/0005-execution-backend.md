@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / slice 3 verification runner integration implemented
+状态：draft / slice 5 sandbox conformance tests implemented
 
 创建日期：2026-06-28
 
@@ -21,6 +21,8 @@
 
 第三切片将 RFC-0003 verification check runner 接入同一个 `ExecutionBackend`。验证命令不再直接 spawn 本地进程；`/task` orchestrator 使用 runtime 配置的 backend，并在缺少 backend 时 fail closed。
 
+第四切片增加第一个 OS sandbox backend MVP：macOS `sandbox-exec` / Seatbelt 后端。它仅覆盖 non-interactive command execution，不覆盖 persistent terminal、MCP、插件或远端工具。
+
 ## 2. Goals
 
 - 提供 provider-neutral、tool-neutral 的 `ExecutionBackend` 契约。
@@ -30,7 +32,7 @@
 
 ## 3. Non-goals
 
-- 本切片不实现 OS-level sandbox。
+- 本 RFC 不一次实现所有平台 sandbox。
 - 本切片不迁移 persistent terminal / PTY。
 - 本切片不承诺 MCP、插件或远端工具受本地 shell sandbox 保护。
 - 本切片不新增普通用户可见操作面。
@@ -65,6 +67,12 @@ pub trait ExecutionBackend {
   - 默认 `backend = "local"`。
   - 默认 `isolation = "allow_local"`。
   - 显式 `isolation = "require_sandbox"` 要求 backend 提供 filesystem 和 process isolation。
+- 已新增 `backend = "macos_seatbelt"`，在 macOS 上通过 `/usr/bin/sandbox-exec` 执行非交互命令。
+  - profile 允许全文件系统读取。
+  - profile 只允许写入命令 working directory。
+  - profile 不开放 network access。
+  - `sandbox-exec` 缺失或非 macOS 平台会 fail closed。
+  - Apple 已将 `sandbox-exec` 标记为 deprecated，因此该 backend 是 enforcement MVP，不是最终跨平台 sandbox 策略。
 - 已新增 `sigil-tools-builtin` 的 `LocalExecutionBackend`。
 - 已将 non-interactive `bash` tool 迁移到 `ExecutionBackend::execute`。
 - 已将 runtime 的 local tool registry 构建接入 `RootConfig.execution`。
@@ -76,8 +84,9 @@ pub trait ExecutionBackend {
 
 ## 6. Productization Remains
 
-- 增加第一个 OS sandbox backend spike / MVP。
 - 根据首个 sandbox backend 增加更细的 profile presets，例如 `workspace_write`、`build_offline`、`build_networked`。
+- 增加 Linux / Windows / container backend，并明确各平台 capability 差异。
+- 扩展 sandbox conformance tests 到 Linux / Windows / container backend 和后续 profile presets。
 - 迁移 persistent terminal 时必须单独处理 PTY、长进程、resize、kill 和恢复语义。
 - MCP、插件和远端工具必须明确标注是否受本地 backend 控制；不能复用 shell sandbox 文案。
 
@@ -93,6 +102,10 @@ cargo test -p sigil-tools-builtin bash_tool_
 cargo test -p sigil-kernel verification_check_runner
 cargo test -p sigil-kernel task_orchestrator
 ./scripts/check-touched.sh --tier standard
+cargo test -p sigil-kernel root_config_loads_macos_seatbelt_execution_backend
+cargo test -p sigil-tools-builtin macos_seatbelt
+cargo test -p sigil-runtime build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required
+cargo test -p sigil-tools-builtin sandbox_conformance
 ```
 
-注意：本切片只证明 LocalBackend migration 未破坏 `bash` 主行为，不证明 OS sandbox 能力。
+注意：`macos_seatbelt` 只证明 macOS non-interactive command backend 的最小 enforcement。完整跨平台 sandbox、profile presets、persistent terminal sandbox 和 MCP/plugin 进程隔离仍属于后续切片。

@@ -141,6 +141,26 @@ tool_timeout_secs = 30
 - `tool_timeout_secs`: tool execution timeout.
 - `max_turns`: optional guard. It is disabled by default; when set, a run stops recoverably if the model keeps requesting tools without producing a final answer.
 
+## Execution Backend
+
+```toml
+[execution]
+backend = "local"
+isolation = "allow_local"
+```
+
+`[execution]` is a file-only advanced section. The default `local` backend preserves the normal local shell behavior and does not claim OS sandbox isolation.
+
+On macOS, advanced users can opt into the first sandbox backend MVP:
+
+```toml
+[execution]
+backend = "macos_seatbelt"
+isolation = "require_sandbox"
+```
+
+`macos_seatbelt` runs non-interactive commands through `/usr/bin/sandbox-exec` with full filesystem reads, writes limited to the command working directory, and network access omitted from the profile. It is macOS-only, does not cover the persistent terminal, MCP servers, plugins, or remote tools, and fails closed if `sandbox-exec` is unavailable. `sandbox-exec` is deprecated by Apple, so this backend is an enforcement MVP rather than the final cross-platform sandbox strategy.
+
 ## Verification
 
 ```toml
@@ -153,9 +173,9 @@ args = ["test"]
 effect = "read_only"
 ```
 
-`[verification]` is a file-only section for explicit user-approved checks. Current task runs materialize these entries into verification policy records before evaluating completion. Sigil also has kernel support for discovering repository-local candidate checks from `.sigil/verification.toml`, CI `run:` steps, `package.json`, `Cargo.toml`, and `Makefile`, but discovery never means execution. Repository-local candidates are untrusted data until they are promoted through a recorded workspace trust decision, explicit approval, a satisfying sandbox decision, or a global policy.
+`[verification]` is a file-only section for explicit user-approved checks. Current task runs materialize these entries into verification policy records before evaluating completion. Sigil also has kernel support for discovering repository-local candidate checks from `.sigil/verification.toml`, CI `run:` steps, `package.json`, `Cargo.toml`, and `Makefile`, but discovery never means execution. Repository-local candidates stay suggested checks until they are promoted through explicit approval, a satisfying sandbox decision, or a global policy; trusting a workspace alone does not make every discovered CI/Cargo/Makefile check block ordinary tasks.
 
-Inside the TUI, `/trust-workspace` records a trust decision for the current workspace. That decision can promote repository-local verification candidates for future `/task` runs or `/task continue`, but it does not grant shell, plugin, MCP, or file-write permissions by itself.
+On first workspace entry, the TUI records a coarse workspace trust decision before normal use. That decision allows repository-local instructions and check discovery, but it does not promote discovered checks by itself and does not grant shell, plugin, MCP, or file-write permissions.
 
 Each `[[verification.checks]]` entry defines a trusted check from user config:
 

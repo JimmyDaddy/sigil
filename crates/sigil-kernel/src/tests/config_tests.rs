@@ -974,6 +974,31 @@ isolation = "require_sandbox"
 }
 
 #[test]
+fn root_config_loads_macos_seatbelt_execution_backend() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[execution]
+backend = "macos_seatbelt"
+isolation = "require_sandbox"
+"#,
+    )
+    .expect("macos seatbelt execution config should parse");
+
+    assert_eq!(
+        config.execution.backend,
+        ExecutionBackendKind::MacosSeatbelt
+    );
+    assert_eq!(
+        config.execution.isolation,
+        ExecutionIsolationPolicy::RequireSandbox
+    );
+}
+
+#[test]
 fn preferred_config_path_falls_back_to_user_config_path() {
     let temp = tempfile::tempdir().expect("tempdir should build");
 

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Agent, AgentRunInput, AgentRunOptions, AutoApproveHandler, CandidateCheck, CheckCommand,
-    CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CheckpointRestored,
+    CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry, CheckpointRestored,
     CompletionRequest, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType,
     EventClass, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
     ExecutionBackendKind, ExecutionFuture, ExecutionMutationProfile, ExecutionReceipt,
@@ -24,10 +24,10 @@ use crate::{
     TaskRunStatus, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
     TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
     ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, VerificationAutoRunPolicy,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    write_file_with_mutation,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
+    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, write_file_with_mutation,
 };
 
 use super::{
@@ -3867,24 +3867,26 @@ fn append_trusted_only_policy_for_task(session: &mut Session, task_id: &str) -> 
 
 #[test]
 fn task_step_default_policy_preserves_repo_check_trust_requirement() -> Result<()> {
-    let trusted = CandidateCheck {
-        source: CheckDiscoverySource::Cargo,
-        command: CheckCommand {
+    let check_spec = CheckSpec::new(
+        "cargo-test",
+        CheckCommand {
             command: "cargo".to_owned(),
             args: vec!["test".to_owned()],
             cwd: None,
         },
-        source_event_id: "event-discovery".to_owned(),
-        workspace_trust_snapshot_id: "trust-1".to_owned(),
-    }
-    .promote(
-        "cargo-test",
-        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
         ToolEffect::ReadOnly,
-        CheckPromotion::WorkspaceTrusted {
+        DEFAULT_TASK_VERIFICATION_SCOPE_HASH,
+    );
+    let trusted = TrustedCheckSpec {
+        check_spec,
+        source: CheckDiscoverySource::Cargo,
+        workspace_trust_snapshot_id: "trust-1".to_owned(),
+        promoted_by: CheckPromotion::WorkspaceTrusted {
             trust_event_id: "event-trust".to_owned(),
         },
-    )?;
+        approval_event_id: None,
+        sandbox_decision_id: None,
+    };
     let mut session = Session::new("planner", "model");
     let task_scope = EvidenceScope::Task("task_1".to_owned());
     let step_scope = EvidenceScope::Step("task_1:step_1".to_owned());

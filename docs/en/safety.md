@@ -103,13 +103,23 @@ Only enable it for narrow, intentional use cases. Keep `default_mode = "ask"` un
 
 ## Shell Commands
 
-`bash` does not provide a full sandbox. Sigil treats shell execution conservatively:
+By default, `bash` uses the local execution backend and does not provide an OS sandbox. Sigil treats shell execution conservatively:
 
 - simple read-like commands may be allowed only when they match safe patterns;
 - commands with writes, redirects, package managers, network access, unknown commands, variables, or complex shell syntax should stay reviewable;
 - command output is bounded before it becomes model-visible.
 
 Review the command, working directory, and expected side effects before approving.
+
+On macOS, `~/.sigil/sigil.toml` can opt into the `macos_seatbelt` backend for non-interactive commands:
+
+```toml
+[execution]
+backend = "macos_seatbelt"
+isolation = "require_sandbox"
+```
+
+This backend runs commands through `/usr/bin/sandbox-exec`, allows filesystem reads, restricts writes to the command working directory, and omits network access from the sandbox profile. It does not cover the persistent terminal, MCP servers, plugins, or remote tools.
 
 ## MCP Trust
 

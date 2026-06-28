@@ -188,9 +188,6 @@ fn spawn_eager_mcp_startup_tasks(
                             error: error.clone(),
                         },
                     });
-                    let _ = message_tx.send(WorkerMessage::Notice(format!(
-                        "MCP startup failed for {server_name}: {error}"
-                    )));
                 }
             }
         });

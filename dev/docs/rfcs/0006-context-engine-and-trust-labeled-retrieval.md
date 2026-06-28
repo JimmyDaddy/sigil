@@ -1,6 +1,6 @@
 # RFC-0006 Context Engine and Trust-labeled Retrieval
 
-状态：draft / roadmap candidate
+状态：draft / slice 1 context digest and provenance model implemented
 
 创建日期：2026-06-28
 
@@ -91,6 +91,15 @@ MVP source order:
 7. LSP diagnostics/symbol/reference hints.
 8. Verification and mutation evidence summaries.
 
+Implementation progress:
+
+- 已新增 kernel-level `ContextItem` provenance model。
+- 已新增 `ContextDigestV0` 和 deterministic builder。
+- 已验证 trusted workspace instruction 必须匹配 workspace trust label；未信任仓库内容不能伪装成 instruction。
+- 已验证 included secret context 必须携带 egress decision。
+- 已验证 digest 中的 `VerificationVerdict::Passed` 必须引用已有 receipt，不能由 digest 自己创造 evidence。
+- 尚未实现 session archive、BM25/repo retrieval、LSP source provider、token budget packer 或 TUI provenance summary。
+
 ## 6. ContextDigestV0
 
 `ContextDigestV0` 是 deterministic、最小、服务 packing 的摘要，不是长期 memory。
@@ -168,6 +177,8 @@ cargo test -p sigil-kernel context
 cargo test -p sigil-code-intel
 cargo test -p sigil-runtime context
 cargo test -p sigil-tui context
+cargo test -p sigil-kernel context_digest
+cargo test -p sigil-kernel context_item
 ```
 
 Exact test filters should be added with the implementation slices.

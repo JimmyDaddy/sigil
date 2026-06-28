@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use std::net::TcpListener;
 use std::{
     collections::BTreeMap,
     fs,
@@ -19,9 +21,10 @@ use tokio::time::{Duration, sleep};
 
 use super::{
     ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
-    EditFileTool, GlobTool, GrepTool, ListTool, LocalExecutionBackend, ReadFileTool,
-    TerminalInputTool, TerminalProcessManagers, TerminalStartRequest, TerminalStartTool,
-    WriteFileTool, register_builtin_tools, register_builtin_tools_with_paths,
+    EditFileTool, GlobTool, GrepTool, ListTool, LocalExecutionBackend,
+    MacosSeatbeltExecutionBackend, ReadFileTool, TerminalInputTool, TerminalProcessManagers,
+    TerminalStartRequest, TerminalStartTool, WriteFileTool, register_builtin_tools,
+    register_builtin_tools_with_paths,
 };
 
 use serial_test::serial;
@@ -56,6 +59,69 @@ fn local_execution_backend_policy_fails_closed_when_sandbox_required() -> Result
     Ok(())
 }
 
+#[test]
+fn macos_seatbelt_backend_default_and_custom_paths_are_stable() {
+    let default_backend = MacosSeatbeltExecutionBackend::default();
+    assert_eq!(default_backend.kind(), ExecutionBackendKind::MacosSeatbelt);
+
+    let custom_path = PathBuf::from("/tmp/custom-sandbox-exec");
+    let custom_backend = MacosSeatbeltExecutionBackend::new(custom_path.clone());
+    assert_eq!(custom_backend.kind(), ExecutionBackendKind::MacosSeatbelt);
+    assert!(!custom_backend.is_available());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_seatbelt_backend_satisfies_required_sandbox_policy() -> Result<()> {
+    let backend = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::MacosSeatbelt,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+    })?;
+
+    assert_eq!(backend.kind(), ExecutionBackendKind::MacosSeatbelt);
+    let capabilities = backend.capabilities();
+    assert!(capabilities.filesystem_isolation);
+    assert!(capabilities.network_isolation);
+    assert!(capabilities.process_isolation);
+    assert!(!capabilities.persistent_pty);
+    assert!(!capabilities.workspace_snapshot);
+    Ok(())
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn macos_seatbelt_backend_missing_binary_fails_closed_during_validation() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let backend = MacosSeatbeltExecutionBackend::new(temp.path().join("missing-sandbox-exec"));
+
+    let error = super::ensure_macos_seatbelt_available(&backend)
+        .expect_err("missing sandbox-exec should fail closed during validation");
+
+    assert!(
+        error
+            .to_string()
+            .contains("macos_seatbelt execution backend requires")
+    );
+}
+
+#[test]
+#[cfg(not(target_os = "macos"))]
+fn macos_seatbelt_backend_fails_closed_on_non_macos() {
+    let result = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::MacosSeatbelt,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+    });
+
+    let Err(error) = result else {
+        panic!("macos_seatbelt backend must fail closed on non-macOS");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("macos_seatbelt execution backend is only available on macOS")
+    );
+}
+
 #[tokio::test]
 async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result<()> {
     let temp = tempfile::tempdir()?;
@@ -82,6 +148,219 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
     assert!(receipt.stderr.is_empty());
     assert!(!receipt.timed_out);
     Ok(())
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn macos_seatbelt_execution_backend_allows_workspace_write_and_denies_external_write()
+-> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let workspace_root = fs::canonicalize(workspace.path())?;
+    let outside_root = fs::canonicalize(outside.path())?;
+    let backend = MacosSeatbeltExecutionBackend::default();
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "/bin/sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "printf ok > allowed.txt; printf nope > \"$1/denied.txt\"".to_owned(),
+                "sh".to_owned(),
+                outside_root.to_string_lossy().into_owned(),
+            ],
+            cwd: workspace_root.clone(),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            timeout_secs: 5,
+        })
+        .await?;
+
+    assert_eq!(receipt.backend, ExecutionBackendKind::MacosSeatbelt);
+    assert_eq!(receipt.exit_code, Some(1));
+    assert_eq!(
+        fs::read_to_string(workspace_root.join("allowed.txt"))?,
+        "ok"
+    );
+    assert!(!outside_root.join("denied.txt").exists());
+    assert!(
+        String::from_utf8_lossy(&receipt.stderr).contains("Operation not permitted"),
+        "stderr should explain the sandbox denial: {}",
+        String::from_utf8_lossy(&receipt.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn macos_seatbelt_profile_escapes_workspace_path() {
+    let profile = super::macos_seatbelt_workspace_write_profile(Path::new(
+        r#"/tmp/sigil "quoted"\workspace"#,
+    ));
+    assert!(
+        profile.contains(r#"(allow file-write* (subpath "/tmp/sigil \"quoted\"\\workspace"))"#)
+    );
+}
+
+#[test]
+fn sandbox_conformance_local_backend_does_not_claim_sandbox_capabilities() {
+    let backend = LocalExecutionBackend;
+    let capabilities = backend.capabilities();
+
+    assert!(!capabilities.filesystem_isolation);
+    assert!(!capabilities.network_isolation);
+    assert!(!capabilities.process_isolation);
+    assert!(!capabilities.resource_limits);
+    assert!(!capabilities.persistent_pty);
+    assert!(!capabilities.workspace_snapshot);
+    assert!(!capabilities.supports_required_sandbox());
+}
+
+#[test]
+fn sandbox_conformance_local_backend_fails_closed_for_required_sandbox() {
+    let result = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::Local,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+    });
+
+    let Err(error) = result else {
+        panic!("local backend must not satisfy required sandbox policy");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("execution sandbox required but Local backend")
+    );
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn sandbox_conformance_macos_seatbelt_enforces_filesystem_write_claim() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let workspace_root = fs::canonicalize(workspace.path())?;
+    let outside_root = fs::canonicalize(outside.path())?;
+    let backend = MacosSeatbeltExecutionBackend::default();
+    let capabilities = backend.capabilities();
+
+    assert!(capabilities.filesystem_isolation);
+    assert!(capabilities.process_isolation);
+    assert!(capabilities.supports_required_sandbox());
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "/bin/sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "mkdir -p build && printf ok > build/artifact.txt; printf nope > \"$1/denied.txt\""
+                    .to_owned(),
+                "sh".to_owned(),
+                outside_root.to_string_lossy().into_owned(),
+            ],
+            cwd: workspace_root.clone(),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            timeout_secs: 5,
+        })
+        .await?;
+
+    assert_eq!(receipt.backend, ExecutionBackendKind::MacosSeatbelt);
+    assert_eq!(receipt.exit_code, Some(1));
+    assert_eq!(
+        fs::read_to_string(workspace_root.join("build").join("artifact.txt"))?,
+        "ok"
+    );
+    assert!(!outside_root.join("denied.txt").exists());
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn sandbox_conformance_macos_seatbelt_denies_network_when_claimed() -> Result<()> {
+    let nc = Path::new("/usr/bin/nc");
+    if !nc.is_file() {
+        eprintln!("skipping network conformance: /usr/bin/nc is unavailable");
+        return Ok(());
+    }
+
+    let workspace = tempfile::tempdir()?;
+    let workspace_root = fs::canonicalize(workspace.path())?;
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port().to_string();
+    let nc_args = vec![
+        "-z".to_owned(),
+        "-G".to_owned(),
+        "1".to_owned(),
+        "127.0.0.1".to_owned(),
+        port,
+    ];
+
+    let local_receipt = LocalExecutionBackend
+        .execute(ExecutionRequest {
+            program: nc.display().to_string(),
+            args: nc_args.clone(),
+            cwd: workspace_root.clone(),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            timeout_secs: 5,
+        })
+        .await?;
+    if local_receipt.exit_code != Some(0) {
+        eprintln!(
+            "skipping network conformance: local nc preflight failed with exit {:?}",
+            local_receipt.exit_code
+        );
+        return Ok(());
+    }
+
+    let backend = MacosSeatbeltExecutionBackend::default();
+    assert!(backend.capabilities().network_isolation);
+
+    let sandboxed_receipt = backend
+        .execute(ExecutionRequest {
+            program: nc.display().to_string(),
+            args: nc_args,
+            cwd: workspace_root,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            timeout_secs: 5,
+        })
+        .await?;
+
+    assert_ne!(sandboxed_receipt.exit_code, Some(0));
+    assert!(!sandboxed_receipt.timed_out);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(target_os = "macos")]
+async fn sandbox_conformance_macos_seatbelt_missing_binary_fails_closed() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let backend = MacosSeatbeltExecutionBackend::new(workspace.path().join("missing-sandbox-exec"));
+
+    let error = backend
+        .execute(ExecutionRequest {
+            program: "/bin/sh".to_owned(),
+            args: vec!["-c".to_owned(), "printf should-not-run".to_owned()],
+            cwd: workspace.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            timeout_secs: 5,
+        })
+        .await
+        .expect_err("missing sandbox-exec should fail closed before command execution");
+
+    assert!(
+        error
+            .to_string()
+            .contains("macos_seatbelt execution backend requires")
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(not(target_os = "macos"))]
+fn sandbox_conformance_macos_seatbelt_is_skipped_with_reason_on_unsupported_platform() {
+    eprintln!("skipping macos_seatbelt conformance: backend is macOS-only");
 }
 
 #[tokio::test]
@@ -147,7 +426,7 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
     let scratch = PathBuf::from("/scratch");
     let request = super::bash_execution_request("printf ok", &workspace, &scratch, 9);
     assert_eq!(request.program, "sh");
-    assert_eq!(request.args, vec!["-lc".to_owned(), "printf ok".to_owned()]);
+    assert_eq!(request.args, vec!["-c".to_owned(), "printf ok".to_owned()]);
     assert_eq!(request.cwd, workspace);
     assert_eq!(
         request

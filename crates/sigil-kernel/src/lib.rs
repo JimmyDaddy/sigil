@@ -3,7 +3,9 @@ pub mod agent_thread;
 pub mod approval;
 pub mod changeset;
 pub mod config;
+pub mod context_engine;
 pub mod conversation_queue;
+pub mod eval;
 pub mod event;
 pub mod execution_backend;
 pub mod memory;
@@ -61,11 +63,24 @@ pub use config::{
     ToolAllowlistConfig, UsageCostCurrency, WorkspaceConfig, default_user_config_dir,
     default_user_config_path, preferred_config_path, resolve_workspace_root,
 };
+pub use context_engine::{
+    ContextBodyRef, ContextDigestText, ContextDigestTextKind, ContextDigestV0,
+    ContextDigestV0Builder, ContextEgressDecisionId, ContextInclusionReason, ContextItem,
+    ContextItemId, ContextRepoRevision, ContextSensitivity, ContextSource, ContextTrustLevel,
+    estimate_context_token_cost,
+};
 pub use conversation_queue::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
     ConversationInputQueueControlEntry, ConversationInputQueueId, ConversationInputQueuedEntry,
     ConversationInputReorderedEntry, ConversationInputStatus, ConversationInputStatusEntry,
     ConversationInputTarget, ConversationQueueItemProjection, ConversationQueueProjection,
+};
+pub use eval::{
+    EvalCase, EvalCaseId, EvalCaseRunner, EvalCaseRunnerOptions, EvalEvidenceId, EvalEvidenceKind,
+    EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalFakeToolAction, EvalFakeToolRegistry,
+    EvalFixtureId, EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRequiredAction,
+    EvalRequiredActionKind, EvalResult, EvalRunId, EvalRunMetadata, EvalStepId, EvalToolCallId,
+    EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture,
 };
 pub use event::{
     ALL_DURABLE_EVENT_TYPES, DomainEvent, DomainPayload, DurableDomainEvent, DurableEventType,

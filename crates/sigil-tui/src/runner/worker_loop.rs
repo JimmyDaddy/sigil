@@ -2366,11 +2366,6 @@ pub(super) fn materialize_task_verification_config(
     let workspace_trust_snapshot_id = trust_entry
         .map(|entry| entry.workspace_trust_snapshot_id.clone())
         .unwrap_or_else(|| format!("workspace-trust:unknown:{workspace_id}"));
-    let workspace_is_trusted =
-        trust_entry.is_some_and(|entry| entry.trust == WorkspaceTrust::Trusted);
-    let trust_event_id = trust_entry
-        .and_then(|entry| entry.decided_by_event_id.clone())
-        .unwrap_or_else(|| workspace_trust_snapshot_id.clone());
     let workspace_scope = EvidenceScope::Workspace(workspace_id.clone());
     let discovered = discover_candidate_checks_with_user_config(
         workspace_root,
@@ -2387,12 +2382,6 @@ pub(super) fn materialize_task_verification_config(
             CheckDiscoverySource::UserExplicitConfig => {
                 let promotion = CheckPromotion::ExplicitUserConfig {
                     config_event_id: source_event_id.clone(),
-                };
-                candidate.promote(DEFAULT_TASK_VERIFICATION_SCOPE_HASH, promotion)
-            }
-            _ if workspace_is_trusted => {
-                let promotion = CheckPromotion::WorkspaceTrusted {
-                    trust_event_id: trust_event_id.clone(),
                 };
                 candidate.promote(DEFAULT_TASK_VERIFICATION_SCOPE_HASH, promotion)
             }

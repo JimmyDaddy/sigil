@@ -700,7 +700,6 @@ impl CandidateCheck {
             && !matches!(
                 promotion,
                 CheckPromotion::UserApproved { .. }
-                    | CheckPromotion::WorkspaceTrusted { .. }
                     | CheckPromotion::Sandboxed { .. }
                     | CheckPromotion::GlobalPolicy { .. }
             )

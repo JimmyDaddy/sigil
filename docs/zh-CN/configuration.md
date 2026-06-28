@@ -141,6 +141,26 @@ tool_timeout_secs = 30
 - `tool_timeout_secs`：工具执行超时。
 - `max_turns`：可选保险丝。默认不限制；如果显式设置，模型连续达到阈值仍只请求工具而没有最终回答时，本轮会可恢复地停止。
 
+## 执行后端
+
+```toml
+[execution]
+backend = "local"
+isolation = "allow_local"
+```
+
+`[execution]` 是只通过配置文件编辑的高级配置。默认 `local` backend 保持普通本地 shell 行为，不声明 OS sandbox 隔离能力。
+
+macOS 上的高级用户可以显式启用第一版 sandbox backend MVP：
+
+```toml
+[execution]
+backend = "macos_seatbelt"
+isolation = "require_sandbox"
+```
+
+`macos_seatbelt` 会通过 `/usr/bin/sandbox-exec` 运行非交互命令；profile 允许读取文件系统、只允许写入命令工作目录，并且不开放网络访问。它只支持 macOS，不覆盖 persistent terminal、MCP server、plugin 或远端工具；如果 `sandbox-exec` 不可用会 fail closed。Apple 已将 `sandbox-exec` 标记为 deprecated，因此这个 backend 是 enforcement MVP，不是最终跨平台 sandbox 策略。
+
 ## 验证
 
 ```toml
@@ -153,9 +173,9 @@ args = ["test"]
 effect = "read_only"
 ```
 
-`[verification]` 是只通过配置文件编辑的显式用户检查配置。当前 task run 会先把这些条目物化成 verification policy 记录，再用于 completion readiness 判断。Sigil 的 kernel 也支持从 `.sigil/verification.toml`、CI `run:` 步骤、`package.json`、`Cargo.toml` 和 `Makefile` 发现仓库本地候选检查，但“发现”不等于“执行”。仓库本地候选在经过 workspace trust decision、显式审批、满足 policy 的 sandbox decision 或 global policy promotion 之前，都只是未信任数据。
+`[verification]` 是只通过配置文件编辑的显式用户检查配置。当前 task run 会先把这些条目物化成 verification policy 记录，再用于 completion readiness 判断。Sigil 的 kernel 也支持从 `.sigil/verification.toml`、CI `run:` 步骤、`package.json`、`Cargo.toml` 和 `Makefile` 发现仓库本地候选检查，但“发现”不等于“执行”。仓库本地候选会保持为 suggested checks，直到经过显式审批、满足 policy 的 sandbox decision 或 global policy promotion；仅仅 trust 一个 workspace 不会让所有 CI/Cargo/Makefile 发现项阻塞普通任务。
 
-在 TUI 中可以使用 `/trust-workspace` 为当前 workspace 记录 trust decision。这个 decision 可以让仓库本地 verification 候选在之后的 `/task` 或 `/task continue` 中被提升为可用检查，但不会单独授予 shell、plugin、MCP 或文件写入权限。
+首次进入 workspace 时，TUI 会先记录粗粒度 workspace trust decision，然后才进入正式使用。这个 decision 允许加载仓库本地 instructions 和发现 repo-local checks，但不会自动提升发现到的 checks，也不会单独授予 shell、plugin、MCP 或文件写入权限。
 
 每个 `[[verification.checks]]` 条目定义一个来自用户配置的受信任检查：
 

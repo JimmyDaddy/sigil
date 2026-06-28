@@ -173,7 +173,7 @@ struct TrustedCheckSpec {
 }
 ```
 
-Untrusted repo-local sources can only produce `CandidateCheck`. They become `TrustedCheckSpec` only through user/global policy promotion, a recorded workspace trust decision, explicit approval or a sandbox decision satisfying policy.
+Repo-local sources can only produce `CandidateCheck` by default. They become `TrustedCheckSpec` only through user/global policy promotion, explicit approval or a sandbox decision satisfying policy. A recorded workspace trust decision allows normal workspace use and repo-local discovery, but it does not automatically make every discovered CI/Cargo/Makefile check required for ordinary tasks.
 
 Product-surface ownership:
 
@@ -550,11 +550,11 @@ Required deterministic tests:
 - 已将 foreground chat final answer 接入 readiness：普通 chat run 结束时会追加系统计算的 `ReadinessEvaluated`；无 workspace mutation 时为 `NotApplicable`，存在 mutation 且缺少适用 receipt 时为 `Missing` / `CompletedUnverified`，不会把 final text 视为 verified。
 - 已将 `/task` step completion 接入 readiness：final text 不能直接证明 verified，missing check 会阻断/降级，RunCheck action 可执行 trusted check 后重算 readiness。
 - 已将 check runner lifecycle 进入 append-only control/audit：`RunCheck` 会记录 queued、running 和 terminal `VerificationCheckRun` entry，projection 保留每个 run 的最新状态；最终 proof 仍由 `VerificationRecorded` receipt 决定。
-- 已收紧 repo-local check 的 workspace trust 持续约束：由 trusted workspace promotion 产生的 policy 会携带 `WorkspaceTrustRequirement::Trusted`，避免 workspace trust 后续降级后继续自动执行 repo scripts。
+- 已收紧 repo-local check promotion：workspace trust 不再自动把 CI/Cargo/Makefile discovery 变成 task required checks；默认只要求用户显式配置的 checks，repo-local discovery 需要显式 approval、sandbox decision 或 global policy promotion 后才进入 task policy。
 - 已修正 check runner 执行前 workspace trust gate：`run_verification_check` 会同时识别 request 级 approval/sandbox decision 和 `TrustedCheckSpec` promotion 自带的 approval/sandbox decision，避免已审批或已 sandboxed 的 repo-local trusted check 被错误拒绝。
-- 已在 session audit 中展示 workspace trust provenance：`WorkspaceTrustDecision` 会显示 trust snapshot、deciding event 和 reason，便于用户追溯 repo-local check promotion 的来源。
+- 已在 session audit 中展示 workspace trust provenance：`WorkspaceTrustDecision` 会显示 trust snapshot、deciding event 和 reason，便于用户追溯 workspace trust 来源。
 - 已在 TUI 中展示 verification missing/passed/stale 等状态，并补 slash command 高亮、timeline command token 和 MCP failure 展示回归测试。
-- 已将 workspace trust 改为首次进入 workspace 的启动 gate：未信任 workspace 不能进入正式 TUI、加载 repo-local instructions 或提升 repo-local checks；`/config` Permissions 只展示 trust 状态、用户配置 checks 和 repo-local candidate checks，不再提供 workspace trust footer action。
+- 已将 workspace trust 改为首次进入 workspace 的启动 gate：未信任 workspace 不能进入正式 TUI、加载 repo-local instructions 或执行 repo-local check discovery；`/config` Permissions 只展示 trust 状态、用户配置 checks 和 repo-local candidate checks，不再提供 workspace trust footer action。
 - 已在 `/config` 的 Permissions 页补充 repo-local instruction trust 摘要：`SIGIL.md`、`AGENTS.md`、`CLAUDE.md` 和 `SIGIL.local.md` 在 workspace 未信任时显示为 untrusted data，workspace trust 后显示为 trusted instructions。
 - 已简化 `/config` Permissions 的 repo-local verification 展示：只展示 repo-local check 数量与长期策略摘要，具体 run/retry/review 入口归属 task sidebar / strip，避免把设置页做成一次性执行审批面。
 - 已在 TUI task sidebar / strip / session audit 中补充 workspace trust / check approval 的用户可读解释：`TrustWorkspace` 会显示 `workspace trust required`，`ApproveCheckExecution` 会显示对应 check approval；task sidebar 的 `action:` 行和 session audit 的 required action 摘要都改为用户可读短语，不再暴露内部 action token。

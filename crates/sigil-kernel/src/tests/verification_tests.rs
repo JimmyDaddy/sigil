@@ -322,7 +322,7 @@ fn check_promotion_receipt_and_projection_helpers_cover_edges() -> Result<()> {
         },
     )?;
     assert_eq!(sandboxed.sandbox_decision_id.as_deref(), Some("sandbox-1"));
-    let workspace_trusted = CandidateCheck {
+    let workspace_trusted_error = CandidateCheck {
         source: CheckDiscoverySource::Makefile,
         command: CheckCommand::shell("make test"),
         source_event_id: "event-make".to_owned(),
@@ -335,9 +335,13 @@ fn check_promotion_receipt_and_projection_helpers_cover_edges() -> Result<()> {
         CheckPromotion::WorkspaceTrusted {
             trust_event_id: "event-trust".to_owned(),
         },
-    )?;
-    assert!(workspace_trusted.approval_event_id.is_none());
-    assert!(workspace_trusted.sandbox_decision_id.is_none());
+    )
+    .expect_err("workspace trust alone must not promote repo-local checks");
+    assert!(
+        workspace_trusted_error
+            .to_string()
+            .contains("requires approval")
+    );
     let global_policy = CandidateCheck {
         source: CheckDiscoverySource::CiConfig,
         command: CheckCommand::shell("cargo test"),

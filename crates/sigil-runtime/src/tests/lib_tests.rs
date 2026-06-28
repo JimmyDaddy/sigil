@@ -906,6 +906,21 @@ async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<(
 }
 
 #[tokio::test]
+#[cfg(target_os = "macos")]
+async fn build_tool_registry_accepts_macos_seatbelt_when_sandbox_is_required() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.execution.backend = ExecutionBackendKind::MacosSeatbelt;
+    config.execution.isolation = ExecutionIsolationPolicy::RequireSandbox;
+
+    let registry =
+        build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await?;
+
+    assert!(registry.specs().iter().any(|spec| spec.name == "bash"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");

@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub enum ExecutionBackendKind {
     #[default]
     Local,
+    MacosSeatbelt,
 }
 
 /// Capability summary for an execution backend.

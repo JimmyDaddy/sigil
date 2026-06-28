@@ -10,6 +10,7 @@ Use this skill to implement a supplied technical solution completely, but scale 
 ## Always Enforce
 
 - Read `AGENTS.md`, repository code/engineering standards when present, the complete supplied technical solution, and any referenced architecture or acceptance material needed to understand the required behavior.
+- For this repository, code implementation must conform to `dev/governance/*` and the relevant `dev/docs/*` architecture/RFC material. If implementation pressure conflicts with those architecture boundaries, stop and resolve the design instead of landing a shortcut.
 - Keep changes scoped to the confirmed solution and required integration, test, and doc updates.
 - Do not introduce unapproved "later", "future", "temporary", "MVP", or "defer" items.
 - Do not use mocks, stubs, fake integrations, hardcoded success returns, tests-only branches, or shortcuts that satisfy tests without implementing the requirement.
@@ -17,6 +18,31 @@ Use this skill to implement a supplied technical solution completely, but scale 
 - Do not use validation volume as a substitute for reading the code, understanding the diff, and choosing precise checks.
 - Stop before editing an affected area if the solution is internally inconsistent or impossible; explain the blocker with evidence and ask for a decision or propose the smallest correction.
 - Preserve repository-specific boundaries, especially provider-neutral kernel APIs, append-only session/control behavior, workspace confinement, approval boundaries, and TUI state/help/docs consistency.
+- Avoid both over-abstraction and unreasonable coupling. Prefer the existing crate/module boundary unless a new boundary clearly reduces coupling, protects an architecture invariant, or matches an approved RFC.
+- Adding a new crate requires an explicit rationale: ownership boundary, dependency direction, why existing crates/modules are insufficient, public API surface, tests, and required `dev/docs` / `dev/governance` updates.
+- When a change affects architecture, public contracts, crate boundaries, configuration, TUI/user flows, durable state, permissions, tools, verification, or execution semantics, update the relevant documents under `dev/` in the same slice.
+
+## Research Before Execution
+
+Before implementing, do enough research to make the execution grounded rather than assumption-driven.
+
+- Start with local source, tests, RFCs, roadmap items, execution slices, governance docs, and prior status records.
+- Inspect adjacent implementations and existing tests before adding new abstractions, fields, flows, or crates.
+- When the task involves product UX, security posture, sandbox behavior, provider/platform behavior, industry comparison, current standards, external APIs, or any fact likely to have changed, use internet research when helpful and cite or summarize the source basis in the execution notes.
+- Prefer primary sources for technical claims: official docs, upstream source, release notes, specs, RFCs, or directly inspected code.
+- Do not use research as a reason to expand scope. Research should clarify the smallest correct implementation, expose blockers, or justify design choices.
+- If research shows the supplied solution conflicts with current facts or architecture constraints, stop before editing the affected area and report the conflict with evidence.
+
+## Slice-Based Execution
+
+Use this mode when the supplied solution is split into RFC execution slices, roadmap items, or `.repo-local-dev/rfcs/*` task files.
+
+- Treat each slice as the unit of work. Move one slice to `in_progress`, implement it, validate it, record the result, then move to the next slice.
+- Keep slice state in the relevant execution-plan file and shared status file when they exist. Do not rely on chat history as the only task ledger.
+- Each slice should reference its source RFC or roadmap section before implementation starts. If the source link is missing, add it first.
+- Do not expand a slice into adjacent RFC work unless the slice cannot be completed without that dependency. Record the dependency instead of silently broadening scope.
+- Prefer a small, complete semantic increment over a broad partial implementation. A slice is not done until code, tests, docs/status updates, and its selected validation are complete.
+- If a slice exposes a product operation to users, audit whether the operation is too complex for the main flow. Prefer coarse user actions, config files, doctor output, or advanced surfaces over adding low-frequency controls to the default TUI/config path.
 
 ## Choose Intensity
 
@@ -67,6 +93,8 @@ Full-audit mode uses the original strict workflow:
 - Do not run multiple heavy Cargo commands in parallel against the same target dir.
 - Treat slow gates as scarce. If a gate is expected to be slow, explain why it is needed before running it; if it is optional, defer it and report that clearly.
 - If a task is static-only or docs/config-only, say so. Do not imply test-backed confidence when no runtime validation was run.
+- For multi-slice work, validate each completed slice with the smallest command that proves the touched semantics. Save broader gates for changed-risk boundaries, final hardening, or explicitly requested delivery, rather than rerunning them after every small edit.
+- When a targeted validation already passed and only docs/status files changed afterward, do not rerun the code validation. Record that the code-covered files were unchanged after the passing gate.
 
 ## Escalation Rules
 
@@ -75,10 +103,11 @@ Escalate to a higher intensity if implementation reveals unplanned public behavi
 ## Execution Flow
 
 1. Ingest the solution and extract goals, non-goals, required behavior, APIs/data/config, docs/tests, acceptance criteria, validation gates, approved defers, and blocking ambiguities.
-2. State the selected intensity and maintain a visible checklist sized to that intensity.
-3. Read relevant existing code/tests before editing. Prefer repository helpers and patterns over new abstractions.
-4. Implement the smallest complete change. Add or update unit tests for new business logic, and update docs when public behavior, config, commands, TUI flow, safety/privacy, or architecture changes.
-5. Validate at the selected intensity using the smallest checks that prove the changed behavior. If a required full gate is too slow or blocked, run the best narrower gate and report exactly what was not run and why.
-6. Review/audit according to the selected intensity. Never claim a sub-agent review happened if it did not.
-7. Fix valid findings and rerun relevant validation.
-8. Final response should be concise. Include intensity used, what changed, validations, review/audit status, and remaining caveats.
+2. Complete the research pass required for the slice: local code/RFC inspection first, internet research when useful for volatile facts, product/security comparisons, external APIs, or standards.
+3. State the selected intensity and maintain a visible checklist sized to that intensity.
+4. Read relevant existing code/tests before editing. Prefer repository helpers and patterns over new abstractions.
+5. Implement the smallest complete change. Add or update unit tests for new business logic, and update docs when public behavior, config, commands, TUI flow, safety/privacy, or architecture changes.
+6. Validate at the selected intensity using the smallest checks that prove the changed behavior. If a required full gate is too slow or blocked, run the best narrower gate and report exactly what was not run and why.
+7. Review/audit according to the selected intensity. Never claim a sub-agent review happened if it did not.
+8. Fix valid findings and rerun relevant validation.
+9. Final response should be concise. Include intensity used, research basis, what changed, validations, review/audit status, and remaining caveats.

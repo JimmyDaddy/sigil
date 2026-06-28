@@ -199,6 +199,53 @@ impl ExecutionBackend for LocalExecutionBackend {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MacosSeatbeltExecutionBackend {
+    sandbox_exec: PathBuf,
+}
+
+impl Default for MacosSeatbeltExecutionBackend {
+    fn default() -> Self {
+        Self {
+            sandbox_exec: PathBuf::from("/usr/bin/sandbox-exec"),
+        }
+    }
+}
+
+impl MacosSeatbeltExecutionBackend {
+    #[must_use]
+    pub fn new(sandbox_exec: PathBuf) -> Self {
+        Self { sandbox_exec }
+    }
+
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        cfg!(target_os = "macos") && self.sandbox_exec.is_file()
+    }
+}
+
+impl ExecutionBackend for MacosSeatbeltExecutionBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::MacosSeatbelt
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities {
+            filesystem_isolation: true,
+            network_isolation: true,
+            process_isolation: true,
+            resource_limits: false,
+            persistent_pty: false,
+            workspace_snapshot: false,
+        }
+    }
+
+    fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
+        let sandbox_exec = self.sandbox_exec.clone();
+        Box::pin(async move { macos_seatbelt_execute(sandbox_exec, request).await })
+    }
+}
+
 /// Builds the configured execution backend for built-in tools.
 ///
 /// # Errors
@@ -208,9 +255,27 @@ impl ExecutionBackend for LocalExecutionBackend {
 pub fn build_execution_backend(config: &ExecutionConfig) -> Result<Arc<dyn ExecutionBackend>> {
     let backend: Arc<dyn ExecutionBackend> = match config.backend {
         ExecutionBackendKind::Local => Arc::new(LocalExecutionBackend),
+        ExecutionBackendKind::MacosSeatbelt => {
+            let backend = MacosSeatbeltExecutionBackend::default();
+            ensure_macos_seatbelt_available(&backend)?;
+            Arc::new(backend)
+        }
     };
     validate_execution_backend(config, backend.as_ref())?;
     Ok(backend)
+}
+
+fn ensure_macos_seatbelt_available(backend: &MacosSeatbeltExecutionBackend) -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        bail!("macos_seatbelt execution backend is only available on macOS");
+    }
+    if !backend.is_available() {
+        bail!(
+            "macos_seatbelt execution backend requires {}",
+            backend.sandbox_exec.display()
+        );
+    }
+    Ok(())
 }
 
 fn validate_execution_backend(
@@ -238,7 +303,71 @@ async fn local_execute(
         .envs(&request.env)
         .kill_on_drop(true);
 
-    let output = match request.timeout_duration() {
+    command_output_to_receipt(backend, capabilities, command, request.timeout_duration()).await
+}
+
+async fn macos_seatbelt_execute(
+    sandbox_exec: PathBuf,
+    request: ExecutionRequest,
+) -> Result<ExecutionReceipt> {
+    if !cfg!(target_os = "macos") {
+        bail!("macos_seatbelt execution backend is only available on macOS");
+    }
+    if !sandbox_exec.is_file() {
+        bail!(
+            "macos_seatbelt execution backend requires {}",
+            sandbox_exec.display()
+        );
+    }
+
+    let canonical_cwd = fs::canonicalize(&request.cwd)
+        .with_context(|| format!("failed to canonicalize cwd {}", request.cwd.display()))?;
+    let profile = macos_seatbelt_workspace_write_profile(&canonical_cwd);
+    let capabilities = MacosSeatbeltExecutionBackend::default().capabilities();
+
+    let mut command = Command::new(&sandbox_exec);
+    command
+        .arg("-p")
+        .arg(profile)
+        .arg(&request.program)
+        .args(&request.args)
+        .current_dir(&canonical_cwd)
+        .envs(&request.env)
+        .kill_on_drop(true);
+
+    command_output_to_receipt(
+        ExecutionBackendKind::MacosSeatbelt,
+        capabilities,
+        command,
+        request.timeout_duration(),
+    )
+    .await
+}
+
+fn macos_seatbelt_workspace_write_profile(workspace_root: &Path) -> String {
+    let workspace = macos_seatbelt_string_literal(&workspace_root.to_string_lossy());
+    format!(
+        r#"(version 1)
+(deny default)
+(allow process*)
+(allow file-read*)
+(allow file-write* (subpath "{}"))
+"#,
+        workspace
+    )
+}
+
+fn macos_seatbelt_string_literal(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+async fn command_output_to_receipt(
+    backend: ExecutionBackendKind,
+    capabilities: ExecutionBackendCapabilities,
+    mut command: Command,
+    timeout: Option<std::time::Duration>,
+) -> Result<ExecutionReceipt> {
+    let output = match timeout {
         Some(timeout) => match tokio::time::timeout(timeout, command.output()).await {
             Ok(output) => output?,
             Err(_) => {
@@ -1431,7 +1560,7 @@ fn bash_execution_request(
 ) -> ExecutionRequest {
     ExecutionRequest {
         program: "sh".to_owned(),
-        args: vec!["-lc".to_owned(), command.to_owned()],
+        args: vec!["-c".to_owned(), command.to_owned()],
         cwd: workspace_root.to_path_buf(),
         env: BTreeMap::from([(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),

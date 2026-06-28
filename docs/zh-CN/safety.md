@@ -103,13 +103,23 @@ rules = []
 
 ## Shell Commands
 
-`bash` 不提供完整 sandbox。Sigil 保守处理 shell execution：
+默认情况下，`bash` 使用本地执行后端，不提供 OS sandbox。Sigil 保守处理 shell execution：
 
 - 简单 read-like command 只有匹配安全模式时才可能允许；
 - 写入、重定向、包管理器、网络访问、未知命令、变量或复杂 shell syntax 应保持可 review；
 - command output 进入模型前会有边界限制。
 
 审批前检查 command、working directory 和预期副作用。
+
+macOS 上可以在 `~/.sigil/sigil.toml` 中为非交互命令显式启用 `macos_seatbelt` backend：
+
+```toml
+[execution]
+backend = "macos_seatbelt"
+isolation = "require_sandbox"
+```
+
+这个 backend 会通过 `/usr/bin/sandbox-exec` 运行命令，允许读取文件系统、限制写入到命令工作目录，并且不在 sandbox profile 中开放网络访问。它不覆盖 persistent terminal、MCP server、plugin 或远端工具。
 
 ## MCP Trust
 

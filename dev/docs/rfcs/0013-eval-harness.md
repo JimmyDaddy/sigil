@@ -125,6 +125,16 @@ Record:
 4. Optional model eval runner.
 5. TUI/CLI report command or developer script.
 
+Implementation progress:
+
+- 2026-06-28: E13.1 added the provider-neutral `sigil-kernel` eval result model. This covers deterministic run metadata, outcome/failure taxonomy, evidence references, tool-call summaries, and separate run status / verification verdict / visible state fields. Runner, fixture repos, report artifacts, and product entry points remain in later slices.
+- 2026-06-28: E13.2 added the deterministic in-memory harness skeleton in `sigil-kernel::eval`. It can materialize an in-memory workspace fixture, replay an explicit fake-provider script, run fake tool actions, capture evidence through the existing session log, and return an `EvalResult`. Real providers, network access, user config, product entry points, committed fixture repos, and model eval runners remain out of scope.
+- 2026-06-28: E13.3 added the read-only completion case. It proves read-only work can complete with `VerificationVerdict::NotApplicable` even when a check capability exists, without treating final answer text as verification evidence or producing mutation events.
+- 2026-06-28: E13.4 added the write-without-check case and required-action result field. It proves controlled writes without current-snapshot verification produce `CompletedUnverified` / `VerificationVerdict::Missing`, carry controlled-write evidence, and request a run-check action instead of fabricating passed evidence from final answer text.
+- 2026-06-28: E13.5 added the stale-after-later-write case. It proves a passed check binds to an earlier deterministic workspace snapshot and a later controlled write invalidates that receipt, producing `VerificationVerdict::Stale` with evidence pointing to the invalidating write.
+- 2026-06-28: E13.9 added integrity eval cases for the RFC-0001/0002 fact layer. The cases map checksum mismatch, sequence gap, middle stream corruption, unknown critical events, prepared-without-commit, file-written-without-commit, and partial changeset reconciliation into structured `EvalResult` diagnostics without introducing projection or protocol product surfaces.
+- 2026-06-28: E13.8 added path/capability security eval cases. The cases cover symlink escape, parent path normalization bypass, read-only shell write denial through permission/capability policy, and approval denial mapping, without implementing real OS sandbox backends or a security dashboard.
+
 ## 9. Acceptance Criteria
 
 - Same eval case can rerun and produce comparable structured result.

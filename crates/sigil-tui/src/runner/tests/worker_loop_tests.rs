@@ -141,7 +141,7 @@ fn materialize_task_verification_config_does_not_promote_repo_checks_without_tru
 }
 
 #[test]
-fn materialize_task_verification_config_promotes_repo_checks_for_trusted_workspace() {
+fn materialize_task_verification_config_does_not_require_repo_checks_for_trusted_workspace() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         temp.path().join("Cargo.toml"),
@@ -177,39 +177,9 @@ fn materialize_task_verification_config_promotes_repo_checks_for_trusted_workspa
 
     let projection = session.verification_state_projection();
     let scope = sigil_kernel::EvidenceScope::Task("task-1".to_owned());
-    let check = projection
-        .check_spec(&scope, "cargo-test")
-        .expect("trusted workspace should promote cargo check");
-    assert_eq!(
-        check.trusted_check.source,
-        sigil_kernel::CheckDiscoverySource::Cargo
-    );
-    assert!(matches!(
-        check.trusted_check.promoted_by,
-        sigil_kernel::CheckPromotion::WorkspaceTrusted { .. }
-    ));
-    assert!(projection.latest_policy(&scope).is_some_and(
-        |entry| entry.policy.required_checks.len() == 1
-            && entry.policy.workspace_trust_requirement
-                == sigil_kernel::WorkspaceTrustRequirement::Trusted
-    ));
-    let controls = rx
-        .try_iter()
-        .filter_map(|message| match message {
-            WorkerMessage::Event(event) => match *event {
-                RunEvent::Control(control) => Some(control),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(matches!(
-        controls.as_slice(),
-        [
-            ControlEntry::CheckSpecRecorded(_),
-            ControlEntry::VerificationPolicyChanged(_)
-        ]
-    ));
+    assert!(projection.check_spec(&scope, "cargo-test").is_none());
+    assert!(projection.latest_policy(&scope).is_none());
+    assert!(rx.try_iter().next().is_none());
 }
 
 #[test]

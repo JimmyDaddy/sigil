@@ -207,6 +207,15 @@ fn spawn_agent_worker_keeps_running_when_eager_mcp_startup_fails() -> Result<()>
         } if server_name == "required-eager"
             && error.contains("failed to spawn MCP server required-eager")
     ));
+    if let Ok(message) = message_rx.recv_timeout(Duration::from_millis(100)) {
+        assert!(
+            !matches!(
+                message,
+                WorkerMessage::Notice(ref notice) if notice.contains("MCP startup failed")
+            ),
+            "background eager MCP startup failure should stay in lifecycle status"
+        );
+    }
 
     command_tx.send(WorkerCommand::CancelRun)?;
     let response = loop {
