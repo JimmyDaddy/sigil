@@ -485,6 +485,7 @@ fn root_config_with_checks(
         compaction: CompactionConfig::default(),
         code_intelligence: CodeIntelligenceConfig::default(),
         terminal: TerminalConfig::default(),
+        execution: Default::default(),
         verification: VerificationConfig {
             auto_run: sigil_kernel::VerificationAutoRunPolicy::Manual,
             checks,

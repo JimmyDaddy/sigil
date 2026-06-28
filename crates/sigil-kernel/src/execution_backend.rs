@@ -5,9 +5,10 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
 /// Stable identifier for an execution backend implementation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionBackendKind {
+    #[default]
     Local,
 }
 
@@ -25,6 +26,42 @@ pub struct ExecutionBackendCapabilities {
     pub resource_limits: bool,
     pub persistent_pty: bool,
     pub workspace_snapshot: bool,
+}
+
+impl ExecutionBackendCapabilities {
+    /// Returns whether the backend can enforce a basic OS-level sandbox boundary.
+    #[must_use]
+    pub fn supports_required_sandbox(self) -> bool {
+        self.filesystem_isolation && self.process_isolation
+    }
+}
+
+/// User-configurable execution policy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionConfig {
+    #[serde(default)]
+    pub backend: ExecutionBackendKind,
+    #[serde(default)]
+    pub isolation: ExecutionIsolationPolicy,
+}
+
+/// Required isolation level for command execution.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionIsolationPolicy {
+    /// Preserve current local process behavior. This is not a sandbox.
+    #[default]
+    AllowLocal,
+    /// Require a backend that can enforce filesystem and process isolation.
+    RequireSandbox,
+}
+
+impl ExecutionIsolationPolicy {
+    #[must_use]
+    pub fn requires_sandbox(self) -> bool {
+        matches!(self, Self::RequireSandbox)
+    }
 }
 
 /// One non-interactive process execution request.

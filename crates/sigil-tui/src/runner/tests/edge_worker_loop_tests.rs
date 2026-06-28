@@ -512,7 +512,7 @@ fn cancel_terminal_task_audits_success_and_uses_final_terminal_output() -> Resul
         temp.path().to_path_buf(),
         elicitation_handler,
         mcp_event_handler,
-    );
+    )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -671,7 +671,7 @@ fn refresh_terminal_task_statuses_audits_natural_exit_and_workspace_mutation() -
         temp.path().to_path_buf(),
         elicitation_handler,
         mcp_event_handler,
-    );
+    )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -814,7 +814,7 @@ fn cancel_terminal_task_audits_tool_failure() -> Result<()> {
         temp.path().to_path_buf(),
         elicitation_handler,
         mcp_event_handler,
-    );
+    )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

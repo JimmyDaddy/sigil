@@ -51,13 +51,19 @@ pub fn spawn_agent_worker(
                 Arc::new(ChannelMcpElicitationHandler::new(message_tx.clone()));
             let (mcp_event_tx, mcp_event_rx) = mpsc::channel();
             let mcp_event_handler = Arc::new(ChannelMcpRuntimeEventHandler::new(mcp_event_tx));
-            let mut registry = sigil_runtime::build_tool_registry_without_eager_mcp(
+            let mut registry = match sigil_runtime::build_tool_registry_without_eager_mcp(
                 &root_config,
                 &provider_capabilities,
                 workspace_root.clone(),
                 elicitation_handler.clone(),
                 mcp_event_handler.clone(),
-            );
+            ) {
+                Ok(registry) => registry,
+                Err(error) => {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(format!("{error:#}")));
+                    return;
+                }
+            };
             let session_entries = match JsonlSessionStore::read_entries(&session_log_path) {
                 Ok(entries) => entries,
                 Err(error) => {

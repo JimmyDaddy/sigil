@@ -379,7 +379,7 @@ pub async fn build_tool_registry_with_mcp_handlers(
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
 ) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
-    register_local_tools(&mut registry, root_config, workspace_root.clone());
+    register_local_tools(&mut registry, root_config, workspace_root.clone())?;
     sigil_mcp::register_mcp_tools_with_options(
         &mut registry,
         &root_config.mcp_servers,
@@ -408,15 +408,20 @@ pub async fn build_tool_registry_with_mcp_handlers(
 /// TUI entrypoints use this to keep the agent worker available when an external MCP server is
 /// slow or broken. Eager MCP servers can then be activated asynchronously against the returned
 /// shared registry.
+///
+/// # Errors
+///
+/// Returns an error when local tool construction fails, including execution backend policies that
+/// cannot be satisfied by the configured backend.
 pub fn build_tool_registry_without_eager_mcp(
     root_config: &RootConfig,
     provider_capabilities: &ProviderCapabilities,
     workspace_root: PathBuf,
     elicitation_handler: Arc<dyn McpElicitationHandler>,
     runtime_event_handler: Arc<dyn McpRuntimeEventHandler>,
-) -> ToolRegistry {
+) -> Result<ToolRegistry> {
     let mut registry = ToolRegistry::new();
-    register_local_tools(&mut registry, root_config, workspace_root.clone());
+    register_local_tools(&mut registry, root_config, workspace_root.clone())?;
     register_lazy_mcp_activation_tool(
         &mut registry,
         root_config,
@@ -425,7 +430,7 @@ pub fn build_tool_registry_without_eager_mcp(
         elicitation_handler,
         runtime_event_handler,
     );
-    registry
+    Ok(registry)
 }
 
 /// Activates lazy MCP servers against an existing runtime tool registry.
@@ -596,9 +601,10 @@ fn register_local_tools(
     registry: &mut ToolRegistry,
     root_config: &RootConfig,
     workspace_root: PathBuf,
-) {
+) -> Result<()> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    sigil_tools_builtin::register_builtin_tools_with_paths(
+    let execution_backend = sigil_tools_builtin::build_execution_backend(&root_config.execution)?;
+    sigil_tools_builtin::register_builtin_tools_with_paths_and_execution_backend(
         registry,
         sigil_tools_builtin::BuiltinToolPaths {
             changesets_root: paths.changesets_root.clone(),
@@ -608,6 +614,7 @@ fn register_local_tools(
             scratch_root: paths.scratch_root.clone(),
             scratch_label: "cache/tmp".to_owned(),
         },
+        execution_backend,
     );
     sigil_code_intel::register_code_intelligence_tools(
         registry,
@@ -622,6 +629,7 @@ fn register_local_tools(
         user_config_dir.as_deref(),
         &root_config.skills,
     );
+    Ok(())
 }
 
 /// Refreshes provider-visible tools for one configured MCP server.

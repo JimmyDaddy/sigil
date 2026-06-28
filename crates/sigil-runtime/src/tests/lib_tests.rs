@@ -12,12 +12,12 @@ use async_trait::async_trait;
 use serde_json::json;
 use sigil_kernel::{
     AgentConfig, AgentRole, ApprovalMode, CodeIntelStartup, CodeIntelligenceConfig,
-    InteractionMode, LanguageServerConfig, McpServerConfig, McpServerStartup, MemoryConfig,
-    PermissionConfig, ProviderCapabilities, ReasoningEffort, ReasoningStreamSupport,
-    RoleModelConfig, RootConfig, SessionConfig, SkillDescriptor, SkillRunMode, SkillSource,
-    SkillTrustState, TaskConfig, Tool, ToolAccess, ToolAllowlistConfig, ToolCall, ToolCategory,
-    ToolContext, ToolPreviewCapability, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolSpec, WorkspaceConfig,
+    ExecutionBackendKind, ExecutionIsolationPolicy, InteractionMode, LanguageServerConfig,
+    McpServerConfig, McpServerStartup, MemoryConfig, PermissionConfig, ProviderCapabilities,
+    ReasoningEffort, ReasoningStreamSupport, RoleModelConfig, RootConfig, SessionConfig,
+    SkillDescriptor, SkillRunMode, SkillSource, SkillTrustState, TaskConfig, Tool, ToolAccess,
+    ToolAllowlistConfig, ToolCall, ToolCategory, ToolContext, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 use sigil_provider_anthropic::{ANTHROPIC_API_KEY_ENV, SIGIL_ANTHROPIC_API_KEY_ENV};
 use sigil_provider_deepseek::{LEGACY_DEEPSEEK_API_KEY_ENV, SIGIL_API_KEY_ENV};
@@ -60,6 +60,7 @@ fn test_root_config(provider: &str) -> RootConfig {
         compaction: sigil_kernel::CompactionConfig::default(),
         code_intelligence: sigil_kernel::CodeIntelligenceConfig::default(),
         terminal: Default::default(),
+        execution: Default::default(),
         verification: Default::default(),
         appearance: Default::default(),
         task: TaskConfig::default(),
@@ -823,6 +824,27 @@ async fn build_tool_registry_registers_builtin_tools_without_mcp() -> Result<()>
 }
 
 #[tokio::test]
+async fn build_tool_registry_fails_closed_when_sandbox_is_required() -> Result<()> {
+    let provider = build_provider(&test_root_config("deepseek"))?;
+    let mut config = test_root_config("deepseek");
+    config.execution.backend = ExecutionBackendKind::Local;
+    config.execution.isolation = ExecutionIsolationPolicy::RequireSandbox;
+
+    let result =
+        build_tool_registry(&config, &provider.capabilities(), std::env::current_dir()?).await;
+    let Err(error) = result else {
+        panic!("local backend must not satisfy required sandbox policy");
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("execution sandbox required but Local backend")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn build_tool_registry_registers_code_intelligence_tools_when_enabled() -> Result<()> {
     let provider = build_provider(&test_root_config("deepseek"))?;
     let mut config = test_root_config("deepseek");
@@ -1179,7 +1201,7 @@ fn build_tool_registry_without_eager_mcp_keeps_local_tools_when_required_eager_i
         std::env::current_dir()?,
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
-    );
+    )?;
 
     assert!(registry.spec_for("read_file").is_some());
     assert!(registry.spec_for("mcp__required_eager__echo").is_none());

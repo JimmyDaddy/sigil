@@ -3,6 +3,7 @@ use std::{fs, path::Path};
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentConfig, ApprovalMode, CodeIntelligenceConfig, CompactionConfig, McpServerStartup,
@@ -667,7 +668,7 @@ path = "agents/reviewer/agent.toml"
 }
 
 #[test]
-fn plugin_mcp_servers_remain_lifecycle_inputs_until_existing_registry_activation() {
+fn plugin_mcp_servers_remain_lifecycle_inputs_until_existing_registry_activation() -> Result<()> {
     let workspace = tempfile::tempdir().expect("workspace should create");
     write_plugin_manifest(
         workspace.path(),
@@ -732,7 +733,7 @@ required = false
         workspace.path().to_path_buf(),
         sigil_mcp::unsupported_mcp_elicitation_handler(),
         sigil_mcp::unsupported_mcp_runtime_event_handler(),
-    );
+    )?;
 
     assert!(registry.spec_for("mcp_activate_server").is_some());
     assert!(
@@ -740,6 +741,7 @@ required = false
             .spec_for("mcp__repo_review_repo_tools__echo")
             .is_none()
     );
+    Ok(())
 }
 
 #[test]
@@ -972,6 +974,7 @@ fn root_config() -> RootConfig {
         compaction: CompactionConfig::default(),
         code_intelligence: CodeIntelligenceConfig::default(),
         terminal: Default::default(),
+        execution: Default::default(),
         verification: Default::default(),
         appearance: Default::default(),
         task: TaskConfig::default(),

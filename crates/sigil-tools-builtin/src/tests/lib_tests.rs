@@ -9,10 +9,11 @@ use anyhow::Result;
 use serde_json::json;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
-    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionReceipt,
-    ExecutionRequest, JsonlSessionStore, MutationEventRecorder, SessionStreamRecord,
-    TerminalTaskId, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
-    ToolPreviewCapability, ToolRegistry, ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig,
+    ExecutionIsolationPolicy, ExecutionReceipt, ExecutionRequest, JsonlSessionStore,
+    MutationEventRecorder, SessionStreamRecord, TerminalTaskId, Tool, ToolAccess, ToolCall,
+    ToolContext, ToolErrorKind, ToolOperation, ToolPreviewCapability, ToolRegistry,
+    ToolResultStatus, ToolSubjectKind, ToolSubjectScope,
 };
 use tokio::time::{Duration, sleep};
 
@@ -33,6 +34,26 @@ fn bash_tool(test_root: &Path) -> BashTool {
         scratch_label: "cache/tmp".to_owned(),
         backend: Arc::new(LocalExecutionBackend),
     }
+}
+
+#[test]
+fn local_execution_backend_policy_fails_closed_when_sandbox_required() -> Result<()> {
+    let backend = super::build_execution_backend(&ExecutionConfig::default())?;
+    assert_eq!(backend.kind(), ExecutionBackendKind::Local);
+
+    let result = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::Local,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+    });
+    let Err(error) = result else {
+        panic!("local backend cannot satisfy required sandbox policy");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("execution sandbox required but Local backend")
+    );
+    Ok(())
 }
 
 #[tokio::test]

@@ -8,8 +8,8 @@ use super::{
     resolve_workspace_root, user_home_dir_from_env,
 };
 use crate::{
-    AgentConfig, AgentRole, ApprovalMode, SkillConfig, StorageConfig, StorageRoot, TaskConfig,
-    TaskMode, WorkspaceConfig,
+    AgentConfig, AgentRole, ApprovalMode, ExecutionBackendKind, ExecutionIsolationPolicy,
+    SkillConfig, StorageConfig, StorageRoot, TaskConfig, TaskMode, WorkspaceConfig,
 };
 
 #[test]
@@ -198,6 +198,7 @@ fn root_config_save_roundtrips() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        execution: Default::default(),
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
@@ -232,6 +233,7 @@ fn root_config_save_handles_paths_without_parent() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        execution: Default::default(),
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),
@@ -554,6 +556,7 @@ fn root_config_serializes_appearance_theme_and_colors() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        execution: Default::default(),
         verification: Default::default(),
         appearance: crate::AppearanceConfig {
             theme: ThemeId::Nord,
@@ -941,6 +944,33 @@ model = "deepseek-v4-flash"
     assert_eq!(config.code_intelligence.max_payload_bytes, 64 * 1024);
     assert!(config.code_intelligence.discovery.enabled);
     assert!(config.code_intelligence.discovery.report_missing);
+    assert_eq!(config.execution.backend, ExecutionBackendKind::Local);
+    assert_eq!(
+        config.execution.isolation,
+        ExecutionIsolationPolicy::AllowLocal
+    );
+}
+
+#[test]
+fn root_config_loads_execution_config() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[execution]
+backend = "local"
+isolation = "require_sandbox"
+"#,
+    )
+    .expect("execution config should parse");
+
+    assert_eq!(config.execution.backend, ExecutionBackendKind::Local);
+    assert_eq!(
+        config.execution.isolation,
+        ExecutionIsolationPolicy::RequireSandbox
+    );
 }
 
 #[test]
@@ -1150,6 +1180,7 @@ fn root_config_save_reports_parent_creation_and_write_errors() {
         compaction: Default::default(),
         code_intelligence: Default::default(),
         terminal: Default::default(),
+        execution: Default::default(),
         verification: Default::default(),
         appearance: Default::default(),
         task: Default::default(),

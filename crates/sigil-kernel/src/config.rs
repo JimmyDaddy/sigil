@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::{
+    execution_backend::ExecutionConfig,
     mutation::MutationArtifactRetentionPolicy,
     permission::{ApprovalMode, PermissionConfig},
     provider::ReasoningEffort,
@@ -41,6 +42,8 @@ pub struct RootConfig {
     pub code_intelligence: CodeIntelligenceConfig,
     #[serde(default)]
     pub terminal: TerminalConfig,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
     #[serde(default, skip_serializing_if = "VerificationConfig::is_empty")]
     pub verification: VerificationConfig,
     #[serde(default)]

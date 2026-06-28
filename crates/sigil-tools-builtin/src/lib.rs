@@ -20,12 +20,12 @@ use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
     ChangeSetValidationKind, ChangeSetValidationStatus, CommittedFileMutation, ExecutionBackend,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture, ExecutionReceipt,
-    ExecutionRequest, FileType, MutationBatchId, MutationBatchStatus, MutationEventRecorder,
-    MutationSubject, TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess, ToolCategory,
-    ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation, ToolPreview, ToolPreviewCapability,
-    ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
-    ToolSubjectScope, delete_file_with_mutation, delete_file_with_mutation_in_batch,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig, ExecutionFuture,
+    ExecutionReceipt, ExecutionRequest, FileType, MutationBatchId, MutationBatchStatus,
+    MutationEventRecorder, MutationSubject, TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess,
+    ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation, ToolPreview,
+    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
+    ToolSubject, ToolSubjectScope, delete_file_with_mutation, delete_file_with_mutation_in_batch,
     write_file_with_mutation, write_file_with_mutation_in_batch,
 };
 use similar::TextDiff;
@@ -78,8 +78,19 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
 }
 
 pub fn register_builtin_tools_with_paths(registry: &mut ToolRegistry, paths: BuiltinToolPaths) {
+    register_builtin_tools_with_paths_and_execution_backend(
+        registry,
+        paths,
+        Arc::new(LocalExecutionBackend),
+    );
+}
+
+pub fn register_builtin_tools_with_paths_and_execution_backend(
+    registry: &mut ToolRegistry,
+    paths: BuiltinToolPaths,
+    execution_backend: Arc<dyn ExecutionBackend>,
+) {
     let terminal_managers = Arc::new(TerminalProcessManagers::default());
-    let execution_backend: Arc<dyn ExecutionBackend> = Arc::new(LocalExecutionBackend);
     let terminal_tasks_root = paths.terminal_tasks_root;
     let terminal_tasks_label_root = paths.terminal_tasks_label_root;
     registry.register(Arc::new(ReadFileTool));
@@ -186,6 +197,33 @@ impl ExecutionBackend for LocalExecutionBackend {
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
         Box::pin(local_execute(self.kind(), self.capabilities(), request))
     }
+}
+
+/// Builds the configured execution backend for built-in tools.
+///
+/// # Errors
+///
+/// Returns an error when configuration requires sandbox enforcement that the selected backend
+/// cannot provide.
+pub fn build_execution_backend(config: &ExecutionConfig) -> Result<Arc<dyn ExecutionBackend>> {
+    let backend: Arc<dyn ExecutionBackend> = match config.backend {
+        ExecutionBackendKind::Local => Arc::new(LocalExecutionBackend),
+    };
+    validate_execution_backend(config, backend.as_ref())?;
+    Ok(backend)
+}
+
+fn validate_execution_backend(
+    config: &ExecutionConfig,
+    backend: &dyn ExecutionBackend,
+) -> Result<()> {
+    if config.isolation.requires_sandbox() && !backend.capabilities().supports_required_sandbox() {
+        bail!(
+            "execution sandbox required but {:?} backend does not provide filesystem and process isolation",
+            backend.kind()
+        );
+    }
+    Ok(())
 }
 
 async fn local_execute(

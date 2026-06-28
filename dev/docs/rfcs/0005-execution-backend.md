@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / slice 1 LocalBackend migration implemented
+状态：draft / slice 2 backend selection and fail-closed policy implemented
 
 创建日期：2026-06-28
 
@@ -15,7 +15,9 @@
 
 本 RFC 定义 Sigil 的 execution backend 抽象。目标是把“能不能执行”的 permission policy 和“执行后最多能影响什么”的 enforcement backend 分开，为后续 Seatbelt、Bubblewrap、Docker 或远端执行后端提供稳定接入点。
 
-第一切片只完成 non-interactive `bash` 的 `LocalBackend` 迁移：用户可见行为保持不变，但执行路径不再直接散落在 `bash` tool 内部。
+第一切片完成 non-interactive `bash` 的 `LocalBackend` 迁移：用户可见行为保持不变，但执行路径不再直接散落在 `bash` tool 内部。
+
+第二切片增加配置驱动的 backend selection 和 fail-closed isolation policy。默认仍允许 `local`，但一旦配置显式要求 sandbox，当前 `LocalBackend` 不能被静默当作 fallback 使用。
 
 ## 2. Goals
 
@@ -57,16 +59,21 @@ pub trait ExecutionBackend {
 ## 5. Implementation Progress
 
 - 已新增 kernel-level `ExecutionBackend`、`ExecutionRequest`、`ExecutionReceipt`、`ExecutionBackendKind` 和 `ExecutionBackendCapabilities`。
+- 已新增 kernel-level `ExecutionConfig` 与 `ExecutionIsolationPolicy`：
+  - 默认 `backend = "local"`。
+  - 默认 `isolation = "allow_local"`。
+  - 显式 `isolation = "require_sandbox"` 要求 backend 提供 filesystem 和 process isolation。
 - 已新增 `sigil-tools-builtin` 的 `LocalExecutionBackend`。
 - 已将 non-interactive `bash` tool 迁移到 `ExecutionBackend::execute`。
+- 已将 runtime 的 local tool registry 构建接入 `RootConfig.execution`。
+- 已增加 fail-closed policy：当配置要求 sandbox 时，`LocalBackend` 会拒绝构建工具 registry，而不是静默继续裸跑。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
 - 已保留 `bash` 的 timeout、stdout/stderr metadata、exit-code error 和 scratch env 行为。
 
 ## 6. Productization Remains
 
-- 将 backend selection 接入配置，但默认仍为 `local`。
-- 增加 fail-closed policy：当 policy 要求 sandbox 而 backend 不可用时，不能静默退回 LocalBackend。
 - 增加第一个 OS sandbox backend spike / MVP。
+- 根据首个 sandbox backend 增加更细的 profile presets，例如 `workspace_write`、`build_offline`、`build_networked`。
 - 迁移 persistent terminal 时必须单独处理 PTY、长进程、resize、kill 和恢复语义。
 - MCP、插件和远端工具必须明确标注是否受本地 backend 控制；不能复用 shell sandbox 文案。
 
@@ -76,6 +83,8 @@ pub trait ExecutionBackend {
 
 ```bash
 cargo test -p sigil-tools-builtin local_execution_backend_runs_command_without_sandbox_claims
+cargo test -p sigil-tools-builtin local_execution_backend_policy_fails_closed_when_sandbox_required
+cargo test -p sigil-runtime build_tool_registry_fails_closed_when_sandbox_is_required
 cargo test -p sigil-tools-builtin bash_tool_
 ./scripts/check-touched.sh --tier standard
 ```

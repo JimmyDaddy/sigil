@@ -79,8 +79,8 @@ pub use event::{
     stable_event_hash, stable_event_uuid,
 };
 pub use execution_backend::{
-    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionFuture,
-    ExecutionReceipt, ExecutionRequest,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig,
+    ExecutionFuture, ExecutionIsolationPolicy, ExecutionReceipt, ExecutionRequest,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
