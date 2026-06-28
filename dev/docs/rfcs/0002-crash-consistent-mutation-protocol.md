@@ -246,8 +246,15 @@ struct WorkspaceSnapshotEntry {
     file_type: FileType,
     content_hash: Option<String>,
     mode: Option<u32>,
+    file_metadata: Option<FileMetadataEvidence>,
     symlink_target: Option<PathBuf>,
     state: SnapshotEntryState,
+}
+
+struct FileMetadataEvidence {
+    platform: FileMetadataPlatform,
+    readonly: bool,
+    unix_mode: Option<u32>,
 }
 
 enum SnapshotEntryState {
@@ -268,7 +275,10 @@ Rules:
 - Permission denied, external and unsupported entries prevent a clean passed snapshot unless policy explicitly excludes them.
 - If the manifest cannot be built completely for the verification scope, the workspace becomes `UnknownDirty`.
 - `WorkspaceSnapshotId` uses `sha256:jcs-v1:<hex>` over the canonical JSON form of `WorkspaceSnapshotManifestV1`.
-- The manifest hash covers `workspace_id`, `scope_hash`, all entries, paths, entry states, content hashes, modes and symlink targets.
+- The manifest hash covers `workspace_id`, `scope_hash`, all entries, paths, entry states, content hashes, legacy Unix `mode`, comparable `file_metadata` and symlink targets.
+- `mode` is a legacy Unix-only compatibility field and must not be filled on non-Unix platforms.
+- `file_metadata.readonly` is the cross-platform comparable permission bit. Unix/macOS entries also record `unix_mode`; Windows and other non-Unix platforms record `readonly` without pretending to have Unix mode.
+- Snapshot ids are stable for the same platform metadata coverage. Cross-platform snapshot ids may differ when one platform can observe metadata another platform cannot; verification validity remains bound to the actual `WorkspaceSnapshotId` produced in that workspace.
 
 ## 11. WorkspaceRevision Scope
 
@@ -423,7 +433,7 @@ Required deterministic tests:
 - 已加强受控 mutation subject 绑定：`MutationCoordinator` 会校验 relative subject 与 absolute target 一致，防止调用方写入 A 文件却记录 B 文件 evidence。
 - 已实现 workspace snapshot 大文件 fail-closed 策略：单文件超过 `VerificationScope.max_file_bytes` 时记录为 `Unsupported`，不读取内容、不生成 clean snapshot id，并使 workspace knowledge 进入 `UnknownDirty`；默认值仍为 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES`。
 - 已实现 workspace snapshot 权限拒绝 fail-closed 策略：无法 stat 或无法读取的条目会记录为 `PermissionDenied`，不产生 clean snapshot id，并使 workspace knowledge 进入 `UnknownDirty`。
-- 已在 workspace snapshot entry 中记录 Unix file mode；非 Unix 平台当前保留为 `None`，避免伪造跨平台不可比的 mode evidence。
+- 已在 workspace snapshot entry 中记录可比较 file metadata：所有平台记录 `readonly`，Unix/macOS 继续记录真实 `unix_mode` 与 legacy `mode`；Windows/其他非 Unix 平台不会伪造 Unix mode。`WorkspaceSnapshotId` 会覆盖该 metadata evidence，因此权限 metadata 变化会使 verification snapshot 变化。
 - 已明确非空目录递归删除不属于当前受控 mutation 协议：`delete_directory_with_mutation` 会在 `MutationPrepared` 前 fail closed，避免 unsupported recursive delete 留下 prepared-without-commit evidence。
 
 Productization remains：
@@ -431,11 +441,11 @@ Productization remains：
 - 启用 plugin hook command runtime 或自动合并 plugin-declared MCP servers 时，必须在 launch/activation 前接入同一 external-process unknown-dirty recorder；当前代码尚不存在这些 plugin-owned process execution 面。
 - MCP ready 后进程 health / 自动恢复体验的主路径已落地：`/config` MCP lifecycle 显示 deferred/activating/ready/failed/stale/refreshing，footer 对 lazy server 执行 activation，对 eager/ready/failed/stale server 执行 refresh/restart recovery；`list_changed` 会标记 stale 并 queue refresh，worker pending refresh set 保留 intent 并避免 tight-loop failure spam，activation/refresh 继续记录 MCP lifecycle unknown-dirty evidence。
 - artifact lifecycle 主路径产品化已落地：`/config` Storage 展示 recommended cleanup preview、retention policy、低噪声 recommended cleanup 提示、artifact list 摘要和 selected artifact inspect view；footer 只保留一个 `clean` action，逐 artifact delete、cleanup target 切换和 multi-select 只作为 advanced/debug 后端能力，不作为普通用户主流程。显式 cleanup intent 与逐 artifact lifecycle result 都进入 durable audit。剩余工作仅限后续真正引入后台 periodic maintenance 时的禁用开关；当前普通 agent run 不会隐式清理。
-- 大文件 fail-closed unsupported 已可按 `VerificationScope.max_file_bytes` 调整；Unix-only file mode 已作为当前实现限制记录，后续可按真实项目需求补非 Unix metadata evidence。
+- 大文件 fail-closed unsupported 已可按 `VerificationScope.max_file_bytes` 调整；非 Unix file metadata evidence 已补齐到 cross-platform `readonly`，平台专属 metadata 覆盖差异已在 snapshot contract 中说明。
 - 递归目录删除仍不属于当前实现；如果未来需要，应单独设计 recursive directory mutation protocol，而不是复用空目录 delete 语义。
 
 ## 17. Open Questions
 
 None for core semantics. Productization questions:
 
-- Whether non-Unix file metadata should gain a comparable mode representation later.
+None.

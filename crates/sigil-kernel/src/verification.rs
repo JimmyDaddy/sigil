@@ -1846,7 +1846,7 @@ fn snapshot_entry_for_path(
     }
     if file_type.is_file() {
         if metadata.len() > max_file_bytes {
-            return snapshot_entry(
+            let mut entry = snapshot_entry(
                 relative,
                 FileType::File,
                 SnapshotEntryState::Unsupported,
@@ -1854,37 +1854,47 @@ fn snapshot_entry_for_path(
                 file_mode(metadata),
                 None,
             );
+            entry.file_metadata = Some(file_metadata_evidence(metadata));
+            return entry;
         }
         return match fs::read(path) {
-            Ok(bytes) => snapshot_entry(
-                relative,
-                FileType::File,
-                SnapshotEntryState::Present,
-                Some(stable_bytes_hash(&bytes)),
-                file_mode(metadata),
-                None,
-            ),
+            Ok(bytes) => {
+                let mut entry = snapshot_entry(
+                    relative,
+                    FileType::File,
+                    SnapshotEntryState::Present,
+                    Some(stable_bytes_hash(&bytes)),
+                    file_mode(metadata),
+                    None,
+                );
+                entry.file_metadata = Some(file_metadata_evidence(metadata));
+                entry
+            }
             Err(error) => {
                 tracing::debug!(path = %path.display(), "failed to read verification snapshot file: {error}");
-                snapshot_entry(
+                let mut entry = snapshot_entry(
                     relative,
                     FileType::File,
                     SnapshotEntryState::PermissionDenied,
                     None,
                     file_mode(metadata),
                     None,
-                )
+                );
+                entry.file_metadata = Some(file_metadata_evidence(metadata));
+                entry
             }
         };
     }
-    snapshot_entry(
+    let mut entry = snapshot_entry(
         relative,
         FileType::Other,
         SnapshotEntryState::Unsupported,
         None,
         file_mode(metadata),
         None,
-    )
+    );
+    entry.file_metadata = Some(file_metadata_evidence(metadata));
+    entry
 }
 
 fn snapshot_symlink_entry(
@@ -1934,6 +1944,7 @@ fn snapshot_entry(
         file_type,
         content_hash,
         mode,
+        file_metadata: None,
         symlink_target,
         state,
     }
@@ -1975,6 +1986,28 @@ fn file_mode(_metadata: &fs::Metadata) -> Option<u32> {
     None
 }
 
+fn file_metadata_evidence(metadata: &fs::Metadata) -> FileMetadataEvidence {
+    let platform = file_metadata_platform();
+    let readonly = metadata.permissions().readonly();
+    let unix_mode = file_mode(metadata);
+    FileMetadataEvidence {
+        platform,
+        readonly,
+        unix_mode,
+    }
+}
+
+#[cfg(windows)]
+const FILE_METADATA_PLATFORM: FileMetadataPlatform = FileMetadataPlatform::Windows;
+#[cfg(unix)]
+const FILE_METADATA_PLATFORM: FileMetadataPlatform = FileMetadataPlatform::Unix;
+#[cfg(not(any(unix, windows)))]
+const FILE_METADATA_PLATFORM: FileMetadataPlatform = FileMetadataPlatform::Other;
+
+fn file_metadata_platform() -> FileMetadataPlatform {
+    FILE_METADATA_PLATFORM
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct WorkspaceSnapshotEntry {
@@ -1985,8 +2018,27 @@ pub struct WorkspaceSnapshotEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_metadata: Option<FileMetadataEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symlink_target: Option<PathBuf>,
     pub state: SnapshotEntryState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct FileMetadataEvidence {
+    pub platform: FileMetadataPlatform,
+    pub readonly: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unix_mode: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FileMetadataPlatform {
+    Unix,
+    Windows,
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -9,17 +9,17 @@ use anyhow::Result;
 use crate::{
     CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, ChildVerificationReceiptLinked, CompletionCriteria, DurableEventType,
-    EvidenceReceipt, EvidenceScope, FileType, JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
-    ReadinessInput, ReadinessProjectionMode, ReadinessReason, ReceiptStatus, RedactionState,
-    RequiredAction, RunStatus, SandboxProfileRequirement, Session, SessionLogEntry,
-    SessionStreamRecord, SnapshotEntryState, ToolEffect, VerificationAutoRunPolicy,
-    VerificationBinding, VerificationCheckConfig, VerificationCheckRunEntry,
-    VerificationCheckRunRequest, VerificationCheckRunStatus, VerificationConfig,
-    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationSkipDecision,
-    VerificationStaleCause, VerificationStaleReason, VerificationStateProjection,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceMutationEvidence, WorkspaceSnapshotEntry,
-    WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
+    EvidenceReceipt, EvidenceScope, FileMetadataPlatform, FileType, JsonlSessionStore,
+    MAX_WORKSPACE_SNAPSHOT_FILE_BYTES, ReadinessInput, ReadinessProjectionMode, ReadinessReason,
+    ReceiptStatus, RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement, Session,
+    SessionLogEntry, SessionStreamRecord, SnapshotEntryState, ToolEffect,
+    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckConfig,
+    VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
+    VerificationConfig, VerificationPolicy, VerificationReceipt, VerificationScope,
+    VerificationSkipDecision, VerificationStaleCause, VerificationStaleReason,
+    VerificationStateProjection, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceMutationEvidence,
+    WorkspaceSnapshotEntry, WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
     build_workspace_snapshot, build_workspace_snapshot_for_event, check_specs_from_user_config,
     discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
     run_verification_check, session::ControlEntry,
@@ -381,6 +381,7 @@ fn receipt_identity_snapshot_and_child_link_validation_cover_edges() {
         file_type: FileType::File,
         content_hash: Some("sha256:file".to_owned()),
         mode: Some(0o100644),
+        file_metadata: None,
         symlink_target: None,
         state: SnapshotEntryState::Present,
     };
@@ -397,6 +398,7 @@ fn receipt_identity_snapshot_and_child_link_validation_cover_edges() {
         file_type: FileType::Symlink,
         content_hash: None,
         mode: None,
+        file_metadata: None,
         symlink_target: Some(PathBuf::from("src/lib.rs")),
         state: SnapshotEntryState::Present,
     };
@@ -2751,6 +2753,7 @@ fn workspace_snapshot_id_is_content_bound_and_rejects_incomplete_manifest() {
                 file_type: FileType::File,
                 content_hash: Some("sha256:b".to_owned()),
                 mode: Some(0o644),
+                file_metadata: None,
                 symlink_target: None,
                 state: SnapshotEntryState::Present,
             },
@@ -2759,6 +2762,7 @@ fn workspace_snapshot_id_is_content_bound_and_rejects_incomplete_manifest() {
                 file_type: FileType::File,
                 content_hash: Some("sha256:a".to_owned()),
                 mode: Some(0o644),
+                file_metadata: None,
                 symlink_target: None,
                 state: SnapshotEntryState::Present,
             },
@@ -2784,6 +2788,7 @@ fn workspace_snapshot_id_is_content_bound_and_rejects_incomplete_manifest() {
             file_type: FileType::File,
             content_hash: None,
             mode: None,
+            file_metadata: None,
             symlink_target: None,
             state: SnapshotEntryState::PermissionDenied,
         }],
@@ -2934,6 +2939,59 @@ fn workspace_snapshot_builder_respects_scope_max_file_bytes() {
             && entry.content_hash.is_some()
             && entry.state == SnapshotEntryState::Present
     }));
+}
+
+#[test]
+fn workspace_snapshot_builder_records_comparable_file_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("note.txt");
+    fs::write(&path, b"metadata").expect("source");
+    let scope = VerificationScope::all_tracked("scope-main");
+
+    let first =
+        build_workspace_snapshot(temp.path(), "workspace-1", &scope, 1).expect("snapshot builds");
+    let entry = first
+        .manifest
+        .entries
+        .iter()
+        .find(|entry| entry.normalized_path == Path::new("note.txt"))
+        .expect("snapshot entry");
+    let file_metadata = entry.file_metadata.as_ref().expect("file metadata");
+    assert_eq!(
+        file_metadata.readonly,
+        fs::metadata(&path)
+            .expect("file metadata")
+            .permissions()
+            .readonly()
+    );
+    #[cfg(unix)]
+    {
+        assert_eq!(file_metadata.platform, FileMetadataPlatform::Unix);
+        assert_eq!(file_metadata.unix_mode, entry.mode);
+        assert!(entry.mode.is_some());
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(file_metadata.platform, FileMetadataPlatform::Windows);
+        assert_eq!(entry.mode, None);
+        assert_eq!(file_metadata.unix_mode, None);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        assert_eq!(file_metadata.platform, FileMetadataPlatform::Other);
+        assert_eq!(entry.mode, None);
+        assert_eq!(file_metadata.unix_mode, None);
+    }
+
+    let original_permissions = fs::metadata(&path).expect("file metadata").permissions();
+    let mut readonly_permissions = original_permissions.clone();
+    readonly_permissions.set_readonly(true);
+    fs::set_permissions(&path, readonly_permissions).expect("set readonly");
+    let second =
+        build_workspace_snapshot(temp.path(), "workspace-1", &scope, 2).expect("snapshot rebuilds");
+    assert_ne!(first.workspace_snapshot_id, second.workspace_snapshot_id);
+
+    fs::set_permissions(&path, original_permissions).expect("restore writable");
 }
 
 #[test]
@@ -3097,6 +3155,7 @@ fn snapshot_entry_completeness_covers_directory_and_unsupported_states() {
         file_type: FileType::Directory,
         content_hash: None,
         mode: Some(0o755),
+        file_metadata: None,
         symlink_target: None,
         state: SnapshotEntryState::Present,
     };

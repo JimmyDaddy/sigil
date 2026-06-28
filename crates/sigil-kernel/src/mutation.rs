@@ -2866,6 +2866,7 @@ fn single_subject_snapshot_id(
             file_type,
             content_hash,
             mode: None,
+            file_metadata: None,
             symlink_target: None,
             state,
         }],

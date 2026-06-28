@@ -241,8 +241,15 @@ struct WorkspaceSnapshotEntry {
     file_type: FileType,
     content_hash: Option<String>,
     mode: Option<u32>,
+    file_metadata: Option<FileMetadataEvidence>,
     symlink_target: Option<PathBuf>,
     state: SnapshotEntryState,
+}
+
+struct FileMetadataEvidence {
+    platform: FileMetadataPlatform,
+    readonly: bool,
+    unix_mode: Option<u32>,
 }
 ```
 
