@@ -5,13 +5,13 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    AgentRole, AgentRunOptions, ApprovalMode, InteractionMode, McpServerConfig, McpServerStartup,
-    MutationEventRecorder, PermissionEvaluationContext, Provider, ProviderCapabilities,
-    ReasoningEffort, RoleModelConfig, RootConfig, ScopedToolRegistry, SecretRedactor,
-    SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory, ToolContext,
-    ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry, ToolRegistryScope,
-    ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
-    default_user_config_dir,
+    AgentRole, AgentRunOptions, ApprovalMode, ExecutionBackend, InteractionMode, McpServerConfig,
+    McpServerStartup, MutationEventRecorder, PermissionEvaluationContext, Provider,
+    ProviderCapabilities, ReasoningEffort, RoleModelConfig, RootConfig, ScopedToolRegistry,
+    SecretRedactor, SkillDescriptor, Tool, ToolAccess, ToolAllowlistConfig, ToolCategory,
+    ToolContext, ToolEgressAudit, ToolErrorKind, ToolPreviewCapability, ToolRegistry,
+    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectKind,
+    ToolSubjectScope, default_user_config_dir,
 };
 pub use sigil_mcp::{
     McpElicitationAction, McpElicitationHandler, McpElicitationRequest, McpElicitationResponse,
@@ -603,7 +603,7 @@ fn register_local_tools(
     workspace_root: PathBuf,
 ) -> Result<()> {
     let paths = resolve_sigil_paths(&root_config.storage, &root_config.session, &workspace_root);
-    let execution_backend = sigil_tools_builtin::build_execution_backend(&root_config.execution)?;
+    let execution_backend = build_configured_execution_backend(root_config)?;
     sigil_tools_builtin::register_builtin_tools_with_paths_and_execution_backend(
         registry,
         sigil_tools_builtin::BuiltinToolPaths {
@@ -630,6 +630,17 @@ fn register_local_tools(
         &root_config.skills,
     );
     Ok(())
+}
+
+/// Builds the execution backend configured for tools and verification checks.
+///
+/// # Errors
+///
+/// Returns an error when the configured backend cannot satisfy the requested isolation policy.
+pub fn build_configured_execution_backend(
+    root_config: &RootConfig,
+) -> Result<Arc<dyn ExecutionBackend>> {
+    sigil_tools_builtin::build_execution_backend(&root_config.execution)
 }
 
 /// Refreshes provider-visible tools for one configured MCP server.

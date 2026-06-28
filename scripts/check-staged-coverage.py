@@ -96,6 +96,17 @@ def is_trivially_non_executable_added_line(line: str) -> bool:
         return True
     if stripped.startswith(("//", "/*", "*", "*/", "#[", "#![", "all(", "allow(")):
         return True
+    if re.fullmatch(r"\.await\??,?", stripped):
+        return True
+    if re.fullmatch(r'"(?:[^"\\]|\\.)*",?', stripped):
+        return True
+    if re.fullmatch(r"[a-z_][A-Za-z0-9_]*,?", stripped):
+        return True
+    if re.fullmatch(
+        r"[a-z_][A-Za-z0-9_]*:\s*[A-Za-z_][A-Za-z0-9_:]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*,?",
+        stripped,
+    ):
+        return True
     if stripped in {"{", "}", "};", ");", ")?;", ")]);", ")]", ")", "],", "[", "]", "},", ","}:
         return True
     if re.fullmatch(r"[\)\]\}]+(?:\?;|;|,)?", stripped):

@@ -564,6 +564,7 @@ Required deterministic tests:
 - 已在 TUI task sidebar / strip 中补充窄宽度 verification reason compact 展示：显示第一个 stale/actionable reason，并用 `+N more` 汇总其余原因；session audit 仍保留完整 reason labels。
 - 已补充 check runner 失败后的最小 retry affordance：queued/running 会隐藏重复 run action，terminal failed/errored/inconclusive/succeeded 等历史 run 不会遮蔽当前 `run_check` required action，用户能看到失败原因和重新运行入口。
 - 已补充配置化 check auto-run policy：`manual` 为默认低摩擦策略，只展示 run/retry action；`trusted_only` 才会自动启动 trusted checks；`never` 禁止自动启动。`/config` Permissions 可查看/切换该策略，task materialize 会把策略写入 task/step policy，子 policy 只能收紧不能放宽。
+- 已将 check runner 执行路径接入 RFC-0005 `ExecutionBackend`：`run_verification_check` 不再直接 spawn 本地进程，而是通过 runtime 配置的 backend 执行；`/task` orchestrator 持有并传递同一 backend，缺少 backend 时 fail closed。
 - 已将 check runner timeout / exit failure reason 写入 `VerificationReceipt`，并由 terminal `VerificationCheckRun` 继承；TUI 可直接展示系统产生的 `check timed out ...` / exit-code reason，而不是只显示泛化 failed 状态。
 - 已将 policy timeout 写入 `VerificationCheckRun` queued/running/terminal lifecycle audit，并在 task sidebar / strip / session detail 中展示，用户能看到 check-run 采用的 timeout 配置。
 - 已将 workspace snapshot 大文件阈值纳入 `VerificationScope.max_file_bytes`，并作为 policy-bound scope coverage 参与验证范围覆盖判断；默认值仍沿用 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES`。
@@ -573,7 +574,7 @@ Required deterministic tests:
 
 Productization remains：
 
-- 完成 check runner 产品化：更完整的失败重试交互；runner lifecycle audit primitive、核心 trust gate、repo-local approval UI、backend sandbox promotion plumbing、最小 queue/status UI、timeout visibility、terminal failure reason、retry affordance 和配置化 auto-run policy 已落地。
+- 完成 check runner 产品化：更完整的失败重试交互；runner lifecycle audit primitive、核心 trust gate、repo-local approval UI、backend execution plumbing、最小 queue/status UI、timeout visibility、terminal failure reason、retry affordance 和配置化 auto-run policy 已落地。真正 OS sandbox enforcement 继续由 RFC-0005 后续 backend 提供。
 - 启用 plugin hook command runtime 或自动合并 plugin-declared MCP servers 时，必须复用 RFC-0002 external-process unknown-dirty recorder；当前代码尚不存在这些 plugin-owned process execution 面。
 - MCP lifecycle verification UX bridge 已落地：`WorkspaceMutationDetected(tool_name="mcp_server:<name>")` 会投影为用户可读的 `MCP server <name>` source reason 和 `refresh MCP or run check` recovery hint；task sidebar / strip / session detail 不再只显示内部 unknown-dirty token。
 - 扩展 verification scope profile 的后续工作只剩真实项目校准：默认/profile presets、配置文件 override 和 TUI 只读摘要已落地；更多语言专用生成目录或依赖缓存应按项目证据追加，避免把普通用户操作面做复杂。

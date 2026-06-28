@@ -8,9 +8,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
-    time::{Duration, Instant},
+    process::Command,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DurableEventType, EventClass, EventId, Session, SessionId, StoredEvent,
+    DurableEventType, EventClass, EventId, ExecutionBackend, ExecutionBackendCapabilities,
+    ExecutionBackendKind, ExecutionRequest, Session, SessionId, StoredEvent,
     WorkspaceMutationDetected,
     session::{ControlEntry, SessionLogEntry},
     stable_event_uuid,
@@ -2312,8 +2312,9 @@ pub struct VerificationCheckRunRequest {
 ///
 /// Returns an error when the workspace cannot be snapshotted, the durable check/command facts
 /// cannot be recorded, or the configured command cannot be spawned.
-pub fn run_verification_check(
+pub async fn run_verification_check(
     session: &mut Session,
+    execution_backend: &dyn ExecutionBackend,
     request: VerificationCheckRunRequest,
 ) -> Result<VerificationRecordedEntry> {
     let workspace_root = fs::canonicalize(&request.workspace_root).with_context(|| {
@@ -2350,8 +2351,13 @@ pub fn run_verification_check(
     )?;
 
     let started_at = Instant::now();
-    let command_output =
-        execute_check_command(&workspace_root, &check.command, request.policy.timeout_ms)?;
+    let command_output = execute_check_command(
+        execution_backend,
+        &workspace_root,
+        &check.command,
+        request.policy.timeout_ms,
+    )
+    .await?;
     let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     let command_event =
@@ -2453,6 +2459,8 @@ pub fn run_verification_check(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckCommandOutput {
+    backend: ExecutionBackendKind,
+    backend_capabilities: ExecutionBackendCapabilities,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
@@ -2465,7 +2473,8 @@ impl CheckCommandOutput {
     }
 }
 
-fn execute_check_command(
+async fn execute_check_command(
+    execution_backend: &dyn ExecutionBackend,
     workspace_root: &Path,
     command: &CheckCommand,
     timeout_ms: Option<u64>,
@@ -2475,51 +2484,31 @@ fn execute_check_command(
         .as_ref()
         .map(|cwd| workspace_root.join(cwd))
         .unwrap_or_else(|| workspace_root.to_path_buf());
-    let mut child = Command::new(&command.command)
-        .args(&command.args)
-        .current_dir(&cwd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to spawn verification check {} in {}",
-                format_check_command(command),
-                cwd.display()
-            )
-        })?;
-    let timeout = timeout_ms.map(Duration::from_millis);
-    let started = Instant::now();
-    loop {
-        if child
-            .try_wait()
-            .context("failed to poll verification check")?
-            .is_some()
-        {
-            let output = child
-                .wait_with_output()
-                .context("failed to collect verification check output")?;
-            return Ok(CheckCommandOutput {
-                exit_code: output.status.code(),
-                stdout: truncated_lossy(&output.stdout),
-                stderr: truncated_lossy(&output.stderr),
-                timed_out: false,
-            });
-        }
-        if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
-            let _ = child.kill();
-            let output = child
-                .wait_with_output()
-                .context("failed to collect timed-out verification check output")?;
-            return Ok(CheckCommandOutput {
-                exit_code: output.status.code(),
-                stdout: truncated_lossy(&output.stdout),
-                stderr: truncated_lossy(&output.stderr),
-                timed_out: true,
-            });
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
+    let request = ExecutionRequest {
+        program: command.command.clone(),
+        args: command.args.clone(),
+        cwd: cwd.clone(),
+        env: BTreeMap::new(),
+        timeout_ms,
+        timeout_secs: timeout_ms
+            .map(|timeout_ms| timeout_ms.saturating_add(999) / 1000)
+            .unwrap_or(0),
+    };
+    let receipt = execution_backend.execute(request).await.with_context(|| {
+        format!(
+            "failed to spawn verification check {} in {}",
+            format_check_command(command),
+            cwd.display()
+        )
+    })?;
+    Ok(CheckCommandOutput {
+        backend: receipt.backend,
+        backend_capabilities: receipt.capabilities,
+        exit_code: receipt.exit_code,
+        stdout: truncated_lossy(&receipt.stdout),
+        stderr: truncated_lossy(&receipt.stderr),
+        timed_out: receipt.timed_out,
+    })
 }
 
 fn check_receipt_status(
@@ -2576,6 +2565,8 @@ fn append_command_finished_event(
             "exit_code": command_output.exit_code,
             "timed_out": command_output.timed_out,
             "elapsed_ms": elapsed_ms,
+            "execution_backend": command_output.backend,
+            "execution_backend_capabilities": command_output.backend_capabilities,
             "stdout_preview": command_output.stdout,
             "stderr_preview": command_output.stderr,
         }),

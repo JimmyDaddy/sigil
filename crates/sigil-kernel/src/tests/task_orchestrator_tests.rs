@@ -13,18 +13,19 @@ use crate::{
     Agent, AgentRunInput, AgentRunOptions, AutoApproveHandler, CandidateCheck, CheckCommand,
     CheckDiscoverySource, CheckPromotion, CheckSpecRecordedEntry, CheckpointRestored,
     CompletionRequest, ControlEntry, DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType,
-    EventClass, EvidenceScope, ExecutionMutationProfile, FileType, InteractionMode,
-    JsonlSessionStore, MemoryConfig, MessageRole, ModelMessage, MutationEventRecorder,
-    MutationPrepared, MutationSubject, MutationSyncClass, PermissionConfig, Provider,
-    ProviderCapabilities, ProviderChunk, ReasoningEffort, ReasoningStreamSupport, RunEvent,
-    SequentialTaskOrchestrator, SequentialTaskRequest, Session, SessionLogEntry, SessionRef,
-    SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionStatus, TaskId, TaskPlanEntry,
-    TaskPlanStatus, TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepSpec,
-    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
-    Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolEffect,
-    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, VerificationAutoRunPolicy, VerificationVerdict,
-    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    EventClass, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
+    ExecutionBackendKind, ExecutionFuture, ExecutionMutationProfile, ExecutionReceipt,
+    ExecutionRequest, FileType, InteractionMode, JsonlSessionStore, MemoryConfig, MessageRole,
+    ModelMessage, MutationEventRecorder, MutationPrepared, MutationSubject, MutationSyncClass,
+    PermissionConfig, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
+    ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
+    SessionLogEntry, SessionRef, SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME,
+    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry,
+    TaskRunStatus, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
+    TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
+    ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, VerificationAutoRunPolicy,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
     WorkspaceMutationDetectionReason, WorkspaceTrust, WorkspaceTrustDecisionEntry,
     write_file_with_mutation,
 };
@@ -48,9 +49,65 @@ struct RecoverableErrorTool;
 struct MutatingTool;
 struct ApprovalRequiredTool;
 struct DenyApprovalHandler;
+#[derive(Debug, Default)]
+struct FakeTaskExecutionBackend;
 #[derive(Default)]
 struct RecordingEventHandler {
     events: Vec<RunEvent>,
+}
+
+impl ExecutionBackend for FakeTaskExecutionBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Local
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities::default()
+    }
+
+    fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
+        Box::pin(async move {
+            if request.cwd.ends_with("missing-cwd") {
+                return Err(anyhow::anyhow!("fake spawn failed for {}", request.program));
+            }
+            let failed = request.program == "false";
+            Ok(ExecutionReceipt {
+                backend: ExecutionBackendKind::Local,
+                capabilities: ExecutionBackendCapabilities::default(),
+                exit_code: if failed { Some(1) } else { Some(0) },
+                stdout: format!("fake backend executed {}\n", request.program).into_bytes(),
+                stderr: if failed {
+                    b"fake verification failure\n".to_vec()
+                } else {
+                    Vec::new()
+                },
+                timed_out: false,
+            })
+        })
+    }
+}
+
+fn run_task_step_verification_checks_with_fake_backend<H>(
+    session: &mut Session,
+    handler: &mut H,
+    request: &SequentialTaskRequest,
+    step: &TaskStepSpec,
+    options: &AgentRunOptions,
+    readiness: &crate::ReadinessEvaluatedEntry,
+) -> Result<bool>
+where
+    H: crate::EventHandler + Send,
+{
+    let backend = FakeTaskExecutionBackend;
+    futures::executor::block_on(run_task_step_verification_checks(
+        session,
+        handler,
+        Some(&backend),
+        request,
+        step,
+        options,
+        readiness,
+    ))
 }
 
 impl crate::EventHandler for RecordingEventHandler {
@@ -632,7 +689,8 @@ async fn sequential_task_orchestrator_runs_configured_check_after_mutating_step(
             },
             ToolRegistry::new(),
         ),
-    );
+    )
+    .with_execution_backend(Arc::new(FakeTaskExecutionBackend));
     let mut options = options();
     options.workspace_root = workspace.clone();
     let mut handler = RecordingEventHandler::default();
@@ -1290,7 +1348,8 @@ async fn direct_child_session_runs_configured_check_after_mutating_write() -> Re
             ToolRegistry::new(),
         ),
         boxed_agent(MutatingToolProvider, registry),
-    );
+    )
+    .with_execution_backend(Arc::new(FakeTaskExecutionBackend));
     let mut options = options();
     options.workspace_root = workspace.clone();
     let mut handler = RecordingEventHandler::default();
@@ -2615,7 +2674,7 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
         VerificationVerdict::Missing
     );
     let mut handler = RecordingEventHandler::default();
-    assert!(run_task_step_verification_checks(
+    assert!(run_task_step_verification_checks_with_fake_backend(
         &mut session,
         &mut handler,
         &request,
@@ -2771,7 +2830,7 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
         policy_hash: None,
         workspace_snapshot_id: None,
     };
-    assert!(!run_task_step_verification_checks(
+    assert!(!run_task_step_verification_checks_with_fake_backend(
         &mut session,
         &mut handler,
         &request,
@@ -2787,7 +2846,7 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
         },
         ..no_action.clone()
     };
-    assert!(!run_task_step_verification_checks(
+    assert!(!run_task_step_verification_checks_with_fake_backend(
         &mut session,
         &mut handler,
         &request,
@@ -2805,7 +2864,7 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
         },
         ..no_action.clone()
     };
-    let error = run_task_step_verification_checks(
+    let error = run_task_step_verification_checks_with_fake_backend(
         &mut session,
         &mut handler,
         &request,
@@ -2869,7 +2928,22 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
         },
         ..no_action.clone()
     };
-    assert!(run_task_step_verification_checks(
+    let no_backend_error = futures::executor::block_on(run_task_step_verification_checks(
+        &mut session,
+        &mut handler,
+        None,
+        &request,
+        &step,
+        &options,
+        &failed_check,
+    ))
+    .expect_err("check execution should fail closed without a backend");
+    assert!(
+        no_backend_error
+            .to_string()
+            .contains("requires an execution backend")
+    );
+    assert!(run_task_step_verification_checks_with_fake_backend(
         &mut session,
         &mut handler,
         &request,
@@ -2927,7 +3001,7 @@ fn task_step_run_check_action_covers_empty_missing_and_failed_checks() -> Result
         },
         ..no_action
     };
-    let spawn_error = run_task_step_verification_checks(
+    let spawn_error = run_task_step_verification_checks_with_fake_backend(
         &mut session,
         &mut handler,
         &request,

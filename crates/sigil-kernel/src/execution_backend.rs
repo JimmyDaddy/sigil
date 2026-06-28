@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use futures::future::BoxFuture;
@@ -74,7 +74,23 @@ pub struct ExecutionRequest {
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
     pub timeout_secs: u64,
+}
+
+impl ExecutionRequest {
+    /// Returns the effective timeout for this request.
+    ///
+    /// Millisecond precision is used when supplied. A zero second timeout with no millisecond
+    /// override means the caller intentionally requested no backend timeout.
+    #[must_use]
+    pub fn timeout_duration(&self) -> Option<Duration> {
+        if let Some(timeout_ms) = self.timeout_ms {
+            return Some(Duration::from_millis(timeout_ms));
+        }
+        (self.timeout_secs > 0).then(|| Duration::from_secs(self.timeout_secs))
+    }
 }
 
 /// Result captured by an execution backend.

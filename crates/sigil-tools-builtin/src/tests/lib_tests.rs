@@ -71,6 +71,7 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
             args: vec!["-lc".to_owned(), "printf backend-ok".to_owned()],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            timeout_ms: None,
             timeout_secs: 5,
         })
         .await?;
@@ -79,6 +80,28 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
     assert_eq!(receipt.exit_code, Some(0));
     assert_eq!(String::from_utf8_lossy(&receipt.stdout), "backend-ok");
     assert!(receipt.stderr.is_empty());
+    assert!(!receipt.timed_out);
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_execution_backend_allows_explicit_no_timeout() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let backend = LocalExecutionBackend;
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "printf".to_owned(),
+            args: vec!["no-timeout".to_owned()],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            timeout_secs: 0,
+        })
+        .await?;
+
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(String::from_utf8_lossy(&receipt.stdout), "no-timeout");
     assert!(!receipt.timed_out);
     Ok(())
 }
@@ -94,6 +117,7 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
             args: vec!["-lc".to_owned(), "sleep 2".to_owned()],
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            timeout_ms: Some(1),
             timeout_secs: 1,
         })
         .await?;
@@ -108,6 +132,7 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
             args: Vec::new(),
             cwd: temp.path().to_path_buf(),
             env: BTreeMap::new(),
+            timeout_ms: None,
             timeout_secs: 1,
         })
         .await

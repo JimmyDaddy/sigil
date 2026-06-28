@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::Arc,
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -11,15 +12,15 @@ use crate::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason,
     ApprovalHandler, CheckPromotion, CheckpointRestored, CompletionCriteria,
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventHandler, EvidenceScope,
-    ExecutionMutationProfile, JsonlSessionStore, ModelMessage, MutationCommitted, MutationPrepared,
-    MutationReconciled, MutationResolution, Provider, ReadinessEvaluatedEntry, ReadinessInput,
-    RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry, SessionStreamRecord,
-    StoredEvent, ToolApproval, ToolCall, ToolErrorKind, ToolExecutionStatus, ToolResultMeta,
-    ToolSpec, VerificationAutoRunPolicy, VerificationCheckRunEntry, VerificationCheckRunRequest,
-    VerificationCheckRunStatus, VerificationPolicy, VerificationReceipt, VerificationScope,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationEvidence, WorkspaceTrust, build_workspace_snapshot_for_event,
-    evaluate_readiness, run_verification_check,
+    ExecutionBackend, ExecutionMutationProfile, JsonlSessionStore, ModelMessage, MutationCommitted,
+    MutationPrepared, MutationReconciled, MutationResolution, Provider, ReadinessEvaluatedEntry,
+    ReadinessInput, RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry,
+    SessionStreamRecord, StoredEvent, ToolApproval, ToolCall, ToolErrorKind, ToolExecutionStatus,
+    ToolResultMeta, ToolSpec, VerificationAutoRunPolicy, VerificationCheckRunEntry,
+    VerificationCheckRunRequest, VerificationCheckRunStatus, VerificationPolicy,
+    VerificationReceipt, VerificationScope, VerificationVerdict, VisibleCompletionState,
+    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationEvidence, WorkspaceTrust,
+    build_workspace_snapshot_for_event, evaluate_readiness, run_verification_check,
     session::ControlEntry,
     stable_workspace_id,
     task::{
@@ -120,6 +121,7 @@ pub struct SequentialTaskOrchestrator<R = LegacyTaskChildSessionRunner> {
     planner: BoxedAgent,
     executor: BoxedAgent,
     child_runner: R,
+    execution_backend: Option<Arc<dyn ExecutionBackend>>,
 }
 
 impl SequentialTaskOrchestrator<LegacyTaskChildSessionRunner> {
@@ -133,6 +135,7 @@ impl SequentialTaskOrchestrator<LegacyTaskChildSessionRunner> {
             planner,
             executor,
             child_runner: LegacyTaskChildSessionRunner::new(subagent_read, subagent_write),
+            execution_backend: None,
         }
     }
 }
@@ -150,7 +153,15 @@ where
             planner,
             executor,
             child_runner,
+            execution_backend: None,
         }
+    }
+
+    /// Returns an orchestrator that uses the provided backend for verification check execution.
+    #[must_use]
+    pub fn with_execution_backend(mut self, execution_backend: Arc<dyn ExecutionBackend>) -> Self {
+        self.execution_backend = Some(execution_backend);
+        self
     }
 
     /// Runs planner once and then executes accepted plan steps sequentially.
@@ -389,11 +400,13 @@ where
                 && run_task_step_verification_checks(
                     session,
                     handler,
+                    self.execution_backend.as_deref(),
                     &request,
                     &step,
                     &step_options,
                     &readiness,
-                )?
+                )
+                .await?
             {
                 readiness = task_step_readiness_nonblocking(
                     session,
@@ -612,11 +625,13 @@ where
             && run_task_step_verification_checks(
                 session,
                 handler,
+                self.execution_backend.as_deref(),
                 &request,
                 &step,
                 &readiness_options,
                 &readiness,
-            )?
+            )
+            .await?
         {
             readiness = task_step_readiness_nonblocking(
                 session,
@@ -1006,9 +1021,10 @@ where
     append_task_control(session, handler, ControlEntry::ReadinessEvaluated(entry))
 }
 
-fn run_task_step_verification_checks<H>(
+async fn run_task_step_verification_checks<H>(
     session: &mut Session,
     handler: &mut H,
+    execution_backend: Option<&dyn ExecutionBackend>,
     request: &SequentialTaskRequest,
     step: &TaskStepSpec,
     options: &AgentRunOptions,
@@ -1029,6 +1045,8 @@ where
     if check_ids.is_empty() {
         return Ok(false);
     }
+    let execution_backend = execution_backend
+        .ok_or_else(|| anyhow!("verification check execution requires an execution backend"))?;
 
     let projection = session.verification_state_projection();
     let step_scope = task_step_evidence_scope(&request.task_id, &step.step_id);
@@ -1096,6 +1114,7 @@ where
         )?;
         let recorded = match run_verification_check(
             session,
+            execution_backend,
             VerificationCheckRunRequest {
                 workspace_root: options.workspace_root.clone(),
                 scope: step_scope.clone(),
@@ -1107,7 +1126,9 @@ where
                 workspace_trust_approval_event_id: None,
                 workspace_trust_sandbox_decision_id: None,
             },
-        ) {
+        )
+        .await
+        {
             Ok(recorded) => recorded,
             Err(error) => {
                 append_task_control(

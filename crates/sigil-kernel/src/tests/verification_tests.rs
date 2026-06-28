@@ -4,26 +4,80 @@ use std::{
     process::Command,
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use crate::{
     CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, ChildVerificationReceiptLinked, CompletionCriteria, DurableEventType,
-    EvidenceReceipt, EvidenceScope, FileMetadataPlatform, FileType, JsonlSessionStore,
-    MAX_WORKSPACE_SNAPSHOT_FILE_BYTES, ReadinessInput, ReadinessProjectionMode, ReadinessReason,
-    ReceiptStatus, RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement, Session,
-    SessionLogEntry, SessionStreamRecord, SnapshotEntryState, ToolEffect,
-    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckConfig,
-    VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
-    VerificationConfig, VerificationPolicy, VerificationReceipt, VerificationScope,
-    VerificationSkipDecision, VerificationStaleCause, VerificationStaleReason,
-    VerificationStateProjection, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceMutationEvidence,
-    WorkspaceSnapshotEntry, WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
+    EvidenceReceipt, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
+    ExecutionBackendKind, ExecutionFuture, ExecutionReceipt, ExecutionRequest,
+    FileMetadataPlatform, FileType, JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
+    ReadinessInput, ReadinessProjectionMode, ReadinessReason, ReceiptStatus, RedactionState,
+    RequiredAction, RunStatus, SandboxProfileRequirement, Session, SessionLogEntry,
+    SessionStreamRecord, SnapshotEntryState, ToolEffect, VerificationAutoRunPolicy,
+    VerificationBinding, VerificationCheckConfig, VerificationCheckRunEntry,
+    VerificationCheckRunRequest, VerificationCheckRunStatus, VerificationConfig,
+    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationSkipDecision,
+    VerificationStaleCause, VerificationStaleReason, VerificationStateProjection,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceMutationEvidence, WorkspaceSnapshotEntry,
+    WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
     build_workspace_snapshot, build_workspace_snapshot_for_event, check_specs_from_user_config,
     discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
     run_verification_check, session::ControlEntry,
 };
+
+#[derive(Debug, Default)]
+struct FakeVerificationBackend;
+
+impl ExecutionBackend for FakeVerificationBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Local
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities::default()
+    }
+
+    fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
+        Box::pin(async move {
+            if request.program.contains("definitely-missing")
+                || request.cwd.ends_with("missing-cwd")
+            {
+                return Err(anyhow!("fake spawn failed for {}", request.program));
+            }
+            let joined_args = request.args.join(" ");
+            let timed_out = request.timeout_ms == Some(1) && joined_args.contains("sleep");
+            let failed = joined_args.contains("--definitely-not-a-real-rustc-flag");
+            Ok(ExecutionReceipt {
+                backend: ExecutionBackendKind::Local,
+                capabilities: ExecutionBackendCapabilities::default(),
+                exit_code: if timed_out {
+                    None
+                } else if failed {
+                    Some(1)
+                } else {
+                    Some(0)
+                },
+                stdout: format!("fake backend executed {}\n", request.program).into_bytes(),
+                stderr: if failed {
+                    b"fake verification failure\n".to_vec()
+                } else {
+                    Vec::new()
+                },
+                timed_out,
+            })
+        })
+    }
+}
+
+fn run_verification_check_with_fake_backend(
+    session: &mut Session,
+    request: VerificationCheckRunRequest,
+) -> Result<crate::VerificationRecordedEntry> {
+    let backend = FakeVerificationBackend;
+    futures::executor::block_on(run_verification_check(session, &backend, request))
+}
 
 #[test]
 fn visible_state_preserves_run_status_and_verification_verdict() {
@@ -614,7 +668,7 @@ fn verification_check_runner_records_durable_check_and_passed_receipt() -> Resul
     )?;
     let policy = policy_with_checks(vec![trusted_check.check_spec.clone()]);
 
-    let recorded = run_verification_check(
+    let recorded = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: workspace,
@@ -683,7 +737,7 @@ fn verification_check_runner_accepts_trusted_check_promotion_approval() -> Resul
     let mut policy = policy_with_checks(vec![trusted_check.check_spec.clone()]);
     policy.workspace_trust_requirement = WorkspaceTrustRequirement::ApprovalOrSandbox;
 
-    let recorded = run_verification_check(
+    let recorded = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: workspace,
@@ -732,7 +786,7 @@ fn verification_check_runner_covers_missing_workspace_and_in_memory_fallback() -
     )?;
     let policy = policy_with_checks(vec![trusted_check.check_spec.clone()]);
     let mut missing_session = Session::new("deepseek", "deepseek-v4-flash");
-    let error = run_verification_check(
+    let error = run_verification_check_with_fake_backend(
         &mut missing_session,
         VerificationCheckRunRequest {
             workspace_root: temp.path().join("missing-workspace"),
@@ -750,7 +804,7 @@ fn verification_check_runner_covers_missing_workspace_and_in_memory_fallback() -
     assert!(error.to_string().contains("failed to canonicalize"));
 
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
-    let recorded = run_verification_check(
+    let recorded = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: workspace,
@@ -801,7 +855,7 @@ fn verification_check_runner_records_failed_and_mutating_checks() -> Result<()> 
             config_event_id: "event-config".to_owned(),
         },
     )?;
-    let failed = run_verification_check(
+    let failed = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: workspace.clone(),
@@ -836,7 +890,7 @@ fn verification_check_runner_records_failed_and_mutating_checks() -> Result<()> 
             config_event_id: "event-config".to_owned(),
         },
     )?;
-    let mutating = run_verification_check(
+    let mutating = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: workspace,
@@ -914,7 +968,7 @@ fn verification_check_runner_records_timeout_and_spawn_failure_edges() -> Result
     )?;
     let mut timeout_policy = policy_with_checks(vec![timeout_check.check_spec.clone()]);
     timeout_policy.timeout_ms = Some(1);
-    let timed_out = run_verification_check(
+    let timed_out = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: workspace.clone(),
@@ -964,7 +1018,7 @@ fn verification_check_runner_records_timeout_and_spawn_failure_edges() -> Result
             config_event_id: "event-config".to_owned(),
         },
     )?;
-    let error = run_verification_check(
+    let error = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: workspace,
@@ -1032,6 +1086,8 @@ fn verification_check_run_entry_covers_terminal_status_and_error_edges() {
 #[test]
 fn check_failure_reason_covers_timeout_and_signal_edges() {
     let timeout_without_configured_ms = super::CheckCommandOutput {
+        backend: ExecutionBackendKind::Local,
+        backend_capabilities: ExecutionBackendCapabilities::default(),
         exit_code: None,
         stdout: String::new(),
         stderr: String::new(),
@@ -1043,6 +1099,8 @@ fn check_failure_reason_covers_timeout_and_signal_edges() {
     );
 
     let terminated_without_exit_code = super::CheckCommandOutput {
+        backend: ExecutionBackendKind::Local,
+        backend_capabilities: ExecutionBackendCapabilities::default(),
         exit_code: None,
         stdout: String::new(),
         stderr: String::new(),
@@ -1081,7 +1139,7 @@ fn verification_check_runner_rejects_untrusted_workspace_policy() -> Result<()> 
     policy.workspace_trust_requirement = WorkspaceTrustRequirement::Trusted;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
 
-    let error = run_verification_check(
+    let error = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: workspace,
@@ -3272,7 +3330,7 @@ fn verification_check_runner_uses_synthetic_snapshot_id_for_incomplete_scope() -
     )?;
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
 
-    let recorded = run_verification_check(
+    let recorded = run_verification_check_with_fake_backend(
         &mut session,
         VerificationCheckRunRequest {
             workspace_root: temp.path().to_path_buf(),

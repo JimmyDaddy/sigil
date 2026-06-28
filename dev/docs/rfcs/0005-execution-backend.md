@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / slice 2 backend selection and fail-closed policy implemented
+状态：draft / slice 3 verification runner integration implemented
 
 创建日期：2026-06-28
 
@@ -18,6 +18,8 @@
 第一切片完成 non-interactive `bash` 的 `LocalBackend` 迁移：用户可见行为保持不变，但执行路径不再直接散落在 `bash` tool 内部。
 
 第二切片增加配置驱动的 backend selection 和 fail-closed isolation policy。默认仍允许 `local`，但一旦配置显式要求 sandbox，当前 `LocalBackend` 不能被静默当作 fallback 使用。
+
+第三切片将 RFC-0003 verification check runner 接入同一个 `ExecutionBackend`。验证命令不再直接 spawn 本地进程；`/task` orchestrator 使用 runtime 配置的 backend，并在缺少 backend 时 fail closed。
 
 ## 2. Goals
 
@@ -66,6 +68,8 @@ pub trait ExecutionBackend {
 - 已新增 `sigil-tools-builtin` 的 `LocalExecutionBackend`。
 - 已将 non-interactive `bash` tool 迁移到 `ExecutionBackend::execute`。
 - 已将 runtime 的 local tool registry 构建接入 `RootConfig.execution`。
+- 已将 verification check runner 迁移到 `ExecutionBackend::execute`，并新增毫秒级 timeout 支持，避免 RFC-0003 policy timeout 在 backend 边界丢精度。
+- 已将 `/task` orchestrator 接入 runtime 配置的 execution backend；自动或手动 `RunCheck` action 不再绕过 backend。
 - 已增加 fail-closed policy：当配置要求 sandbox 时，`LocalBackend` 会拒绝构建工具 registry，而不是静默继续裸跑。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
 - 已保留 `bash` 的 timeout、stdout/stderr metadata、exit-code error 和 scratch env 行为。
@@ -86,6 +90,8 @@ cargo test -p sigil-tools-builtin local_execution_backend_runs_command_without_s
 cargo test -p sigil-tools-builtin local_execution_backend_policy_fails_closed_when_sandbox_required
 cargo test -p sigil-runtime build_tool_registry_fails_closed_when_sandbox_is_required
 cargo test -p sigil-tools-builtin bash_tool_
+cargo test -p sigil-kernel verification_check_runner
+cargo test -p sigil-kernel task_orchestrator
 ./scripts/check-touched.sh --tier standard
 ```
 

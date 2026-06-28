@@ -29,7 +29,7 @@ use sigil_kernel::{
     write_file_with_mutation, write_file_with_mutation_in_batch,
 };
 use similar::TextDiff;
-use tokio::{process::Command, task, time::Duration};
+use tokio::{process::Command, task};
 
 mod terminal_process;
 
@@ -238,10 +238,8 @@ async fn local_execute(
         .envs(&request.env)
         .kill_on_drop(true);
 
-    let output =
-        match tokio::time::timeout(Duration::from_secs(request.timeout_secs), command.output())
-            .await
-        {
+    let output = match request.timeout_duration() {
+        Some(timeout) => match tokio::time::timeout(timeout, command.output()).await {
             Ok(output) => output?,
             Err(_) => {
                 return Ok(ExecutionReceipt {
@@ -253,7 +251,9 @@ async fn local_execute(
                     timed_out: true,
                 });
             }
-        };
+        },
+        None => command.output().await?,
+    };
 
     Ok(ExecutionReceipt {
         backend,
@@ -1437,6 +1437,7 @@ fn bash_execution_request(
             SIGIL_SCRATCH_DIR_ENV.to_owned(),
             scratch_root.to_string_lossy().into_owned(),
         )]),
+        timeout_ms: None,
         timeout_secs,
     }
 }

@@ -2834,12 +2834,15 @@ fn build_task_role_runtime(
         Agent::new(subagent_read_provider, subagent_read_registry),
         Agent::new(subagent_write_provider, subagent_write_registry),
     );
+    let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
+        .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(
             Agent::new(planner_provider, planner_registry),
             Agent::new(executor_provider, executor_registry),
             child_runner,
-        ),
+        )
+        .with_execution_backend(execution_backend),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,
             workspace_root.clone(),
@@ -2925,12 +2928,15 @@ fn build_skill_child_role_runtime(
         Agent::new(subagent_read_provider, subagent_read_registry),
         Agent::new(subagent_write_provider, subagent_write_registry),
     );
+    let execution_backend = sigil_runtime::build_configured_execution_backend(root_config)
+        .map_err(|error| format!("failed to build verification execution backend: {error:#}"))?;
     Ok(TaskRoleRuntime {
         orchestrator: SequentialTaskOrchestrator::new_with_child_runner(
             Agent::new(planner_provider, planner_registry),
             Agent::new(executor_provider, executor_registry),
             child_runner,
-        ),
+        )
+        .with_execution_backend(execution_backend),
         planner_options: sigil_runtime::build_role_run_options(
             root_config,
             workspace_root.clone(),
