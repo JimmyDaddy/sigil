@@ -3033,6 +3033,72 @@ impl VerificationStateProjection {
     }
 }
 
+/// JSON-friendly persisted form of `VerificationStateProjection`.
+///
+/// The runtime projection uses map keys that are not ideal JSON object keys. The persisted snapshot
+/// keeps the same materialized facts as ordered entry vectors so a projection store can be rebuilt
+/// from JSONL and reloaded without reparsing the full session stream.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct VerificationStateProjectionSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_specs: Vec<CheckSpecRecordedEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policies: Vec<VerificationPolicyChangedEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_runs: Vec<VerificationCheckRunEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub receipts: Vec<VerificationRecordedEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readiness: Vec<ReadinessEvaluatedEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_receipt_links: Vec<ChildVerificationReceiptLinked>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_trust: Vec<WorkspaceTrustDecisionEntry>,
+}
+
+impl From<&VerificationStateProjection> for VerificationStateProjectionSnapshot {
+    fn from(projection: &VerificationStateProjection) -> Self {
+        Self {
+            check_specs: projection.check_specs.values().cloned().collect(),
+            policies: projection.policies.values().cloned().collect(),
+            check_runs: projection.check_runs.values().cloned().collect(),
+            receipts: projection.receipts.values().cloned().collect(),
+            readiness: projection.readiness.values().cloned().collect(),
+            child_receipt_links: projection.child_receipt_links.clone(),
+            workspace_trust: projection.workspace_trust.values().cloned().collect(),
+        }
+    }
+}
+
+impl From<VerificationStateProjectionSnapshot> for VerificationStateProjection {
+    fn from(snapshot: VerificationStateProjectionSnapshot) -> Self {
+        let mut projection = Self::default();
+        for entry in snapshot.check_specs {
+            projection.apply_control_entry(&ControlEntry::CheckSpecRecorded(entry));
+        }
+        for entry in snapshot.policies {
+            projection.apply_control_entry(&ControlEntry::VerificationPolicyChanged(entry));
+        }
+        for entry in snapshot.check_runs {
+            projection.apply_control_entry(&ControlEntry::VerificationCheckRun(entry));
+        }
+        for entry in snapshot.receipts {
+            projection.apply_control_entry(&ControlEntry::VerificationRecorded(entry));
+        }
+        for entry in snapshot.readiness {
+            projection.apply_control_entry(&ControlEntry::ReadinessEvaluated(entry));
+        }
+        for entry in snapshot.child_receipt_links {
+            projection.apply_control_entry(&ControlEntry::ChildVerificationReceiptLinked(entry));
+        }
+        for entry in snapshot.workspace_trust {
+            projection.apply_control_entry(&ControlEntry::WorkspaceTrustDecision(entry));
+        }
+        projection
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "reason", content = "details")]
 pub enum ReadinessReason {

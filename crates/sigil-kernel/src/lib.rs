@@ -10,6 +10,7 @@ pub mod mutation;
 pub mod permission;
 pub mod plan;
 pub mod plugin;
+pub mod projection;
 pub mod provider;
 pub mod secret;
 pub mod session;
@@ -108,6 +109,9 @@ pub use plugin::{
     PluginSkillRef, PluginStateProjection, PluginTrustDecision, PluginTrustEntry,
     validate_plugin_id,
 };
+pub use projection::{
+    FILE_PROJECTION_STORE_SCHEMA_VERSION, FileProjectionStore, ProjectionStoreState,
+};
 pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
     PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
@@ -168,11 +172,11 @@ pub use verification::{
     VerificationPolicyChangedEntry, VerificationReceipt, VerificationRecordedEntry,
     VerificationScope, VerificationScopeHash, VerificationScopeProfile, VerificationSkipDecision,
     VerificationStaleCause, VerificationStaleReason, VerificationStateProjection,
-    VerificationVerdict, VisibleCompletionState, WorkspaceId, WorkspaceKnowledge,
-    WorkspaceMutationEvidence, WorkspaceRevision, WorkspaceSnapshotBuild, WorkspaceSnapshotEntry,
-    WorkspaceSnapshotId, WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustDecisionEntry,
-    WorkspaceTrustRequirement, WorkspaceTrustSnapshotId, build_workspace_snapshot,
-    build_workspace_snapshot_for_event, check_specs_from_user_config, default_scope_excludes,
-    discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
-    run_verification_check, stable_workspace_id, verification_check_run_id,
+    VerificationStateProjectionSnapshot, VerificationVerdict, VisibleCompletionState, WorkspaceId,
+    WorkspaceKnowledge, WorkspaceMutationEvidence, WorkspaceRevision, WorkspaceSnapshotBuild,
+    WorkspaceSnapshotEntry, WorkspaceSnapshotId, WorkspaceSnapshotManifestV1, WorkspaceTrust,
+    WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement, WorkspaceTrustSnapshotId,
+    build_workspace_snapshot, build_workspace_snapshot_for_event, check_specs_from_user_config,
+    default_scope_excludes, discover_candidate_checks, discover_candidate_checks_with_user_config,
+    evaluate_readiness, run_verification_check, stable_workspace_id, verification_check_run_id,
 };

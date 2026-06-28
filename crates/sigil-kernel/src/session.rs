@@ -1032,7 +1032,9 @@ fn session_entry_from_stored_event(event: &StoredEvent) -> Result<Option<Session
     Ok(Some(entry))
 }
 
-fn session_entry_from_domain_event(event: &DomainEvent) -> Result<Option<SessionLogEntry>> {
+pub(crate) fn session_entry_from_domain_event(
+    event: &DomainEvent,
+) -> Result<Option<SessionLogEntry>> {
     if let DomainEvent::Legacy(event) = event {
         let entry = serde_json::from_value(event.payload.clone())
             .context("failed to decode session entry from legacy domain event payload")?;
