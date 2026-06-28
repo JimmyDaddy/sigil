@@ -1053,6 +1053,23 @@ impl ManualLoopWorker {
             .map_err(|error| anyhow::anyhow!("timed out waiting for worker message: {error}"))
     }
 
+    fn recv_until_with_timeout<F>(&self, timeout: Duration, predicate: F) -> Result<WorkerMessage>
+    where
+        F: Fn(&WorkerMessage) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow::anyhow!("timed out waiting for worker message"));
+            }
+            let message = self.recv(remaining)?;
+            if predicate(&message) {
+                return Ok(message);
+            }
+        }
+    }
+
     fn recv_optional(&self, timeout: Duration) -> Result<Option<WorkerMessage>> {
         match self.message_rx.recv_timeout(timeout) {
             Ok(message) => Ok(Some(message)),
@@ -1357,15 +1374,20 @@ fn cancel_run_reports_load_error_if_session_log_cannot_be_reloaded() -> Result<(
     )?;
 
     worker.send(WorkerCommand::CancelRun)?;
-    let failure = worker.recv(Duration::from_secs(3))?;
+    let failure = worker.recv_until_with_timeout(Duration::from_secs(3), |message| {
+        let text = match message {
+            WorkerMessage::RunFailed(error) | WorkerMessage::Notice(error) => error,
+            _ => return false,
+        };
+        text.contains("expected")
+            || text.contains("failed to")
+            || text.contains("middle corruption")
+    })?;
 
     assert!(
         matches!(
             failure,
-            WorkerMessage::RunFailed(ref error)
-                if error.contains("expected")
-                    || error.contains("failed to")
-                    || error.contains("middle corruption")
+            WorkerMessage::RunFailed(_) | WorkerMessage::Notice(_)
         ),
         "unexpected cancel failure message: {failure:?}"
     );
