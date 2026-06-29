@@ -239,6 +239,53 @@ fn linux_bubblewrap_args_mount_workspace_scratch_and_disable_network_by_default(
     Ok(())
 }
 
+#[test]
+fn linux_bubblewrap_args_keep_tmp_workspace_visible_after_tmpfs() {
+    let canonical_workspace = PathBuf::from("/tmp/sigil-bwrap-test/workspace");
+    let request = ExecutionRequest {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), "true".to_owned()],
+        cwd: canonical_workspace.clone(),
+        env: BTreeMap::new(),
+        timeout_ms: None,
+        timeout_secs: 5,
+        cpu_time_ms: None,
+        memory_limit_bytes: None,
+        process_count_limit: None,
+    };
+
+    let args = super::linux_bubblewrap_args(&canonical_workspace, &request, false)
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let workspace_text = canonical_workspace.to_string_lossy();
+    let Some(parent) = canonical_workspace.parent() else {
+        panic!("test workspace path should have a parent");
+    };
+    let parent_text = parent.to_string_lossy();
+    let tmpfs_index = args
+        .windows(2)
+        .position(|window| window[0] == "--tmpfs" && window[1] == "/tmp")
+        .expect("bubblewrap args should mount tmpfs /tmp");
+    let dir_index = args
+        .windows(2)
+        .position(|window| window[0] == "--dir" && window[1] == parent_text.as_ref())
+        .expect("bubblewrap args should recreate tmp workspace parent");
+    let bind_index = args
+        .windows(3)
+        .position(|window| {
+            window[0] == "--bind"
+                && window[1] == workspace_text.as_ref()
+                && window[2] == workspace_text.as_ref()
+        })
+        .expect("bubblewrap args should bind tmp workspace after tmpfs");
+
+    assert!(
+        tmpfs_index < dir_index && dir_index < bind_index,
+        "tmpfs /tmp must be mounted before recreating and binding tmp workspace"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires Linux host with bubblewrap user/mount namespaces and wget"]
 #[cfg(target_os = "linux")]
@@ -253,7 +300,8 @@ async fn linux_bubblewrap_execution_backend_real_conformance() -> Result<()> {
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace)?;
     fs::write(workspace.join("input.txt"), "from-host")?;
-    let external_path = temp.path().join("outside.txt");
+    let external_temp = tempfile::tempdir_in("/var/tmp")?;
+    let external_path = external_temp.path().join("outside.txt");
 
     let receipt = backend
         .execute(ExecutionRequest {

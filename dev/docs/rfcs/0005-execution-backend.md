@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / E05.1-E05.7 implemented / E05.8 backend code implemented, Linux conformance gated by runner namespace support / E05.9 implemented with real Docker conformance / E05.16 minimal doctor implemented / productization remains
+状态：draft / E05.1-E05.9 implemented with real macOS/Linux/Docker conformance where applicable / E05.16 minimal doctor implemented / productization remains
 
 创建日期：2026-06-28
 
@@ -134,21 +134,23 @@ pub trait ExecutionBackend {
   - 新增 `backend = "linux_bubblewrap"`。
   - backend selection 在非 Linux、缺 `bwrap` 或 namespace smoke check 失败时 fail closed。
   - non-interactive command path 使用 bwrap 构造 read-only host root、writable workspace/cwd、writable `$SIGIL_SCRATCH_DIR`、tmpfs `/tmp`、PID namespace、die-with-parent 和 offline `--unshare-net`。
-  - 已有 Linux-only ignored conformance test 和手动 `Sandbox Conformance` GitHub Actions workflow；2026-06-29 首次 GitHub Ubuntu runner diagnostics 在 `bwrap --unshare-net` 阶段失败（`loopback: Failed RTM_NEWADDR: Operation not permitted`），因此 E05.8 仍不能标记 done，需要兼容的 Linux host/runner 证明 namespace/network conformance。
+  - bwrap args 先挂载 tmpfs `/tmp`，再创建 `/tmp` 下 bind destination 父目录并绑定 workspace/scratch，避免 tempfile workspace 被 tmpfs 遮住。
+  - 已有 Linux-only ignored conformance test 和手动 `Sandbox Conformance` GitHub Actions workflow；2026-06-29 首次 GitHub Ubuntu runner diagnostics 在 `bwrap --unshare-net` 阶段失败（`loopback: Failed RTM_NEWADDR: Operation not permitted`），因此 GitHub hosted runner 只保留为 diagnostic-only handoff。
   - 手动 workflow 已调整为 preflight/report 模式：默认把不兼容 hosted runner 记录为 `unsupported runner` 并跳过 conformance，不把它伪装成 conformance success；手动输入 `require_conformance=true` 时仍会 fail closed。
+  - 外部 Ubuntu Linux host 已使用 `bubblewrap 0.11.1` 跑通 ignored real conformance test，覆盖 workspace write、host workspace 外写阻断和 offline network block。
 - 已保留 `bash` 的 timeout、stdout/stderr metadata、exit-code error 和 scratch env 行为。
 
 ## 6. Productization Remains
 
-- 增加 Linux / Windows / container backend，并明确各平台 capability 差异。
-- 扩展 sandbox conformance tests 到 Linux / Windows / container backend 和后续 backend-specific profile enforcement。
+- 增加 Windows backend，并明确后续平台 capability 差异。
+- 扩展 sandbox conformance tests 到 Windows 和后续 backend-specific profile enforcement。
 - 为 persistent terminal 接入真正 OS sandbox backend。当前已记录 local process / local PTY backend metadata，但仍不表示 PTY 进程已受 Seatbelt/Bubblewrap/container 强制隔离。
 - 将 execution coverage labels 接入更完整的 TUI/runtime detail views；当前已提供 kernel/plugin summary API 和测试覆盖。
 
 2026-06-29 productization slice expansion:
 
 - E05.7 Sandbox Capability Matrix and Backend Selection Contract：已实现 backend selection、fallback、diagnostics 和 profile requirement taxonomy。该切片是后续完整 OS Sandbox 的直接入口。
-- E05.8 Linux Bubblewrap Backend MVP：backend code 已实现，要求真实 Linux+bwrap conformance 后才能从 gated 转 done。
+- E05.8 Linux Bubblewrap Backend MVP：已实现 Linux Bubblewrap backend code path，并已在外部 Ubuntu Linux host 上跑通 real conformance；GitHub hosted workflow 保持 diagnostic-only，因为 hosted runner 不支持当前 bwrap network namespace preflight。
 - E05.9 Container Backend MVP：已实现 Docker non-interactive backend code path、fake-Docker 参数构造测试和显式 real-Docker conformance test；本机已用 `redis:8-alpine` 完成真实 daemon/mount/network/ownership 验证。
 - E05.10 Windows Restricted Backend Spike：Windows restricted token / job object / cleanup 能力验证，必须有 Windows 环境。
 - E05.11 Network Policy Enforcement and Receipt：已完成 network allowed/denied/unsupported/unknown receipt、verification binding/hash 集成和 bash metadata 展示；macOS Seatbelt 仍不宣传网络隔离。
@@ -158,7 +160,7 @@ pub trait ExecutionBackend {
 - E05.15 Plugin Hook Process Sandbox Handoff：未来插件 hook command runtime 必须经过 execution backend 或显式 unconfined/unsupported。
 - E05.16 Sandbox Product Surface and Doctor：已实现 minimal doctor 展示；TUI tool/approval card 的更完整 coverage surface 仍可后续扩展。
 
-E05.8 已新增手动 `Sandbox Conformance` workflow，通过 GitHub Actions 的 Ubuntu runner 安装 `bubblewrap` 后运行 ignored Linux conformance test。当前 `linux_bubblewrap` backend code 和 workflow 均已存在；2026-06-29 首次 workflow 运行在 host namespace diagnostics 阶段失败，原因是 runner 不允许 bwrap 配置 loopback network namespace。workflow 现已改为 preflight/report 模式：默认记录 unsupported runner 并保留 E05.8 gated；需要硬门禁时用 `require_conformance=true` 运行。下一步需要在兼容 Linux host/runner 上运行 ignored test 并记录结果。E05.9 同时保留 fake-Docker request construction 测试和显式 real-Docker conformance 测试；后者需要健康 Docker daemon 与本机已有镜像。
+E05.8 已新增手动 `Sandbox Conformance` workflow，通过 GitHub Actions 的 Ubuntu runner 安装 `bubblewrap` 后运行 ignored Linux conformance test。当前 `linux_bubblewrap` backend code 和 workflow 均已存在；2026-06-29 首次 workflow 运行在 host namespace diagnostics 阶段失败，原因是 runner 不允许 bwrap 配置 loopback network namespace。workflow 现已改为 preflight/report 模式：默认记录 unsupported runner；需要硬门禁时用 `require_conformance=true` 运行。2026-06-29 已在外部 Ubuntu Linux host 上跑通 ignored real conformance test，因此 E05.8 backend semantics 已完成；GitHub hosted runner 仍不是 Linux Bubblewrap conformance 证明。E05.9 同时保留 fake-Docker request construction 测试和显式 real-Docker conformance 测试；后者需要健康 Docker daemon 与本机已有镜像。
 
 ## 7. Validation
 
@@ -201,8 +203,10 @@ cargo test -p sigil-tools-builtin linux_bubblewrap -- --nocapture
 ruby -e "require 'yaml'; YAML.load_file('.github/workflows/sandbox-conformance.yml'); puts 'ok'"
 gh workflow run sandbox-conformance.yml --repo JimmyDaddy/sigil --ref main
 gh run watch 28369483689 --repo JimmyDaddy/sigil --exit-status
+ssh root@<linux-host> 'bwrap --die-with-parent --unshare-pid --unshare-net --ro-bind / / --proc /proc --dev /dev /bin/true'
+ssh root@<linux-host> 'cd /var/tmp/sigil-e05-8 && CARGO_BUILD_JOBS=1 cargo test --locked -p sigil-tools-builtin tests::linux_bubblewrap_execution_backend_real_conformance -- --ignored --exact --nocapture'
 ```
 
 注意：`macos_seatbelt` 只证明 macOS non-interactive command backend 的最小 enforcement。Docker backend 已通过本机真实 daemon conformance，但只覆盖 non-interactive command execution。完整跨平台 sandbox、persistent terminal sandbox 和 MCP/plugin 进程隔离仍属于后续切片。E05.3 的 terminal metadata 只让 durable state 清楚记录 local process / local PTY 能力边界，不提供额外隔离。E05.4 的 coverage label 只说明哪些边界不受 local shell sandbox 覆盖，不提供额外隔离。
 
-`Sandbox Conformance` run `28369483689` 验证了默认 diagnostic-only workflow 行为：host namespace preflight 成功记录 unsupported runner，Linux Bubblewrap conformance step 被跳过，workflow 以 success 结束。该结果不是 Bubblewrap conformance success；E05.8 仍 gated。
+`Sandbox Conformance` run `28369483689` 验证了默认 diagnostic-only workflow 行为：host namespace preflight 成功记录 unsupported runner，Linux Bubblewrap conformance step 被跳过，workflow 以 success 结束。该结果不是 Bubblewrap conformance success。外部 Ubuntu Linux host 使用 `bubblewrap 0.11.1` 和仓库 pinned Rust `1.94.1` 跑通 `tests::linux_bubblewrap_execution_backend_real_conformance`；该测试证明 E05.8 的 real Linux conformance。

@@ -791,11 +791,14 @@ fn linux_bubblewrap_args(
         OsString::from("--ro-bind"),
         OsString::from("/"),
         OsString::from("/"),
+        OsString::from("--tmpfs"),
+        OsString::from("/tmp"),
+    ]);
+    linux_bubblewrap_add_tmpfs_bind_parent(&mut args, canonical_cwd);
+    args.extend([
         OsString::from("--bind"),
         canonical_cwd.as_os_str().to_owned(),
         canonical_cwd.as_os_str().to_owned(),
-        OsString::from("--tmpfs"),
-        OsString::from("/tmp"),
         OsString::from("--proc"),
         OsString::from("/proc"),
         OsString::from("--dev"),
@@ -809,6 +812,7 @@ fn linux_bubblewrap_args(
         .and_then(|path| fs::canonicalize(path).ok())
         .filter(|path| !path.starts_with(canonical_cwd))
     {
+        linux_bubblewrap_add_tmpfs_bind_parent(&mut args, &scratch_dir);
         args.extend([
             OsString::from("--bind"),
             scratch_dir.as_os_str().to_owned(),
@@ -821,6 +825,15 @@ fn linux_bubblewrap_args(
         OsString::from("--"),
     ]);
     args
+}
+
+fn linux_bubblewrap_add_tmpfs_bind_parent(args: &mut Vec<OsString>, destination: &Path) {
+    if !destination.starts_with("/tmp") {
+        return;
+    }
+    if let Some(parent) = destination.parent() {
+        args.extend([OsString::from("--dir"), parent.as_os_str().to_owned()]);
+    }
 }
 
 async fn docker_execute(
