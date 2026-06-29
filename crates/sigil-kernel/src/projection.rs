@@ -82,6 +82,364 @@ pub struct ProjectionRebuildOutput<T> {
     pub report: ProjectionRebuildReport,
 }
 
+/// Product-facing query families that projection views are expected to serve.
+///
+/// This is a contract layer, not a storage backend decision. Query pressure is measured against
+/// these stable shapes before Sigil considers escalating from file-backed projections to a
+/// materialized database view.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionQueryFamily {
+    SessionList,
+    SessionDetail,
+    TaskState,
+    AgentGraph,
+    DispatchTrace,
+    VerificationState,
+    CostSummary,
+    Checkpoint,
+    ContextSource,
+}
+
+/// Logical scope of a projection query.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionQueryScope {
+    SingleSession,
+    Workspace,
+    CrossSession,
+}
+
+/// Product surface that asks for a projection query.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionQuerySurface {
+    Tui,
+    Cli,
+    Http,
+    Desktop,
+    Ide,
+    Daemon,
+    DeveloperTool,
+}
+
+/// Stable query contract used by TUI, HTTP and future desktop adapters.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ProjectionQueryContract {
+    pub family: ProjectionQueryFamily,
+    pub scope: ProjectionQueryScope,
+    pub surface: ProjectionQuerySurface,
+    #[serde(default)]
+    pub requires_pagination: bool,
+    #[serde(default)]
+    pub requires_filtering: bool,
+    #[serde(default)]
+    pub requires_sorting: bool,
+    #[serde(default)]
+    pub requires_search: bool,
+    #[serde(default)]
+    pub requires_fresh_live_state: bool,
+}
+
+impl ProjectionQueryContract {
+    pub fn new(
+        family: ProjectionQueryFamily,
+        scope: ProjectionQueryScope,
+        surface: ProjectionQuerySurface,
+    ) -> Self {
+        Self {
+            family,
+            scope,
+            surface,
+            requires_pagination: false,
+            requires_filtering: false,
+            requires_sorting: false,
+            requires_search: false,
+            requires_fresh_live_state: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_pagination(mut self, value: bool) -> Self {
+        self.requires_pagination = value;
+        self
+    }
+
+    #[must_use]
+    pub fn with_filtering(mut self, value: bool) -> Self {
+        self.requires_filtering = value;
+        self
+    }
+
+    #[must_use]
+    pub fn with_sorting(mut self, value: bool) -> Self {
+        self.requires_sorting = value;
+        self
+    }
+
+    #[must_use]
+    pub fn with_search(mut self, value: bool) -> Self {
+        self.requires_search = value;
+        self
+    }
+
+    #[must_use]
+    pub fn with_fresh_live_state(mut self, value: bool) -> Self {
+        self.requires_fresh_live_state = value;
+        self
+    }
+}
+
+/// Thresholds used to decide whether projection pressure is only worth measuring or already
+/// strong enough to justify a materialized-view design.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ProjectionPressureThresholds {
+    pub sessions_scanned_warn: u64,
+    pub sessions_scanned_escalate: u64,
+    pub records_scanned_warn: u64,
+    pub records_scanned_escalate: u64,
+    pub query_latency_warn_ms: u64,
+    pub query_latency_escalate_ms: u64,
+    pub rebuild_latency_warn_ms: u64,
+    pub rebuild_latency_escalate_ms: u64,
+    pub repeated_log_scan_warn: u64,
+    pub repeated_log_scan_escalate: u64,
+    pub product_surface_warn: u64,
+    pub product_surface_escalate: u64,
+}
+
+impl Default for ProjectionPressureThresholds {
+    fn default() -> Self {
+        Self {
+            sessions_scanned_warn: 50,
+            sessions_scanned_escalate: 250,
+            records_scanned_warn: 10_000,
+            records_scanned_escalate: 50_000,
+            query_latency_warn_ms: 100,
+            query_latency_escalate_ms: 300,
+            rebuild_latency_warn_ms: 500,
+            rebuild_latency_escalate_ms: 2_000,
+            repeated_log_scan_warn: 2,
+            repeated_log_scan_escalate: 5,
+            product_surface_warn: 2,
+            product_surface_escalate: 3,
+        }
+    }
+}
+
+/// One measured product query sample.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ProjectionPressureSample {
+    pub contract: ProjectionQueryContract,
+    #[serde(default)]
+    pub sessions_scanned: u64,
+    #[serde(default)]
+    pub records_scanned: u64,
+    #[serde(default)]
+    pub repeated_log_scans: u64,
+    #[serde(default)]
+    pub product_surface_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_latency_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebuild_latency_ms: Option<u64>,
+}
+
+impl ProjectionPressureSample {
+    pub fn new(contract: ProjectionQueryContract) -> Self {
+        Self {
+            contract,
+            sessions_scanned: 0,
+            records_scanned: 0,
+            repeated_log_scans: 0,
+            product_surface_count: 1,
+            query_latency_ms: None,
+            rebuild_latency_ms: None,
+        }
+    }
+}
+
+/// Recommendation derived from projection pressure metrics.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionStoreRecommendation {
+    KeepFileBacked,
+    MeasureMore,
+    EscalateMaterializedView,
+}
+
+/// Stable reasons attached to pressure recommendations.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionPressureReason {
+    NoPressure,
+    LiveStateBoundary,
+    CrossSessionQuery,
+    PaginationRequired,
+    FilteringRequired,
+    SortingRequired,
+    SearchRequired,
+    SessionScanHigh,
+    RecordScanHigh,
+    QueryLatencyHigh,
+    RebuildLatencyHigh,
+    RepeatedLogScanHigh,
+    MultiSurfaceDemand,
+}
+
+/// Evaluation result for one projection pressure sample.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ProjectionPressureEvaluation {
+    pub recommendation: ProjectionStoreRecommendation,
+    #[serde(default)]
+    pub reasons: Vec<ProjectionPressureReason>,
+}
+
+pub fn evaluate_projection_pressure(
+    sample: &ProjectionPressureSample,
+    thresholds: &ProjectionPressureThresholds,
+) -> ProjectionPressureEvaluation {
+    if sample.contract.requires_fresh_live_state {
+        return ProjectionPressureEvaluation {
+            recommendation: ProjectionStoreRecommendation::KeepFileBacked,
+            reasons: vec![ProjectionPressureReason::LiveStateBoundary],
+        };
+    }
+
+    let mut reasons = Vec::new();
+    let mut should_escalate = false;
+    let mut should_measure = false;
+
+    push_contract_pressure_reasons(&sample.contract, &mut reasons, &mut should_measure);
+
+    evaluate_pressure_value(
+        sample.sessions_scanned,
+        thresholds.sessions_scanned_warn,
+        thresholds.sessions_scanned_escalate,
+        ProjectionPressureReason::SessionScanHigh,
+        &mut reasons,
+        &mut should_measure,
+        &mut should_escalate,
+    );
+    evaluate_pressure_value(
+        sample.records_scanned,
+        thresholds.records_scanned_warn,
+        thresholds.records_scanned_escalate,
+        ProjectionPressureReason::RecordScanHigh,
+        &mut reasons,
+        &mut should_measure,
+        &mut should_escalate,
+    );
+    evaluate_pressure_value(
+        sample.repeated_log_scans,
+        thresholds.repeated_log_scan_warn,
+        thresholds.repeated_log_scan_escalate,
+        ProjectionPressureReason::RepeatedLogScanHigh,
+        &mut reasons,
+        &mut should_measure,
+        &mut should_escalate,
+    );
+    evaluate_pressure_value(
+        sample.product_surface_count,
+        thresholds.product_surface_warn,
+        thresholds.product_surface_escalate,
+        ProjectionPressureReason::MultiSurfaceDemand,
+        &mut reasons,
+        &mut should_measure,
+        &mut should_escalate,
+    );
+    if let Some(latency) = sample.query_latency_ms {
+        evaluate_pressure_value(
+            latency,
+            thresholds.query_latency_warn_ms,
+            thresholds.query_latency_escalate_ms,
+            ProjectionPressureReason::QueryLatencyHigh,
+            &mut reasons,
+            &mut should_measure,
+            &mut should_escalate,
+        );
+    }
+    if let Some(latency) = sample.rebuild_latency_ms {
+        evaluate_pressure_value(
+            latency,
+            thresholds.rebuild_latency_warn_ms,
+            thresholds.rebuild_latency_escalate_ms,
+            ProjectionPressureReason::RebuildLatencyHigh,
+            &mut reasons,
+            &mut should_measure,
+            &mut should_escalate,
+        );
+    }
+
+    reasons.sort();
+    reasons.dedup();
+    if reasons.is_empty() {
+        reasons.push(ProjectionPressureReason::NoPressure);
+    }
+
+    let recommendation = if should_escalate {
+        ProjectionStoreRecommendation::EscalateMaterializedView
+    } else if should_measure {
+        ProjectionStoreRecommendation::MeasureMore
+    } else {
+        ProjectionStoreRecommendation::KeepFileBacked
+    };
+
+    ProjectionPressureEvaluation {
+        recommendation,
+        reasons,
+    }
+}
+
+fn push_contract_pressure_reasons(
+    contract: &ProjectionQueryContract,
+    reasons: &mut Vec<ProjectionPressureReason>,
+    should_measure: &mut bool,
+) {
+    if contract.scope == ProjectionQueryScope::CrossSession {
+        reasons.push(ProjectionPressureReason::CrossSessionQuery);
+        *should_measure = true;
+    }
+    if contract.requires_pagination {
+        reasons.push(ProjectionPressureReason::PaginationRequired);
+        *should_measure = true;
+    }
+    if contract.requires_filtering {
+        reasons.push(ProjectionPressureReason::FilteringRequired);
+        *should_measure = true;
+    }
+    if contract.requires_sorting {
+        reasons.push(ProjectionPressureReason::SortingRequired);
+        *should_measure = true;
+    }
+    if contract.requires_search {
+        reasons.push(ProjectionPressureReason::SearchRequired);
+        *should_measure = true;
+    }
+}
+
+fn evaluate_pressure_value(
+    value: u64,
+    warn_threshold: u64,
+    escalate_threshold: u64,
+    reason: ProjectionPressureReason,
+    reasons: &mut Vec<ProjectionPressureReason>,
+    should_measure: &mut bool,
+    should_escalate: &mut bool,
+) {
+    if value >= escalate_threshold {
+        reasons.push(reason);
+        *should_escalate = true;
+    } else if value >= warn_threshold {
+        reasons.push(reason);
+        *should_measure = true;
+    }
+}
+
 /// Common interface for rebuildable projection stores.
 pub trait ProjectionStore<T> {
     fn load_state(&self) -> Result<ProjectionStoreState<T>>;

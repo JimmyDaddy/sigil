@@ -1,6 +1,6 @@
 # RFC-0008 Thread Projection and Agent Graph Observability
 
-状态：draft / E08.1-E08.4 and E08.6 implemented / E08.5 gated
+状态：draft / E08.1-E08.4, E08.6 and E08.7 implemented / E08.5 gated
 
 创建日期：2026-06-28
 
@@ -88,6 +88,7 @@ Projection lag must be visible when it matters. UI must not treat lagging projec
 4. Dispatch trace projection.
 5. Optional SQLite/materialized view when product query volume requires it.
 6. Product view projection adoption for suitable historical/audit views.
+7. Projection query contract and pressure metrics before opening SQLite/materialized view work.
 
 ## 8. Acceptance Criteria
 
@@ -125,6 +126,7 @@ cargo test -p sigil-tui session
 - 已新增 file-backed dispatch trace projection store specialization，支持 duplicate replay idempotence 和 redacted inspect summary。
 - Dispatch trace projection 不保存 streaming token deltas、egress payload 或 raw tool result content；仅保存 hash、destination、计数、redaction/truncation metadata 和 bounded summary fields。
 - E08.6 已新增 runtime agent graph product-view adapter over durable session logs，并迁移 TUI agent summary consumer；active turn、approval 和 transient progress 仍保持 live runtime state 边界，projection lag 不作为交互真相来源。
+- E08.7 已新增 projection query contract 和 pressure metrics：`ProjectionQueryContract` 描述 query family、scope、surface、pagination/filter/search/sort/freshness 需求；`ProjectionPressureSample` / `ProjectionPressureThresholds` / `evaluate_projection_pressure` 输出 keep file-backed、measure more 或 escalate materialized view 的建议。
 
 本阶段没有引入 SQLite，也没有让 active approval/tool execution 依赖 projection。
 
@@ -132,6 +134,11 @@ cargo test -p sigil-tui session
 
 - 当前是 projection infrastructure + selected adapter adoption，不是所有 TUI/product views 全面 projection-first。
 - E08.5 SQLite/materialized view 继续 gated：只有桌面端、server 或跨会话查询出现真实查询压力，且 file-backed durable replay 不再足够时才升级。
+
+2026-06-30 审计补充：
+
+- E08.5 不应直接以“为桌面端预留”为理由打开。先通过 E08.7 收集 projection query contract 和 pressure metrics；只有 scan count、latency、repeated log scan、多 surface demand 或 query shape 证明 file-backed replay 不够时，才进入 materialized-view design。
+- `requires_fresh_live_state` 的查询不通过 SQLite 解决；active turn/tool/approval/terminal progress 仍属于 live runtime state boundary。
 
 ## 11. Open Questions
 

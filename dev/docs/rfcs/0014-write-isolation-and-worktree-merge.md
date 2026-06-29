@@ -1,6 +1,6 @@
 # RFC-0014 Write Isolation and Worktree Merge
 
-状态：draft / planning
+状态：draft / E14.1-E14.3 and E14.5-E14.7 implemented / E14.4 and E14.8 gated
 
 创建日期：2026-06-29
 
@@ -25,6 +25,16 @@
 3. Child workspace 的 verification 只绑定 child `WorkspaceSnapshotId`，不能自动继承到 parent。
 4. Merge 到 parent workspace 必须通过 RFC-0002 mutation protocol 产生 parent mutation evidence。
 5. Merge 后 parent required checks 必须重新运行，才能得到 parent `Passed` verdict。
+
+实现进度：
+
+- E14.1 已实现写隔离事实层：`WriteIsolationMode`、write lease / isolated workspace / merge review records、durable event taxonomy、typed decode 和 mixed-stream projection skeleton。
+- E14.2 已实现 shared workspace 写租约 enforcement：task 写步骤会获取/释放 durable write lease，ready queue 可在 active lease 下阻断候选步骤，并提供 stale lease release hook。
+- E14.3 已实现 changeset-only child write output：`SubagentWrite + ChangesetOnly` 不获取 parent shared-write lease，child 只能看到按真实 `ToolSpec` 过滤后的只读/代码检索工具，最终回答必须解码为结构化 changeset proposal 且包含 reviewable artifact content/ref；parent snapshot 若被 child 修改则该 step 失败；成功时追加 `ChangeSetProposed`、`IsolatedChangeSetProduced` 和 `MergeReviewRequested`，task step 进入 ready-for-review 的 `Paused` / `Blocked` 状态。
+- E14.5 已实现 merge review parent mutation handoff：accepted review 使用 review-time unified diff artifact 通过 RFC-0002 mutation batch 应用 parent workspace，记录 `MergeReviewResolved`、`ChangeSetApplied`、per-file mutation evidence、batch finished status 和 `ChildChangesetMerged`；rejected/conflict/cancelled review 不产生 parent mutation；partial apply 记录 explicit `PartiallyApplied` result。
+- E14.6 已实现 task DAG write isolation integration：`/task` continue 使用 DAG ready queue，active write lease 会暂停候选步骤，read-only ready steps 可同轮运行，shared-workspace write step 串行获取/释放 durable write lease，dependency-blocked 状态保持 paused，failed write 会取消依赖它的下游 steps。
+- E14.7 已实现 TUI merge/recheck product surface：task sidebar 和 task strip 从 `WriteIsolationProjection` 展示 pending/accepted/conflict/rejected/cancelled merge review 状态，并把主路径收敛为每个状态最多一个推荐动作；existing child verification stale trace 继续指向 parent recheck。
+- E14.1-E14.7 不启用并行写、不创建 physical worktree；这些仍由后续切片按 gate 顺序推进。
 
 ## 2. Goals
 
@@ -90,6 +100,8 @@ struct IsolatedChangeSetProduced {
     base_snapshot_id: WorkspaceSnapshotId,
     child_snapshot_id: Option<WorkspaceSnapshotId>,
     source_isolation: WriteIsolationMode,
+    artifact_ref: Option<String>,
+    touched_subjects: Vec<MutationSubject>,
 }
 
 struct MergeReviewRequested {

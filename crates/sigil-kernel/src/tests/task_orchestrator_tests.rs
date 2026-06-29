@@ -20,20 +20,23 @@ use crate::{
     PermissionConfig, Provider, ProviderCapabilities, ProviderChunk, ReasoningEffort,
     ReasoningStreamSupport, RunEvent, SequentialTaskOrchestrator, SequentialTaskRequest, Session,
     SessionLogEntry, SessionRef, SnapshotCoverage, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionStatus, TaskId, TaskPlanEntry, TaskPlanStatus, TaskRouteStatus, TaskRunEntry,
-    TaskRunStatus, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle,
-    TerminalTaskId, TerminalTaskStatus, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolContext, ToolEffect, ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability,
-    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, TrustedCheckSpec,
-    VerificationAutoRunPolicy, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
-    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceTrust,
-    WorkspaceTrustDecisionEntry, write_file_with_mutation,
+    TaskChildSessionStatus, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
+    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStepId, TaskStepMode, TaskStepSpec,
+    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolEffect,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreviewCapability, ToolRegistry, ToolResult,
+    ToolResultMeta, ToolSpec, TrustedCheckSpec, VerificationAutoRunPolicy, VerificationVerdict,
+    VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationDetectionReason, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WriteIsolationMode, WriteLeaseAcquired, WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseScope,
+    stable_workspace_id, write_file_with_mutation,
 };
 
 use super::{
-    StepRunOutput, child_status_from_output, durable_workspace_mutation_evidence,
-    latest_relevant_successful_verification_sequence, planner_prompt,
-    relevant_verification_receipts, route_id_for_call, run_status_from_step_status,
+    StepRunOutput, TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    child_status_from_output, decode_changeset_only_child_output,
+    durable_workspace_mutation_evidence, latest_relevant_successful_verification_sequence,
+    planner_prompt, relevant_verification_receipts, route_id_for_call, run_status_from_step_status,
     run_task_step_verification_checks, step_status_after_readiness, step_status_from_outcome,
     step_terminal_reason, task_status_from_step_status, task_step_auto_run_policy,
     task_step_default_policy, task_step_readiness,
@@ -46,9 +49,20 @@ struct ToolCallingProvider;
 struct MutatingToolProvider;
 struct RecoveringToolErrorProvider;
 struct RecoverableErrorTool;
+struct NamedFixtureTool {
+    name: &'static str,
+    category: ToolCategory,
+    access: ToolAccess,
+}
 struct MutatingTool;
 struct ApprovalRequiredTool;
 struct DenyApprovalHandler;
+#[derive(Clone)]
+struct StaticChangesetChildRunner {
+    final_text: String,
+    outcome: crate::AgentRunOutcome,
+    mutate_parent_file: Option<PathBuf>,
+}
 #[derive(Debug, Default)]
 struct FakeTaskExecutionBackend;
 #[derive(Default)]
@@ -116,6 +130,52 @@ impl crate::EventHandler for RecordingEventHandler {
     fn handle(&mut self, event: RunEvent) -> Result<()> {
         self.events.push(event);
         Ok(())
+    }
+}
+
+#[async_trait]
+impl TaskChildSessionRunner for StaticChangesetChildRunner {
+    async fn run_child_session<H, A>(
+        &self,
+        _parent_session: &mut Session,
+        request: TaskChildSessionRunRequest,
+        _handler: &mut H,
+        _approval_handler: &mut A,
+    ) -> Result<TaskChildSessionRunOutput>
+    where
+        H: crate::EventHandler + Send,
+        A: crate::ApprovalHandler + Send,
+    {
+        if let Some(path) = &self.mutate_parent_file {
+            std::fs::write(request.options.workspace_root.join(path), b"mutated")?;
+        }
+        let changeset_proposal =
+            if request.step.effective_isolation() == crate::TaskIsolationMode::ChangesetOnly {
+                Some(decode_changeset_only_child_output(&self.final_text)?)
+            } else {
+                None
+            };
+        let changeset_only_after_snapshot_id =
+            if let Some(base_snapshot_id) = request.changeset_only_base_snapshot_id.as_deref() {
+                Some(
+                    crate::validate_changeset_only_parent_snapshot_unchanged_for_task(
+                        _parent_session,
+                        &request.task,
+                        request.plan_version,
+                        &request.step,
+                        &request.options,
+                        base_snapshot_id,
+                    )?,
+                )
+            } else {
+                None
+            };
+        Ok(TaskChildSessionRunOutput {
+            final_text: self.final_text.clone(),
+            outcome: self.outcome.clone(),
+            changeset_proposal,
+            changeset_only_after_snapshot_id,
+        })
     }
 }
 
@@ -423,6 +483,34 @@ impl Tool for RecoverableErrorTool {
             "recoverable_error",
             crate::ToolErrorKind::InvalidInput,
             "bad path",
+        ))
+    }
+}
+
+#[async_trait]
+impl Tool for NamedFixtureTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: self.name.to_owned(),
+            description: "fixture tool".to_owned(),
+            input_schema: json!({"type":"object","properties":{}}),
+            category: self.category,
+            access: self.access,
+            preview: ToolPreviewCapability::None,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _ctx: ToolContext,
+        call_id: String,
+        _args: Value,
+    ) -> Result<ToolResult> {
+        Ok(ToolResult::ok(
+            call_id,
+            self.name,
+            "ok",
+            ToolResultMeta::default(),
         ))
     }
 }
@@ -876,6 +964,626 @@ async fn continue_run_skips_completed_steps_and_executes_remaining() -> Result<(
                 && content.contains("focus runtime state updates")
         })
     }));
+    let lease_projection = session.write_isolation_projection();
+    assert_eq!(lease_projection.leases.len(), 1);
+    let lease_state = lease_projection
+        .leases
+        .values()
+        .next()
+        .expect("write lease state");
+    assert!(lease_state.acquired.is_some());
+    assert!(matches!(
+        lease_state.released.as_ref(),
+        Some(release) if release.status == WriteLeaseReleaseStatus::Completed
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn continue_run_pauses_when_active_workspace_write_lease_defers_ready_step() -> Result<()> {
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    seed_two_step_task(&mut session, TaskRunStatus::Paused, true)?;
+    let options = options();
+    session.append_control(ControlEntry::WriteLeaseAcquired(WriteLeaseAcquired {
+        lease_id: WriteLeaseId::new("lease-existing")?,
+        workspace_id: stable_workspace_id(&options.workspace_root)?,
+        owner_agent_id: "other-agent".to_owned(),
+        isolation_mode: WriteIsolationMode::SharedWorkspaceExclusive,
+        scope: WriteLeaseScope::Workspace,
+    }))?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "inspect implementation".to_owned(),
+            },
+            options.clone(),
+            options.clone(),
+            options,
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert!(output.steps.is_empty());
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                if run.status == TaskRunStatus::Paused
+                    && run.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("active_write_lease")
+                    })
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_write_isolation_ready_queue_defers_write_until_read_dependencies_complete()
+-> Result<()> {
+    let read_requests = Arc::new(Mutex::new(Vec::new()));
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&executor_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&read_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    seed_task_with_steps(
+        &mut session,
+        TaskRunStatus::Paused,
+        vec![
+            TaskStepSpec {
+                step_id: TaskStepId::new("read_a")?,
+                title: "read A".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("read_b")?,
+                title: "read B".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("write")?,
+                title: "write".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::Executor,
+                depends_on: vec![TaskStepId::new("read_a")?, TaskStepId::new("read_b")?],
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            },
+        ],
+    )?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let first = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "read before write".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(first.status, TaskRunStatus::Paused);
+    assert_eq!(first.steps.len(), 2);
+    assert_eq!(
+        first
+            .steps
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read_a", "read_b"]
+    );
+    assert_eq!(
+        read_requests
+            .lock()
+            .expect("read requests should not be poisoned")
+            .len(),
+        2
+    );
+    assert_eq!(
+        executor_requests
+            .lock()
+            .expect("executor requests should not be poisoned")
+            .len(),
+        0
+    );
+    assert!(!session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::WriteLeaseAcquired(_))
+        )
+    }));
+
+    let second = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "read before write".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(second.status, TaskRunStatus::Completed);
+    assert_eq!(second.steps.len(), 1);
+    assert_eq!(second.steps[0].step_id, TaskStepId::new("write")?);
+    assert_eq!(
+        executor_requests
+            .lock()
+            .expect("executor requests should not be poisoned")
+            .len(),
+        1
+    );
+    let lease_projection = session.write_isolation_projection();
+    assert_eq!(lease_projection.leases.len(), 1);
+    assert!(
+        lease_projection
+            .leases
+            .values()
+            .all(|lease| !lease.is_active())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_write_isolation_active_lease_pauses_ready_queue_without_running_steps() -> Result<()>
+{
+    let read_requests = Arc::new(Mutex::new(Vec::new()));
+    let executor_requests = Arc::new(Mutex::new(Vec::new()));
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&executor_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::clone(&read_requests),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    seed_task_with_steps(
+        &mut session,
+        TaskRunStatus::Paused,
+        vec![
+            TaskStepSpec {
+                step_id: TaskStepId::new("read")?,
+                title: "read".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentRead,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("write")?,
+                title: "write".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            },
+        ],
+    )?;
+    let run_options = options();
+    session.append_control(ControlEntry::WriteLeaseAcquired(WriteLeaseAcquired {
+        lease_id: WriteLeaseId::new("lease-existing")?,
+        workspace_id: stable_workspace_id(&run_options.workspace_root)?,
+        owner_agent_id: "other-agent".to_owned(),
+        isolation_mode: WriteIsolationMode::SharedWorkspaceExclusive,
+        scope: WriteLeaseScope::Workspace,
+    }))?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "blocked by lease".to_owned(),
+            },
+            run_options.clone(),
+            run_options.clone(),
+            run_options,
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert!(output.steps.is_empty());
+    assert_eq!(
+        read_requests
+            .lock()
+            .expect("read requests should not be poisoned")
+            .len(),
+        0
+    );
+    assert_eq!(
+        executor_requests
+            .lock()
+            .expect("executor requests should not be poisoned")
+            .len(),
+        0
+    );
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskRun(run))
+                if run.status == TaskRunStatus::Paused
+                    && run.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("active_write_lease")
+                    })
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn task_write_isolation_cancels_dependents_after_failed_write() -> Result<()> {
+    let orchestrator = SequentialTaskOrchestrator::new(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(FailingProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+    );
+    let mut session = Session::new("planner", "model");
+    seed_task_with_steps(
+        &mut session,
+        TaskRunStatus::Paused,
+        vec![
+            TaskStepSpec {
+                step_id: TaskStepId::new("write")?,
+                title: "write".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("verify")?,
+                title: "verify".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::SubagentRead,
+                depends_on: vec![TaskStepId::new("write")?],
+                mode: Some(TaskStepMode::Verify),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            },
+        ],
+    )?;
+    let mut handler = crate::event::NoopEventHandler;
+    let mut approval_handler = AutoApproveHandler;
+
+    let output = orchestrator
+        .continue_run(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "failed write cancels dependent".to_owned(),
+            },
+            options(),
+            options(),
+            options(),
+            None,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Failed);
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.step_id == TaskStepId::new("write").expect("valid step id")
+                    && step.status == TaskStepStatus::Failed
+        )
+    }));
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.step_id == TaskStepId::new("verify").expect("valid step id")
+                    && step.status == TaskStepStatus::Cancelled
+                    && step.reason.as_deref().is_some_and(|reason| {
+                        reason.contains("dependency write ended with failed")
+                    })
+        )
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn changeset_only_child_records_proposal_without_parent_mutation() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
+    let runner = StaticChangesetChildRunner {
+        final_text: changeset_only_child_final_text("change-note"),
+        outcome: crate::AgentRunOutcome::default(),
+        mutate_parent_file: None,
+    };
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        runner,
+    );
+    let mut session = Session::new("planner", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+    let options = options_for_workspace(temp.path());
+
+    let output = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "propose note change".to_owned(),
+            },
+            changeset_only_step()?,
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                "propose note change",
+            )]),
+            options.clone(),
+            options,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Paused);
+    assert_eq!(output.steps[0].status, TaskStepStatus::Blocked);
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("note.txt"))?,
+        "old\n"
+    );
+    assert!(session.entries().iter().all(|entry| {
+        !matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::WriteLeaseAcquired(_))
+        )
+    }));
+    let proposed = session
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            SessionLogEntry::Control(ControlEntry::ChangeSetProposed(change_set)) => {
+                Some(change_set)
+            }
+            _ => None,
+        })
+        .expect("changeset proposed");
+    assert_eq!(proposed.id.as_str(), "change-note");
+    let produced = session
+        .write_isolation_projection()
+        .isolated_changesets
+        .get(&proposed.id)
+        .cloned()
+        .expect("isolated changeset produced");
+    assert_eq!(produced.source_isolation, WriteIsolationMode::ChangesetOnly);
+    assert!(produced.child_snapshot_id.is_none());
+    assert!(!produced.base_snapshot_id.is_empty());
+    assert!(
+        produced
+            .artifact_ref
+            .as_deref()
+            .is_some_and(|artifact_ref| artifact_ref.starts_with("inline:sha256:"))
+    );
+    assert_eq!(
+        produced.touched_subjects,
+        vec![MutationSubject::File {
+            path: PathBuf::from("note.txt"),
+            file_type: FileType::File,
+        }]
+    );
+    let projection = session.write_isolation_projection();
+    let review = projection
+        .merge_reviews
+        .values()
+        .next()
+        .expect("merge review requested");
+    assert_eq!(
+        review
+            .requested
+            .as_ref()
+            .map(|request| &request.changeset_id),
+        Some(&proposed.id)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn changeset_only_child_registry_filters_unsafe_same_name_tools() -> Result<()> {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(NamedFixtureTool {
+        name: "grep",
+        category: ToolCategory::Search,
+        access: ToolAccess::Read,
+    }));
+    registry.register(Arc::new(NamedFixtureTool {
+        name: "read_file",
+        category: ToolCategory::File,
+        access: ToolAccess::Write,
+    }));
+
+    let scoped = crate::changeset_only_child_tool_registry(&registry);
+
+    assert!(scoped.spec_for("grep").is_some());
+    assert!(scoped.spec_for("read_file").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn changeset_only_child_fails_when_parent_snapshot_changes() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    std::fs::write(temp.path().join("note.txt"), b"old\n")?;
+    let runner = StaticChangesetChildRunner {
+        final_text: changeset_only_child_final_text("change-note"),
+        outcome: crate::AgentRunOutcome::default(),
+        mutate_parent_file: Some(PathBuf::from("note.txt")),
+    };
+    let orchestrator = SequentialTaskOrchestrator::new_with_child_runner(
+        boxed_agent(PlannerProvider, ToolRegistry::new()),
+        boxed_agent(
+            CapturingExecutorProvider {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            ToolRegistry::new(),
+        ),
+        runner,
+    );
+    let mut session = Session::new("planner", "model");
+    let mut handler = RecordingEventHandler::default();
+    let mut approval_handler = AutoApproveHandler;
+    let options = options_for_workspace(temp.path());
+
+    let output = orchestrator
+        .run_direct_child_session(
+            &mut session,
+            SequentialTaskRequest {
+                task_id: TaskId::new("task_1")?,
+                parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+                objective: "propose note change".to_owned(),
+            },
+            changeset_only_step()?,
+            AgentRunInput::without_persisted_user_message(vec![ModelMessage::user(
+                "propose note change",
+            )]),
+            options.clone(),
+            options,
+            &mut handler,
+            &mut approval_handler,
+        )
+        .await?;
+
+    assert_eq!(output.status, TaskRunStatus::Failed);
+    assert!(session.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::TaskStep(step))
+                if step.status == TaskStepStatus::Failed
+                    && step
+                        .reason
+                        .as_deref()
+                        .is_some_and(|reason| reason.contains("changed parent workspace snapshot"))
+        )
+    }));
+    assert!(session.entries().iter().all(|entry| {
+        !matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::IsolatedChangeSetProduced(_))
+        )
+    }));
     Ok(())
 }
 
@@ -900,7 +1608,32 @@ async fn continue_run_continues_after_recovered_tool_error() -> Result<()> {
         ),
     );
     let mut session = Session::new("planner", "model");
-    seed_two_step_task(&mut session, TaskRunStatus::Paused, false)?;
+    seed_task_with_steps(
+        &mut session,
+        TaskRunStatus::Paused,
+        vec![
+            TaskStepSpec {
+                step_id: TaskStepId::new("step_1")?,
+                title: "recoverable read".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::Planner,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            },
+            TaskStepSpec {
+                step_id: TaskStepId::new("step_2")?,
+                title: "follow-up read".to_owned(),
+                display_name: None,
+                detail: None,
+                role: crate::AgentRole::Planner,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            },
+        ],
+    )?;
     let mut handler = crate::event::NoopEventHandler;
     let mut approval_handler = AutoApproveHandler;
 
@@ -2142,10 +2875,16 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
     let output = |outcome| StepRunOutput {
         final_text: String::new(),
         outcome,
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
     let recovered_output = |outcome| StepRunOutput {
         final_text: "recovered".to_owned(),
         outcome,
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     assert_eq!(
@@ -2317,6 +3056,9 @@ fn task_step_readiness_marks_changed_files_unverified() -> Result<()> {
             changed_files: vec!["note.txt".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
     let session = Session::new("deepseek", "deepseek-v4-flash");
     let temp = tempfile::tempdir()?;
@@ -2387,6 +3129,9 @@ fn task_step_readiness_uses_durable_mutation_without_changed_files() -> Result<(
             tool_call_ids: vec!["call-shell".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
     let mut options = options();
     options.workspace_root = workspace;
@@ -2461,6 +3206,9 @@ fn task_step_readiness_uses_post_task_mutation_from_prior_tool_call() -> Result<
             tool_call_ids: vec!["call-terminal-cancel".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
     let mut options = options();
     options.workspace_root = workspace;
@@ -2519,6 +3267,9 @@ fn task_step_readiness_treats_durable_mutation_replay_failure_as_unknown_dirty()
             tool_call_ids: vec!["call-shell".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
     let mut options = options();
     options.workspace_root = workspace;
@@ -2606,6 +3357,9 @@ fn task_step_readiness_uses_recorded_check_specs_and_workspace_snapshot() -> Res
             changed_files: vec!["note.txt".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -2717,6 +3471,9 @@ fn task_step_run_check_action_executes_configured_check_and_passes() -> Result<(
             changed_files: vec!["note.txt".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     let missing = task_step_readiness(
@@ -3118,6 +3875,9 @@ fn task_step_status_blocks_when_readiness_requires_action() -> Result<()> {
             changed_files: vec!["note.txt".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -3176,6 +3936,9 @@ fn task_step_readiness_records_recovered_tool_error_reason() -> Result<()> {
             }],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -3243,6 +4006,8 @@ fn task_step_verification_config_does_not_block_read_only_step() -> Result<()> {
     let output = StepRunOutput {
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome::default(),
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -3336,6 +4101,9 @@ fn task_step_default_policy_uses_only_current_task_scope() -> Result<()> {
             changed_files: vec!["note.txt".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -3411,6 +4179,8 @@ fn task_step_readiness_uses_projected_workspace_trust() -> Result<()> {
     let output = StepRunOutput {
         final_text: "done".to_owned(),
         outcome: crate::AgentRunOutcome::default(),
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -3469,6 +4239,9 @@ fn task_step_readiness_carries_unknown_dirty_snapshot_evidence() -> Result<()> {
             changed_files: vec!["leak".to_owned()],
             ..crate::AgentRunOutcome::default()
         },
+
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
 
     let readiness = task_step_readiness(
@@ -4184,6 +4957,28 @@ fn seed_two_step_task(
     Ok(())
 }
 
+fn seed_task_with_steps(
+    session: &mut Session,
+    status: TaskRunStatus,
+    steps: Vec<TaskStepSpec>,
+) -> Result<()> {
+    session.append_control(ControlEntry::TaskRun(crate::TaskRunEntry {
+        task_id: TaskId::new("task_1")?,
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        objective: "inspect implementation".to_owned(),
+        status,
+        reason: None,
+    }))?;
+    session.append_control(ControlEntry::TaskPlan(TaskPlanEntry {
+        task_id: TaskId::new("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps,
+        reason: None,
+    }))?;
+    Ok(())
+}
+
 fn seed_single_step_task(session: &mut Session, role: crate::AgentRole) -> Result<()> {
     session.append_control(ControlEntry::TaskRun(crate::TaskRunEntry {
         task_id: TaskId::new("task_1")?,
@@ -4211,6 +5006,49 @@ fn seed_single_step_task(session: &mut Session, role: crate::AgentRole) -> Resul
     Ok(())
 }
 
+fn changeset_only_step() -> Result<TaskStepSpec> {
+    Ok(TaskStepSpec {
+        step_id: TaskStepId::new("changeset_step")?,
+        title: "propose change".to_owned(),
+        display_name: None,
+        detail: Some("produce a changeset proposal".to_owned()),
+        role: crate::AgentRole::SubagentWrite,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Write),
+        isolation: Some(TaskIsolationMode::ChangesetOnly),
+    })
+}
+
+fn changeset_only_child_final_text(change_id: &str) -> String {
+    format!(
+        r#"```sigil_changeset
+{{
+  "change_set": {{
+    "id": "{change_id}",
+    "title": "Update note",
+    "summary": "Would update note.txt",
+    "risk": "low",
+    "files": [
+      {{
+        "path": "note.txt",
+        "action": "update",
+        "risk": "low",
+        "additions": 1,
+        "deletions": 1
+      }}
+    ],
+    "validations": []
+  }}
+,
+  "artifact": {{
+    "media_type": "text/x-diff",
+    "content": "--- a/note.txt\n+++ b/note.txt\n@@\n-old\n+new\n"
+  }}
+}}
+```"#
+    )
+}
+
 fn options() -> AgentRunOptions {
     AgentRunOptions {
         workspace_root: std::env::current_dir().expect("test cwd should resolve"),
@@ -4223,6 +5061,13 @@ fn options() -> AgentRunOptions {
         permission_context: crate::PermissionEvaluationContext::default(),
         memory_config: MemoryConfig { enabled: false },
         compaction_config: crate::CompactionConfig::default(),
+    }
+}
+
+fn options_for_workspace(workspace_root: &std::path::Path) -> AgentRunOptions {
+    AgentRunOptions {
+        workspace_root: workspace_root.to_path_buf(),
+        ..options()
     }
 }
 

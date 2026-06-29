@@ -445,7 +445,7 @@ fn optional_string<'a>(details: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 fn optional_value<'a>(details: &'a Value, key: &str) -> Option<&'a Value> {
-    details.get(key)
+    details.get(key).filter(|value| !value.is_null())
 }
 
 fn required_u64(details: &Value, key: &str) -> Result<u64> {

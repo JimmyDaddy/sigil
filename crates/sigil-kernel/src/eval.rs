@@ -31,6 +31,24 @@ pub type EvalEvidenceId = String;
 pub type EvalStepId = String;
 pub type EvalToolCallId = String;
 
+/// Source RFC and execution slice covered by one eval case.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub struct EvalCaseProvenance {
+    pub rfc_id: String,
+    pub slice_id: String,
+}
+
+impl EvalCaseProvenance {
+    #[must_use]
+    pub fn new(rfc_id: impl Into<String>, slice_id: impl Into<String>) -> Self {
+        Self {
+            rfc_id: rfc_id.into(),
+            slice_id: slice_id.into(),
+        }
+    }
+}
+
 /// Provider-neutral outcome bucket for one eval run.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -227,6 +245,12 @@ pub struct EvalRunMetadata {
     pub os_toolchain: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provenance: Vec<EvalCaseProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_outcome: Option<EvalOutcomeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_verification_verdict: Option<VerificationVerdict>,
 }
 
 impl EvalRunMetadata {
@@ -250,7 +274,40 @@ impl EvalRunMetadata {
             sandbox_backend: "none".to_owned(),
             os_toolchain: "deterministic".to_owned(),
             seed: None,
+            provenance: Vec::new(),
+            expected_outcome: None,
+            expected_verification_verdict: None,
         }
+    }
+
+    /// Adds one RFC/slice provenance edge to this eval run.
+    #[must_use]
+    pub fn with_provenance(
+        mut self,
+        rfc_id: impl Into<String>,
+        slice_id: impl Into<String>,
+    ) -> Self {
+        let provenance = EvalCaseProvenance::new(rfc_id, slice_id);
+        if !self
+            .provenance
+            .iter()
+            .any(|existing| existing == &provenance)
+        {
+            self.provenance.push(provenance);
+        }
+        self
+    }
+
+    /// Records the expected result bucket and verification verdict for matrix reporting.
+    #[must_use]
+    pub fn with_expected(
+        mut self,
+        outcome: EvalOutcomeKind,
+        verification_verdict: VerificationVerdict,
+    ) -> Self {
+        self.expected_outcome = Some(outcome);
+        self.expected_verification_verdict = Some(verification_verdict);
+        self
     }
 }
 
@@ -326,11 +383,61 @@ pub struct EvalReportRecord {
     pub config_hash: String,
     pub tool_schema_digest: String,
     pub deterministic: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rfc_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slice_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_outcome: Option<EvalOutcomeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_verification_verdict: Option<VerificationVerdict>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixture_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failure_artifacts: Vec<EvalReportArtifact>,
     pub result: EvalResult,
+}
+
+/// One manifest row for active RFC regression reporting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct EvalReportMatrixEntry {
+    pub case_id: EvalCaseId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rfc_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slice_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_outcome: Option<EvalOutcomeKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_verification_verdict: Option<VerificationVerdict>,
+    pub observed_outcome: EvalOutcomeKind,
+    pub observed_verification_verdict: VerificationVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_stream_cursor: Option<ProjectionCursor>,
+}
+
+/// Stable manifest for one deterministic eval report directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct EvalReportManifest {
+    pub report_schema_version: u16,
+    pub deterministic: bool,
+    pub case_count: usize,
+    pub required_case_count: usize,
+    pub results_jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    pub artifact_dir: PathBuf,
+    pub outcome_counts: BTreeMap<String, usize>,
+    pub verification_verdict_counts: BTreeMap<String, usize>,
+    pub config_hashes: Vec<String>,
+    pub tool_schema_digests: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rfc_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slice_refs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matrix: Vec<EvalReportMatrixEntry>,
 }
 
 /// Paths written by [`write_eval_report_artifacts`].
@@ -339,6 +446,7 @@ pub struct EvalReportRecord {
 pub struct EvalReportArtifacts {
     pub results_jsonl_path: PathBuf,
     pub summary_path: PathBuf,
+    pub manifest_path: PathBuf,
     pub artifact_dir: PathBuf,
 }
 
@@ -371,9 +479,22 @@ pub fn write_eval_report_artifacts(
     fs::write(&summary_path, render_eval_report_summary(&records))
         .with_context(|| format!("failed to write {}", summary_path.display()))?;
 
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest = build_eval_report_manifest(
+        &records,
+        results_jsonl_path.clone(),
+        summary_path.clone(),
+        artifact_dir.clone(),
+    );
+    let manifest_file = fs::File::create(&manifest_path)
+        .with_context(|| format!("failed to create {}", manifest_path.display()))?;
+    serde_json::to_writer_pretty(manifest_file, &manifest)
+        .context("failed to serialize eval report manifest")?;
+
     Ok(EvalReportArtifacts {
         results_jsonl_path,
         summary_path,
+        manifest_path,
         artifact_dir,
     })
 }
@@ -418,12 +539,97 @@ fn build_eval_report_records(
             tool_schema_digest: result.metadata.tool_schema_digest.clone(),
             deterministic: result.metadata.provider == "fake"
                 && result.metadata.model == "deterministic",
+            rfc_refs: rfc_refs(&result.metadata),
+            slice_refs: slice_refs(&result.metadata),
+            expected_outcome: result.metadata.expected_outcome,
+            expected_verification_verdict: result.metadata.expected_verification_verdict,
             fixture_path,
             failure_artifacts,
             result: result.clone(),
         });
     }
     Ok(records)
+}
+
+fn build_eval_report_manifest(
+    records: &[EvalReportRecord],
+    results_jsonl_path: PathBuf,
+    summary_path: PathBuf,
+    artifact_dir: PathBuf,
+) -> EvalReportManifest {
+    let mut outcome_counts = BTreeMap::<String, usize>::new();
+    let mut verification_verdict_counts = BTreeMap::<String, usize>::new();
+    let mut config_hashes = Vec::<String>::new();
+    let mut tool_schema_digests = Vec::<String>::new();
+    let mut rfc_refs = Vec::<String>::new();
+    let mut slice_refs = Vec::<String>::new();
+    let mut matrix = Vec::<EvalReportMatrixEntry>::new();
+    for record in records {
+        *outcome_counts
+            .entry(format!("{:?}", record.result.outcome))
+            .or_default() += 1;
+        *verification_verdict_counts
+            .entry(format!("{:?}", record.result.verification_verdict))
+            .or_default() += 1;
+        push_unique(&mut config_hashes, record.config_hash.clone());
+        push_unique(&mut tool_schema_digests, record.tool_schema_digest.clone());
+        for rfc_ref in &record.rfc_refs {
+            push_unique(&mut rfc_refs, rfc_ref.clone());
+        }
+        for slice_ref in &record.slice_refs {
+            push_unique(&mut slice_refs, slice_ref.clone());
+        }
+        matrix.push(EvalReportMatrixEntry {
+            case_id: record.result.metadata.case_id.clone(),
+            rfc_refs: record.rfc_refs.clone(),
+            slice_refs: record.slice_refs.clone(),
+            expected_outcome: record.expected_outcome,
+            expected_verification_verdict: record.expected_verification_verdict,
+            observed_outcome: record.result.outcome,
+            observed_verification_verdict: record.result.verification_verdict,
+            durable_stream_cursor: record.result.durable_stream_cursor.clone(),
+        });
+    }
+    EvalReportManifest {
+        report_schema_version: 2,
+        deterministic: records
+            .iter()
+            .all(|record| record.deterministic && record.provider == "fake"),
+        case_count: records.len(),
+        required_case_count: records.len(),
+        results_jsonl_path,
+        summary_path,
+        artifact_dir,
+        outcome_counts,
+        verification_verdict_counts,
+        config_hashes,
+        tool_schema_digests,
+        rfc_refs,
+        slice_refs,
+        matrix,
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn rfc_refs(metadata: &EvalRunMetadata) -> Vec<String> {
+    let mut values = Vec::new();
+    for provenance in &metadata.provenance {
+        push_unique(&mut values, provenance.rfc_id.clone());
+    }
+    values
+}
+
+fn slice_refs(metadata: &EvalRunMetadata) -> Vec<String> {
+    let mut values = Vec::new();
+    for provenance in &metadata.provenance {
+        push_unique(&mut values, provenance.slice_id.clone());
+    }
+    values
 }
 
 fn render_eval_report_summary(records: &[EvalReportRecord]) -> String {
@@ -461,6 +667,34 @@ fn render_eval_report_summary(records: &[EvalReportRecord]) -> String {
             record.provider,
             record.model
         ));
+        if !record.rfc_refs.is_empty() || !record.slice_refs.is_empty() {
+            summary.push_str(&format!(
+                "  - provenance: rfc=`{}`, slice=`{}`\n",
+                record.rfc_refs.join(","),
+                record.slice_refs.join(",")
+            ));
+        }
+        if record.expected_outcome.is_some() || record.expected_verification_verdict.is_some() {
+            summary.push_str(&format!(
+                "  - expected: outcome=`{}`, verification=`{}`\n",
+                record
+                    .expected_outcome
+                    .map(|outcome| format!("{outcome:?}"))
+                    .unwrap_or_else(|| "unspecified".to_owned()),
+                record
+                    .expected_verification_verdict
+                    .map(|verdict| format!("{verdict:?}"))
+                    .unwrap_or_else(|| "unspecified".to_owned())
+            ));
+        }
+        if let Some(cursor) = &record.result.durable_stream_cursor {
+            summary.push_str(&format!(
+                "  - evidence cursor: session=`{}`, sequence=`{}`, event=`{}`\n",
+                cursor.session_id,
+                cursor.last_applied_stream_sequence,
+                cursor.last_applied_event_id
+            ));
+        }
         if !record.failure_artifacts.is_empty() {
             for artifact in &record.failure_artifacts {
                 summary.push_str(&format!(

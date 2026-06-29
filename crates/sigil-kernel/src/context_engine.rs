@@ -1,11 +1,14 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
+    fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{ArtifactId, EventId, ReceiptId, VerificationVerdict};
@@ -59,7 +62,7 @@ pub enum ContextSensitivity {
     External,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextInclusionReason {
     StablePrompt,
@@ -141,7 +144,7 @@ impl ContextItem {
     /// # Errors
     ///
     /// Returns an error when a trusted workspace instruction is mislabeled or when an included
-    /// secret-like item lacks an egress decision.
+    /// secret-like or external item lacks an egress decision.
     pub fn validate(&self) -> Result<()> {
         if self.trust_level == ContextTrustLevel::WorkspaceInstruction
             && self.source != ContextSource::WorkspaceInstruction
@@ -154,10 +157,19 @@ impl ContextItem {
             bail!("workspace instruction source must carry workspace instruction trust");
         }
         if self.inclusion_reason.is_included()
-            && self.sensitivity == ContextSensitivity::Secret
+            && matches!(
+                self.sensitivity,
+                ContextSensitivity::PotentialSecret | ContextSensitivity::Secret
+            )
             && self.egress_decision.is_none()
         {
             bail!("included secret context requires an egress decision");
+        }
+        if self.inclusion_reason.is_included()
+            && self.sensitivity == ContextSensitivity::External
+            && self.egress_decision.is_none()
+        {
+            bail!("included external context requires an egress decision");
         }
         Ok(())
     }
@@ -318,10 +330,16 @@ impl SessionArchive {
             if score <= 0.0 {
                 continue;
             }
-            let inclusion_reason = if entry.sensitivity == ContextSensitivity::Secret
-                && entry.egress_decision.is_none()
+            let inclusion_reason = if matches!(
+                entry.sensitivity,
+                ContextSensitivity::PotentialSecret | ContextSensitivity::Secret
+            ) && entry.egress_decision.is_none()
             {
                 ContextInclusionReason::ExcludedSecret
+            } else if entry.sensitivity == ContextSensitivity::External
+                && entry.egress_decision.is_none()
+            {
+                ContextInclusionReason::ExcludedEgressDenied
             } else {
                 ContextInclusionReason::RetrievalHit
             };
@@ -387,6 +405,377 @@ pub struct PackedContext {
     pub stable_prefix: Vec<ContextItem>,
     pub dynamic_suffix: Vec<ContextItem>,
     pub excluded: Vec<ContextItem>,
+}
+
+pub const CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION: u16 = 1;
+pub const CONTEXT_QUALITY_REPORT_SCHEMA_VERSION: u16 = 1;
+
+/// Stable, developer-facing evidence for one Context V0 retrieval and packing run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextQualityEvidencePack {
+    pub schema_version: u16,
+    pub fixture_id: String,
+    pub query: String,
+    pub max_tokens: usize,
+    pub used_tokens: usize,
+    pub token_budget_remaining: usize,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub included_by_source: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub excluded_by_reason: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub included: Vec<ContextQualityItemEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<ContextQualityItemEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ContextQualityFinding>,
+}
+
+/// Stable manifest for one Context V0 quality evidence report directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextQualityReportManifest {
+    pub report_schema_version: u16,
+    pub pack_count: usize,
+    pub evidence_jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    pub finding_counts: BTreeMap<String, usize>,
+    pub fixture_ids: Vec<String>,
+}
+
+/// Paths written by [`write_context_quality_evidence_artifacts`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextQualityReportArtifacts {
+    pub evidence_jsonl_path: PathBuf,
+    pub summary_path: PathBuf,
+    pub manifest_path: PathBuf,
+}
+
+/// One item row in a context quality evidence pack.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextQualityItemEvidence {
+    pub id: ContextItemId,
+    pub source: ContextSource,
+    pub trust_level: ContextTrustLevel,
+    pub sensitivity: ContextSensitivity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_decision: Option<ContextEgressDecisionId>,
+    pub token_cost: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    pub inclusion_reason: ContextInclusionReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<ContextPackPlacement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncation: Option<ContextTruncation>,
+    pub body_ref: ContextBodyRef,
+}
+
+/// High-level reason a context quality pack should be inspected.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextQualityFindingKind {
+    RecallInsufficient,
+    RankingInsufficient,
+    TokenBudgetPressure,
+    SafetyExclusion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextQualityFinding {
+    pub kind: ContextQualityFindingKind,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_ids: Vec<ContextItemId>,
+}
+
+impl ContextQualityFinding {
+    #[must_use]
+    pub fn new(
+        kind: ContextQualityFindingKind,
+        message: impl Into<String>,
+        item_ids: Vec<ContextItemId>,
+    ) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            item_ids,
+        }
+    }
+}
+
+/// Builds deterministic quality evidence from an already packed Context V0 candidate set.
+#[must_use]
+pub fn build_context_quality_evidence_pack(
+    fixture_id: impl Into<String>,
+    query: impl Into<String>,
+    packed: &PackedContext,
+    truncations: impl IntoIterator<Item = (ContextItemId, ContextTruncation)>,
+) -> ContextQualityEvidencePack {
+    let truncations = truncations.into_iter().collect::<BTreeMap<_, _>>();
+    let mut included = Vec::new();
+    let mut excluded = Vec::new();
+    let mut included_by_source = BTreeMap::<String, usize>::new();
+    let mut excluded_by_reason = BTreeMap::<String, usize>::new();
+
+    for (index, item) in packed.stable_prefix.iter().enumerate() {
+        *included_by_source
+            .entry(serialized_label(&item.source))
+            .or_default() += 1;
+        included.push(context_quality_item_row(
+            item,
+            Some(ContextPackPlacement::StablePrefix),
+            Some(index + 1),
+            &truncations,
+        ));
+    }
+    let dynamic_offset = included.len();
+    for (index, item) in packed.dynamic_suffix.iter().enumerate() {
+        *included_by_source
+            .entry(serialized_label(&item.source))
+            .or_default() += 1;
+        included.push(context_quality_item_row(
+            item,
+            Some(ContextPackPlacement::DynamicSuffix),
+            Some(dynamic_offset + index + 1),
+            &truncations,
+        ));
+    }
+    for item in &packed.excluded {
+        *excluded_by_reason
+            .entry(serialized_label(&item.inclusion_reason))
+            .or_default() += 1;
+        excluded.push(context_quality_item_row(item, None, None, &truncations));
+    }
+
+    let findings = context_quality_findings(packed);
+
+    ContextQualityEvidencePack {
+        schema_version: CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION,
+        fixture_id: fixture_id.into(),
+        query: query.into(),
+        max_tokens: packed.max_tokens,
+        used_tokens: packed.used_tokens,
+        token_budget_remaining: packed.max_tokens.saturating_sub(packed.used_tokens),
+        included_by_source,
+        excluded_by_reason,
+        included,
+        excluded,
+        findings,
+    }
+}
+
+/// Writes Context V0 quality evidence artifacts for developer inspection.
+///
+/// The JSONL file is the machine-readable source. The Markdown summary is intentionally compact:
+/// it supports E06.6 trigger decisions without introducing a user-facing context dashboard.
+///
+/// # Errors
+///
+/// Returns an error if the output directory or any report artifact cannot be written.
+pub fn write_context_quality_evidence_artifacts(
+    output_dir: impl AsRef<Path>,
+    packs: &[ContextQualityEvidencePack],
+) -> Result<ContextQualityReportArtifacts> {
+    let output_dir = output_dir.as_ref();
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+
+    let evidence_jsonl_path = output_dir.join("context-quality.jsonl");
+    let mut evidence_file = fs::File::create(&evidence_jsonl_path)
+        .with_context(|| format!("failed to create {}", evidence_jsonl_path.display()))?;
+    for pack in packs {
+        serde_json::to_writer(&mut evidence_file, pack)
+            .context("failed to serialize context quality evidence pack")?;
+        evidence_file
+            .write_all(b"\n")
+            .context("failed to write context quality evidence newline")?;
+    }
+
+    let summary_path = output_dir.join("summary.md");
+    fs::write(&summary_path, render_context_quality_summary(packs))
+        .with_context(|| format!("failed to write {}", summary_path.display()))?;
+
+    let manifest_path = output_dir.join("manifest.json");
+    let manifest =
+        build_context_quality_manifest(packs, evidence_jsonl_path.clone(), summary_path.clone());
+    let manifest_file = fs::File::create(&manifest_path)
+        .with_context(|| format!("failed to create {}", manifest_path.display()))?;
+    serde_json::to_writer_pretty(manifest_file, &manifest)
+        .context("failed to serialize context quality manifest")?;
+
+    Ok(ContextQualityReportArtifacts {
+        evidence_jsonl_path,
+        summary_path,
+        manifest_path,
+    })
+}
+
+fn build_context_quality_manifest(
+    packs: &[ContextQualityEvidencePack],
+    evidence_jsonl_path: PathBuf,
+    summary_path: PathBuf,
+) -> ContextQualityReportManifest {
+    let mut finding_counts = BTreeMap::<String, usize>::new();
+    let mut fixture_ids = Vec::<String>::new();
+    for pack in packs {
+        push_unique_string(&mut fixture_ids, pack.fixture_id.clone());
+        for finding in &pack.findings {
+            *finding_counts
+                .entry(serialized_label(&finding.kind))
+                .or_default() += 1;
+        }
+    }
+
+    ContextQualityReportManifest {
+        report_schema_version: CONTEXT_QUALITY_REPORT_SCHEMA_VERSION,
+        pack_count: packs.len(),
+        evidence_jsonl_path,
+        summary_path,
+        finding_counts,
+        fixture_ids,
+    }
+}
+
+fn render_context_quality_summary(packs: &[ContextQualityEvidencePack]) -> String {
+    let mut out = String::new();
+    out.push_str("# Sigil Context Quality Evidence\n\n");
+    out.push_str(&format!("Total packs: {}\n\n", packs.len()));
+    for pack in packs {
+        out.push_str(&format!("## {}\n\n", pack.fixture_id));
+        out.push_str(&format!("- query: `{}`\n", pack.query));
+        out.push_str(&format!(
+            "- budget: {} / {} tokens\n",
+            pack.used_tokens, pack.max_tokens
+        ));
+        out.push_str(&format!("- included: {} items\n", pack.included.len()));
+        out.push_str(&format!("- excluded: {} items\n", pack.excluded.len()));
+        if pack.findings.is_empty() {
+            out.push_str("- findings: none\n\n");
+        } else {
+            out.push_str("- findings:\n");
+            for finding in &pack.findings {
+                out.push_str(&format!("  - {:?}: {}\n", finding.kind, finding.message));
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn context_quality_item_row(
+    item: &ContextItem,
+    placement: Option<ContextPackPlacement>,
+    rank: Option<usize>,
+    truncations: &BTreeMap<ContextItemId, ContextTruncation>,
+) -> ContextQualityItemEvidence {
+    ContextQualityItemEvidence {
+        id: item.id.clone(),
+        source: item.source.clone(),
+        trust_level: item.trust_level,
+        sensitivity: item.sensitivity,
+        egress_decision: item.egress_decision.clone(),
+        token_cost: item.token_cost,
+        score: item.score,
+        inclusion_reason: item.inclusion_reason.clone(),
+        placement,
+        rank,
+        truncation: truncations.get(&item.id).cloned(),
+        body_ref: item.body_ref.clone(),
+    }
+}
+
+fn context_quality_findings(packed: &PackedContext) -> Vec<ContextQualityFinding> {
+    let mut findings = Vec::new();
+    if packed.stable_prefix.is_empty()
+        && packed.dynamic_suffix.is_empty()
+        && packed.excluded.is_empty()
+    {
+        findings.push(ContextQualityFinding::new(
+            ContextQualityFindingKind::RecallInsufficient,
+            "no context candidates were recalled for this query",
+            Vec::new(),
+        ));
+    } else if packed.stable_prefix.is_empty() && packed.dynamic_suffix.is_empty() {
+        findings.push(ContextQualityFinding::new(
+            ContextQualityFindingKind::RecallInsufficient,
+            "all recalled context candidates were excluded before prompt assembly",
+            packed.excluded.iter().map(|item| item.id.clone()).collect(),
+        ));
+    }
+
+    let missing_scores = packed
+        .dynamic_suffix
+        .iter()
+        .filter(|item| item.score.is_none())
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    if !missing_scores.is_empty() {
+        findings.push(ContextQualityFinding::new(
+            ContextQualityFindingKind::RankingInsufficient,
+            "one or more dynamic context items have no retrieval score",
+            missing_scores,
+        ));
+    }
+
+    let budget_excluded = packed
+        .excluded
+        .iter()
+        .filter(|item| item.inclusion_reason == ContextInclusionReason::ExcludedTokenBudget)
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    if !budget_excluded.is_empty() {
+        findings.push(ContextQualityFinding::new(
+            ContextQualityFindingKind::TokenBudgetPressure,
+            "token budget excluded otherwise eligible context candidates",
+            budget_excluded,
+        ));
+    }
+
+    let safety_excluded = packed
+        .excluded
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.inclusion_reason,
+                ContextInclusionReason::ExcludedSecret
+                    | ContextInclusionReason::ExcludedEgressDenied
+                    | ContextInclusionReason::ExcludedUntrustedWorkspace
+            )
+        })
+        .map(|item| item.id.clone())
+        .collect::<Vec<_>>();
+    if !safety_excluded.is_empty() {
+        findings.push(ContextQualityFinding::new(
+            ContextQualityFindingKind::SafetyExclusion,
+            "safety policy excluded context from provider assembly",
+            safety_excluded,
+        ));
+    }
+
+    findings
+}
+
+fn serialized_label<T>(value: &T) -> String
+where
+    T: Serialize + std::fmt::Debug,
+{
+    match serde_json::to_value(value) {
+        Ok(Value::String(label)) => label,
+        _ => format!("{value:?}"),
+    }
 }
 
 /// Packs context deterministically into stable-prefix and dynamic-suffix sections.
@@ -473,10 +862,18 @@ fn pack_candidate(
 
 fn normalize_context_item_for_pack(mut item: ContextItem) -> ContextItem {
     if item.inclusion_reason.is_included()
-        && item.sensitivity == ContextSensitivity::Secret
+        && matches!(
+            item.sensitivity,
+            ContextSensitivity::PotentialSecret | ContextSensitivity::Secret
+        )
         && item.egress_decision.is_none()
     {
         item.inclusion_reason = ContextInclusionReason::ExcludedSecret;
+    } else if item.inclusion_reason.is_included()
+        && item.sensitivity == ContextSensitivity::External
+        && item.egress_decision.is_none()
+    {
+        item.inclusion_reason = ContextInclusionReason::ExcludedEgressDenied;
     }
     item
 }

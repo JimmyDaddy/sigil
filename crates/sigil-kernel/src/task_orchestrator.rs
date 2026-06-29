@@ -1,38 +1,96 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
     Agent, AgentRunInput, AgentRunOptions, AgentRunOutcome, AgentRunTerminalReason,
-    ApprovalHandler, CheckPromotion, CheckpointRestored, CompletionCriteria,
+    ApprovalHandler, ChangeSet, CheckPromotion, CheckpointRestored, CompletionCriteria,
     DEFAULT_TASK_VERIFICATION_SCOPE_HASH, DurableEventType, EventHandler, EvidenceScope,
-    ExecutionBackend, ExecutionMutationProfile, JsonlSessionStore, ModelMessage, MutationCommitted,
-    MutationPrepared, MutationReconciled, MutationResolution, Provider, ReadinessEvaluatedEntry,
-    ReadinessInput, RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry,
-    SessionStreamRecord, StoredEvent, ToolApproval, ToolCall, ToolErrorKind, ToolExecutionStatus,
-    ToolResultMeta, ToolSpec, VerificationAutoRunPolicy, VerificationCheckRunEntry,
-    VerificationCheckRunRequest, VerificationCheckRunStatus, VerificationPolicy,
-    VerificationReceipt, VerificationScope, VerificationVerdict, VisibleCompletionState,
-    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationEvidence, WorkspaceTrust,
+    ExecutionBackend, ExecutionMutationProfile, FileType, JsonlSessionStore, MergeReviewId,
+    MergeReviewRequested, ModelMessage, MutationCommitted, MutationPrepared, MutationReconciled,
+    MutationResolution, MutationSubject, Provider, ReadinessEvaluatedEntry, ReadinessInput,
+    RequiredAction, RunEvent, RunStatus, Session, SessionLogEntry, SessionStreamRecord,
+    StoredEvent, ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolErrorKind,
+    ToolExecutionStatus, ToolRegistry, ToolRegistryScope, ToolResultMeta, ToolSpec,
+    VerificationAutoRunPolicy, VerificationCheckRunEntry, VerificationCheckRunRequest,
+    VerificationCheckRunStatus, VerificationPolicy, VerificationReceipt, VerificationScope,
+    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
+    WorkspaceMutationEvidence, WorkspaceTrust, WriteIsolationMode, WriteLeaseAcquired,
+    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope,
     build_workspace_snapshot_for_event, evaluate_readiness, run_verification_check,
     session::ControlEntry,
-    stable_workspace_id,
+    stable_event_uuid, stable_workspace_id,
     task::{
         AgentRole, SessionRef, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-        TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus,
-        TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
+        TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskPlanUpdateContext,
+        TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId, TaskRouteStatus, TaskRunEntry,
+        TaskRunProjection, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec,
         TaskStepStatus, TaskSubagentApprovalRouteEntry, child_session_ref,
     },
     verification_check_run_id,
 };
 
 type BoxedAgent = Agent<Box<dyn Provider>>;
+
+const CHANGESET_ONLY_CHILD_TOOL_NAMES: &[&str] = &[
+    "read_file",
+    "ls",
+    "glob",
+    "grep",
+    "code_symbols",
+    "code_workspace_symbols",
+    "code_definition",
+    "code_references",
+    "code_diagnostics",
+    "load_skill",
+];
+
+/// Returns the only tool surface allowed for a `ChangesetOnly` child writer.
+///
+/// The child proposes a structured changeset through its final result. It must not execute
+/// mutating tools such as `write_file`, `edit_file`, `delete_file`, `apply_changeset`, `bash`,
+/// terminal tools, MCP tools, or plugin tools in the parent workspace.
+pub fn changeset_only_child_tool_scope() -> ToolRegistryScope {
+    ToolRegistryScope::from_names_and_prefixes(
+        CHANGESET_ONLY_CHILD_TOOL_NAMES.iter().copied(),
+        std::iter::empty::<&'static str>(),
+    )
+}
+
+/// Returns a capability-filtered tool registry for `ChangesetOnly` child writers.
+///
+/// The initial scope is name-based for provider schema stability, but this function also validates
+/// the resolved tool specs so a replaced same-name tool cannot carry write/execute/network access.
+pub fn changeset_only_child_tool_registry(registry: &ToolRegistry) -> ToolRegistry {
+    let scoped = registry.scoped(changeset_only_child_tool_scope());
+    let safe_names = scoped
+        .specs()
+        .into_iter()
+        .filter(changeset_only_child_tool_spec_is_safe)
+        .map(|spec| spec.name)
+        .collect::<Vec<_>>();
+    registry
+        .scoped(ToolRegistryScope::from_names_and_prefixes(
+            safe_names,
+            std::iter::empty::<String>(),
+        ))
+        .into_registry()
+}
+
+fn changeset_only_child_tool_spec_is_safe(spec: &ToolSpec) -> bool {
+    spec.access == ToolAccess::Read
+        && matches!(
+            spec.category,
+            ToolCategory::File | ToolCategory::Search | ToolCategory::Custom
+        )
+}
 
 /// Request for one sequential planner/executor task run.
 #[derive(Debug, Clone)]
@@ -68,6 +126,7 @@ pub struct TaskChildSessionRunRequest {
     pub step: TaskStepSpec,
     pub child_input: AgentRunInput,
     pub options: AgentRunOptions,
+    pub changeset_only_base_snapshot_id: Option<String>,
 }
 
 /// Output returned by a child-session runner after a terminal child run.
@@ -75,6 +134,24 @@ pub struct TaskChildSessionRunRequest {
 pub struct TaskChildSessionRunOutput {
     pub final_text: String,
     pub outcome: AgentRunOutcome,
+    pub changeset_proposal: Option<TaskChildChangeSetProposal>,
+    pub changeset_only_after_snapshot_id: Option<String>,
+}
+
+/// Structured output contract returned by a `ChangesetOnly` child writer.
+#[derive(Debug, Clone)]
+pub struct TaskChildChangeSetProposal {
+    pub change_set: ChangeSet,
+    pub artifact_ref: String,
+    pub artifact: TaskChildChangeSetArtifact,
+}
+
+/// Reviewable artifact material emitted by a `ChangesetOnly` child writer.
+#[derive(Debug, Clone)]
+pub struct TaskChildChangeSetArtifact {
+    pub media_type: String,
+    pub content: String,
+    pub content_sha256: String,
 }
 
 /// Runtime-neutral contract for launching task child sessions.
@@ -281,7 +358,17 @@ where
             )
         })?;
         let (plan_version, steps) = latest_executable_plan(task)?;
-        let pending_steps = resumable_steps(task, plan_version, &steps);
+        let runnable = runnable_steps_for_continue(
+            session,
+            task,
+            plan_version,
+            &steps,
+            [
+                &executor_options,
+                &subagent_read_options,
+                &subagent_write_options,
+            ],
+        )?;
         let guidance = normalize_task_guidance(guidance);
         append_task_run(
             session,
@@ -292,7 +379,25 @@ where
         )?;
 
         let mut step_outputs = Vec::new();
-        for step in pending_steps {
+        if runnable.steps.is_empty() {
+            let (status, reason) = if let Some(reason) = runnable.paused_reason {
+                (TaskRunStatus::Paused, reason)
+            } else {
+                (
+                    TaskRunStatus::Completed,
+                    format!("completed plan v{plan_version}"),
+                )
+            };
+            append_task_run(session, handler, &request, status, Some(reason))?;
+            return Ok(SequentialTaskRunOutput {
+                task_id: request.task_id,
+                plan_version,
+                steps: step_outputs,
+                status,
+            });
+        }
+
+        for step in runnable.steps {
             let step_options = match step.role {
                 AgentRole::Planner | AgentRole::Executor => executor_options.clone(),
                 AgentRole::SubagentRead => subagent_read_options.clone(),
@@ -307,6 +412,14 @@ where
                 TaskStepStatus::Running,
                 None,
                 None,
+            )?;
+            let write_lease_id = acquire_task_write_lease(
+                session,
+                handler,
+                &request,
+                plan_version,
+                &step,
+                &step_options,
             )?;
             let step_run_result = match step.role {
                 AgentRole::Planner | AgentRole::Executor => {
@@ -352,6 +465,12 @@ where
             let output = match step_run_result {
                 Ok(output) => output,
                 Err(error) => {
+                    release_task_write_lease(
+                        session,
+                        handler,
+                        write_lease_id,
+                        WriteLeaseReleaseStatus::Interrupted,
+                    )?;
                     let readiness = task_step_failure_readiness_nonblocking(
                         session,
                         &request,
@@ -368,6 +487,15 @@ where
                         TaskStepStatus::Failed,
                         None,
                         Some(format!("{error:#}")),
+                    )?;
+                    append_cancelled_dependent_steps(
+                        session,
+                        handler,
+                        &request.task_id,
+                        plan_version,
+                        &steps,
+                        &step.step_id,
+                        TaskStepStatus::Failed,
                     )?;
                     append_task_readiness(session, handler, readiness)?;
                     append_task_run(
@@ -386,6 +514,12 @@ where
                 }
             };
             let initial_status = step_status_from_outcome(&output);
+            release_task_write_lease(
+                session,
+                handler,
+                write_lease_id,
+                write_lease_release_status_from_step_status(initial_status),
+            )?;
             let mut readiness = task_step_readiness_nonblocking(
                 session,
                 &request,
@@ -441,6 +575,17 @@ where
                 Some(output.final_text.clone()),
                 step_reason_from_output(status, &output),
             )?;
+            if cancels_dependent_steps(status) {
+                append_cancelled_dependent_steps(
+                    session,
+                    handler,
+                    &request.task_id,
+                    plan_version,
+                    &steps,
+                    &step.step_id,
+                    status,
+                )?;
+            }
             append_task_readiness(session, handler, readiness.clone())?;
             step_outputs.push(SequentialTaskStepOutput {
                 step_id: step.step_id.clone(),
@@ -467,18 +612,33 @@ where
             }
         }
 
-        append_task_run(
-            session,
-            handler,
-            &request,
-            TaskRunStatus::Completed,
-            Some(format!("completed plan v{plan_version}")),
-        )?;
+        let final_projection = session.task_state_projection();
+        let final_task = final_projection
+            .tasks
+            .get(&request.task_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "task {} disappeared from session projection",
+                    request.task_id.as_str()
+                )
+            })?;
+        let (status, reason) = if plan_steps_all_completed(final_task, plan_version, &steps) {
+            (
+                TaskRunStatus::Completed,
+                format!("completed plan v{plan_version}"),
+            )
+        } else {
+            (
+                TaskRunStatus::Paused,
+                format!("plan v{plan_version} has more ready or dependency-blocked steps"),
+            )
+        };
+        append_task_run(session, handler, &request, status, Some(reason))?;
         Ok(SequentialTaskRunOutput {
             task_id: request.task_id,
             plan_version,
             steps: step_outputs,
-            status: TaskRunStatus::Completed,
+            status,
         })
     }
 
@@ -556,6 +716,14 @@ where
             AgentRole::Planner | AgentRole::Executor => unreachable!("role checked above"),
         };
         let readiness_options = options.clone();
+        let write_lease_id = acquire_task_write_lease(
+            session,
+            handler,
+            &request,
+            plan_version,
+            &step,
+            &readiness_options,
+        )?;
         let output = match self
             .run_child_step_with_input(
                 session,
@@ -571,6 +739,12 @@ where
         {
             Ok(output) => output,
             Err(error) => {
+                release_task_write_lease(
+                    session,
+                    handler,
+                    write_lease_id,
+                    WriteLeaseReleaseStatus::Interrupted,
+                )?;
                 let readiness = task_step_failure_readiness_nonblocking(
                     session,
                     &request,
@@ -611,6 +785,12 @@ where
             }
         };
         let initial_status = step_status_from_outcome(&output);
+        release_task_write_lease(
+            session,
+            handler,
+            write_lease_id,
+            write_lease_release_status_from_step_status(initial_status),
+        )?;
         let mut readiness = task_step_readiness_nonblocking(
             session,
             &request,
@@ -723,6 +903,8 @@ where
         Ok(StepRunOutput {
             final_text: output.result.final_text,
             outcome: output.outcome,
+            changeset_proposal: None,
+            changeset_only_after_snapshot_id: None,
         })
     }
 
@@ -773,6 +955,24 @@ where
         H: EventHandler + Send,
         A: ApprovalHandler + Send,
     {
+        let changeset_only_base_snapshot_id =
+            if step.effective_isolation() == TaskIsolationMode::ChangesetOnly {
+                Some(capture_changeset_only_parent_snapshot_id(
+                    parent_session,
+                    request,
+                    plan_version,
+                    step,
+                    &options,
+                    "base",
+                )?)
+            } else {
+                None
+            };
+        let child_input = if changeset_only_base_snapshot_id.is_some() {
+            with_changeset_only_child_contract(child_input)
+        } else {
+            child_input
+        };
         let output = self
             .child_runner
             .run_child_session(
@@ -782,16 +982,31 @@ where
                     plan_version,
                     step: step.clone(),
                     child_input,
-                    options,
+                    options: options.clone(),
+                    changeset_only_base_snapshot_id: changeset_only_base_snapshot_id.clone(),
                 },
                 handler,
                 approval_handler,
             )
             .await?;
-        Ok(StepRunOutput {
+        let step_output = StepRunOutput {
             final_text: output.final_text,
             outcome: output.outcome,
-        })
+            changeset_proposal: output.changeset_proposal,
+            changeset_only_after_snapshot_id: output.changeset_only_after_snapshot_id,
+        };
+        if let Some(base_snapshot_id) = changeset_only_base_snapshot_id {
+            record_changeset_only_child_output(
+                parent_session,
+                handler,
+                request,
+                plan_version,
+                step,
+                &base_snapshot_id,
+                &step_output,
+            )?;
+        }
+        Ok(step_output)
     }
 }
 
@@ -799,6 +1014,8 @@ where
 struct StepRunOutput {
     final_text: String,
     outcome: AgentRunOutcome,
+    changeset_proposal: Option<TaskChildChangeSetProposal>,
+    changeset_only_after_snapshot_id: Option<String>,
 }
 
 #[async_trait]
@@ -820,6 +1037,7 @@ impl TaskChildSessionRunner for LegacyTaskChildSessionRunner {
             step,
             child_input,
             options,
+            changeset_only_base_snapshot_id,
         } = request;
         let child_task_id =
             TaskId::new(format!("child_v{plan_version}_{}", step.step_id.as_str()))?;
@@ -851,15 +1069,16 @@ impl TaskChildSessionRunner for LegacyTaskChildSessionRunner {
                 bail!("task child session runner requires a subagent role")
             }
         };
-        let output = match agent
-            .run_with_approval_input(
-                &mut child_session,
-                child_input,
-                options,
-                handler,
-                &mut route_handler,
-            )
-            .await
+        let output = match run_child_agent_for_step(
+            agent,
+            &mut child_session,
+            child_input,
+            options.clone(),
+            &step,
+            handler,
+            &mut route_handler,
+        )
+        .await
         {
             Ok(output) => output,
             Err(error) => {
@@ -877,9 +1096,45 @@ impl TaskChildSessionRunner for LegacyTaskChildSessionRunner {
                 return Err(error);
             }
         };
+        let changeset_proposal = if step.effective_isolation() == TaskIsolationMode::ChangesetOnly {
+            match decode_changeset_only_child_output(&output.result.final_text) {
+                Ok(proposal) => Some(proposal),
+                Err(error) => {
+                    append_child_session(
+                        route_handler.parent_session,
+                        handler,
+                        &task,
+                        plan_version,
+                        &step,
+                        &child_task_id,
+                        &child_session_ref,
+                        TaskChildSessionStatus::Failed,
+                        None,
+                    )?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let changeset_only_after_snapshot_id =
+            if let Some(base_snapshot_id) = changeset_only_base_snapshot_id.as_deref() {
+                Some(validate_changeset_only_parent_snapshot_unchanged_for_task(
+                    route_handler.parent_session,
+                    &task,
+                    plan_version,
+                    &step,
+                    &options,
+                    base_snapshot_id,
+                )?)
+            } else {
+                None
+            };
         let step_output = StepRunOutput {
             final_text: output.result.final_text,
             outcome: output.outcome,
+            changeset_proposal,
+            changeset_only_after_snapshot_id,
         };
         let status = child_status_from_output(&step_output);
         let summary_hash = Some(hash_text(&step_output.final_text));
@@ -897,7 +1152,48 @@ impl TaskChildSessionRunner for LegacyTaskChildSessionRunner {
         Ok(TaskChildSessionRunOutput {
             final_text: step_output.final_text,
             outcome: step_output.outcome,
+            changeset_proposal: step_output.changeset_proposal,
+            changeset_only_after_snapshot_id: step_output.changeset_only_after_snapshot_id,
         })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_child_agent_for_step<H, A>(
+    agent: &BoxedAgent,
+    child_session: &mut Session,
+    child_input: AgentRunInput,
+    options: AgentRunOptions,
+    step: &TaskStepSpec,
+    handler: &mut H,
+    approval_handler: &mut A,
+) -> Result<crate::AgentRunOutput>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    if step.effective_isolation() == TaskIsolationMode::ChangesetOnly {
+        let scoped_tools = changeset_only_child_tool_registry(agent.tool_registry());
+        agent
+            .run_with_approval_input_and_tool_registry(
+                child_session,
+                child_input,
+                options,
+                scoped_tools,
+                handler,
+                approval_handler,
+            )
+            .await
+    } else {
+        agent
+            .run_with_approval_input(
+                child_session,
+                child_input,
+                options,
+                handler,
+                approval_handler,
+            )
+            .await
     }
 }
 
@@ -1009,6 +1305,441 @@ where
             reason,
         }),
     )
+}
+
+fn acquire_task_write_lease<H>(
+    session: &mut Session,
+    handler: &mut H,
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    options: &AgentRunOptions,
+) -> Result<Option<WriteLeaseId>>
+where
+    H: EventHandler + Send,
+{
+    if step.effective_mode() != TaskStepMode::Write {
+        return Ok(None);
+    }
+    match step.effective_isolation() {
+        TaskIsolationMode::SequentialWorkspaceWrite => {}
+        TaskIsolationMode::SharedReadOnly => {
+            bail!(
+                "write task step {} cannot acquire a shared-read-only write lease",
+                step.step_id.as_str()
+            );
+        }
+        TaskIsolationMode::ChangesetOnly => {
+            if step.role != AgentRole::SubagentWrite {
+                bail!(
+                    "changeset-only write task step {} requires a subagent_write role",
+                    step.step_id.as_str()
+                );
+            }
+            return Ok(None);
+        }
+        TaskIsolationMode::Worktree => {
+            bail!(
+                "write task step {} uses unsupported isolation mode {}",
+                step.step_id.as_str(),
+                step.effective_isolation().as_str()
+            );
+        }
+    }
+
+    let workspace_id = stable_workspace_id(&options.workspace_root)?;
+    let lease_seed = format!(
+        "{}:{}:{}:{}",
+        request.task_id.as_str(),
+        plan_version,
+        step.step_id.as_str(),
+        workspace_id
+    );
+    let lease_id = WriteLeaseId::new(format!(
+        "lease-{}",
+        stable_event_uuid("sigil-write-lease", &lease_seed)
+    ))?;
+    let entry = WriteLeaseAcquired {
+        lease_id: lease_id.clone(),
+        workspace_id,
+        owner_agent_id: task_step_owner_agent_id(request, plan_version, step),
+        isolation_mode: WriteIsolationMode::SharedWorkspaceExclusive,
+        scope: WriteLeaseScope::Workspace,
+    };
+    session
+        .write_isolation_projection()
+        .validate_can_acquire_shared_workspace_lease(&entry)?;
+    append_task_control(session, handler, ControlEntry::WriteLeaseAcquired(entry))?;
+    Ok(Some(lease_id))
+}
+
+fn release_task_write_lease<H>(
+    session: &mut Session,
+    handler: &mut H,
+    lease_id: Option<WriteLeaseId>,
+    status: WriteLeaseReleaseStatus,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    let Some(lease_id) = lease_id else {
+        return Ok(());
+    };
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::WriteLeaseReleased(WriteLeaseReleased { lease_id, status }),
+    )
+}
+
+fn write_lease_release_status_from_step_status(status: TaskStepStatus) -> WriteLeaseReleaseStatus {
+    match status {
+        TaskStepStatus::Cancelled => WriteLeaseReleaseStatus::Cancelled,
+        TaskStepStatus::Interrupted => WriteLeaseReleaseStatus::Interrupted,
+        TaskStepStatus::Failed | TaskStepStatus::Superseded => WriteLeaseReleaseStatus::Stale,
+        TaskStepStatus::Pending | TaskStepStatus::Running => WriteLeaseReleaseStatus::Interrupted,
+        TaskStepStatus::Completed | TaskStepStatus::Blocked => WriteLeaseReleaseStatus::Completed,
+    }
+}
+
+fn with_changeset_only_child_contract(mut input: AgentRunInput) -> AgentRunInput {
+    input
+        .transient_context
+        .push(ModelMessage::system(changeset_only_child_contract_prompt()));
+    input
+}
+
+fn changeset_only_child_contract_prompt() -> &'static str {
+    r#"This delegated write step uses changeset-only isolation.
+
+You must not modify files, run shell commands, use terminal tools, call apply_changeset, or call any MCP/plugin tool.
+
+Return the proposed edit as structured JSON only. Use a raw JSON object or a fenced block tagged sigil_changeset. The schema is:
+
+```sigil_changeset
+{
+  "change_set": {
+    "id": "change-brief-stable-id",
+    "title": "short user-facing title",
+    "summary": "what the change would do",
+    "risk": "low",
+    "files": [
+      {
+        "path": "relative/path",
+        "action": "update",
+        "risk": "low",
+        "additions": 0,
+        "deletions": 0
+      }
+    ],
+    "validations": []
+  },
+  "artifact": {
+    "media_type": "text/x-diff",
+    "content": "reviewable patch, diff, or exact change artifact content"
+  }
+}
+```
+
+Do not claim the changes were applied. They will be reviewed and applied by the parent session later."#
+}
+
+fn capture_changeset_only_parent_snapshot_id(
+    session: &Session,
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    options: &AgentRunOptions,
+    label: &str,
+) -> Result<String> {
+    if step.role != AgentRole::SubagentWrite || step.effective_mode() != TaskStepMode::Write {
+        bail!(
+            "changeset-only task step {} requires a subagent_write write step",
+            step.step_id.as_str()
+        );
+    }
+    let scope = VerificationScope::all_tracked(task_step_verification_scope_hash());
+    let workspace_id = stable_workspace_id(&options.workspace_root)?;
+    let seed = format!(
+        "{}:{}:{}:{}:{}",
+        request.task_id.as_str(),
+        plan_version,
+        step.step_id.as_str(),
+        workspace_id,
+        label
+    );
+    let source_event_id = format!(
+        "changeset-only-{label}-snapshot-{}",
+        stable_event_uuid("sigil-changeset-only-snapshot", &seed)
+    );
+    let snapshot = build_workspace_snapshot_for_event(
+        &options.workspace_root,
+        workspace_id,
+        &scope,
+        0,
+        source_event_id,
+        session.next_stream_sequence_hint().unwrap_or(1),
+    )?;
+    snapshot.workspace_snapshot_id.ok_or_else(|| {
+        anyhow!(
+            "changeset-only task step {} cannot bind {label} parent workspace snapshot",
+            step.step_id.as_str()
+        )
+    })
+}
+
+pub fn validate_changeset_only_parent_snapshot_unchanged_for_task(
+    session: &Session,
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    options: &AgentRunOptions,
+    base_snapshot_id: &str,
+) -> Result<String> {
+    let after_snapshot_id = capture_changeset_only_parent_snapshot_id(
+        session,
+        request,
+        plan_version,
+        step,
+        options,
+        "after",
+    )?;
+    if after_snapshot_id != base_snapshot_id {
+        bail!(
+            "changeset-only task step {} changed parent workspace snapshot",
+            step.step_id.as_str()
+        );
+    }
+    Ok(after_snapshot_id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_changeset_only_child_output<H>(
+    session: &mut Session,
+    handler: &mut H,
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    base_snapshot_id: &str,
+    output: &StepRunOutput,
+) -> Result<()>
+where
+    H: EventHandler + Send,
+{
+    if !output.outcome.changed_files.is_empty() {
+        bail!(
+            "changeset-only task step {} mutated parent workspace files: {}",
+            step.step_id.as_str(),
+            output.outcome.changed_files.join(", ")
+        );
+    }
+    let parent_snapshot_id = output
+        .changeset_only_after_snapshot_id
+        .as_deref()
+        .ok_or_else(|| {
+            anyhow!(
+                "changeset-only task step {} missing validated parent snapshot",
+                step.step_id.as_str()
+            )
+        })?;
+    let proposal = output.changeset_proposal.as_ref().ok_or_else(|| {
+        anyhow!(
+            "changeset-only task step {} did not return a structured changeset proposal",
+            step.step_id.as_str()
+        )
+    })?;
+    let touched_subjects = changeset_touched_subjects(&proposal.change_set);
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::ChangeSetProposed(proposal.change_set.clone()),
+    )?;
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::IsolatedChangeSetProduced(crate::IsolatedChangeSetProduced {
+            changeset_id: proposal.change_set.id.clone(),
+            owner_agent_id: task_step_owner_agent_id(request, plan_version, step),
+            base_snapshot_id: base_snapshot_id.to_owned(),
+            child_snapshot_id: None,
+            source_isolation: WriteIsolationMode::ChangesetOnly,
+            artifact_ref: Some(proposal.artifact_ref.clone()),
+            touched_subjects,
+        }),
+    )?;
+    append_task_control(
+        session,
+        handler,
+        ControlEntry::MergeReviewRequested(MergeReviewRequested {
+            review_id: changeset_only_merge_review_id(
+                request,
+                plan_version,
+                step,
+                &proposal.change_set.id,
+            )?,
+            changeset_id: proposal.change_set.id.clone(),
+            parent_workspace_snapshot_id: parent_snapshot_id.to_owned(),
+        }),
+    )
+}
+
+fn changeset_only_merge_review_id(
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    step: &TaskStepSpec,
+    change_set_id: &crate::ChangeSetId,
+) -> Result<MergeReviewId> {
+    let seed = format!(
+        "{}:{}:{}:{}",
+        request.task_id.as_str(),
+        plan_version,
+        step.step_id.as_str(),
+        change_set_id.as_str()
+    );
+    MergeReviewId::new(format!(
+        "review-{}",
+        stable_event_uuid("sigil-merge-review", &seed)
+    ))
+}
+
+fn task_step_owner_agent_id(
+    request: &SequentialTaskRequest,
+    plan_version: u32,
+    step: &TaskStepSpec,
+) -> String {
+    format!(
+        "task:{}:v{}:{}",
+        request.task_id.as_str(),
+        plan_version,
+        step.step_id.as_str()
+    )
+}
+
+/// Decodes the strict structured output expected from a changeset-only child writer.
+///
+/// # Errors
+///
+/// Returns an error when the final output is not raw JSON or a `sigil_changeset` fenced JSON
+/// block, or when the decoded changeset is empty or contains unsafe paths.
+pub fn decode_changeset_only_child_output(final_text: &str) -> Result<TaskChildChangeSetProposal> {
+    let json_text = extract_changeset_only_json(final_text).ok_or_else(|| {
+        anyhow!("changeset-only child output must be raw JSON or a sigil_changeset fenced block")
+    })?;
+    let envelope: TaskChildChangeSetProposalEnvelope = serde_json::from_str(json_text)
+        .map_err(|error| anyhow!("invalid changeset-only child output JSON: {error}"))?;
+    let proposal = envelope.into_proposal()?;
+    validate_changeset_only_proposal(&proposal.change_set)?;
+    Ok(proposal)
+}
+
+#[derive(Deserialize)]
+struct TaskChildChangeSetProposalEnvelope {
+    #[serde(alias = "changeset")]
+    change_set: ChangeSet,
+    artifact: TaskChildChangeSetArtifactWire,
+}
+
+#[derive(Deserialize)]
+struct TaskChildChangeSetArtifactWire {
+    media_type: String,
+    content: String,
+}
+
+impl TaskChildChangeSetProposalEnvelope {
+    fn into_proposal(self) -> Result<TaskChildChangeSetProposal> {
+        let media_type = self.artifact.media_type.trim();
+        if media_type.is_empty() {
+            bail!(
+                "changeset-only proposal {} artifact media_type must be non-empty",
+                self.change_set.id.as_str()
+            );
+        }
+        let content = self.artifact.content;
+        if content.trim().is_empty() {
+            bail!(
+                "changeset-only proposal {} artifact content must be non-empty",
+                self.change_set.id.as_str()
+            );
+        }
+        let content_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+        Ok(TaskChildChangeSetProposal {
+            change_set: self.change_set,
+            artifact_ref: format!("inline:sha256:{content_sha256}"),
+            artifact: TaskChildChangeSetArtifact {
+                media_type: media_type.to_owned(),
+                content,
+                content_sha256,
+            },
+        })
+    }
+}
+
+fn extract_changeset_only_json(final_text: &str) -> Option<&str> {
+    let trimmed = final_text.trim();
+    if trimmed.starts_with('{') {
+        return Some(trimmed);
+    }
+    let marker = "```sigil_changeset";
+    let start = trimmed.find(marker)? + marker.len();
+    let after_marker = trimmed[start..]
+        .strip_prefix("\r\n")
+        .or_else(|| trimmed[start..].strip_prefix('\n'))
+        .unwrap_or(&trimmed[start..]);
+    let end = after_marker.find("```")?;
+    Some(after_marker[..end].trim())
+}
+
+fn validate_changeset_only_proposal(change_set: &ChangeSet) -> Result<()> {
+    if change_set.files.is_empty() {
+        bail!(
+            "changeset-only proposal {} must include at least one touched file",
+            change_set.id.as_str()
+        );
+    }
+    for file in &change_set.files {
+        validate_changeset_path(&file.path)?;
+        if let Some(previous_path) = &file.previous_path {
+            validate_changeset_path(previous_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_changeset_path(path: &str) -> Result<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        bail!("changeset proposal file path cannot be empty");
+    }
+    let path = Path::new(trimmed);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        bail!("changeset proposal file path must stay inside the workspace: {trimmed}");
+    }
+    Ok(())
+}
+
+fn changeset_touched_subjects(change_set: &ChangeSet) -> Vec<MutationSubject> {
+    let mut subjects = Vec::new();
+    for file in &change_set.files {
+        push_file_subject(&mut subjects, &file.path);
+        if let Some(previous_path) = &file.previous_path {
+            push_file_subject(&mut subjects, previous_path);
+        }
+    }
+    subjects
+}
+
+fn push_file_subject(subjects: &mut Vec<MutationSubject>, path: &str) {
+    let subject = MutationSubject::File {
+        path: PathBuf::from(path),
+        file_type: FileType::File,
+    };
+    if !subjects.contains(&subject) {
+        subjects.push(subject);
+    }
 }
 
 fn append_task_readiness<H>(
@@ -1383,6 +2114,8 @@ async fn task_step_failure_readiness_nonblocking(
     let output = StepRunOutput {
         final_text: String::new(),
         outcome: AgentRunOutcome::default(),
+        changeset_proposal: None,
+        changeset_only_after_snapshot_id: None,
     };
     task_step_readiness_nonblocking(
         session,
@@ -2059,6 +2792,120 @@ fn latest_executable_plan(task: &TaskRunProjection) -> Result<(u32, Vec<TaskStep
     Ok((plan_version, plan.steps.clone()))
 }
 
+struct TaskRunnableSelection {
+    steps: Vec<TaskStepSpec>,
+    paused_reason: Option<String>,
+}
+
+fn runnable_steps_for_continue(
+    session: &Session,
+    task: &TaskRunProjection,
+    plan_version: u32,
+    plan_steps: &[TaskStepSpec],
+    step_options: [&AgentRunOptions; 3],
+) -> Result<TaskRunnableSelection> {
+    let Some(plan) = task.plans.get(&plan_version) else {
+        return Ok(TaskRunnableSelection {
+            steps: resumable_steps(task, plan_version, plan_steps),
+            paused_reason: None,
+        });
+    };
+    let Some(graph) = plan.graph.as_ref() else {
+        if let Some(error) = plan.graph_validation_error.as_deref() {
+            bail!("task plan v{plan_version} graph is invalid: {error}");
+        }
+        return Ok(TaskRunnableSelection {
+            steps: resumable_steps(task, plan_version, plan_steps),
+            paused_reason: None,
+        });
+    };
+
+    let active_write_lease = has_active_task_write_lease(session, step_options)?;
+    let queue = graph.ready_queue_with_active_write_lease(
+        &task.steps,
+        TaskReadyQueueOptions::new(DEFAULT_TASK_READ_ONLY_CONCURRENCY),
+        active_write_lease,
+    );
+    let step_ids = if !queue.read_only_batch.is_empty() {
+        queue
+            .read_only_batch
+            .iter()
+            .map(|step| step.step_id.clone())
+            .collect::<Vec<_>>()
+    } else if let Some(step) = queue.sequential_step.as_ref() {
+        vec![step.step_id.clone()]
+    } else {
+        Vec::new()
+    };
+    let steps = step_ids
+        .iter()
+        .map(|step_id| {
+            plan_steps
+                .iter()
+                .find(|step| &step.step_id == step_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("task graph references missing step {}", step_id.as_str()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let paused_reason = if steps.is_empty() {
+        if queue.deferred.is_empty() {
+            if plan_steps_all_completed(task, plan_version, plan_steps) {
+                None
+            } else {
+                Some(format!(
+                    "plan v{plan_version} has no ready steps; waiting for dependencies"
+                ))
+            }
+        } else {
+            Some(format!(
+                "plan v{plan_version} has deferred steps: {}",
+                queue
+                    .deferred
+                    .iter()
+                    .map(|step| format!(
+                        "{}:{}",
+                        step.step_id.as_str(),
+                        task_ready_deferred_reason_label(step.reason)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    } else {
+        None
+    };
+    Ok(TaskRunnableSelection {
+        steps,
+        paused_reason,
+    })
+}
+
+const DEFAULT_TASK_READ_ONLY_CONCURRENCY: usize = 4;
+
+fn task_ready_deferred_reason_label(reason: TaskReadyDeferredReason) -> &'static str {
+    match reason {
+        TaskReadyDeferredReason::ActiveWriteLease => "active_write_lease",
+        TaskReadyDeferredReason::ConcurrencyBudget => "concurrency_budget",
+        TaskReadyDeferredReason::RunningReadOnly => "running_read_only",
+        TaskReadyDeferredReason::RunningWrite => "running_write",
+        TaskReadyDeferredReason::SequentialWrite => "sequential_write",
+    }
+}
+
+fn has_active_task_write_lease(
+    session: &Session,
+    step_options: [&AgentRunOptions; 3],
+) -> Result<bool> {
+    let projection = session.write_isolation_projection();
+    for options in step_options {
+        let workspace_id = stable_workspace_id(&options.workspace_root)?;
+        if projection.has_active_write_lease(&workspace_id) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn resumable_steps(
     task: &TaskRunProjection,
     plan_version: u32,
@@ -2078,6 +2925,106 @@ fn resumable_steps(
         .collect()
 }
 
+fn plan_steps_all_completed(
+    task: &TaskRunProjection,
+    plan_version: u32,
+    plan_steps: &[TaskStepSpec],
+) -> bool {
+    plan_steps.iter().all(|step| {
+        task.steps
+            .get(&(plan_version, step.step_id.clone()))
+            .is_some_and(|projected| projected.status == TaskStepStatus::Completed)
+    })
+}
+
+fn cancels_dependent_steps(status: TaskStepStatus) -> bool {
+    matches!(
+        status,
+        TaskStepStatus::Failed | TaskStepStatus::Cancelled | TaskStepStatus::Interrupted
+    )
+}
+
+fn append_cancelled_dependent_steps<H>(
+    session: &mut Session,
+    handler: &mut H,
+    task_id: &TaskId,
+    plan_version: u32,
+    plan_steps: &[TaskStepSpec],
+    failed_step_id: &TaskStepId,
+    failed_status: TaskStepStatus,
+) -> Result<usize>
+where
+    H: EventHandler + Send,
+{
+    let projected = session.task_state_projection();
+    let Some(task) = projected.tasks.get(task_id) else {
+        return Ok(0);
+    };
+    let mut cancelled = BTreeSet::<TaskStepId>::new();
+    loop {
+        let mut changed = false;
+        for step in plan_steps {
+            if &step.step_id == failed_step_id || cancelled.contains(&step.step_id) {
+                continue;
+            }
+            let depends_on_failed = step
+                .depends_on
+                .iter()
+                .any(|dependency| dependency == failed_step_id || cancelled.contains(dependency));
+            if !depends_on_failed {
+                continue;
+            }
+            if task
+                .steps
+                .get(&(plan_version, step.step_id.clone()))
+                .is_some_and(|projection| projection.status.is_terminal())
+            {
+                continue;
+            }
+            cancelled.insert(step.step_id.clone());
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut count = 0;
+    for step_id in cancelled {
+        let Some(step) = plan_steps.iter().find(|step| step.step_id == step_id) else {
+            continue;
+        };
+        append_task_step(
+            session,
+            handler,
+            task_id,
+            plan_version,
+            step,
+            TaskStepStatus::Cancelled,
+            None,
+            Some(format!(
+                "dependency {} ended with {}",
+                failed_step_id.as_str(),
+                task_step_status_label(failed_status)
+            )),
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn task_step_status_label(status: TaskStepStatus) -> &'static str {
+    match status {
+        TaskStepStatus::Pending => "pending",
+        TaskStepStatus::Running => "running",
+        TaskStepStatus::Completed => "completed",
+        TaskStepStatus::Failed => "failed",
+        TaskStepStatus::Blocked => "blocked",
+        TaskStepStatus::Cancelled => "cancelled",
+        TaskStepStatus::Interrupted => "interrupted",
+        TaskStepStatus::Superseded => "superseded",
+    }
+}
+
 fn step_status_from_outcome(output: &StepRunOutput) -> TaskStepStatus {
     if output.outcome.terminal_reason == AgentRunTerminalReason::MaxTurns
         || !output.outcome.interrupted_tool_calls.is_empty()
@@ -2087,6 +3034,8 @@ fn step_status_from_outcome(output: &StepRunOutput) -> TaskStepStatus {
         TaskStepStatus::Blocked
     } else if !output.outcome.tool_errors.is_empty() && output.final_text.trim().is_empty() {
         TaskStepStatus::Failed
+    } else if output.changeset_proposal.is_some() {
+        TaskStepStatus::Blocked
     } else {
         TaskStepStatus::Completed
     }
@@ -2104,6 +3053,9 @@ fn step_status_after_readiness(
 }
 
 fn step_reason_from_output(status: TaskStepStatus, output: &StepRunOutput) -> Option<String> {
+    if status == TaskStepStatus::Blocked && output.changeset_proposal.is_some() {
+        return Some("changeset ready for merge review".to_owned());
+    }
     let error = output.outcome.tool_errors.first()?;
     if status == TaskStepStatus::Completed {
         Some(format!("recovered tool error: {}", error.message))

@@ -20,8 +20,22 @@ fn default_plugin_egress_logging() -> bool {
     true
 }
 
+fn default_plugin_hook_timeout_ms() -> u64 {
+    DEFAULT_PLUGIN_HOOK_TIMEOUT_MS
+}
+
+fn default_plugin_hook_declared_effect() -> ToolEffect {
+    ToolEffect::Unknown
+}
+
 /// Canonical prefix for plugin manifest content digests.
 pub const PLUGIN_MANIFEST_DIGEST_PREFIX: &str = "sha256:";
+
+/// Default bounded runtime for a plugin hook command declared in static manifest data.
+pub const DEFAULT_PLUGIN_HOOK_TIMEOUT_MS: u64 = 30_000;
+
+/// Maximum hook timeout accepted in a plugin manifest.
+pub const MAX_PLUGIN_HOOK_TIMEOUT_MS: u64 = 600_000;
 
 /// Provider-neutral manifest for one local capability package.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,9 +104,15 @@ impl PluginManifest {
             path: skill.path.clone(),
         });
         let hook_capabilities = self.hooks.iter().map(|hook| PluginCapability::Hook {
+            id: hook.stable_id(),
             event: hook.event.clone(),
+            hook_kind: hook.kind,
             command: hook.command.clone(),
             args: hook.args.clone(),
+            declared_effect: hook.declared_effect,
+            timeout_ms: hook.timeout_ms,
+            input_schema_digest: hook.input_schema_digest.clone(),
+            output_schema_digest: hook.output_schema_digest.clone(),
             approval: hook.approval,
             egress_logging: hook.egress_logging,
             allow_secrets: hook.allow_secrets,
@@ -158,10 +178,22 @@ impl PluginSkillRef {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct PluginHookRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub event: String,
+    #[serde(default)]
+    pub kind: PluginHookKind,
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default = "default_plugin_hook_declared_effect")]
+    pub declared_effect: ToolEffect,
+    #[serde(default = "default_plugin_hook_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema_digest: Option<String>,
     #[serde(default)]
     pub approval: ApprovalMode,
     #[serde(default = "default_plugin_egress_logging")]
@@ -171,20 +203,66 @@ pub struct PluginHookRef {
 }
 
 impl PluginHookRef {
-    /// Validates that the hook is named and has an executable command.
+    /// Returns the stable hook id used in review, digest and future runtime records.
+    #[must_use]
+    pub fn stable_id(&self) -> String {
+        self.id
+            .as_ref()
+            .filter(|id| !id.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| self.event.clone())
+    }
+
+    /// Returns the static command vector declared by the plugin manifest.
+    #[must_use]
+    pub fn command_vector(&self) -> Vec<String> {
+        let mut command = Vec::with_capacity(1 + self.args.len());
+        command.push(self.command.clone());
+        command.extend(self.args.clone());
+        command
+    }
+
+    /// Validates that the hook has a stable identity and bounded executable command contract.
     ///
     /// # Errors
     ///
-    /// Returns an error when the event or command is empty.
+    /// Returns an error when the hook id, event, command vector, timeout or schema digests are
+    /// structurally unsafe.
     pub fn validate(&self) -> Result<()> {
+        let id = self.stable_id();
+        validate_plugin_id(&id)?;
         if self.event.trim().is_empty() {
-            bail!("plugin hook has empty event");
+            bail!("plugin hook {id} has empty event");
         }
         if self.command.trim().is_empty() {
-            bail!("plugin hook {} has empty command", self.event);
+            bail!("plugin hook {id} has empty command");
+        }
+        validate_plugin_command_segment("hook command", &self.command)?;
+        for arg in &self.args {
+            validate_plugin_command_segment("hook argument", arg)?;
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > MAX_PLUGIN_HOOK_TIMEOUT_MS {
+            bail!("plugin hook {id} timeout_ms must be between 1 and {MAX_PLUGIN_HOOK_TIMEOUT_MS}");
+        }
+        if let Some(digest) = &self.input_schema_digest {
+            validate_plugin_hook_schema_digest(&id, "input", digest)?;
+        }
+        if let Some(digest) = &self.output_schema_digest {
+            validate_plugin_hook_schema_digest(&id, "output", digest)?;
         }
         Ok(())
     }
+}
+
+/// Static hook category declared by plugin manifest data.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginHookKind {
+    Context,
+    Compaction,
+    Verification,
+    #[default]
+    Event,
 }
 
 /// Reviewable capability summary derived from a plugin manifest.
@@ -198,10 +276,22 @@ pub enum PluginCapability {
         path: PathBuf,
     },
     Hook {
+        #[serde(default)]
+        id: String,
         event: String,
+        #[serde(default)]
+        hook_kind: PluginHookKind,
         command: String,
         #[serde(default)]
         args: Vec<String>,
+        #[serde(default = "default_plugin_hook_declared_effect")]
+        declared_effect: ToolEffect,
+        #[serde(default = "default_plugin_hook_timeout_ms")]
+        timeout_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_schema_digest: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_schema_digest: Option<String>,
         approval: ApprovalMode,
         #[serde(default = "default_plugin_egress_logging")]
         egress_logging: bool,
@@ -247,6 +337,7 @@ impl PluginCapability {
                 approval,
                 egress_logging,
                 allow_secrets,
+                declared_effect,
                 ..
             } => PluginCapabilityPolicy {
                 tool_category: Some(ToolCategory::Custom),
@@ -255,7 +346,7 @@ impl PluginCapability {
                 execution_backend_required: true,
                 egress_logging: *egress_logging,
                 allow_secrets: *allow_secrets,
-                mutation_effect: ToolEffect::Unknown,
+                mutation_effect: *declared_effect,
             },
             Self::McpServer {
                 approval,
@@ -296,12 +387,38 @@ impl PluginCapability {
         match self {
             Self::Agent { path } => validate_manifest_relative_path("agent", path),
             Self::Skill { path } => validate_manifest_relative_path("skill", path),
-            Self::Hook { event, command, .. } => {
+            Self::Hook {
+                id,
+                event,
+                command,
+                args,
+                timeout_ms,
+                input_schema_digest,
+                output_schema_digest,
+                ..
+            } => {
+                let id = if id.trim().is_empty() { event } else { id };
+                validate_plugin_id(id)?;
                 if event.trim().is_empty() {
-                    bail!("plugin hook capability has empty event");
+                    bail!("plugin hook capability {id} has empty event");
                 }
                 if command.trim().is_empty() {
-                    bail!("plugin hook capability {event} has empty command");
+                    bail!("plugin hook capability {id} has empty command");
+                }
+                validate_plugin_command_segment("hook command", command)?;
+                for arg in args {
+                    validate_plugin_command_segment("hook argument", arg)?;
+                }
+                if *timeout_ms == 0 || *timeout_ms > MAX_PLUGIN_HOOK_TIMEOUT_MS {
+                    bail!(
+                        "plugin hook capability {id} timeout_ms must be between 1 and {MAX_PLUGIN_HOOK_TIMEOUT_MS}"
+                    );
+                }
+                if let Some(digest) = input_schema_digest {
+                    validate_plugin_hook_schema_digest(id, "input", digest)?;
+                }
+                if let Some(digest) = output_schema_digest {
+                    validate_plugin_hook_schema_digest(id, "output", digest)?;
                 }
                 Ok(())
             }
@@ -623,6 +740,25 @@ pub fn validate_plugin_capability_digest(plugin_id: &str, digest: &str) -> Resul
         })
 }
 
+/// Validates a plugin hook schema digest.
+///
+/// # Errors
+///
+/// Returns an error when the digest is not a SHA-256 digest.
+pub fn validate_plugin_hook_schema_digest(
+    hook_id: &str,
+    schema_kind: &str,
+    digest: &str,
+) -> Result<()> {
+    normalize_plugin_manifest_digest(digest)
+        .map(|_| ())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "plugin hook {hook_id} {schema_kind} schema digest must be a SHA-256 digest"
+            )
+        })
+}
+
 /// Returns true when two manifest digests identify the same content.
 ///
 /// This accepts prefixed-vs-bare SHA-256 compatibility but does not match malformed digests.
@@ -650,6 +786,19 @@ fn normalize_plugin_manifest_digest(digest: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn validate_plugin_command_segment(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("plugin {kind} cannot be empty");
+    }
+    if value
+        .chars()
+        .any(|character| character == '\0' || character.is_ascii_control())
+    {
+        bail!("plugin {kind} cannot contain control characters");
+    }
+    Ok(())
 }
 
 fn plugin_capability_digest(capabilities: &[PluginCapability]) -> Result<String> {

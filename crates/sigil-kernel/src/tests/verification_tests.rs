@@ -2732,7 +2732,7 @@ fn restore_invalidates_previous_passed_verification() {
 }
 
 #[test]
-fn child_worktree_passed_evidence_does_not_transfer_to_parent_after_merge() {
+fn verification_child_worktree_passed_evidence_does_not_transfer_to_parent_after_merge() {
     let link = ChildVerificationReceiptLinked {
         parent_session_id: "parent-session".to_owned(),
         child_session_id: "child-session".to_owned(),

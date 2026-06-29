@@ -13,14 +13,15 @@ use sigil_kernel::{
     AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry,
     AgentProfileCapturedEntry, AgentProfileId, AgentRole, AgentRouteId, AgentRouteStatus,
     AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunInput,
-    AgentRunInterruptedEntry, AgentRunResult, AgentThreadId, AgentThreadResult,
+    AgentRunInterruptedEntry, AgentRunOptions, AgentRunResult, AgentThreadId, AgentThreadResult,
     AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
     AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
     ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, Provider, ProviderCapabilities,
     RunEvent, Session, SessionRef, SessionStats, TaskChildSessionEntry, TaskChildSessionRunOutput,
     TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
     TaskRouteId, TaskRouteStatus, TaskStepSpec, TaskSubagentApprovalRouteEntry, ToolApproval,
-    ToolCall, ToolErrorKind, ToolRegistryScope, ToolSpec, WorkspaceRootSnapshot, child_session_ref,
+    ToolCall, ToolErrorKind, ToolRegistryScope, ToolSpec, WorkspaceRootSnapshot,
+    changeset_only_child_tool_registry, child_session_ref, decode_changeset_only_child_output,
 };
 
 use crate::{
@@ -1141,15 +1142,16 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         };
         let child_input = request.child_input.clone();
         let options = request.options.clone();
-        let output = match agent
-            .run_with_approval_input(
-                &mut child_session,
-                child_input,
-                options,
-                handler,
-                &mut route_handler,
-            )
-            .await
+        let output = match run_task_child_agent_for_step(
+            agent,
+            &mut child_session,
+            child_input,
+            options,
+            &request.step,
+            handler,
+            &mut route_handler,
+        )
+        .await
         {
             Ok(output) => output,
             Err(error) => {
@@ -1171,6 +1173,48 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
                 return Err(error);
             }
         };
+        let changeset_proposal = if request.step.effective_isolation()
+            == sigil_kernel::TaskIsolationMode::ChangesetOnly
+        {
+            match decode_changeset_only_child_output(&output.result.final_text) {
+                Ok(proposal) => Some(proposal),
+                Err(error) => {
+                    append_task_child_session(
+                        route_handler.parent_session,
+                        handler,
+                        &request,
+                        &child_task_id,
+                        &child_session_ref,
+                        TaskChildSessionStatus::Failed,
+                        None,
+                    )?;
+                    self.supervisor.record_task_child_failure(
+                        route_handler.parent_session,
+                        handler,
+                        &child_thread,
+                        format!("{error:#}"),
+                    )?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let changeset_only_after_snapshot_id =
+            if let Some(base_snapshot_id) = request.changeset_only_base_snapshot_id.as_deref() {
+                Some(
+                    sigil_kernel::validate_changeset_only_parent_snapshot_unchanged_for_task(
+                        route_handler.parent_session,
+                        &request.task,
+                        request.plan_version,
+                        &request.step,
+                        &request.options,
+                        base_snapshot_id,
+                    )?,
+                )
+            } else {
+                None
+            };
         let final_answer_ref = agent_final_answer_ref(&child_session_ref, &output.result);
         let final_text = output.result.final_text;
         let outcome = output.outcome;
@@ -1209,7 +1253,48 @@ impl TaskChildSessionRunner for AgentSupervisorTaskChildRunner {
         Ok(TaskChildSessionRunOutput {
             final_text,
             outcome,
+            changeset_proposal,
+            changeset_only_after_snapshot_id,
         })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_task_child_agent_for_step<H, A>(
+    agent: &BoxedAgent,
+    child_session: &mut Session,
+    child_input: AgentRunInput,
+    options: AgentRunOptions,
+    step: &TaskStepSpec,
+    handler: &mut H,
+    approval_handler: &mut A,
+) -> Result<sigil_kernel::AgentRunOutput>
+where
+    H: EventHandler + Send,
+    A: ApprovalHandler + Send,
+{
+    if step.effective_isolation() == sigil_kernel::TaskIsolationMode::ChangesetOnly {
+        let scoped_tools = changeset_only_child_tool_registry(agent.tool_registry());
+        agent
+            .run_with_approval_input_and_tool_registry(
+                child_session,
+                child_input,
+                options,
+                scoped_tools,
+                handler,
+                approval_handler,
+            )
+            .await
+    } else {
+        agent
+            .run_with_approval_input(
+                child_session,
+                child_input,
+                options,
+                handler,
+                approval_handler,
+            )
+            .await
     }
 }
 
@@ -1493,7 +1578,13 @@ fn tool_scope_has_unguarded_write_capability(scope: &ToolRegistryScope) -> bool 
 
 #[cfg(test)]
 const WRITE_CAPABLE_TOOL_NAMES: &[&str] = &["write_file", "edit_file", "apply_changeset", "bash"];
-const UNGUARDED_WRITE_TOOL_NAMES: &[&str] = &["write_file", "edit_file", "bash"];
+const UNGUARDED_WRITE_TOOL_NAMES: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "apply_changeset",
+    "bash",
+];
 const WRITE_CAPABLE_TOOL_PREFIXES: &[&str] = &["mcp__"];
 
 fn main_thread_id() -> Result<AgentThreadId> {

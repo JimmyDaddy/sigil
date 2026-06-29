@@ -85,6 +85,12 @@ pub enum DurableEventType {
     ChildVerificationReceiptLinked,
     ChildChangesetMerged,
     AgentMergeApplied,
+    WriteLeaseAcquired,
+    WriteLeaseReleased,
+    IsolatedWorkspaceCreated,
+    IsolatedChangeSetProduced,
+    MergeReviewRequested,
+    MergeReviewResolved,
     JobIntentRecorded,
     StepLeaseRecorded,
     StepLeaseHeartbeatRecorded,
@@ -133,6 +139,12 @@ impl DurableEventType {
             Self::ChildVerificationReceiptLinked => "child_verification_receipt_linked",
             Self::ChildChangesetMerged => "child_changeset_merged",
             Self::AgentMergeApplied => "agent_merge_applied",
+            Self::WriteLeaseAcquired => "write_lease_acquired",
+            Self::WriteLeaseReleased => "write_lease_released",
+            Self::IsolatedWorkspaceCreated => "isolated_workspace_created",
+            Self::IsolatedChangeSetProduced => "isolated_changeset_produced",
+            Self::MergeReviewRequested => "merge_review_requested",
+            Self::MergeReviewResolved => "merge_review_resolved",
             Self::JobIntentRecorded => "job_intent_recorded",
             Self::StepLeaseRecorded => "step_lease_recorded",
             Self::StepLeaseHeartbeatRecorded => "step_lease_heartbeat_recorded",
@@ -181,6 +193,12 @@ impl DurableEventType {
             "child_verification_receipt_linked" => Self::ChildVerificationReceiptLinked,
             "child_changeset_merged" => Self::ChildChangesetMerged,
             "agent_merge_applied" => Self::AgentMergeApplied,
+            "write_lease_acquired" => Self::WriteLeaseAcquired,
+            "write_lease_released" => Self::WriteLeaseReleased,
+            "isolated_workspace_created" => Self::IsolatedWorkspaceCreated,
+            "isolated_changeset_produced" => Self::IsolatedChangeSetProduced,
+            "merge_review_requested" => Self::MergeReviewRequested,
+            "merge_review_resolved" => Self::MergeReviewResolved,
             "job_intent_recorded" => Self::JobIntentRecorded,
             "step_lease_recorded" => Self::StepLeaseRecorded,
             "step_lease_heartbeat_recorded" => Self::StepLeaseHeartbeatRecorded,
@@ -266,6 +284,12 @@ pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
     DurableEventType::ChildVerificationReceiptLinked,
     DurableEventType::ChildChangesetMerged,
     DurableEventType::AgentMergeApplied,
+    DurableEventType::WriteLeaseAcquired,
+    DurableEventType::WriteLeaseReleased,
+    DurableEventType::IsolatedWorkspaceCreated,
+    DurableEventType::IsolatedChangeSetProduced,
+    DurableEventType::MergeReviewRequested,
+    DurableEventType::MergeReviewResolved,
     DurableEventType::JobIntentRecorded,
     DurableEventType::StepLeaseRecorded,
     DurableEventType::StepLeaseHeartbeatRecorded,
@@ -506,6 +530,12 @@ pub enum DurableDomainEvent {
     ChildVerificationReceiptLinked(DomainPayload),
     ChildChangesetMerged(DomainPayload),
     AgentMergeApplied(DomainPayload),
+    WriteLeaseAcquired(DomainPayload),
+    WriteLeaseReleased(DomainPayload),
+    IsolatedWorkspaceCreated(DomainPayload),
+    IsolatedChangeSetProduced(DomainPayload),
+    MergeReviewRequested(DomainPayload),
+    MergeReviewResolved(DomainPayload),
     JobIntentRecorded(DomainPayload),
     StepLeaseRecorded(DomainPayload),
     StepLeaseHeartbeatRecorded(DomainPayload),
@@ -562,6 +592,12 @@ impl DurableDomainEvent {
             }
             Self::ChildChangesetMerged(_) => DurableEventType::ChildChangesetMerged,
             Self::AgentMergeApplied(_) => DurableEventType::AgentMergeApplied,
+            Self::WriteLeaseAcquired(_) => DurableEventType::WriteLeaseAcquired,
+            Self::WriteLeaseReleased(_) => DurableEventType::WriteLeaseReleased,
+            Self::IsolatedWorkspaceCreated(_) => DurableEventType::IsolatedWorkspaceCreated,
+            Self::IsolatedChangeSetProduced(_) => DurableEventType::IsolatedChangeSetProduced,
+            Self::MergeReviewRequested(_) => DurableEventType::MergeReviewRequested,
+            Self::MergeReviewResolved(_) => DurableEventType::MergeReviewResolved,
             Self::JobIntentRecorded(_) => DurableEventType::JobIntentRecorded,
             Self::StepLeaseRecorded(_) => DurableEventType::StepLeaseRecorded,
             Self::StepLeaseHeartbeatRecorded(_) => DurableEventType::StepLeaseHeartbeatRecorded,
@@ -610,6 +646,12 @@ impl DurableDomainEvent {
             | Self::ChildVerificationReceiptLinked(payload)
             | Self::ChildChangesetMerged(payload)
             | Self::AgentMergeApplied(payload)
+            | Self::WriteLeaseAcquired(payload)
+            | Self::WriteLeaseReleased(payload)
+            | Self::IsolatedWorkspaceCreated(payload)
+            | Self::IsolatedChangeSetProduced(payload)
+            | Self::MergeReviewRequested(payload)
+            | Self::MergeReviewResolved(payload)
             | Self::JobIntentRecorded(payload)
             | Self::StepLeaseRecorded(payload)
             | Self::StepLeaseHeartbeatRecorded(payload)
@@ -663,6 +705,7 @@ pub enum TypedDomainEvent {
     TerminalTask(TerminalTaskEntry),
     ChangeSetProposed(ChangeSet),
     ChangeSetApplied(ChangeSetResult),
+    WriteIsolation(ControlEntry),
     Other(DomainEvent),
 }
 
@@ -726,6 +769,14 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                 &event,
             )?)
         }
+        DurableEventType::WriteLeaseAcquired
+        | DurableEventType::WriteLeaseReleased
+        | DurableEventType::IsolatedWorkspaceCreated
+        | DurableEventType::IsolatedChangeSetProduced
+        | DurableEventType::MergeReviewRequested
+        | DurableEventType::MergeReviewResolved => {
+            TypedDomainEvent::WriteIsolation(decode_write_isolation_record(&event)?)
+        }
         DurableEventType::TaskStatusChanged => {
             let control = decode_control_entry(&event)?;
             match control {
@@ -751,6 +802,14 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                     }
                     ControlEntry::ChangeSetApplied(result) => {
                         TypedDomainEvent::ChangeSetApplied(result)
+                    }
+                    ControlEntry::WriteLeaseAcquired(_)
+                    | ControlEntry::WriteLeaseReleased(_)
+                    | ControlEntry::IsolatedWorkspaceCreated(_)
+                    | ControlEntry::IsolatedChangeSetProduced(_)
+                    | ControlEntry::MergeReviewRequested(_)
+                    | ControlEntry::MergeReviewResolved(_) => {
+                        TypedDomainEvent::WriteIsolation(control)
                     }
                     _ => typed_other_event(event_type, event)?,
                 }
@@ -813,6 +872,40 @@ fn decode_step_lease_heartbeat_recorded(event: &StoredEvent) -> Result<StepLease
     match decode_control_entry(event)? {
         ControlEntry::StepLeaseHeartbeatRecorded(entry) => Ok(entry),
         _ => bail!("step lease heartbeat event carried non-step-lease-heartbeat payload"),
+    }
+}
+
+fn decode_write_isolation_record(event: &StoredEvent) -> Result<ControlEntry> {
+    let control = decode_control_entry(event)?;
+    let valid = matches!(
+        (&event.event_kind(), &control),
+        (
+            Some(DurableEventType::WriteLeaseAcquired),
+            ControlEntry::WriteLeaseAcquired(_)
+        ) | (
+            Some(DurableEventType::WriteLeaseReleased),
+            ControlEntry::WriteLeaseReleased(_)
+        ) | (
+            Some(DurableEventType::IsolatedWorkspaceCreated),
+            ControlEntry::IsolatedWorkspaceCreated(_)
+        ) | (
+            Some(DurableEventType::IsolatedChangeSetProduced),
+            ControlEntry::IsolatedChangeSetProduced(_)
+        ) | (
+            Some(DurableEventType::MergeReviewRequested),
+            ControlEntry::MergeReviewRequested(_)
+        ) | (
+            Some(DurableEventType::MergeReviewResolved),
+            ControlEntry::MergeReviewResolved(_)
+        )
+    );
+    if valid {
+        Ok(control)
+    } else {
+        bail!(
+            "{} event carried non-write-isolation control payload",
+            event.event_type
+        )
     }
 }
 
@@ -895,6 +988,16 @@ fn domain_event_from_payload(
         }
         DurableEventType::ChildChangesetMerged => DurableDomainEvent::ChildChangesetMerged(payload),
         DurableEventType::AgentMergeApplied => DurableDomainEvent::AgentMergeApplied(payload),
+        DurableEventType::WriteLeaseAcquired => DurableDomainEvent::WriteLeaseAcquired(payload),
+        DurableEventType::WriteLeaseReleased => DurableDomainEvent::WriteLeaseReleased(payload),
+        DurableEventType::IsolatedWorkspaceCreated => {
+            DurableDomainEvent::IsolatedWorkspaceCreated(payload)
+        }
+        DurableEventType::IsolatedChangeSetProduced => {
+            DurableDomainEvent::IsolatedChangeSetProduced(payload)
+        }
+        DurableEventType::MergeReviewRequested => DurableDomainEvent::MergeReviewRequested(payload),
+        DurableEventType::MergeReviewResolved => DurableDomainEvent::MergeReviewResolved(payload),
         DurableEventType::JobIntentRecorded => DurableDomainEvent::JobIntentRecorded(payload),
         DurableEventType::StepLeaseRecorded => DurableDomainEvent::StepLeaseRecorded(payload),
         DurableEventType::StepLeaseHeartbeatRecorded => {
@@ -1381,6 +1484,12 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::ReadinessEvaluated(_) => "readiness_evaluated",
         ControlEntry::ChildVerificationReceiptLinked(_) => "child_verification_receipt_linked",
         ControlEntry::WorkspaceTrustDecision(_) => "workspace_trust_decision",
+        ControlEntry::WriteLeaseAcquired(_) => "write_lease_acquired",
+        ControlEntry::WriteLeaseReleased(_) => "write_lease_released",
+        ControlEntry::IsolatedWorkspaceCreated(_) => "isolated_workspace_created",
+        ControlEntry::IsolatedChangeSetProduced(_) => "isolated_changeset_produced",
+        ControlEntry::MergeReviewRequested(_) => "merge_review_requested",
+        ControlEntry::MergeReviewResolved(_) => "merge_review_resolved",
         ControlEntry::AgentProfileCaptured(_) => "agent_profile_captured",
         ControlEntry::AgentProfileTrustDecision(_) => "agent_profile_trust_decision",
         ControlEntry::AgentProfilePolicyDecision(_) => "agent_profile_policy_decision",

@@ -9,6 +9,7 @@
 - Roadmap: [Sigil Capability Roadmap v1.0 / Frozen](../sigil-capability-roadmap.md)
 - Depends on: [RFC-0001 Durable Event Stream and Event Taxonomy](0001-durable-event-stream-and-event-taxonomy.md)
 - Related: [RFC-0008 Thread Projection and Agent Graph Observability](0008-thread-projection-and-agent-graph-observability.md)
+- Productization track: [RFC-0016 Desktop and App Server Productization](0016-desktop-app-server-productization.md)
 
 ## 1. Summary
 
@@ -146,7 +147,7 @@ Core DTO semantics implemented:
 
 Productization remains:
 
-- Localhost listener, OpenAPI and SSE productization are separate slices.
+- Localhost listener, OpenAPI and SSE productization are tracked in RFC-0016.
 - 2026-06-29 审计确认：当前实现是 DTO / registry / runner bridge，不是完整 app-server。E12.4 / E12.5 继续 gated；没有 auth/local-only listener 前，不应宣传 OpenAPI/SSE productization。
 
 ## 9. Acceptance Criteria

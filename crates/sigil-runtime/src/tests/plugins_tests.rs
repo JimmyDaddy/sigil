@@ -7,10 +7,10 @@ use anyhow::Result;
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     AgentConfig, ApprovalMode, CodeIntelligenceConfig, CompactionConfig, McpServerStartup,
-    MemoryConfig, PermissionConfig, PluginCapability, PluginSkillRef, PluginTrustDecision,
-    PluginTrustEntry, ProviderCapabilities, ReasoningStreamSupport, RootConfig, SessionConfig,
-    SkillConfig, SkillIndexSnapshot, SkillSource, TaskConfig, ToolAccess, ToolCategory, ToolEffect,
-    WorkspaceConfig,
+    MemoryConfig, PermissionConfig, PluginCapability, PluginHookKind, PluginSkillRef,
+    PluginTrustDecision, PluginTrustEntry, ProviderCapabilities, ReasoningStreamSupport,
+    RootConfig, SessionConfig, SkillConfig, SkillIndexSnapshot, SkillSource, TaskConfig,
+    ToolAccess, ToolCategory, ToolEffect, WorkspaceConfig,
 };
 
 use super::{
@@ -169,9 +169,15 @@ required = false
                 path: "skills/review/SKILL.md".into()
             },
             PluginCapability::Hook {
+                id: "pre_tool_use".to_owned(),
                 event: "pre_tool_use".to_owned(),
+                hook_kind: PluginHookKind::Event,
                 command: "scripts/check-tool-policy.sh".to_owned(),
                 args: Vec::new(),
+                declared_effect: ToolEffect::Unknown,
+                timeout_ms: 30_000,
+                input_schema_digest: None,
+                output_schema_digest: None,
                 approval: ApprovalMode::Ask,
                 egress_logging: true,
                 allow_secrets: false,
@@ -237,8 +243,15 @@ name = "Repository Review"
 version = "0.1.0"
 
 [[hooks]]
+id = "context-pack"
 event = "pre_tool_use"
+kind = "context"
 command = "scripts/check-tool-policy.sh"
+args = ["--strict"]
+declared_effect = "workspace_write"
+timeout_ms = 45000
+input_schema_digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+output_schema_digest = "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 approval = "deny"
 egress_logging = false
 allow_secrets = true
@@ -278,7 +291,26 @@ allow_secrets = true
     assert!(hook_policy.execution_backend_required);
     assert!(!hook_policy.egress_logging);
     assert!(hook_policy.allow_secrets);
-    assert_eq!(hook_policy.mutation_effect, ToolEffect::Unknown);
+    assert_eq!(hook_policy.mutation_effect, ToolEffect::WorkspaceWrite);
+    assert!(matches!(
+        hook,
+        PluginCapability::Hook {
+            id,
+            hook_kind,
+            args,
+            timeout_ms,
+            input_schema_digest,
+            output_schema_digest,
+            ..
+        } if id == "context-pack"
+            && *hook_kind == PluginHookKind::Context
+            && args == &vec!["--strict".to_owned()]
+            && *timeout_ms == 45_000
+            && input_schema_digest.as_deref()
+                == Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            && output_schema_digest.as_deref()
+                == Some("sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
+    ));
 
     let mcp_policy = mcp.policy_summary();
     assert_eq!(mcp_policy.tool_category, Some(ToolCategory::Mcp));

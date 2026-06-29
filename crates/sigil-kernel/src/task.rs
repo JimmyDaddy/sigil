@@ -1181,7 +1181,30 @@ impl TaskGraphProjection {
         statuses: &BTreeMap<(u32, TaskStepId), TaskStepProjection>,
         options: TaskReadyQueueOptions,
     ) -> TaskReadyQueue {
+        self.ready_queue_with_active_write_lease(statuses, options, false)
+    }
+
+    #[must_use]
+    pub fn ready_queue_with_active_write_lease(
+        &self,
+        statuses: &BTreeMap<(u32, TaskStepId), TaskStepProjection>,
+        options: TaskReadyQueueOptions,
+        active_write_lease: bool,
+    ) -> TaskReadyQueue {
         let ready_steps = self.ready_steps(statuses);
+        if active_write_lease {
+            return TaskReadyQueue {
+                read_only_batch: Vec::new(),
+                sequential_step: None,
+                deferred: ready_steps
+                    .into_iter()
+                    .map(|step| TaskReadyDeferredStep {
+                        step_id: step.step_id.clone(),
+                        reason: TaskReadyDeferredReason::ActiveWriteLease,
+                    })
+                    .collect(),
+            };
+        }
         let running_steps = self.running_steps(statuses);
         let running_write = running_steps
             .iter()
@@ -1326,6 +1349,7 @@ pub struct TaskReadyDeferredStep {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskReadyDeferredReason {
+    ActiveWriteLease,
     ConcurrencyBudget,
     RunningReadOnly,
     RunningWrite,

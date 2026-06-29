@@ -3077,16 +3077,28 @@ fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
         .iter()
         .filter_map(|capability| match capability {
             PluginCapability::Hook {
+                id,
                 event,
+                hook_kind,
                 command,
                 args,
+                declared_effect,
+                timeout_ms,
+                input_schema_digest,
+                output_schema_digest,
                 approval,
                 egress_logging,
                 allow_secrets,
             } => Some((
+                id,
                 event,
+                hook_kind,
                 command,
                 args,
+                declared_effect,
+                timeout_ms,
+                input_schema_digest,
+                output_schema_digest,
                 approval,
                 egress_logging,
                 allow_secrets,
@@ -3099,16 +3111,47 @@ fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
         lines.push(render_config_readonly_row("Hook count", "0"));
         return lines;
     }
-    for (index, (event, command, args, approval, egress_logging, allow_secrets)) in
-        hooks.iter().enumerate()
+    for (
+        index,
+        (
+            id,
+            event,
+            hook_kind,
+            command,
+            args,
+            declared_effect,
+            timeout_ms,
+            input_schema_digest,
+            output_schema_digest,
+            approval,
+            egress_logging,
+            allow_secrets,
+        ),
+    ) in hooks.iter().enumerate()
     {
         let label = format!("Hook {}", index + 1);
         lines.push(render_config_readonly_row(&label, event.as_str()));
+        lines.push(render_config_readonly_row(
+            &format!("{label} contract"),
+            &format!(
+                "{} · {} · {} ms · {}",
+                id.as_str(),
+                format!("{hook_kind:?}").to_ascii_lowercase(),
+                timeout_ms,
+                declared_effect.as_str()
+            ),
+        ));
         push_wrapped_readonly_rows(
             &mut lines,
             &format!("{label} command"),
             &command_with_args(command, args),
         );
+        if let Some(digest) = input_schema_digest {
+            push_wrapped_readonly_rows(&mut lines, &format!("{label} input schema"), digest);
+        }
+        if let Some(digest) = output_schema_digest {
+            push_wrapped_readonly_rows(&mut lines, &format!("{label} output schema"), digest);
+        }
         lines.push(render_config_readonly_row(
             &format!("{label} policy"),
             &plugin_capability_policy_summary(approval, **egress_logging, **allow_secrets),

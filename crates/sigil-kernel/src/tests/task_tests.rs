@@ -593,6 +593,44 @@ fn task_dag_read_only_ready_queue_blocks_when_write_is_running() -> Result<()> {
 }
 
 #[test]
+fn task_dag_ready_queue_blocks_when_write_lease_is_active() -> Result<()> {
+    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![
+            read_step("read", Vec::new())?,
+            write_step("write", Vec::new())?,
+        ],
+        reason: None,
+    })?;
+
+    let queue = graph.ready_queue_with_active_write_lease(
+        &std::collections::BTreeMap::new(),
+        TaskReadyQueueOptions::new(4),
+        true,
+    );
+
+    assert!(queue.read_only_batch.is_empty());
+    assert!(queue.sequential_step.is_none());
+    assert_eq!(
+        queue
+            .deferred
+            .iter()
+            .map(|step| (step.step_id.as_str().to_owned(), step.reason))
+            .collect::<Vec<_>>(),
+        vec![
+            ("read".to_owned(), TaskReadyDeferredReason::ActiveWriteLease),
+            (
+                "write".to_owned(),
+                TaskReadyDeferredReason::ActiveWriteLease
+            ),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn task_dag_read_only_write_denial_rejects_shared_read_only_write_step() -> Result<()> {
     let unsafe_write = TaskStepSpec {
         step_id: step_id("write")?,

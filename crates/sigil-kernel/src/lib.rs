@@ -26,6 +26,7 @@ pub mod terminal_task;
 pub mod time;
 pub mod tool;
 pub mod verification;
+pub mod write_isolation;
 
 pub use agent::{
     Agent, AgentDelegationRequirement, AgentRunInput, AgentRunOptions, AgentRunOutcome,
@@ -68,13 +69,16 @@ pub use config::{
     default_user_config_path, preferred_config_path, resolve_workspace_root,
 };
 pub use context_engine::{
-    ContextBodyRef, ContextDigestText, ContextDigestTextKind, ContextDigestV0,
-    ContextDigestV0Builder, ContextEgressDecisionId, ContextInclusionReason, ContextItem,
-    ContextItemId, ContextPackOptions, ContextPackPlacement, ContextRepoRevision,
-    ContextSensitivity, ContextSource, ContextTruncation, ContextTrustLevel,
-    DEFAULT_SESSION_ARCHIVE_MAX_INDEX_BYTES, PackedContext, SessionArchive, SessionArchiveEntry,
-    SessionArchiveEntryId, SessionArchiveSearchHit, estimate_context_token_cost,
-    pack_context_items,
+    CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION, CONTEXT_QUALITY_REPORT_SCHEMA_VERSION, ContextBodyRef,
+    ContextDigestText, ContextDigestTextKind, ContextDigestV0, ContextDigestV0Builder,
+    ContextEgressDecisionId, ContextInclusionReason, ContextItem, ContextItemId,
+    ContextPackOptions, ContextPackPlacement, ContextQualityEvidencePack, ContextQualityFinding,
+    ContextQualityFindingKind, ContextQualityItemEvidence, ContextQualityReportArtifacts,
+    ContextQualityReportManifest, ContextRepoRevision, ContextSensitivity, ContextSource,
+    ContextTruncation, ContextTrustLevel, DEFAULT_SESSION_ARCHIVE_MAX_INDEX_BYTES, PackedContext,
+    SessionArchive, SessionArchiveEntry, SessionArchiveEntryId, SessionArchiveSearchHit,
+    build_context_quality_evidence_pack, estimate_context_token_cost, pack_context_items,
+    write_context_quality_evidence_artifacts,
 };
 pub use conversation_queue::{
     ConversationInputEditedEntry, ConversationInputKind, ConversationInputQueueControlAction,
@@ -83,10 +87,11 @@ pub use conversation_queue::{
     ConversationInputTarget, ConversationQueueItemProjection, ConversationQueueProjection,
 };
 pub use eval::{
-    EvalCase, EvalCaseId, EvalCaseRunner, EvalCaseRunnerOptions, EvalEvidenceId, EvalEvidenceKind,
-    EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalFakeToolAction, EvalFakeToolRegistry,
-    EvalFixtureId, EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRepoCheckPromotion,
-    EvalReportArtifact, EvalReportArtifacts, EvalReportRecord, EvalRequiredAction,
+    EvalCase, EvalCaseId, EvalCaseProvenance, EvalCaseRunner, EvalCaseRunnerOptions,
+    EvalEvidenceId, EvalEvidenceKind, EvalEvidenceRef, EvalFailure, EvalFailureKind,
+    EvalFakeToolAction, EvalFakeToolRegistry, EvalFixtureId, EvalOutcomeKind, EvalProviderScript,
+    EvalProviderStep, EvalRepoCheckPromotion, EvalReportArtifact, EvalReportArtifacts,
+    EvalReportManifest, EvalReportMatrixEntry, EvalReportRecord, EvalRequiredAction,
     EvalRequiredActionKind, EvalResult, EvalRunId, EvalRunMetadata, EvalStepId, EvalToolCallId,
     EvalToolCallStatus, EvalToolCallSummary, EvalWorkspaceFixture, write_eval_report_artifacts,
 };
@@ -139,21 +144,26 @@ pub use plan::{
     PlanApprovalScope, PlanApprovedEntry, plan_text_hash, plan_workspace_paths,
 };
 pub use plugin::{
-    PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginCapability, PluginCapabilityPolicy,
-    PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef, PluginStateProjection,
+    DEFAULT_PLUGIN_HOOK_TIMEOUT_MS, MAX_PLUGIN_HOOK_TIMEOUT_MS, PLUGIN_MANIFEST_DIGEST_PREFIX,
+    PluginAgentRef, PluginCapability, PluginCapabilityPolicy, PluginHookKind, PluginHookRef,
+    PluginManifest, PluginManifestSnapshot, PluginSkillRef, PluginStateProjection,
     PluginTrustDecision, PluginTrustEntry, plugin_manifest_digests_match,
-    validate_plugin_capability_digest, validate_plugin_id, validate_plugin_manifest_digest,
-    validate_plugin_version,
+    validate_plugin_capability_digest, validate_plugin_hook_schema_digest, validate_plugin_id,
+    validate_plugin_manifest_digest, validate_plugin_version,
 };
 pub use projection::{
     AGENT_GRAPH_PROJECTION_SCHEMA_VERSION, DISPATCH_TRACE_PROJECTION_SCHEMA_VERSION,
     DispatchTraceEntry, DispatchTraceKind, DispatchTraceProjectionSnapshot, DispatchTraceStatus,
     DispatchTraceSummary, DispatchTraceUsageSummary, FILE_PROJECTION_STORE_SCHEMA_VERSION,
-    FileProjectionStore, ProjectionRebuildOutput, ProjectionRebuildReport, ProjectionStore,
-    ProjectionStoreState, SESSION_LIST_PROJECTION_SCHEMA_VERSION, SessionListProjectionEntry,
+    FileProjectionStore, ProjectionPressureEvaluation, ProjectionPressureReason,
+    ProjectionPressureSample, ProjectionPressureThresholds, ProjectionQueryContract,
+    ProjectionQueryFamily, ProjectionQueryScope, ProjectionQuerySurface, ProjectionRebuildOutput,
+    ProjectionRebuildReport, ProjectionStore, ProjectionStoreRecommendation, ProjectionStoreState,
+    SESSION_LIST_PROJECTION_SCHEMA_VERSION, SessionListProjectionEntry,
     SessionListProjectionSnapshot, SessionListReadinessSummary, SessionListTaskSummary,
     SessionListUsageSummary, agent_graph_projection_from_records,
-    dispatch_trace_projection_from_records, session_list_projection_from_records,
+    dispatch_trace_projection_from_records, evaluate_projection_pressure,
+    session_list_projection_from_records,
 };
 pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
@@ -197,8 +207,10 @@ pub use task_memory::{
 };
 pub use task_orchestrator::{
     LegacyTaskChildSessionRunner, SequentialTaskOrchestrator, SequentialTaskRequest,
-    SequentialTaskRunOutput, SequentialTaskStepOutput, TaskChildSessionRunOutput,
-    TaskChildSessionRunRequest, TaskChildSessionRunner,
+    SequentialTaskRunOutput, SequentialTaskStepOutput, TaskChildChangeSetProposal,
+    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
+    changeset_only_child_tool_registry, changeset_only_child_tool_scope,
+    decode_changeset_only_child_output, validate_changeset_only_parent_snapshot_unchanged_for_task,
 };
 pub use terminal_task::{
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
@@ -235,4 +247,12 @@ pub use verification::{
     build_workspace_snapshot, build_workspace_snapshot_for_event, check_specs_from_user_config,
     default_scope_excludes, discover_candidate_checks, discover_candidate_checks_with_user_config,
     evaluate_readiness, run_verification_check, stable_workspace_id, verification_check_run_id,
+};
+pub use write_isolation::{
+    IsolatedChangeSetProduced, IsolatedWorkspaceBackend, IsolatedWorkspaceCreated, MergeDecision,
+    MergeReviewId, MergeReviewParentMutationOutcome, MergeReviewParentMutationRequest,
+    MergeReviewRequested, MergeReviewResolved, MergeReviewState, WriteIsolationAgentId,
+    WriteIsolationMode, WriteIsolationProjection, WriteIsolationRecordRef, WriteLeaseAcquired,
+    WriteLeaseId, WriteLeaseReleaseStatus, WriteLeaseReleased, WriteLeaseScope, WriteLeaseState,
+    resolve_merge_review_parent_mutation,
 };

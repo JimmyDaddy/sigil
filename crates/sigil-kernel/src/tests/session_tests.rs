@@ -23,13 +23,13 @@ use crate::{
     ProviderContinuationState, ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus,
     RedactionState, RequiredAction, ResponseHandle, RunStatus, SandboxProfileRequirement,
     SessionRef, SessionStreamRecord, SkillDescriptor, SkillIndexSnapshot, SkillLoadEntry,
-    SkillRunMode, SkillSource, SkillTrustState, StoredEvent, TaskId, TaskPlanEntry, TaskPlanStatus,
-    TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepStatus,
-    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, ToolAccess,
-    ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry, ToolExecutionEntry,
-    ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot, ToolResultMeta,
-    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent, UsageStats,
-    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
+    SkillRunMode, SkillSource, SkillTrustState, StoredEvent, TaskId, TaskMemoryV1, TaskPlanEntry,
+    TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
+    TaskStepStatus, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ToolAccess, ToolApprovalAuditAction, ToolApprovalEntry, ToolEffect, ToolEgressEntry,
+    ToolExecutionEntry, ToolExecutionStatus, ToolPreview, ToolPreviewFile, ToolPreviewSnapshot,
+    ToolResultMeta, ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, TypedDomainEvent,
+    UsageStats, VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
     VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
     VerificationReceipt, VerificationRecordedEntry, VerificationScope, VerificationStateProjection,
     VerificationVerdict, VisibleCompletionState, WorkspaceMutationDetected, WorkspaceRootSnapshot,
@@ -55,6 +55,14 @@ fn request_memory_text(request: &crate::CompletionRequest) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn request_context_v0_messages(request: &crate::CompletionRequest) -> Vec<&ModelMessage> {
+    request
+        .messages
+        .iter()
+        .filter(|message| message.id.starts_with("context:v0:"))
+        .collect()
 }
 
 fn memory_snapshot_count(entries: &[SessionLogEntry]) -> usize {
@@ -3720,6 +3728,112 @@ fn build_request_persists_prefix_snapshot_in_memory_and_store() -> Result<()> {
             SessionLogEntry::Control(ControlEntry::MemorySnapshotCaptured(_))
         )
     }));
+    Ok(())
+}
+
+#[test]
+fn build_request_injects_context_v0_dynamic_suffix_from_session_archive() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_user_message(ModelMessage::user("Earlier parser investigation"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("The note parser rejected note.txt input during validation".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user(
+        "What did we learn about parser validation?",
+    ))?;
+
+    let first = session.build_request(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+    let context_messages = request_context_v0_messages(&first);
+    assert_eq!(context_messages.len(), 1);
+    let context = context_messages[0];
+    assert!(matches!(context.role, crate::MessageRole::System));
+    let context_text = context.content.as_deref().expect("context content");
+    assert!(context_text.contains("sigil_context_v0"));
+    assert!(context_text.contains("session-archive:"));
+    assert!(context_text.contains("parser rejected"));
+    assert!(context_text.contains("retrieval_hit"));
+
+    let context_index = first
+        .messages
+        .iter()
+        .position(|message| message.id == context.id)
+        .expect("context message position");
+    let first_conversation_index = first
+        .messages
+        .iter()
+        .position(|message| message.content.as_deref() == Some("Earlier parser investigation"))
+        .expect("first projected conversation message");
+    assert!(context_index < first_conversation_index);
+
+    let second = session.build_request(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+    let second_context = request_context_v0_messages(&second);
+    assert_eq!(second_context.len(), 1);
+    assert_eq!(context.id, second_context[0].id);
+    assert_eq!(context.content, second_context[0].content);
+    Ok(())
+}
+
+#[test]
+fn build_request_injects_context_v0_from_latest_task_memory() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    session.append_control(ControlEntry::CompactionApplied(CompactionRecord {
+        summary: "typed task memory summary".to_owned(),
+        compacted_message_count: 0,
+        retained_tail_message_count: 0,
+        task_memory: Some(TaskMemoryV1 {
+            memory_id: "runtime-memory".to_owned(),
+            branch_id: None,
+            valid_for_snapshot: "snapshot-runtime".to_owned(),
+            supersedes: None,
+            source_event_ids: vec!["event-objective".to_owned()],
+            objective: "Keep context provenance inspectable".to_owned(),
+            constraints: Vec::new(),
+            decisions: Vec::new(),
+            files_changed: Vec::new(),
+            commands_run: Vec::new(),
+            verification_results: Vec::new(),
+            failed_attempts: Vec::new(),
+            risks: Vec::new(),
+            unresolved_issues: Vec::new(),
+        }),
+    }))?;
+    session.append_user_message(ModelMessage::user("What context should I keep in mind?"))?;
+
+    let request = session.build_request(
+        temp.path(),
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+
+    let context_messages = request_context_v0_messages(&request);
+    assert_eq!(context_messages.len(), 1);
+    let context_text = context_messages[0]
+        .content
+        .as_deref()
+        .expect("context content");
+    assert!(context_text.contains("task-memory:runtime-memory:objective"));
+    assert!(context_text.contains("Keep context provenance inspectable"));
+    assert!(context_text.contains("event-objective"));
     Ok(())
 }
 

@@ -10,19 +10,22 @@ use crate::{
     ChildVerificationReceiptLinked, CompletionCriteria, ControlEntry, DispatchTraceKind,
     DispatchTraceProjectionSnapshot, DispatchTraceStatus, DurableEventType, EventClass,
     EvidenceReceipt, EvidenceScope, FileProjectionStore, JsonlSessionStore, PathTrustZone,
-    PermissionRisk, ProjectionApplyDecision, ProjectionStore, ReadinessEvaluatedEntry,
-    ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction, RunStatus,
-    SandboxProfileRequirement, SessionListProjectionSnapshot, SessionLogEntry, SessionRef,
-    SessionStreamRecord, TaskId, TaskRunEntry, TaskRunStatus, ToolAccess, ToolApprovalAuditAction,
-    ToolApprovalEntry, ToolApprovalUserDecision, ToolEffect, ToolError, ToolErrorKind,
-    ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolResultMeta, ToolSubjectAudit,
-    ToolSubjectKind, ToolSubjectScope, UsageStats, VerificationAutoRunPolicy, VerificationBinding,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
+    PermissionRisk, ProjectionApplyDecision, ProjectionPressureReason, ProjectionPressureSample,
+    ProjectionPressureThresholds, ProjectionQueryContract, ProjectionQueryFamily,
+    ProjectionQueryScope, ProjectionQuerySurface, ProjectionStore, ProjectionStoreRecommendation,
+    ReadinessEvaluatedEntry, ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction,
+    RunStatus, SandboxProfileRequirement, SessionListProjectionSnapshot, SessionLogEntry,
+    SessionRef, SessionStreamRecord, TaskId, TaskRunEntry, TaskRunStatus, ToolAccess,
+    ToolApprovalAuditAction, ToolApprovalEntry, ToolApprovalUserDecision, ToolEffect, ToolError,
+    ToolErrorKind, ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolResultMeta,
+    ToolSubjectAudit, ToolSubjectKind, ToolSubjectScope, UsageStats, VerificationAutoRunPolicy,
+    VerificationBinding, VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
     VerificationPolicyChangedEntry, VerificationRecordedEntry, VerificationScope,
     VerificationStateProjection, VerificationStateProjectionSnapshot, VerificationVerdict,
     VisibleCompletionState, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
     WorkspaceTrustRequirement, agent_graph_projection_from_records,
-    dispatch_trace_projection_from_records, session_list_projection_from_records,
+    dispatch_trace_projection_from_records, evaluate_projection_pressure,
+    session_list_projection_from_records,
 };
 
 fn workspace_trust_entry(workspace_id: &str, trust_event: &str) -> WorkspaceTrustDecisionEntry {
@@ -958,4 +961,136 @@ fn file_projection_store_fails_closed_when_cursor_is_ahead_of_old_record() -> Re
         Some(2)
     );
     Ok(())
+}
+
+#[test]
+fn projection_pressure_keeps_file_backed_without_product_pressure() {
+    let contract = ProjectionQueryContract::new(
+        ProjectionQueryFamily::SessionList,
+        ProjectionQueryScope::SingleSession,
+        ProjectionQuerySurface::Tui,
+    );
+    let sample = ProjectionPressureSample::new(contract);
+
+    let evaluation =
+        evaluate_projection_pressure(&sample, &ProjectionPressureThresholds::default());
+
+    assert_eq!(
+        evaluation.recommendation,
+        ProjectionStoreRecommendation::KeepFileBacked
+    );
+    assert_eq!(
+        evaluation.reasons,
+        vec![ProjectionPressureReason::NoPressure]
+    );
+}
+
+#[test]
+fn projection_pressure_measures_cross_session_product_queries_before_escalating() {
+    let contract = ProjectionQueryContract::new(
+        ProjectionQueryFamily::SessionList,
+        ProjectionQueryScope::CrossSession,
+        ProjectionQuerySurface::Desktop,
+    )
+    .with_pagination(true)
+    .with_filtering(true)
+    .with_sorting(true);
+    let sample = ProjectionPressureSample {
+        product_surface_count: 2,
+        sessions_scanned: 75,
+        records_scanned: 12_000,
+        ..ProjectionPressureSample::new(contract)
+    };
+
+    let evaluation =
+        evaluate_projection_pressure(&sample, &ProjectionPressureThresholds::default());
+
+    assert_eq!(
+        evaluation.recommendation,
+        ProjectionStoreRecommendation::MeasureMore
+    );
+    assert!(
+        evaluation
+            .reasons
+            .contains(&ProjectionPressureReason::CrossSessionQuery)
+    );
+    assert!(
+        evaluation
+            .reasons
+            .contains(&ProjectionPressureReason::PaginationRequired)
+    );
+    assert!(
+        evaluation
+            .reasons
+            .contains(&ProjectionPressureReason::SessionScanHigh)
+    );
+}
+
+#[test]
+fn projection_pressure_escalates_when_scan_and_latency_cross_thresholds() {
+    let contract = ProjectionQueryContract::new(
+        ProjectionQueryFamily::DispatchTrace,
+        ProjectionQueryScope::CrossSession,
+        ProjectionQuerySurface::Http,
+    )
+    .with_search(true);
+    let sample = ProjectionPressureSample {
+        sessions_scanned: 300,
+        records_scanned: 75_000,
+        repeated_log_scans: 6,
+        product_surface_count: 3,
+        query_latency_ms: Some(450),
+        rebuild_latency_ms: Some(2_500),
+        ..ProjectionPressureSample::new(contract)
+    };
+
+    let evaluation =
+        evaluate_projection_pressure(&sample, &ProjectionPressureThresholds::default());
+
+    assert_eq!(
+        evaluation.recommendation,
+        ProjectionStoreRecommendation::EscalateMaterializedView
+    );
+    assert!(
+        evaluation
+            .reasons
+            .contains(&ProjectionPressureReason::RecordScanHigh)
+    );
+    assert!(
+        evaluation
+            .reasons
+            .contains(&ProjectionPressureReason::QueryLatencyHigh)
+    );
+    assert!(
+        evaluation
+            .reasons
+            .contains(&ProjectionPressureReason::RepeatedLogScanHigh)
+    );
+}
+
+#[test]
+fn projection_pressure_keeps_fresh_runtime_state_out_of_projection_escalation() {
+    let contract = ProjectionQueryContract::new(
+        ProjectionQueryFamily::AgentGraph,
+        ProjectionQueryScope::CrossSession,
+        ProjectionQuerySurface::Desktop,
+    )
+    .with_fresh_live_state(true);
+    let sample = ProjectionPressureSample {
+        records_scanned: 100_000,
+        query_latency_ms: Some(1_000),
+        ..ProjectionPressureSample::new(contract)
+    };
+
+    let evaluation =
+        evaluate_projection_pressure(&sample, &ProjectionPressureThresholds::default());
+
+    assert_eq!(
+        evaluation.recommendation,
+        ProjectionStoreRecommendation::KeepFileBacked
+    );
+    assert_eq!(
+        evaluation.reasons,
+        vec![ProjectionPressureReason::LiveStateBoundary]
+    );
 }

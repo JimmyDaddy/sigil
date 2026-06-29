@@ -2,15 +2,18 @@ use anyhow::Result;
 use serde_json::json;
 
 use crate::{
+    ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, ControlEntry,
     DurableEventType, EvalCase, EvalCaseRunner, EvalCaseRunnerOptions, EvalEvidenceKind,
     EvalEvidenceRef, EvalFailure, EvalFailureKind, EvalFakeToolAction, EvalFakeToolRegistry,
     EvalOutcomeKind, EvalProviderScript, EvalProviderStep, EvalRepoCheckPromotion,
     EvalRequiredActionKind, EvalResult, EvalRunMetadata, EvalToolCallStatus, EvalToolCallSummary,
-    EvalWorkspaceFixture, EventClass, JsonlSessionStore, MutationEventRecorder,
-    MutationObservedState, MutationReconciled, MutationResolution, PermissionConfig,
-    PermissionPolicy, PermissionPreset, ProjectionCursor, RunStatus, SessionStreamRecord,
-    StoredEvent, ToolAccess, ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject,
-    VerificationVerdict, VisibleCompletionState, WorkspaceTrust, bytes_hash,
+    EvalWorkspaceFixture, EventClass, JsonlSessionStore, MemoryConfig, MergeDecision,
+    MergeReviewId, MergeReviewParentMutationRequest, MergeReviewRequested, ModelMessage,
+    MutationBatchStatus, MutationEventRecorder, MutationObservedState, MutationReconciled,
+    MutationResolution, PermissionConfig, PermissionPolicy, PermissionPreset, ProjectionCursor,
+    RunStatus, Session, SessionLogEntry, SessionStreamRecord, StoredEvent, ToolAccess,
+    ToolCategory, ToolPreviewCapability, ToolSpec, ToolSubject, VerificationVerdict,
+    VisibleCompletionState, WorkspaceTrust, bytes_hash, resolve_merge_review_parent_mutation,
     write_eval_report_artifacts,
 };
 
@@ -996,6 +999,7 @@ fn eval_report_writes_deterministic_artifacts() -> Result<()> {
 
     assert!(artifacts.results_jsonl_path.exists());
     assert!(artifacts.summary_path.exists());
+    assert!(artifacts.manifest_path.exists());
     assert!(artifacts.artifact_dir.exists());
     let jsonl = std::fs::read_to_string(&artifacts.results_jsonl_path)?;
     assert_eq!(jsonl.lines().count(), results.len());
@@ -1014,12 +1018,70 @@ fn eval_report_writes_deterministic_artifacts() -> Result<()> {
     assert!(retained_artifacts >= 4);
     let summary = std::fs::read_to_string(&artifacts.summary_path)?;
     assert!(summary.contains("# Sigil Deterministic Eval Report"));
-    assert!(summary.contains("Total cases: 6"));
+    assert!(summary.contains("Total cases: 9"));
     assert!(summary.contains("VerifiedSuccess"));
     assert!(summary.contains("CompletedUnverified"));
     assert!(summary.contains("FailedVerification"));
     assert!(summary.contains("PermissionDenied"));
     assert!(summary.contains("Stale"));
+    assert!(summary.contains("active-context-v0-request-adoption"));
+    assert!(summary.contains("active-merge-parent-mutation-handoff"));
+    assert!(summary.contains("active-sandbox-receipt-truthfulness"));
+    assert!(summary.contains("provenance: rfc=`RFC-0013"));
+    assert!(summary.contains("expected: outcome="));
+    assert!(summary.contains("evidence cursor:"));
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&artifacts.manifest_path)?)?;
+    assert_eq!(manifest["report_schema_version"], 2);
+    assert_eq!(manifest["deterministic"], true);
+    assert_eq!(manifest["case_count"], 9);
+    assert_eq!(manifest["required_case_count"], 9);
+    assert_eq!(manifest["config_hashes"][0], "sha256:deterministic");
+    assert_eq!(manifest["tool_schema_digests"][0], "sha256:deterministic");
+    assert!(
+        manifest["rfc_refs"]
+            .as_array()
+            .expect("manifest rfc_refs should be an array")
+            .iter()
+            .any(|value| value == "RFC-0013")
+    );
+    assert!(
+        manifest["slice_refs"]
+            .as_array()
+            .expect("manifest slice_refs should be an array")
+            .iter()
+            .any(|value| value == "E13.13")
+    );
+    let matrix = manifest["matrix"]
+        .as_array()
+        .expect("manifest matrix should be an array");
+    assert_eq!(matrix.len(), 9);
+    let active_merge = manifest["matrix"]
+        .as_array()
+        .expect("manifest matrix should be an array")
+        .iter()
+        .find(|entry| entry["case_id"] == "active-merge-parent-mutation-handoff")
+        .expect("active merge matrix row");
+    assert_eq!(active_merge["expected_outcome"], "completed_unverified");
+    assert_eq!(active_merge["observed_outcome"], "completed_unverified");
+    assert_eq!(active_merge["expected_verification_verdict"], "missing");
+    assert_eq!(active_merge["observed_verification_verdict"], "missing");
+    assert!(active_merge["durable_stream_cursor"].is_object());
+    assert!(
+        manifest["outcome_counts"]["VerifiedSuccess"]
+            .as_u64()
+            .expect("VerifiedSuccess count should be an integer")
+            >= 1
+    );
+    assert_eq!(
+        manifest["results_jsonl_path"],
+        artifacts.results_jsonl_path.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        manifest["summary_path"],
+        artifacts.summary_path.to_string_lossy().as_ref()
+    );
 
     Ok(())
 }
@@ -1028,21 +1090,27 @@ fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<
     Ok(vec![
         run_report_case(
             workspace_root,
-            EvalCase::deterministic(
-                "report-read-only",
-                "read-only task",
-                EvalWorkspaceFixture::new("fixture-report-read-only")
-                    .with_file("README.md", "Sigil"),
-                EvalProviderScript::new(vec![
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-read".to_owned(),
-                        tool_name: "read_repo".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::FinalAnswer {
-                        text: "read only".to_owned(),
-                    },
-                ]),
+            matrix_case(
+                EvalCase::deterministic(
+                    "report-read-only",
+                    "read-only task",
+                    EvalWorkspaceFixture::new("fixture-report-read-only")
+                        .with_file("README.md", "Sigil"),
+                    EvalProviderScript::new(vec![
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-read".to_owned(),
+                            tool_name: "read_repo".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::FinalAnswer {
+                            text: "read only".to_owned(),
+                        },
+                    ]),
+                ),
+                "RFC-0013",
+                "E13.3",
+                EvalOutcomeKind::Completed,
+                VerificationVerdict::NotApplicable,
             ),
             EvalFakeToolRegistry::new().with_tool(
                 "read_repo",
@@ -1053,25 +1121,32 @@ fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<
         )?,
         run_report_case(
             workspace_root,
-            EvalCase::deterministic(
-                "report-verified",
-                "write then verify",
-                EvalWorkspaceFixture::new("fixture-report-verified").with_file("note.txt", "old"),
-                EvalProviderScript::new(vec![
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-write".to_owned(),
-                        tool_name: "write_note".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-check".to_owned(),
-                        tool_name: "check_note".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::FinalAnswer {
-                        text: "verified".to_owned(),
-                    },
-                ]),
+            matrix_case(
+                EvalCase::deterministic(
+                    "report-verified",
+                    "write then verify",
+                    EvalWorkspaceFixture::new("fixture-report-verified")
+                        .with_file("note.txt", "old"),
+                    EvalProviderScript::new(vec![
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-write".to_owned(),
+                            tool_name: "write_note".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-check".to_owned(),
+                            tool_name: "check_note".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::FinalAnswer {
+                            text: "verified".to_owned(),
+                        },
+                    ]),
+                ),
+                "RFC-0003",
+                "E13.4",
+                EvalOutcomeKind::VerifiedSuccess,
+                VerificationVerdict::Passed,
             ),
             EvalFakeToolRegistry::new()
                 .with_tool(
@@ -1090,20 +1165,27 @@ fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<
         )?,
         run_report_case(
             workspace_root,
-            EvalCase::deterministic(
-                "report-missing",
-                "write without verification",
-                EvalWorkspaceFixture::new("fixture-report-missing").with_file("note.txt", "old"),
-                EvalProviderScript::new(vec![
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-write".to_owned(),
-                        tool_name: "write_note".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::FinalAnswer {
-                        text: "done".to_owned(),
-                    },
-                ]),
+            matrix_case(
+                EvalCase::deterministic(
+                    "report-missing",
+                    "write without verification",
+                    EvalWorkspaceFixture::new("fixture-report-missing")
+                        .with_file("note.txt", "old"),
+                    EvalProviderScript::new(vec![
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-write".to_owned(),
+                            tool_name: "write_note".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::FinalAnswer {
+                            text: "done".to_owned(),
+                        },
+                    ]),
+                ),
+                "RFC-0003",
+                "E13.4",
+                EvalOutcomeKind::CompletedUnverified,
+                VerificationVerdict::Missing,
             ),
             EvalFakeToolRegistry::new().with_tool(
                 "write_note",
@@ -1115,30 +1197,36 @@ fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<
         )?,
         run_report_case(
             workspace_root,
-            EvalCase::deterministic(
-                "report-stale",
-                "write verify then write again",
-                EvalWorkspaceFixture::new("fixture-report-stale").with_file("note.txt", "old"),
-                EvalProviderScript::new(vec![
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-write-1".to_owned(),
-                        tool_name: "write_note".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-check".to_owned(),
-                        tool_name: "check_note".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-write-2".to_owned(),
-                        tool_name: "rewrite_note".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::FinalAnswer {
-                        text: "stale".to_owned(),
-                    },
-                ]),
+            matrix_case(
+                EvalCase::deterministic(
+                    "report-stale",
+                    "write verify then write again",
+                    EvalWorkspaceFixture::new("fixture-report-stale").with_file("note.txt", "old"),
+                    EvalProviderScript::new(vec![
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-write-1".to_owned(),
+                            tool_name: "write_note".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-check".to_owned(),
+                            tool_name: "check_note".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-write-2".to_owned(),
+                            tool_name: "rewrite_note".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::FinalAnswer {
+                            text: "stale".to_owned(),
+                        },
+                    ]),
+                ),
+                "RFC-0003",
+                "E13.5",
+                EvalOutcomeKind::CompletedUnverified,
+                VerificationVerdict::Stale,
             ),
             EvalFakeToolRegistry::new()
                 .with_tool(
@@ -1164,22 +1252,28 @@ fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<
         )?,
         run_report_case(
             workspace_root,
-            EvalCase::deterministic(
-                "report-failed",
-                "write then failing check",
-                EvalWorkspaceFixture::new("fixture-report-failed").with_file("note.txt", "old"),
-                EvalProviderScript::new(vec![
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-write".to_owned(),
-                        tool_name: "write_note".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-check".to_owned(),
-                        tool_name: "check_note".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                ]),
+            matrix_case(
+                EvalCase::deterministic(
+                    "report-failed",
+                    "write then failing check",
+                    EvalWorkspaceFixture::new("fixture-report-failed").with_file("note.txt", "old"),
+                    EvalProviderScript::new(vec![
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-write".to_owned(),
+                            tool_name: "write_note".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-check".to_owned(),
+                            tool_name: "check_note".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                    ]),
+                ),
+                "RFC-0003",
+                "E13.6",
+                EvalOutcomeKind::FailedVerification,
+                VerificationVerdict::Failed,
             ),
             EvalFakeToolRegistry::new()
                 .with_tool(
@@ -1199,23 +1293,29 @@ fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<
         )?,
         run_report_case(
             workspace_root,
-            EvalCase::deterministic(
-                "report-denied",
-                "untrusted repo check without promotion",
-                EvalWorkspaceFixture::new("fixture-report-denied")
-                    .with_file(".github/workflows/ci.yml", "cargo test"),
-                EvalProviderScript::new(vec![
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-discover".to_owned(),
-                        tool_name: "discover_repo_check".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                    EvalProviderStep::ToolCall {
-                        tool_call_id: "call-run-check".to_owned(),
-                        tool_name: "repo_check".to_owned(),
-                        args_json: "{}".to_owned(),
-                    },
-                ]),
+            matrix_case(
+                EvalCase::deterministic(
+                    "report-denied",
+                    "untrusted repo check without promotion",
+                    EvalWorkspaceFixture::new("fixture-report-denied")
+                        .with_file(".github/workflows/ci.yml", "cargo test"),
+                    EvalProviderScript::new(vec![
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-discover".to_owned(),
+                            tool_name: "discover_repo_check".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                        EvalProviderStep::ToolCall {
+                            tool_call_id: "call-run-check".to_owned(),
+                            tool_name: "repo_check".to_owned(),
+                            args_json: "{}".to_owned(),
+                        },
+                    ]),
+                ),
+                "RFC-0003",
+                "E13.7",
+                EvalOutcomeKind::PermissionDenied,
+                VerificationVerdict::NotApplicable,
             )
             .with_workspace_trust(WorkspaceTrust::Unknown),
             EvalFakeToolRegistry::new()
@@ -1234,6 +1334,9 @@ fn deterministic_report_results(workspace_root: &std::path::Path) -> Result<Vec<
                     },
                 ),
         )?,
+        active_context_v0_request_adoption_result(workspace_root)?,
+        active_merge_parent_mutation_handoff_result(workspace_root)?,
+        active_sandbox_receipt_truthfulness_result(workspace_root)?,
     ])
 }
 
@@ -1246,6 +1349,318 @@ fn run_report_case(
     EvalCaseRunner::new(registry)
         .with_options(EvalCaseRunnerOptions::with_workspace_root(case_workspace))
         .run(case)
+}
+
+fn matrix_case(
+    mut case: EvalCase,
+    rfc_id: &str,
+    slice_id: &str,
+    expected_outcome: EvalOutcomeKind,
+    expected_verification_verdict: VerificationVerdict,
+) -> EvalCase {
+    case.metadata = case
+        .metadata
+        .with_provenance(rfc_id, slice_id)
+        .with_expected(expected_outcome, expected_verification_verdict);
+    case
+}
+
+fn active_metadata(
+    case_id: &str,
+    fixture_id: &str,
+    rfc_id: &str,
+    slice_id: &str,
+    expected_outcome: EvalOutcomeKind,
+    expected_verification_verdict: VerificationVerdict,
+) -> EvalRunMetadata {
+    EvalRunMetadata::deterministic(case_id, format!("{case_id}-run"), fixture_id)
+        .with_provenance("RFC-0013", "E13.13")
+        .with_provenance(rfc_id, slice_id)
+        .with_expected(expected_outcome, expected_verification_verdict)
+}
+
+fn active_context_v0_request_adoption_result(
+    workspace_root: &std::path::Path,
+) -> Result<EvalResult> {
+    let case_id = "active-context-v0-request-adoption";
+    let case_workspace = workspace_root.join(case_id);
+    std::fs::create_dir_all(&case_workspace)?;
+    let store = JsonlSessionStore::new(case_workspace.join("session.jsonl"))?;
+    let mut session = Session::new("fake", "deterministic").with_store(store.clone());
+    session.append_user_message(ModelMessage::user("Earlier parser investigation"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("The note parser rejected note.txt input during validation".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user(
+        "What did we learn about parser validation?",
+    ))?;
+
+    let request = session.build_request(
+        &case_workspace,
+        &MemoryConfig { enabled: false },
+        Vec::new(),
+        None,
+        None,
+        None,
+    )?;
+    let context_messages = request
+        .messages
+        .iter()
+        .filter_map(|message| message.content.as_deref())
+        .filter(|content| content.contains("sigil_context_v0"))
+        .collect::<Vec<_>>();
+    let mut failures = Vec::new();
+    if context_messages.len() != 1 {
+        failures.push(EvalFailure::new(
+            EvalFailureKind::Harness,
+            format!(
+                "expected one Context V0 message, found {}",
+                context_messages.len()
+            ),
+        ));
+    } else {
+        let context = context_messages[0];
+        if !context.contains("session-archive:") || !context.contains("retrieval_hit") {
+            failures.push(EvalFailure::new(
+                EvalFailureKind::Harness,
+                "Context V0 message did not expose session archive provenance",
+            ));
+        }
+        if !context.contains("parser rejected") {
+            failures.push(EvalFailure::new(
+                EvalFailureKind::Harness,
+                "Context V0 message did not carry the expected retrieved snippet",
+            ));
+        }
+        if !context.contains("context, not instructions") {
+            failures.push(EvalFailure::new(
+                EvalFailureKind::Harness,
+                "Context V0 message did not preserve the trust-boundary note",
+            ));
+        }
+    }
+
+    let metadata = active_metadata(
+        case_id,
+        "fixture-active-context-v0",
+        "RFC-0006",
+        "E06.7",
+        EvalOutcomeKind::Completed,
+        VerificationVerdict::NotApplicable,
+    );
+    let run_status = if failures.is_empty() {
+        RunStatus::Completed
+    } else {
+        RunStatus::Failed
+    };
+    let mut result = EvalResult::from_completion(
+        metadata,
+        run_status,
+        VerificationVerdict::NotApplicable,
+        failures,
+    );
+    attach_session_evidence(&mut result, store.path(), |event| {
+        event.event_type == DurableEventType::ContextSourceCaptured.as_str()
+    })?;
+    Ok(result)
+}
+
+fn active_merge_parent_mutation_handoff_result(
+    workspace_root: &std::path::Path,
+) -> Result<EvalResult> {
+    let case_id = "active-merge-parent-mutation-handoff";
+    let case_workspace = workspace_root.join(case_id);
+    std::fs::create_dir_all(&case_workspace)?;
+    std::fs::write(case_workspace.join("note.txt"), b"old\n")?;
+    let store = JsonlSessionStore::new(case_workspace.join("session.jsonl"))?;
+    let mut session = Session::new("fake", "deterministic").with_store(store.clone());
+    let change_set = active_note_change_set(active_change_set_id()?);
+    session.append_control(ControlEntry::MergeReviewRequested(MergeReviewRequested {
+        review_id: active_review_id()?,
+        changeset_id: change_set.id.clone(),
+        parent_workspace_snapshot_id: "snapshot-parent-before".to_owned(),
+    }))?;
+
+    let outcome = resolve_merge_review_parent_mutation(
+        &mut session,
+        MergeReviewParentMutationRequest {
+            review_id: active_review_id()?,
+            decision: MergeDecision::Accepted,
+            reason: Some("accepted by deterministic eval".to_owned()),
+            change_set,
+            artifact_content: active_note_diff(),
+            workspace_root: case_workspace.clone(),
+            tool_call_id: "eval-merge-review".to_owned(),
+        },
+    )?;
+
+    let mut failures = Vec::new();
+    if outcome.batch_status != Some(MutationBatchStatus::Applied) {
+        failures.push(EvalFailure::new(
+            EvalFailureKind::Integrity,
+            "accepted merge review did not apply a parent mutation batch",
+        ));
+    }
+    if std::fs::read_to_string(case_workspace.join("note.txt"))? != "new\n" {
+        failures.push(EvalFailure::new(
+            EvalFailureKind::Integrity,
+            "accepted merge review did not mutate the parent workspace file",
+        ));
+    }
+
+    let metadata = active_metadata(
+        case_id,
+        "fixture-active-merge-parent",
+        "RFC-0014",
+        "E14.5",
+        EvalOutcomeKind::CompletedUnverified,
+        VerificationVerdict::Missing,
+    );
+    let run_status = if failures.is_empty() {
+        RunStatus::Completed
+    } else {
+        RunStatus::Failed
+    };
+    let mut result =
+        EvalResult::from_completion(metadata, run_status, VerificationVerdict::Missing, failures);
+    result.changed_files.push("note.txt".into());
+    attach_session_evidence(&mut result, store.path(), |event| {
+        matches!(
+            event.event_type.as_str(),
+            "mutation_committed" | "write_committed" | "child_changeset_merged"
+        )
+    })?;
+    Ok(result)
+}
+
+fn active_sandbox_receipt_truthfulness_result(
+    workspace_root: &std::path::Path,
+) -> Result<EvalResult> {
+    let case_id = "active-sandbox-receipt-truthfulness";
+    let case_workspace = workspace_root.join(case_id);
+    std::fs::create_dir_all(&case_workspace)?;
+    let session_log_path = case_workspace.join("session.jsonl");
+    let event = append_eval_note(
+        &session_log_path,
+        "sandbox_receipt_truthfulness",
+        json!({
+            "backend": "macos_seatbelt",
+            "claimed_network_isolation": false,
+            "required_network_isolation": true,
+            "receipt_truthfulness": "backend may not claim unproven network isolation",
+        }),
+    )?;
+    let metadata = active_metadata(
+        case_id,
+        "fixture-active-sandbox-truthfulness",
+        "RFC-0005",
+        "E05.6",
+        EvalOutcomeKind::SandboxDenied,
+        VerificationVerdict::Inconclusive,
+    );
+    let mut failure = EvalFailure::new(
+        EvalFailureKind::SandboxDenied,
+        "sandbox receipt cannot claim network isolation that the backend did not prove",
+    );
+    failure.evidence.push(EvalEvidenceRef::durable_event(
+        "sandbox_receipt_truthfulness",
+        &event.event_id,
+    ));
+    let mut result = EvalResult::from_completion(
+        metadata,
+        RunStatus::Failed,
+        VerificationVerdict::Inconclusive,
+        vec![failure],
+    );
+    result.session_log_path = Some(session_log_path);
+    result.durable_stream_cursor = Some(cursor_for_event(&event));
+    result.evidence.push(EvalEvidenceRef::durable_event(
+        "sandbox_receipt_truthfulness",
+        event.event_id,
+    ));
+    Ok(result)
+}
+
+fn active_change_set_id() -> Result<ChangeSetId> {
+    ChangeSetId::new("active-change-1")
+}
+
+fn active_review_id() -> Result<MergeReviewId> {
+    MergeReviewId::new("active-review-1")
+}
+
+fn active_note_change_set(id: ChangeSetId) -> ChangeSet {
+    ChangeSet {
+        id,
+        title: "Update note".to_owned(),
+        summary: "Update note.txt".to_owned(),
+        risk: ChangeSetRisk::Low,
+        files: vec![ChangeSetFile {
+            path: "note.txt".to_owned(),
+            previous_path: None,
+            action: ChangeSetFileAction::Update,
+            risk: ChangeSetRisk::Low,
+            before_hash: Some(bytes_hash(b"old\n")),
+            after_hash: Some(bytes_hash(b"new\n")),
+            diff_hash: Some(bytes_hash(active_note_diff().as_bytes())),
+            additions: 1,
+            deletions: 1,
+            validations: Vec::new(),
+        }],
+        validations: Vec::new(),
+    }
+}
+
+fn active_note_diff() -> String {
+    "--- a/note.txt\n+++ b/note.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n".to_owned()
+}
+
+fn attach_session_evidence(
+    result: &mut EvalResult,
+    session_log_path: &std::path::Path,
+    mut include: impl FnMut(&StoredEvent) -> bool,
+) -> Result<()> {
+    result.session_log_path = Some(session_log_path.to_path_buf());
+    let mut last_event = None;
+    for record in JsonlSessionStore::read_event_records(session_log_path)? {
+        if let SessionStreamRecord::Stored(event) = record {
+            if include(&event) {
+                result.evidence.push(EvalEvidenceRef::durable_event(
+                    event.event_type.clone(),
+                    &event.event_id,
+                ));
+            }
+            last_event = Some(event);
+        }
+    }
+    result.durable_stream_cursor = last_event.as_ref().map(cursor_for_event);
+    Ok(())
+}
+
+fn append_eval_note(
+    session_log_path: &std::path::Path,
+    label: &str,
+    payload: serde_json::Value,
+) -> Result<StoredEvent> {
+    let store = JsonlSessionStore::new(session_log_path)?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::Note {
+        kind: "eval_harness".to_owned(),
+        data: json!({
+            "label": label,
+            "payload": payload,
+        }),
+    }))
+}
+
+fn cursor_for_event(event: &StoredEvent) -> ProjectionCursor {
+    ProjectionCursor {
+        session_id: event.session_id.clone(),
+        projection_schema_version: crate::session::SESSION_ENTRY_PROJECTION_SCHEMA_VERSION,
+        last_applied_stream_sequence: event.stream_sequence,
+        last_applied_event_id: event.event_id.clone(),
+        last_applied_record_checksum: event.record_checksum.clone(),
+    }
 }
 
 #[test]

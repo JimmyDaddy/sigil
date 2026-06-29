@@ -1034,6 +1034,44 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 result.status.as_str(),
                 result.file_results.len()
             ),
+            ControlEntry::WriteLeaseAcquired(entry) => format!(
+                "[ctl] write lease {} acquired isolation={} scope={} owner={}",
+                truncate_session_view_text(entry.lease_id.as_str(), 48),
+                entry.isolation_mode.as_str(),
+                write_lease_scope_label(&entry.scope),
+                truncate_session_view_text(&entry.owner_agent_id, 48)
+            ),
+            ControlEntry::WriteLeaseReleased(entry) => format!(
+                "[ctl] write lease {} released status={}",
+                truncate_session_view_text(entry.lease_id.as_str(), 48),
+                entry.status.as_str()
+            ),
+            ControlEntry::IsolatedWorkspaceCreated(entry) => format!(
+                "[ctl] isolated workspace {} backend={} mode={} base={}",
+                truncate_session_view_text(&entry.isolated_workspace_id, 48),
+                entry.backend.as_str(),
+                entry.isolation_mode.as_str(),
+                truncate_session_view_text(&entry.base_snapshot_id, 16)
+            ),
+            ControlEntry::IsolatedChangeSetProduced(entry) => format!(
+                "[ctl] isolated changeset {} mode={} subjects={} artifact={}",
+                entry.changeset_id.as_str(),
+                entry.source_isolation.as_str(),
+                entry.touched_subjects.len(),
+                truncate_session_view_text(entry.artifact_ref.as_deref().unwrap_or("-"), 48)
+            ),
+            ControlEntry::MergeReviewRequested(entry) => format!(
+                "[ctl] merge review {} changeset={} snapshot={}",
+                truncate_session_view_text(entry.review_id.as_str(), 48),
+                entry.changeset_id.as_str(),
+                truncate_session_view_text(&entry.parent_workspace_snapshot_id, 16)
+            ),
+            ControlEntry::MergeReviewResolved(entry) => format!(
+                "[ctl] merge review {} decision={} reason={}",
+                truncate_session_view_text(entry.review_id.as_str(), 48),
+                entry.decision.as_str(),
+                truncate_session_view_text(entry.reason.as_deref().unwrap_or("-"), 64)
+            ),
             ControlEntry::TerminalTask(task) => format!(
                 "[ctl] terminal {} status={} log={}",
                 task.handle.task_id.as_str(),
@@ -1485,6 +1523,13 @@ fn step_lease_status_label(status: sigil_kernel::StepLeaseStatus) -> &'static st
         sigil_kernel::StepLeaseStatus::Released => "released",
         sigil_kernel::StepLeaseStatus::Interrupted => "interrupted",
         sigil_kernel::StepLeaseStatus::Abandoned => "abandoned",
+    }
+}
+
+fn write_lease_scope_label(scope: &sigil_kernel::WriteLeaseScope) -> &'static str {
+    match scope {
+        sigil_kernel::WriteLeaseScope::Workspace => "workspace",
+        sigil_kernel::WriteLeaseScope::Subjects(_) => "subjects",
     }
 }
 

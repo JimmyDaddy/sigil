@@ -2,14 +2,22 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fmt,
+    future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    str,
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use sigil_kernel::{PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision};
 use thiserror::Error as ThisError;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::broadcast,
+};
 
 /// Environment variable read by the HTTP adapter for its bearer token by default.
 pub const DEFAULT_HTTP_TOKEN_ENV: &str = "SIGIL_HTTP_TOKEN";
@@ -19,8 +27,12 @@ pub const HTTP_RUN_EVENT_SSE_NAME: &str = "run_event";
 pub const HTTP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 1;
 /// Current protocol command/event surface version.
 pub const HTTP_PROTOCOL_VERSION: u16 = 1;
+/// OpenAPI version emitted for the MVP desktop/app-server command surface.
+pub const HTTP_OPENAPI_VERSION: &str = "3.1.0";
 
 const HTTP_PROTOCOL_CURSOR_PREFIX: &str = "sigil-http-run-v1";
+const HTTP_MAX_HEADER_BYTES: usize = 64 * 1024;
+const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
 
 /// Versioned command envelope shared by future HTTP, IDE, and TUI command bridges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +97,316 @@ impl<T> HttpCommandEnvelope<T> {
         }
         Ok(())
     }
+}
+
+/// Returns the MVP OpenAPI description for the local HTTP command surface.
+///
+/// The document intentionally covers only routes implemented by this crate:
+/// health, session creation, run start, and approval decision submission.
+#[must_use]
+pub fn http_openapi_document() -> Value {
+    json!({
+        "openapi": HTTP_OPENAPI_VERSION,
+        "info": {
+            "title": "Sigil Local App Server API",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "Localhost-only adapter surface for desktop and future local clients."
+        },
+        "security": [{ "BearerAuth": [] }],
+        "paths": {
+            "/health": {
+                "get": {
+                    "summary": "Local listener health check",
+                    "security": [],
+                    "responses": {
+                        "200": {
+                            "description": "Listener is running",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/HealthResponse" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/sessions": {
+                "post": {
+                    "summary": "Create a local session handle",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/SessionCreateRequest" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Session snapshot",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/SessionSnapshot" }
+                                }
+                            }
+                        },
+                        "401": { "$ref": "#/components/responses/Unauthorized" }
+                    }
+                }
+            },
+            "/sessions/{session_id}/runs": {
+                "post": {
+                    "summary": "Start a run in a session",
+                    "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/RunStartCommand" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Run-start command receipt",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/RunStartCommandReceipt" }
+                                }
+                            }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" }
+                    }
+                }
+            },
+            "/runs/{run_id}/approvals/{call_id}": {
+                "post": {
+                    "summary": "Submit an approval decision for a pending tool call",
+                    "parameters": [
+                        { "$ref": "#/components/parameters/RunId" },
+                        { "$ref": "#/components/parameters/CallId" }
+                    ],
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": { "$ref": "#/components/schemas/ApprovalDecisionCommand" }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Approval command receipt",
+                            "content": {
+                                "application/json": {
+                                    "schema": { "$ref": "#/components/schemas/ApprovalCommandReceipt" }
+                                }
+                            }
+                        },
+                        "400": { "$ref": "#/components/responses/BadRequest" },
+                        "401": { "$ref": "#/components/responses/Unauthorized" },
+                        "404": { "$ref": "#/components/responses/NotFound" },
+                        "409": { "$ref": "#/components/responses/Conflict" }
+                    }
+                }
+            }
+        },
+        "components": {
+            "securitySchemes": {
+                "BearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer"
+                }
+            },
+            "parameters": {
+                "SessionId": {
+                    "name": "session_id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                "RunId": {
+                    "name": "run_id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                },
+                "CallId": {
+                    "name": "call_id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }
+            },
+            "responses": {
+                "BadRequest": { "description": "Invalid request body or command payload", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+                "Unauthorized": { "description": "Bearer token is missing or invalid", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+                "NotFound": { "description": "Session, run, or route was not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } },
+                "Conflict": { "description": "Command is stale, mismatched, expired, or not pending", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorResponse" } } } }
+            },
+            "schemas": {
+                "HealthResponse": {
+                    "type": "object",
+                    "required": ["status"],
+                    "properties": { "status": { "type": "string", "const": "ok" } }
+                },
+                "SessionCreateRequest": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string" }
+                    }
+                },
+                "SessionSnapshot": {
+                    "type": "object",
+                    "required": ["id", "label", "created_at_ms", "run_ids"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "label": { "type": ["string", "null"] },
+                        "created_at_ms": { "type": "integer", "format": "uint64" },
+                        "run_ids": { "type": "array", "items": { "type": "string" } }
+                    }
+                },
+                "CommandEnvelopeBase": {
+                    "type": "object",
+                    "required": ["protocol_version", "command_id", "client_id", "session_id", "payload"],
+                    "properties": {
+                        "protocol_version": { "type": "integer", "const": HTTP_PROTOCOL_VERSION },
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
+                        "correlation_id": { "type": ["string", "null"] }
+                    }
+                },
+                "RunStartCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": {
+                                "payload": { "$ref": "#/components/schemas/RunStartRequest" }
+                            }
+                        }
+                    ]
+                },
+                "RunStartRequest": {
+                    "type": "object",
+                    "required": ["prompt", "approval_mode"],
+                    "properties": {
+                        "prompt": { "type": "string" },
+                        "approval_mode": { "$ref": "#/components/schemas/RunApprovalMode" }
+                    }
+                },
+                "RunApprovalMode": {
+                    "type": "string",
+                    "enum": ["ask", "allow_readonly", "deny"]
+                },
+                "RunStartCommandReceipt": {
+                    "type": "object",
+                    "required": ["command_id", "client_id", "session_id", "run", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "run": { "$ref": "#/components/schemas/RunSnapshot" },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
+                "RunSnapshot": {
+                    "type": "object",
+                    "required": ["id", "session_id", "status", "prompt", "approval_mode", "created_at_ms", "updated_at_ms", "stream_sequence", "pending_approval_call_ids"],
+                    "properties": {
+                        "id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "status": { "$ref": "#/components/schemas/RunStatus" },
+                        "prompt": { "type": "string" },
+                        "approval_mode": { "$ref": "#/components/schemas/RunApprovalMode" },
+                        "created_at_ms": { "type": "integer", "format": "uint64" },
+                        "updated_at_ms": { "type": "integer", "format": "uint64" },
+                        "stream_sequence": { "type": "integer", "format": "uint64" },
+                        "pending_approval_call_ids": { "type": "array", "items": { "type": "string" } }
+                    }
+                },
+                "RunStatus": {
+                    "type": "string",
+                    "enum": ["starting", "running", "waiting_for_approval", "completed", "cancelled", "failed"]
+                },
+                "ApprovalDecisionCommand": {
+                    "allOf": [
+                        { "$ref": "#/components/schemas/CommandEnvelopeBase" },
+                        {
+                            "type": "object",
+                            "required": ["payload"],
+                            "properties": {
+                                "payload": { "$ref": "#/components/schemas/ApprovalDecisionRequest" }
+                            }
+                        }
+                    ]
+                },
+                "ApprovalDecisionRequest": {
+                    "type": "object",
+                    "required": ["approval_request_id", "tool_call_hash", "policy_version", "expires_at_ms", "decision"],
+                    "properties": {
+                        "approval_request_id": { "type": "string" },
+                        "tool_call_hash": { "type": "string" },
+                        "policy_version": { "type": "string" },
+                        "expires_at_ms": { "type": "integer", "format": "uint64" },
+                        "decision": { "$ref": "#/components/schemas/ApprovalDecision" },
+                        "reason": { "type": ["string", "null"] }
+                    }
+                },
+                "ApprovalDecision": {
+                    "type": "string",
+                    "enum": ["approve", "deny"]
+                },
+                "ApprovalCommandReceipt": {
+                    "type": "object",
+                    "required": ["command_id", "client_id", "session_id", "run_id", "call_id", "decision", "replayed"],
+                    "properties": {
+                        "command_id": { "type": "string" },
+                        "client_id": { "type": "string" },
+                        "session_id": { "type": "string" },
+                        "run_id": { "type": "string" },
+                        "call_id": { "type": "string" },
+                        "expected_stream_sequence": { "type": ["integer", "null"], "format": "uint64" },
+                        "correlation_id": { "type": ["string", "null"] },
+                        "decision": { "$ref": "#/components/schemas/ApprovalDecisionRecord" },
+                        "replayed": { "type": "boolean" }
+                    }
+                },
+                "ApprovalDecisionRecord": {
+                    "type": "object",
+                    "required": ["run_id", "call_id", "decision"],
+                    "properties": {
+                        "run_id": { "type": "string" },
+                        "call_id": { "type": "string" },
+                        "decision": { "type": "string", "enum": ["approved", "denied"] },
+                        "reason": { "type": ["string", "null"] }
+                    }
+                },
+                "ErrorResponse": {
+                    "type": "object",
+                    "required": ["error"],
+                    "properties": {
+                        "error": {
+                            "type": "object",
+                            "required": ["code", "message"],
+                            "properties": {
+                                "code": { "type": "string" },
+                                "message": { "type": "string" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Protocol-version errors for command DTOs.
@@ -302,6 +624,373 @@ pub enum HttpAuthError {
     /// The bearer token did not match the configured token.
     #[error("http bearer token is invalid")]
     InvalidToken,
+}
+
+/// Errors returned by the localhost HTTP listener boundary.
+#[derive(Debug, ThisError)]
+pub enum HttpListenerError {
+    /// Server configuration is unsafe or incomplete.
+    #[error("http listener config is invalid: {message}")]
+    Config { message: String },
+    /// Bearer token configuration is unsafe or incomplete.
+    #[error("http listener auth is invalid: {message}")]
+    Auth { message: String },
+    /// TCP listener or socket I/O failed.
+    #[error("http listener io failed: {source}")]
+    Io {
+        #[from]
+        source: std::io::Error,
+    },
+    /// Incoming HTTP request could not be parsed.
+    #[error("http request is invalid: {message}")]
+    Request { message: String },
+    /// Response serialization failed.
+    #[error("http response serialization failed: {message}")]
+    Response { message: String },
+}
+
+/// Minimal localhost HTTP adapter.
+///
+/// This listener owns only HTTP framing, bearer auth and registry routing. Runtime agent
+/// execution still belongs to the injected `HttpRunDriver`.
+pub struct HttpLocalServer {
+    listener: TcpListener,
+    validator: HttpAuthValidator,
+    registry: Arc<HttpSessionRunRegistry>,
+}
+
+impl HttpLocalServer {
+    /// Binds a local HTTP listener using an already resolved bearer token value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the config fails safety validation, required auth has no token, or
+    /// the TCP listener cannot bind.
+    pub async fn bind(
+        config: HttpServerConfig,
+        token: Option<&str>,
+        registry: Arc<HttpSessionRunRegistry>,
+    ) -> Result<Self, HttpListenerError> {
+        config
+            .validate()
+            .map_err(|error| HttpListenerError::Config {
+                message: error.to_string(),
+            })?;
+        let validator =
+            config
+                .auth
+                .validator_from_token(token)
+                .map_err(|error| HttpListenerError::Auth {
+                    message: error.to_string(),
+                })?;
+        let listener = TcpListener::bind(config.bind_addr()).await?;
+        Ok(Self {
+            listener,
+            validator,
+            registry,
+        })
+    }
+
+    /// Returns the actual bound address.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operating system cannot report the bound address.
+    pub fn local_addr(&self) -> Result<SocketAddr, HttpListenerError> {
+        Ok(self.listener.local_addr()?)
+    }
+
+    /// Serves connections until `shutdown` resolves.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when accepting a TCP connection fails.
+    pub async fn serve_until_shutdown<F>(self, shutdown: F) -> Result<(), HttpListenerError>
+    where
+        F: Future<Output = ()> + Send,
+    {
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                () = &mut shutdown => return Ok(()),
+                accepted = self.listener.accept() => {
+                    let (stream, _) = accepted?;
+                    let validator = self.validator.clone();
+                    let registry = Arc::clone(&self.registry);
+                    tokio::spawn(async move {
+                        let _ = handle_http_connection(stream, validator, registry).await;
+                    });
+                }
+            }
+        }
+    }
+}
+
+async fn handle_http_connection(
+    mut stream: TcpStream,
+    validator: HttpAuthValidator,
+    registry: Arc<HttpSessionRunRegistry>,
+) -> Result<(), HttpListenerError> {
+    let response = match read_http_request(&mut stream).await {
+        Ok(request) => route_http_request(request, &validator, &registry),
+        Err(error) => http_error_response(400, "bad_request", error.to_string()),
+    };
+    write_http_response(&mut stream, response).await
+}
+
+fn route_http_request(
+    request: HttpRequest,
+    validator: &HttpAuthValidator,
+    registry: &HttpSessionRunRegistry,
+) -> HttpResponse {
+    if request.method == "GET" && request.path == "/health" {
+        return json_response(200, json!({ "status": "ok" }));
+    }
+    if request.method != "POST" {
+        return http_error_response(404, "not_found", "http route not found");
+    }
+    if let Err(error) =
+        validator.validate_authorization_header(request.header("authorization").map(String::as_str))
+    {
+        return http_error_response(401, "unauthorized", error.to_string());
+    }
+
+    if request.path == "/sessions" {
+        let Ok(body) = parse_json_body::<HttpSessionCreateRequest>(&request.body) else {
+            return http_error_response(400, "bad_request", "invalid session create body");
+        };
+        let session = registry.create_session(body);
+        return json_response(201, json!(session));
+    }
+
+    if let Some(session_id) = request
+        .path
+        .strip_prefix("/sessions/")
+        .and_then(|suffix| suffix.strip_suffix("/runs"))
+        .filter(|session_id| !session_id.is_empty() && !session_id.contains('/'))
+    {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpRunStartRequest>>(&request.body)
+        else {
+            return http_error_response(400, "bad_request", "invalid run start command body");
+        };
+        return match registry.start_run_command(session_id, command) {
+            Ok(receipt) => json_response(201, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    if let Some((run_id, call_id)) = approval_route_parts(&request.path) {
+        let Ok(command) =
+            parse_json_body::<HttpCommandEnvelope<HttpApprovalDecisionRequest>>(&request.body)
+        else {
+            return http_error_response(400, "bad_request", "invalid approval command body");
+        };
+        return match registry.submit_approval_command(run_id, call_id, command) {
+            Ok(receipt) => json_response(200, json!(receipt)),
+            Err(error) => registry_error_response(error),
+        };
+    }
+
+    http_error_response(404, "not_found", "http route not found")
+}
+
+fn approval_route_parts(path: &str) -> Option<(&str, &str)> {
+    let suffix = path.strip_prefix("/runs/")?;
+    let (run_id, call_id) = suffix.split_once("/approvals/")?;
+    if run_id.is_empty() || run_id.contains('/') || call_id.is_empty() || call_id.contains('/') {
+        return None;
+    }
+    Some((run_id, call_id))
+}
+
+fn parse_json_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
+    serde_json::from_slice(body)
+}
+
+async fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest, HttpListenerError> {
+    let mut buffer = Vec::new();
+    let header_end = loop {
+        if let Some(index) = find_header_end(&buffer) {
+            break index;
+        }
+        if buffer.len() > HTTP_MAX_HEADER_BYTES {
+            return Err(HttpListenerError::Request {
+                message: "request headers exceed limit".to_owned(),
+            });
+        }
+        let mut chunk = [0_u8; 4096];
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(HttpListenerError::Request {
+                message: "request closed before headers completed".to_owned(),
+            });
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+    };
+    let header_bytes = &buffer[..header_end];
+    let mut body = buffer[header_end + 4..].to_vec();
+    let header_text = str::from_utf8(header_bytes).map_err(|error| HttpListenerError::Request {
+        message: format!("request headers are not utf-8: {error}"),
+    })?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().ok_or_else(|| HttpListenerError::Request {
+        message: "missing request line".to_owned(),
+    })?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or_else(|| HttpListenerError::Request {
+            message: "missing request method".to_owned(),
+        })?
+        .to_owned();
+    let path = request_parts
+        .next()
+        .ok_or_else(|| HttpListenerError::Request {
+            message: "missing request path".to_owned(),
+        })?
+        .to_owned();
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(HttpListenerError::Request {
+                message: "malformed request header".to_owned(),
+            });
+        };
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+    }
+    let content_length = headers
+        .get("content-length")
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|error| HttpListenerError::Request {
+                    message: format!("invalid content-length: {error}"),
+                })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if content_length > HTTP_MAX_BODY_BYTES {
+        return Err(HttpListenerError::Request {
+            message: "request body exceeds limit".to_owned(),
+        });
+    }
+    while body.len() < content_length {
+        let remaining = content_length - body.len();
+        let mut chunk = vec![0_u8; remaining.min(4096)];
+        let read = stream.read(&mut chunk).await?;
+        if read == 0 {
+            return Err(HttpListenerError::Request {
+                message: "request closed before body completed".to_owned(),
+            });
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    body.truncate(content_length);
+    Ok(HttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    })
+}
+
+fn find_header_end(buffer: &[u8]) -> Option<usize> {
+    buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    response: HttpResponse,
+) -> Result<(), HttpListenerError> {
+    let body = serde_json::to_vec(&response.body).map_err(|error| HttpListenerError::Response {
+        message: error.to_string(),
+    })?;
+    let head = format!(
+        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        response.status,
+        http_reason(response.status),
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await?;
+    stream.write_all(&body).await?;
+    stream.shutdown().await?;
+    Ok(())
+}
+
+fn registry_error_response(error: HttpRegistryError) -> HttpResponse {
+    let status = match error {
+        HttpRegistryError::SessionNotFound { .. } | HttpRegistryError::RunNotFound { .. } => 404,
+        HttpRegistryError::UnsupportedProtocolVersion { .. }
+        | HttpRegistryError::CommandSessionMismatch { .. }
+        | HttpRegistryError::CommandPathSessionMismatch { .. }
+        | HttpRegistryError::StaleCommandSequence { .. }
+        | HttpRegistryError::RunNotActive { .. }
+        | HttpRegistryError::ApprovalNotPending { .. }
+        | HttpRegistryError::ApprovalModeDoesNotAsk { .. }
+        | HttpRegistryError::ApprovalRequestChanged { .. }
+        | HttpRegistryError::ApprovalToolCallChanged { .. }
+        | HttpRegistryError::ApprovalPolicyChanged { .. }
+        | HttpRegistryError::ApprovalExpiryChanged { .. }
+        | HttpRegistryError::ApprovalExpired { .. } => 409,
+        HttpRegistryError::EmptyPrompt | HttpRegistryError::MissingApprovalMode => 400,
+        HttpRegistryError::DriverRejected { .. } => 500,
+    };
+    http_error_response(status, "registry_error", error.to_string())
+}
+
+fn json_response(status: u16, body: Value) -> HttpResponse {
+    HttpResponse { status, body }
+}
+
+fn http_error_response(
+    status: u16,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) -> HttpResponse {
+    json_response(
+        status,
+        json!({
+            "error": {
+                "code": code.into(),
+                "message": message.into()
+            }
+        }),
+    )
+}
+
+fn http_reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        409 => "Conflict",
+        500 => "Internal Server Error",
+        _ => "OK",
+    }
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    headers: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+impl HttpRequest {
+    fn header(&self, name: &str) -> Option<&String> {
+        self.headers.get(name)
+    }
+}
+
+struct HttpResponse {
+    status: u16,
+    body: Value,
 }
 
 /// One Server-Sent Events frame.
@@ -595,6 +1284,17 @@ pub enum HttpProtocolReplayError {
     CursorAhead,
 }
 
+/// Errors returned while receiving a transient live event.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum HttpLiveEventRecvError {
+    /// The subscriber lagged behind the bounded channel and one or more live events were dropped.
+    #[error("http live event subscriber lagged and dropped {dropped} events")]
+    Lagged { dropped: u64 },
+    /// The live event bus was closed.
+    #[error("http live event stream is closed")]
+    Closed,
+}
+
 /// In-memory protocol event buffer used by HTTP/SSE adapters.
 ///
 /// The buffer stores both durable and transient views for current subscribers, but reconnect replay
@@ -682,6 +1382,87 @@ impl HttpProtocolEventBuffer {
             })
             .cloned()
             .collect())
+    }
+}
+
+/// Bounded live event bus for local clients.
+///
+/// The bus broadcasts both durable and transient protocol events to active subscribers. Durable
+/// replay still comes from `HttpProtocolEventBuffer`; lagged transient delivery is reported as a
+/// live-stream drop and never mutates durable replay semantics.
+pub struct HttpLiveEventBus {
+    buffer: HttpProtocolEventBuffer,
+    sender: broadcast::Sender<HttpProtocolEvent>,
+}
+
+impl HttpLiveEventBus {
+    /// Creates a live bus with bounded subscriber capacity.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        let (sender, _) = broadcast::channel(capacity);
+        Self {
+            buffer: HttpProtocolEventBuffer::new(),
+            sender,
+        }
+    }
+
+    /// Subscribes to live protocol events from this point forward.
+    #[must_use]
+    pub fn subscribe(&self) -> HttpLiveEventSubscriber {
+        HttpLiveEventSubscriber {
+            receiver: self.sender.subscribe(),
+        }
+    }
+
+    /// Records one run event and broadcasts it to active subscribers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a durable cursor cannot be generated for the event.
+    pub fn publish_run_event(
+        &self,
+        event: PublicRunEvent,
+    ) -> Result<HttpProtocolEvent, HttpProtocolCursorError> {
+        let event = self.buffer.push_run_event(event)?;
+        let _ = self.sender.send(event.clone());
+        Ok(event)
+    }
+
+    /// Replays durable events for one run after an optional cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cursor is invalid, wrong-scope, or ahead of the buffer.
+    pub fn replay_run_after(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        last_event_id: Option<&str>,
+    ) -> Result<Vec<HttpProtocolEvent>, HttpProtocolReplayError> {
+        self.buffer
+            .replay_run_after(session_id, run_id, last_event_id)
+    }
+}
+
+/// Subscriber for bounded local live events.
+pub struct HttpLiveEventSubscriber {
+    receiver: broadcast::Receiver<HttpProtocolEvent>,
+}
+
+impl HttpLiveEventSubscriber {
+    /// Receives one live protocol event.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Lagged` when bounded live capacity dropped events, or `Closed` when the bus closes.
+    pub async fn recv(&mut self) -> Result<HttpProtocolEvent, HttpLiveEventRecvError> {
+        self.receiver.recv().await.map_err(|error| match error {
+            broadcast::error::RecvError::Closed => HttpLiveEventRecvError::Closed,
+            broadcast::error::RecvError::Lagged(dropped) => {
+                HttpLiveEventRecvError::Lagged { dropped }
+            }
+        })
     }
 }
 
@@ -1030,6 +1811,32 @@ impl HttpApprovalCommandReceipt {
     }
 }
 
+/// Receipt for an envelope-routed run start command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpRunStartCommandReceipt {
+    /// Command id used for retry de-duplication.
+    pub command_id: String,
+    /// Client that submitted the command.
+    pub client_id: String,
+    /// Session id from the command envelope.
+    pub session_id: String,
+    /// Optional durable correlation id supplied by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Run snapshot produced by the existing registry/driver path.
+    pub run: HttpRunSnapshot,
+    /// Whether this response was replayed from a prior command id.
+    pub replayed: bool,
+}
+
+impl HttpRunStartCommandReceipt {
+    fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
+}
+
 /// Start context delivered to the HTTP run driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRunDriverStart {
@@ -1153,6 +1960,14 @@ pub enum HttpRegistryError {
         command_session_id: String,
         run_id: String,
         run_session_id: String,
+    },
+    /// The command envelope points to a different session than the addressed URL.
+    #[error(
+        "http command session {command_session_id} does not match path session {path_session_id}"
+    )]
+    CommandPathSessionMismatch {
+        command_session_id: String,
+        path_session_id: String,
     },
     /// The command was based on an older run stream sequence.
     #[error(
@@ -1293,6 +2108,56 @@ impl HttpSessionRunRegistry {
             run.status = HttpRunStatus::Running;
         }
         Ok(run.snapshot())
+    }
+
+    /// Starts one run from a command envelope with retry de-duplication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command version is unsupported, the command session does not
+    /// match the path session, the session/run request is invalid, or the driver rejects startup.
+    pub fn start_run_command(
+        &self,
+        session_id: &str,
+        command: HttpCommandEnvelope<HttpRunStartRequest>,
+    ) -> Result<HttpRunStartCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        if command.session_id != session_id {
+            return Err(HttpRegistryError::CommandPathSessionMismatch {
+                command_session_id: command.session_id,
+                path_session_id: session_id.to_owned(),
+            });
+        }
+        let key = HttpCommandKey {
+            session_id: command.session_id.clone(),
+            client_id: command.client_id.clone(),
+            command_id: command.command_id.clone(),
+        };
+        {
+            let state = self.lock_state();
+            if let Some(receipt) = state.run_start_command_receipts.get(&key) {
+                return Ok(receipt.clone().replayed());
+            }
+        }
+
+        let run = self.start_run(session_id, command.payload.clone())?;
+        let receipt = HttpRunStartCommandReceipt {
+            command_id: command.command_id,
+            client_id: command.client_id,
+            session_id: command.session_id,
+            correlation_id: command.correlation_id,
+            run,
+            replayed: false,
+        };
+        let mut state = self.lock_state();
+        state
+            .run_start_command_receipts
+            .insert(key, receipt.clone());
+        Ok(receipt)
     }
 
     /// Returns one HTTP adapter run snapshot.
@@ -1545,6 +2410,7 @@ impl HttpSessionRunRegistry {
 struct HttpRegistryState {
     sessions: BTreeMap<String, HttpSessionState>,
     runs: BTreeMap<String, HttpRunState>,
+    run_start_command_receipts: BTreeMap<HttpCommandKey, HttpRunStartCommandReceipt>,
     command_receipts: BTreeMap<HttpCommandKey, HttpApprovalCommandReceipt>,
     next_session_number: u64,
     next_run_number: u64,

@@ -1,5 +1,6 @@
 use sigil_kernel::{
-    AgentRole, ControlEntry, EvidenceScope, ModelMessage, ReadinessEvaluatedEntry,
+    AgentRole, ChangeSetId, ControlEntry, EvidenceScope, MergeDecision, MergeReviewId,
+    MergeReviewRequested, MergeReviewResolved, ModelMessage, ReadinessEvaluatedEntry,
     ReadinessEvaluation, ReadinessReason, RequiredAction, RunStatus, SessionLogEntry, SessionRef,
     TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
     TaskIsolationMode, TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry,
@@ -226,6 +227,99 @@ fn task_sidebar_surfaces_child_merge_recheck_trace() {
     let strip = task_strip_view(&entries).expect("task strip should project");
     assert!(strip.detail.contains("Review Agent completed"));
     assert!(strip.detail.contains("run parent check"));
+}
+
+#[test]
+fn task_sidebar_surfaces_pending_merge_review_as_single_action() {
+    let mut entries =
+        task_entries_without_readiness(TaskRunStatus::Paused, TaskStepStatus::Blocked);
+    append_merge_review(&mut entries, None);
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "merge: changeset changeset-1 ready; review changes")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "action: review changeset changeset-1")
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("action:"))
+            .count(),
+        1
+    );
+
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert!(strip.detail.contains("review changes"));
+}
+
+#[test]
+fn task_sidebar_surfaces_accepted_merge_review_as_parent_recheck() {
+    let mut entries =
+        task_entries_without_readiness(TaskRunStatus::Paused, TaskStepStatus::Blocked);
+    append_merge_review(&mut entries, Some(MergeDecision::Accepted));
+
+    let lines = task_sidebar_lines(&entries);
+
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "merge: changeset changeset-1 accepted; run parent check")
+    );
+    assert!(lines.iter().any(|line| line == "action: run parent check"));
+
+    let strip = task_strip_view(&entries).expect("task strip should project");
+    assert!(strip.detail.contains("run parent check"));
+}
+
+#[test]
+fn task_sidebar_surfaces_conflict_and_rejected_merge_review_states() {
+    let mut conflict_entries =
+        task_entries_without_readiness(TaskRunStatus::Paused, TaskStepStatus::Blocked);
+    append_merge_review(&mut conflict_entries, Some(MergeDecision::Conflict));
+
+    let conflict_lines = task_sidebar_lines(&conflict_entries);
+
+    assert!(
+        conflict_lines
+            .iter()
+            .any(|line| line == "merge: changeset changeset-1 conflict; resolve conflict")
+    );
+    assert!(
+        conflict_lines
+            .iter()
+            .any(|line| line == "action: resolve conflict changeset-1")
+    );
+    assert_eq!(
+        conflict_lines
+            .iter()
+            .filter(|line| line.starts_with("action:"))
+            .count(),
+        1
+    );
+
+    let mut rejected_entries =
+        task_entries_without_readiness(TaskRunStatus::Paused, TaskStepStatus::Blocked);
+    append_merge_review(&mut rejected_entries, Some(MergeDecision::Rejected));
+
+    let rejected_lines = task_sidebar_lines(&rejected_entries);
+
+    assert!(
+        rejected_lines
+            .iter()
+            .any(|line| line == "merge: changeset changeset-1 rejected; no parent changes")
+    );
+    assert!(
+        rejected_lines
+            .iter()
+            .all(|line| !line.starts_with("action:"))
+    );
 }
 
 #[test]
@@ -666,6 +760,46 @@ fn task_entries_with_custom_readiness_and_reasons(
             workspace_snapshot_id: Some("snapshot-1".to_owned()),
         })),
     ]
+}
+
+fn task_entries_without_readiness(
+    run_status: TaskRunStatus,
+    step_status: TaskStepStatus,
+) -> Vec<SessionLogEntry> {
+    let mut entries = task_entries_with_custom_readiness(
+        run_status,
+        step_status,
+        VerificationVerdict::Passed,
+        VisibleCompletionState::Verified,
+        Vec::new(),
+    );
+    entries.retain(|entry| {
+        !matches!(
+            entry,
+            SessionLogEntry::Control(ControlEntry::ReadinessEvaluated(_))
+        )
+    });
+    entries
+}
+
+fn append_merge_review(entries: &mut Vec<SessionLogEntry>, decision: Option<MergeDecision>) {
+    let review_id = MergeReviewId::new("review-1").expect("review id");
+    entries.push(SessionLogEntry::Control(
+        ControlEntry::MergeReviewRequested(MergeReviewRequested {
+            review_id: review_id.clone(),
+            changeset_id: ChangeSetId::new("changeset-1").expect("changeset id"),
+            parent_workspace_snapshot_id: "parent-snapshot-1".to_owned(),
+        }),
+    ));
+    if let Some(decision) = decision {
+        entries.push(SessionLogEntry::Control(ControlEntry::MergeReviewResolved(
+            MergeReviewResolved {
+                review_id,
+                decision,
+                reason: None,
+            },
+        )));
+    }
 }
 
 fn verification_check_run(

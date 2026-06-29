@@ -5,18 +5,24 @@ use std::{
 
 use serde_json::{Value, json};
 use sigil_kernel::{PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::oneshot,
+};
 
 use super::{
     DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
     HTTP_RUN_EVENT_SSE_NAME, HttpApprovalCommandReceipt, HttpApprovalDecision,
     HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
-    HttpCommandEnvelope, HttpPendingApproval, HttpProtocolEvent, HttpProtocolEventBuffer,
-    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
-    HttpProtocolVersionError, HttpRegistryError, HttpRunApprovalMode, HttpRunDriver,
-    HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
-    HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpServerConfig,
-    HttpServerConfigError, HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError,
-    HttpSseEvent, public_run_event_to_sse,
+    HttpCommandEnvelope, HttpLiveEventBus, HttpLiveEventRecvError, HttpLocalServer,
+    HttpPendingApproval, HttpProtocolEvent, HttpProtocolEventBuffer, HttpProtocolEventClass,
+    HttpProtocolEventView, HttpProtocolReplayError, HttpProtocolVersionError, HttpRegistryError,
+    HttpRunApprovalMode, HttpRunDriver, HttpRunDriverApproval, HttpRunDriverCancel,
+    HttpRunDriverError, HttpRunDriverStart, HttpRunEventSequencer, HttpRunStartRequest,
+    HttpRunStatus, HttpServerConfig, HttpServerConfigError, HttpSessionCreateRequest,
+    HttpSessionRunRegistry, HttpSseError, HttpSseEvent, http_openapi_document,
+    public_run_event_to_sse,
 };
 
 #[test]
@@ -207,6 +213,209 @@ fn auth_validator_rejects_missing_malformed_and_invalid_headers() {
         HttpAuthError::InvalidToken.to_string(),
         "http bearer token is invalid"
     );
+}
+
+#[tokio::test]
+async fn local_server_binds_loopback_and_serves_health_without_auth() {
+    let (address, shutdown, _driver) = spawn_test_http_server().await;
+
+    assert!(address.ip().is_loopback());
+
+    let (status, body) = http_raw_request(
+        address,
+        "GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n".to_owned(),
+    )
+    .await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["status"], "ok");
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_rejects_unauthenticated_session_command() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+
+    let body = json!({"label": "desktop"}).to_string();
+    let request = format!(
+        "POST /sessions HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let (status, body) = http_raw_request(address, request).await;
+
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
+    assert!(driver.starts().is_empty());
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_routes_run_start_command_and_replays_retry() {
+    let (address, shutdown, driver) = spawn_test_http_server().await;
+
+    let session_body = json!({"label": "desktop"}).to_string();
+    let session_request = http_post("/sessions", Some("secret-token"), &session_body);
+    let (status, session) = http_raw_request(address, session_request).await;
+    assert_eq!(status, 201);
+    assert_eq!(session["id"], "http-session-1");
+
+    let command = HttpCommandEnvelope::new(
+        "command-start-1",
+        "desktop-client",
+        "http-session-1",
+        HttpRunStartRequest {
+            prompt: "hello from desktop".to_owned(),
+            approval_mode: Some(HttpRunApprovalMode::Ask),
+        },
+    );
+    let command_body = serde_json::to_string(&command).expect("command should serialize");
+    let start_request = http_post(
+        "/sessions/http-session-1/runs",
+        Some("secret-token"),
+        &command_body,
+    );
+    let (status, receipt) = http_raw_request(address, start_request.clone()).await;
+
+    assert_eq!(status, 201);
+    assert_eq!(receipt["run"]["id"], "http-run-1");
+    assert_eq!(receipt["run"]["status"], "running");
+    assert_eq!(receipt["replayed"], false);
+    assert_eq!(driver.starts().len(), 1);
+    assert_eq!(driver.starts()[0].prompt, "hello from desktop");
+
+    let (retry_status, retry_receipt) = http_raw_request(address, start_request).await;
+
+    assert_eq!(retry_status, 201);
+    assert_eq!(retry_receipt["run"]["id"], "http-run-1");
+    assert_eq!(retry_receipt["replayed"], true);
+    assert_eq!(driver.starts().len(), 1);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test]
+async fn local_server_routes_approval_command_and_replays_retry() {
+    let (address, shutdown, driver, registry) = spawn_test_http_server_with_registry().await;
+
+    let session_body = json!({"label": "desktop"}).to_string();
+    let session_request = http_post("/sessions", Some("secret-token"), &session_body);
+    let (status, session) = http_raw_request(address, session_request).await;
+    assert_eq!(status, 201);
+    assert_eq!(session["id"], "http-session-1");
+
+    let command = HttpCommandEnvelope::new(
+        "command-start-1",
+        "desktop-client",
+        "http-session-1",
+        HttpRunStartRequest {
+            prompt: "approval needed".to_owned(),
+            approval_mode: Some(HttpRunApprovalMode::Ask),
+        },
+    );
+    let command_body = serde_json::to_string(&command).expect("command should serialize");
+    let start_request = http_post(
+        "/sessions/http-session-1/runs",
+        Some("secret-token"),
+        &command_body,
+    );
+    let (status, receipt) = http_raw_request(address, start_request).await;
+    assert_eq!(status, 201);
+    assert_eq!(receipt["run"]["id"], "http-run-1");
+
+    let waiting = registry
+        .register_approval_request("http-run-1", pending_approval("call-1", "write_file"))
+        .expect("approval should be pending");
+    let approval = HttpCommandEnvelope::new(
+        "command-approval-1",
+        "desktop-client",
+        "http-session-1",
+        approval_decision("call-1", HttpApprovalDecision::Approve, None),
+    )
+    .with_expected_stream_sequence(waiting.stream_sequence)
+    .with_correlation_id("event-approval-1");
+    let approval_body = serde_json::to_string(&approval).expect("approval should serialize");
+    let approval_request = http_post(
+        "/runs/http-run-1/approvals/call-1",
+        Some("secret-token"),
+        &approval_body,
+    );
+    let (status, receipt) = http_raw_request(address, approval_request.clone()).await;
+    assert_eq!(status, 200);
+    assert_eq!(receipt["command_id"], "command-approval-1");
+    assert_eq!(receipt["decision"]["decision"], "approved");
+    assert_eq!(receipt["replayed"], false);
+    assert_eq!(driver.approvals().len(), 1);
+
+    let (retry_status, retry_receipt) = http_raw_request(address, approval_request).await;
+    assert_eq!(retry_status, 200);
+    assert_eq!(retry_receipt["replayed"], true);
+    assert_eq!(driver.approvals().len(), 1);
+    let _ = shutdown.send(());
+}
+
+#[test]
+fn openapi_document_covers_current_command_surface_and_approval_guards() {
+    let document = http_openapi_document();
+
+    assert_eq!(document["openapi"], "3.1.0");
+    assert_eq!(
+        document["components"]["securitySchemes"]["BearerAuth"]["scheme"],
+        "bearer"
+    );
+    assert!(
+        document["paths"]["/health"]["get"]["security"]
+            .as_array()
+            .expect("health security should be an array")
+            .is_empty()
+    );
+    assert!(document["paths"]["/sessions"]["post"]["responses"]["401"].is_object());
+    assert!(
+        document["paths"]["/sessions/{session_id}/runs"]["post"]["responses"]["409"].is_object()
+    );
+    assert!(
+        document["paths"]["/runs/{run_id}/approvals/{call_id}"]["post"]["responses"]["409"]
+            .is_object()
+    );
+    assert_eq!(
+        document["components"]["schemas"]["RunStartCommand"]["allOf"][1]["properties"]["payload"]["$ref"],
+        "#/components/schemas/RunStartRequest"
+    );
+    assert_eq!(
+        document["components"]["schemas"]["ApprovalDecisionCommand"]["allOf"][1]["properties"]["payload"]
+            ["$ref"],
+        "#/components/schemas/ApprovalDecisionRequest"
+    );
+    let command_required = document["components"]["schemas"]["CommandEnvelopeBase"]["required"]
+        .as_array()
+        .expect("command envelope required fields");
+    for field in [
+        "protocol_version",
+        "command_id",
+        "client_id",
+        "session_id",
+        "payload",
+    ] {
+        assert!(
+            command_required.iter().any(|value| value == field),
+            "missing command envelope field {field}"
+        );
+    }
+    let approval_required =
+        document["components"]["schemas"]["ApprovalDecisionRequest"]["required"]
+            .as_array()
+            .expect("approval required fields");
+    for field in [
+        "approval_request_id",
+        "tool_call_hash",
+        "policy_version",
+        "expires_at_ms",
+        "decision",
+    ] {
+        assert!(
+            approval_required.iter().any(|value| value == field),
+            "missing approval guard field {field}"
+        );
+    }
 }
 
 #[test]
@@ -514,6 +723,91 @@ fn protocol_event_buffer_replay_fails_closed_on_bad_or_wrong_cursor() {
             .expect_err("ahead cursor should fail closed"),
         HttpProtocolReplayError::CursorAhead
     );
+}
+
+#[tokio::test]
+async fn live_event_bus_delivers_transient_events_without_replay_id() {
+    let bus = HttpLiveEventBus::new(8);
+    let mut subscriber = bus.subscribe();
+
+    let published = bus
+        .publish_run_event(PublicRunEvent::new(
+            "session-1",
+            "run-1",
+            1,
+            PublicRunEventKind::ReasoningDelta {
+                text: "thinking".to_owned(),
+            },
+        ))
+        .expect("transient event should publish");
+
+    assert_eq!(published.event_class, HttpProtocolEventClass::Transient);
+    assert_eq!(published.replay_id, None);
+    let live = subscriber
+        .recv()
+        .await
+        .expect("subscriber should receive transient event");
+    assert_eq!(live.event_class, HttpProtocolEventClass::Transient);
+    assert_eq!(live.run_event.sequence, 1);
+    assert!(
+        bus.replay_run_after("session-1", "run-1", None)
+            .expect("replay should work")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn live_event_bus_reports_lag_without_corrupting_durable_replay() {
+    let bus = HttpLiveEventBus::new(1);
+    let mut subscriber = bus.subscribe();
+    bus.publish_run_event(PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        1,
+        PublicRunEventKind::RunStarted {
+            prompt: "hello".to_owned(),
+        },
+    ))
+    .expect("start event should publish");
+    bus.publish_run_event(PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        2,
+        PublicRunEventKind::TextDelta {
+            text: "partial".to_owned(),
+        },
+    ))
+    .expect("transient event should publish");
+    bus.publish_run_event(PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        3,
+        PublicRunEventKind::RunFinished {
+            final_text: "done".to_owned(),
+        },
+    ))
+    .expect("finish event should publish");
+
+    assert!(matches!(
+        subscriber.recv().await,
+        Err(HttpLiveEventRecvError::Lagged { dropped: 2 })
+    ));
+    let remaining = subscriber
+        .recv()
+        .await
+        .expect("latest event should remain available after lag");
+    assert_eq!(remaining.run_event.sequence, 3);
+
+    let replay = bus
+        .replay_run_after(
+            "session-1",
+            "run-1",
+            Some("sigil-http-run-v1:session-1:run-1:1"),
+        )
+        .expect("durable replay should ignore live lag");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].event_class, HttpProtocolEventClass::Durable);
+    assert_eq!(replay[0].run_event.sequence, 3);
 }
 
 #[test]
@@ -1397,6 +1691,80 @@ impl HttpRunDriver for RecordingRunDriver {
 
 type StartObserver = Arc<dyn Fn(&HttpRunDriverStart) + Send + Sync>;
 type ApprovalObserver = Arc<dyn Fn(&HttpRunDriverApproval) + Send + Sync>;
+
+async fn spawn_test_http_server() -> (SocketAddr, oneshot::Sender<()>, Arc<RecordingRunDriver>) {
+    let (address, shutdown, driver, _registry) = spawn_test_http_server_with_registry().await;
+    (address, shutdown, driver)
+}
+
+async fn spawn_test_http_server_with_registry() -> (
+    SocketAddr,
+    oneshot::Sender<()>,
+    Arc<RecordingRunDriver>,
+    Arc<HttpSessionRunRegistry>,
+) {
+    let driver = Arc::new(RecordingRunDriver::default());
+    let registry = Arc::new(HttpSessionRunRegistry::new(driver.clone()));
+    let server = HttpLocalServer::bind(
+        HttpServerConfig::default(),
+        Some("secret-token"),
+        Arc::clone(&registry),
+    )
+    .await
+    .expect("test listener should bind");
+    let address = server
+        .local_addr()
+        .expect("listener address should resolve");
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let _ = server
+            .serve_until_shutdown(async {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    (address, shutdown_tx, driver, registry)
+}
+
+fn http_post(path: &str, token: Option<&str>, body: &str) -> String {
+    let auth = token
+        .map(|token| format!("authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    format!(
+        "POST {path} HTTP/1.1\r\nhost: localhost\r\n{auth}content-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+async fn http_raw_request(address: SocketAddr, request: String) -> (u16, Value) {
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("test client should connect");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("test client should write request");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("test client should read response");
+    let text = String::from_utf8(response).expect("response should be utf-8");
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .expect("response should have header/body separator");
+    let status = head
+        .lines()
+        .next()
+        .expect("response should have status line")
+        .split_whitespace()
+        .nth(1)
+        .expect("response should include status code")
+        .parse::<u16>()
+        .expect("status code should be numeric");
+    let body = serde_json::from_str(body).expect("response body should be json");
+    (status, body)
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().expect("test lock should not be poisoned")

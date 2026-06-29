@@ -1,9 +1,10 @@
 use sigil_kernel::{
-    ChildVerificationReceiptLinked, EvidenceScope, ReadinessEvaluatedEntry, RequiredAction,
-    SessionLogEntry, TaskChildSessionEntry, TaskPlanProjection, TaskRunProjection, TaskRunStatus,
-    TaskStateProjection, TaskStepId, TaskStepSpec, TaskStepStatus, TerminalTaskProjection,
-    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationStateProjection,
-    VerificationVerdict, VisibleCompletionState,
+    ChildVerificationReceiptLinked, EvidenceScope, MergeDecision, MergeReviewState,
+    ReadinessEvaluatedEntry, RequiredAction, SessionLogEntry, TaskChildSessionEntry,
+    TaskPlanProjection, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepId,
+    TaskStepSpec, TaskStepStatus, TerminalTaskProjection, VerificationCheckRunEntry,
+    VerificationCheckRunStatus, VerificationStateProjection, VerificationVerdict,
+    VisibleCompletionState, WriteIsolationProjection, WriteIsolationRecordRef,
 };
 
 use crate::ui::{StatusKind, status_symbol};
@@ -32,14 +33,29 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
     let terminal_lines = terminal_task_sidebar_lines(entries);
     let projection = TaskStateProjection::from_entries(entries);
     let verification_projection = VerificationStateProjection::from_entries(entries);
+    let write_projection = WriteIsolationProjection::from_entries(entries);
     let Some(task) = projection.latest_task() else {
         return terminal_lines;
     };
+    let merge_review_view = latest_merge_review_product_view(&write_projection, 72);
     let mut lines = vec![
         format!("task: {}", task.task_id.as_str()),
         format!("status: {}", task_run_status_label(task.status)),
     ];
     let mut step_lines = Vec::new();
+    let mut merge_line_rendered = false;
+    let mut action_line_rendered = false;
+    if let Some(view) = merge_review_view
+        .as_ref()
+        .filter(|view| view.action_preempts_verification)
+    {
+        lines.push(format!("merge: {}", view.summary));
+        merge_line_rendered = true;
+        if let Some(action) = &view.action {
+            lines.push(format!("action: {action}"));
+            action_line_rendered = true;
+        }
+    }
     if let Some(plan_version) = task.latest_plan_version {
         lines.push(format!("plan: v{plan_version}"));
         if let Some(plan) = task.plans.get(&plan_version) {
@@ -118,6 +134,7 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
         }
         if let Some(summary) = child_merge_recheck_summary(entries, task, readiness, 48) {
             lines.push(format!("merge: {summary}"));
+            merge_line_rendered = true;
         }
         for action in readiness.evaluation.required_actions.iter().take(2) {
             lines.extend(required_action_context_lines(action));
@@ -137,12 +154,22 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
                         truncate_session_view_text(reason, 48)
                     ));
                 }
-                if !check_run_status_blocks_action(run.status) {
+                if !check_run_status_blocks_action(run.status) && !action_line_rendered {
                     lines.push(format!("action: {}", required_action_label(action)));
+                    action_line_rendered = true;
                 }
             } else {
-                lines.push(format!("action: {}", required_action_label(action)));
+                if !action_line_rendered {
+                    lines.push(format!("action: {}", required_action_label(action)));
+                    action_line_rendered = true;
+                }
             }
+        }
+    }
+    if !merge_line_rendered && let Some(view) = merge_review_view.as_ref() {
+        lines.push(format!("merge: {}", view.summary));
+        if !action_line_rendered && let Some(action) = &view.action {
+            lines.push(format!("action: {action}"));
         }
     }
     if let Some(reason) = task
@@ -169,6 +196,8 @@ pub(super) fn task_sidebar_lines(entries: &[SessionLogEntry]) -> Vec<String> {
 pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripView> {
     let projection = TaskStateProjection::from_entries(entries);
     let verification_projection = VerificationStateProjection::from_entries(entries);
+    let write_projection = WriteIsolationProjection::from_entries(entries);
+    let merge_review_view = latest_merge_review_product_view(&write_projection, 72);
     let task = projection.latest_task()?;
     let mut rows = Vec::new();
     let mut detail = task_run_status_label(task.status).to_owned();
@@ -206,6 +235,9 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             if let Some(summary) = child_merge_recheck_summary(entries, task, readiness, 40) {
                 detail.push_str(" · ");
                 detail.push_str(&summary);
+            } else if let Some(view) = merge_review_view.as_ref() {
+                detail.push_str(" · ");
+                detail.push_str(&view.summary);
             }
             if let Some(run) = latest_check_run_for_actions(
                 entries,
@@ -225,6 +257,14 @@ pub(crate) fn task_strip_view(entries: &[SessionLogEntry]) -> Option<TaskStripVi
             }
         }
         rows = task_strip_step_rows(task, plan_version, plan, &verification_projection);
+    }
+    if !detail.contains("review changes")
+        && !detail.contains("run parent check")
+        && !detail.contains("resolve conflict")
+        && let Some(view) = merge_review_view.as_ref()
+    {
+        detail.push_str(" · ");
+        detail.push_str(&view.summary);
     }
 
     if rows.is_empty() {
@@ -869,6 +909,63 @@ fn child_merge_recheck_summary(
         &format!("{child_label}; run parent check"),
         max_chars,
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MergeReviewProductView {
+    summary: String,
+    action: Option<String>,
+    action_preempts_verification: bool,
+}
+
+fn latest_merge_review_product_view(
+    projection: &WriteIsolationProjection,
+    max_chars: usize,
+) -> Option<MergeReviewProductView> {
+    let review = latest_merge_review_state(projection)?;
+    let requested = review.requested.as_ref()?;
+    let changeset_id = requested.changeset_id.as_str();
+    let view = match review.resolved.as_ref().map(|entry| entry.decision) {
+        None => MergeReviewProductView {
+            summary: format!("changeset {changeset_id} ready; review changes"),
+            action: Some(format!("review changeset {changeset_id}")),
+            action_preempts_verification: true,
+        },
+        Some(MergeDecision::Accepted) => MergeReviewProductView {
+            summary: format!("changeset {changeset_id} accepted; run parent check"),
+            action: Some("run parent check".to_owned()),
+            action_preempts_verification: false,
+        },
+        Some(MergeDecision::Conflict) => MergeReviewProductView {
+            summary: format!("changeset {changeset_id} conflict; resolve conflict"),
+            action: Some(format!("resolve conflict {changeset_id}")),
+            action_preempts_verification: true,
+        },
+        Some(MergeDecision::Rejected) => MergeReviewProductView {
+            summary: format!("changeset {changeset_id} rejected; no parent changes"),
+            action: None,
+            action_preempts_verification: false,
+        },
+        Some(MergeDecision::Cancelled) => MergeReviewProductView {
+            summary: format!("changeset {changeset_id} cancelled; no parent changes"),
+            action: None,
+            action_preempts_verification: false,
+        },
+    };
+    Some(MergeReviewProductView {
+        summary: truncate_session_view_text(&view.summary, max_chars),
+        action: view.action,
+        action_preempts_verification: view.action_preempts_verification,
+    })
+}
+
+fn latest_merge_review_state(projection: &WriteIsolationProjection) -> Option<&MergeReviewState> {
+    projection.replay_order.iter().rev().find_map(|record| {
+        let WriteIsolationRecordRef::MergeReview { review_id } = record else {
+            return None;
+        };
+        projection.merge_reviews.get(review_id)
+    })
 }
 
 fn workspace_changed_event_id(reason: &sigil_kernel::ReadinessReason) -> Option<&str> {

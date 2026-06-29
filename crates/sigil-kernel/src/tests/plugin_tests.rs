@@ -2,10 +2,10 @@ use anyhow::Result;
 
 use crate::{
     ApprovalMode, ControlEntry, ExecutionCoverageLabel, McpServerConfig, McpServerStartup,
-    PluginAgentRef, PluginCapability, PluginHookRef, PluginManifest, PluginManifestSnapshot,
-    PluginSkillRef, PluginStateProjection, PluginTrustDecision, PluginTrustEntry, SessionLogEntry,
-    plugin_manifest_digests_match, validate_plugin_id, validate_plugin_manifest_digest,
-    validate_plugin_version,
+    PluginAgentRef, PluginCapability, PluginHookKind, PluginHookRef, PluginManifest,
+    PluginManifestSnapshot, PluginSkillRef, PluginStateProjection, PluginTrustDecision,
+    PluginTrustEntry, SessionLogEntry, ToolEffect, plugin_manifest_digests_match,
+    validate_plugin_id, validate_plugin_manifest_digest, validate_plugin_version,
 };
 
 const VALID_PLUGIN_DIGEST: &str =
@@ -27,9 +27,15 @@ fn sample_manifest() -> PluginManifest {
             path: "skills/review/SKILL.md".into(),
         }],
         hooks: vec![PluginHookRef {
+            id: Some("pre-tool-policy".to_owned()),
             event: "pre_tool_use".to_owned(),
+            kind: PluginHookKind::Event,
             command: "scripts/check-tool-policy.sh".to_owned(),
             args: vec!["--strict".to_owned()],
+            declared_effect: ToolEffect::ReadOnly,
+            timeout_ms: 10_000,
+            input_schema_digest: Some(VALID_PLUGIN_DIGEST.to_owned()),
+            output_schema_digest: None,
             approval: ApprovalMode::Ask,
             egress_logging: true,
             allow_secrets: false,
@@ -83,15 +89,27 @@ fn plugin_manifest_validation_accepts_reviewable_capabilities() -> Result<()> {
     assert!(matches!(
         &capabilities[2],
         PluginCapability::Hook {
+            id,
             event,
+            hook_kind,
             command,
             args,
+            declared_effect,
+            timeout_ms,
+            input_schema_digest,
+            output_schema_digest,
             approval,
             egress_logging,
             allow_secrets,
-        } if event == "pre_tool_use"
+        } if id == "pre-tool-policy"
+            && event == "pre_tool_use"
+            && *hook_kind == PluginHookKind::Event
             && command == "scripts/check-tool-policy.sh"
             && args == &vec!["--strict".to_owned()]
+            && *declared_effect == ToolEffect::ReadOnly
+            && *timeout_ms == 10_000
+            && input_schema_digest.as_deref() == Some(VALID_PLUGIN_DIGEST)
+            && output_schema_digest.is_none()
             && *approval == ApprovalMode::Ask
             && *egress_logging
             && !*allow_secrets
@@ -166,7 +184,7 @@ fn plugin_capabilities_map_to_normal_tool_secret_egress_policy() {
     assert!(hook.execution_backend_required);
     assert!(hook.egress_logging);
     assert!(!hook.allow_secrets);
-    assert_eq!(hook.mutation_effect, crate::ToolEffect::Unknown);
+    assert_eq!(hook.mutation_effect, ToolEffect::ReadOnly);
 
     let mcp = capabilities[3].policy_summary();
     assert_eq!(mcp.tool_category, Some(crate::ToolCategory::Mcp));
@@ -223,9 +241,25 @@ fn plugin_manifest_validation_rejects_unsafe_edges() {
     empty_hook_event.hooks[0].event = "  ".to_owned();
     assert!(empty_hook_event.validate().is_err());
 
+    let mut invalid_hook_id = sample_manifest();
+    invalid_hook_id.hooks[0].id = Some("bad hook id".to_owned());
+    assert!(invalid_hook_id.validate().is_err());
+
     let mut empty_hook = sample_manifest();
     empty_hook.hooks[0].command = "  ".to_owned();
     assert!(empty_hook.validate().is_err());
+
+    let mut invalid_hook_arg = sample_manifest();
+    invalid_hook_arg.hooks[0].args = vec!["bad\narg".to_owned()];
+    assert!(invalid_hook_arg.validate().is_err());
+
+    let mut invalid_hook_timeout = sample_manifest();
+    invalid_hook_timeout.hooks[0].timeout_ms = 0;
+    assert!(invalid_hook_timeout.validate().is_err());
+
+    let mut invalid_hook_schema = sample_manifest();
+    invalid_hook_schema.hooks[0].input_schema_digest = Some("sha256:not-a-digest".to_owned());
+    assert!(invalid_hook_schema.validate().is_err());
 
     let mut invalid_mcp_name = sample_manifest();
     invalid_mcp_name.mcp_servers[0].name = "bad server".to_owned();
@@ -242,9 +276,15 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
 
     assert!(
         PluginCapability::Hook {
+            id: " ".to_owned(),
             event: " ".to_owned(),
+            hook_kind: PluginHookKind::Event,
             command: "scripts/hook.sh".to_owned(),
             args: Vec::new(),
+            declared_effect: ToolEffect::Unknown,
+            timeout_ms: 30_000,
+            input_schema_digest: None,
+            output_schema_digest: None,
             approval: ApprovalMode::Ask,
             egress_logging: true,
             allow_secrets: false,
@@ -254,9 +294,15 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
     );
     assert!(
         PluginCapability::Hook {
+            id: "pre-tool-policy".to_owned(),
             event: "pre_tool_use".to_owned(),
+            hook_kind: PluginHookKind::Event,
             command: " ".to_owned(),
             args: Vec::new(),
+            declared_effect: ToolEffect::Unknown,
+            timeout_ms: 30_000,
+            input_schema_digest: None,
+            output_schema_digest: None,
             approval: ApprovalMode::Ask,
             egress_logging: true,
             allow_secrets: false,
@@ -495,6 +541,36 @@ fn plugin_state_projection_invalidates_trust_when_capabilities_change_even_with_
     changed.capabilities.push(PluginCapability::Skill {
         path: "skills/extra/SKILL.md".into(),
     });
+
+    let projection = PluginStateProjection::from_entries(&[
+        SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trusted)),
+        SessionLogEntry::Control(ControlEntry::PluginManifestCaptured(changed)),
+    ]);
+
+    let latest_manifest = projection
+        .latest_manifest()
+        .expect("latest manifest should exist");
+    assert_eq!(latest_manifest.trust, PluginTrustDecision::NeedsReview);
+}
+
+#[test]
+fn plugin_state_projection_invalidates_trust_when_hook_contract_changes() {
+    let trusted = sample_trust(PluginTrustDecision::Trusted);
+    let mut changed = sample_snapshot();
+    let PluginCapability::Hook {
+        command,
+        declared_effect,
+        timeout_ms,
+        output_schema_digest,
+        ..
+    } = &mut changed.capabilities[2]
+    else {
+        panic!("sample capability should be a hook");
+    };
+    *command = "scripts/new-policy.sh".to_owned();
+    *declared_effect = ToolEffect::WorkspaceWrite;
+    *timeout_ms = 60_000;
+    *output_schema_digest = Some(VALID_PLUGIN_DIGEST.to_owned());
 
     let projection = PluginStateProjection::from_entries(&[
         SessionLogEntry::Control(ControlEntry::PluginTrustDecision(trusted)),

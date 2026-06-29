@@ -1,6 +1,6 @@
 # RFC-0006 Context Engine and Trust-labeled Retrieval
 
-状态：draft / E06.1-E06.5 implemented / full repo intelligence gated
+状态：draft / E06.1-E06.5 and E06.7-E06.9 implemented / full repo intelligence gated
 
 创建日期：2026-06-28
 
@@ -96,16 +96,21 @@ Implementation progress:
 - 已新增 kernel-level `ContextItem` provenance model。
 - 已新增 `ContextDigestV0` 和 deterministic builder。
 - 已验证 trusted workspace instruction 必须匹配 workspace trust label；未信任仓库内容不能伪装成 instruction。
-- 已验证 included secret context 必须携带 egress decision。
+- 已验证 included secret-like 和 external context 必须携带 egress decision。
 - 已验证 digest 中的 `VerificationVerdict::Passed` 必须引用已有 receipt，不能由 digest 自己创造 evidence。
 - 已新增 session-local archive + BM25 retrieval，返回 trust/sensitivity-labeled hits、snippet、score、token cost 和 truncation metadata；secret archive hits without egress are represented as excluded context.
 - 已新增 code-intel context adapter，将 symbols、diagnostics、references、repo file hits 和 current diff 转为 provenance-labeled context hits；secret hits without egress are represented as excluded context.
 - 已新增 deterministic token budget packer，输出 stable prefix、dynamic suffix 和 excluded context，保持 provider prefix cache 友好并记录 budget/secret exclusion reason。
 - 已新增 TUI provenance summary view model，展示 context budget、top included sources、excluded reason summary、untrusted/secret warning 和一个 recommended action。
+- 已完成 Context V0 runtime adoption：默认 agent request assembly 会在 stable memory prefix 之后注入动态 `Sigil Context V0` system message，来源包括 session archive BM25 hits 和 latest `TaskMemoryV1` context items；注入结果进入 `PrefixSnapshotCaptured.materialized_text`，可从 session audit 定位。
+- Runtime adoption 对 context engine failure 采用安全降级：无可用 source、空 BM25、无 task memory 或 task-memory adapter 失败时，不阻断普通 request。
+- Context V0 request rendering 不会为被排除的 secret-like / external item 输出 snippet；未信任 workspace instruction 仍不能提升为 trusted workspace instruction。
+- 已完成 Context quality evidence pack：`ContextQualityEvidencePack` 记录 query、included/excluded context rows、token budget、source counts、exclusion reason counts、rank/score、trust/sensitivity/egress labels、truncation facts 和 recall/ranking/token-budget/safety findings。它用于判断 E06.6 是否真的需要打开，而不是直接实现 heavy repo graph 或 semantic retrieval。
+- 已完成 Context quality evidence sweep：`scripts/run-context-quality.sh` 可生成 `context-quality.jsonl`、`summary.md` 和 `manifest.json`，用于把 E06.6 trigger decision 绑定到可复核 artifact。
 
 2026-06-29 审计补充：
 
-- 当前实现是 V0 Context Engine：ContextDigestV0、session archive BM25、code-intel adapter、token budget packer 和 TUI provenance summary。
+- 当前实现是 V0 Context Engine：ContextDigestV0、session archive BM25、code-intel adapter、token budget packer、TUI provenance summary、deterministic context quality evidence pack 和 evidence sweep。
 - 它不是完整持久 repo graph、semantic vector retrieval、call/impact graph 或跨 session repo knowledge。
 - 这些更重能力由 `.repo-local-dev/rfcs/0006-context-engine/e06-06-persistent-repo-graph-semantic-retrieval-trigger.md` 作为 gated trigger 跟踪，只有真实 context-quality 证据或明确产品需求出现后才开工。
 
@@ -167,6 +172,8 @@ The main flow should provide at most one recommended action, such as `review tru
 3. Repo file/symbol retrieval using existing code-intel where possible.
 4. Token budget packer with deterministic ordering.
 5. TUI provenance summary.
+6. Context V0 runtime adoption in request assembly.
+7. Context quality evidence pack for V0 retrieval/packing inspection.
 
 ## 10. Acceptance Criteria
 

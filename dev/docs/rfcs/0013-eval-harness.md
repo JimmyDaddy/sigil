@@ -1,6 +1,6 @@
 # RFC-0013 Eval Harness
 
-状态：draft / E13.1-E13.10 deterministic harness implemented / E13.11 model eval gated
+状态：draft / deterministic harness, adoption gate and active RFC matrix implemented / E13.11 model eval gated
 
 创建日期：2026-06-28
 
@@ -138,6 +138,8 @@ Implementation progress:
 - 2026-06-28: E13.8 added path/capability security eval cases. The cases cover symlink escape, parent path normalization bypass, read-only shell write denial through permission/capability policy, and approval denial mapping, without implementing real OS sandbox backends or a security dashboard.
 - 2026-06-28: E13.10 added `scripts/run-evals.sh --deterministic` and deterministic report artifacts. The runner writes structured JSONL results, a Markdown summary, and retained session-log artifacts for non-success outcomes under a repo-local output directory, without invoking real providers or making evals part of normal user flows.
 - 2026-06-29: E13.11 tracks the future model eval runner trigger. It remains gated by deterministic baseline stability, fixture/provider metadata repeatability, budget policy and nightly/release-prep execution policy. Deterministic eval results must not be presented as real-model task success rates.
+- 2026-06-29: E13.12 made deterministic evals usable as an RFC core-semantics adoption gate. The report directory now includes `results.jsonl`, `summary.md`, retained non-success artifacts and `manifest.json`; the script verifies required artifacts exist and stay non-empty, and remains developer-only rather than a normal user flow or default commit gate.
+- 2026-06-30: E13.13 added the active RFC deterministic regression matrix. Eval metadata now records RFC/slice provenance plus expected outcome and expected verification verdict; report schema v2 emits a matrix with expected/observed outcome, expected/observed verification verdict and durable stream cursor. The first active cases cover Context V0 request assembly, E14.5 parent mutation handoff, verification staleness through existing cases, and sandbox receipt truthfulness. E13.11 model eval remains gated.
 
 ## 9. Acceptance Criteria
 

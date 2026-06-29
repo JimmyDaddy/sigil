@@ -1346,9 +1346,10 @@ fn supervisor_denies_foreground_write_capable_agents_without_changeset_guard() -
 }
 
 #[test]
-fn supervisor_allows_changeset_only_write_capable_agents() -> Result<()> {
+fn supervisor_denies_apply_changeset_in_changeset_only_write_agents() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut config = root_config();
+    config.task.allow_write_subagents = true;
     config.task.subagent_write.tools = sigil_kernel::ToolAllowlistConfig {
         allow_all: false,
         names: vec!["apply_changeset".to_owned()],
@@ -1363,6 +1364,43 @@ fn supervisor_allows_changeset_only_write_capable_agents() -> Result<()> {
     let mut handler = RecordingEventHandler::default();
     let mut start = child_start(write_step("changeset")?, temp.path().to_path_buf())?;
     start.role = AgentRole::SubagentWrite;
+    start.step.mode = Some(sigil_kernel::TaskStepMode::Write);
+    start.step.isolation = Some(sigil_kernel::TaskIsolationMode::ChangesetOnly);
+
+    let error = supervisor
+        .begin_task_child_thread(&mut session, &mut handler, start)
+        .expect_err("apply_changeset is an unguarded parent mutation capability");
+
+    assert!(
+        error
+            .to_string()
+            .contains("write-capable agent requires guarded changeset-only scope")
+    );
+    Ok(())
+}
+
+#[test]
+fn supervisor_allows_changeset_only_scoped_write_agents() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut config = root_config();
+    config.task.allow_write_subagents = true;
+    let scope = sigil_kernel::changeset_only_child_tool_scope();
+    config.task.subagent_write.tools = sigil_kernel::ToolAllowlistConfig {
+        allow_all: scope.allow_all,
+        names: scope.names.into_iter().collect(),
+        prefixes: scope.prefixes,
+    };
+    let supervisor = AgentSupervisor::new(
+        AgentProfileRegistry::from_root_config(&config)?,
+        AgentBudgetPolicy::from_root_config(&config),
+        provider_capabilities(),
+    );
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut start = child_start(write_step("changeset")?, temp.path().to_path_buf())?;
+    start.role = AgentRole::SubagentWrite;
+    start.step.mode = Some(sigil_kernel::TaskStepMode::Write);
+    start.step.isolation = Some(sigil_kernel::TaskIsolationMode::ChangesetOnly);
 
     let thread = supervisor.begin_task_child_thread(&mut session, &mut handler, start)?;
 
@@ -1495,6 +1533,7 @@ async fn supervisor_records_post_run_token_budget_warning_without_failing_child(
                     ModelMessage::user("apply skill"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -1546,6 +1585,7 @@ async fn supervisor_enforces_cumulative_agent_tokens_per_task() -> Result<()> {
                     ModelMessage::user("apply skill"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -1567,6 +1607,7 @@ async fn supervisor_enforces_cumulative_agent_tokens_per_task() -> Result<()> {
                     ModelMessage::user("apply skill again"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -1588,6 +1629,7 @@ async fn supervisor_enforces_cumulative_agent_tokens_per_task() -> Result<()> {
                     ModelMessage::user("apply skill after budget"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -1647,6 +1689,7 @@ async fn child_run_context_uses_selected_role_provider_capabilities() -> Result<
                     ModelMessage::user("inspect only"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -1713,6 +1756,7 @@ async fn direct_child_skill_uses_supervisor() -> Result<()> {
                     ModelMessage::user("apply skill"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -1787,6 +1831,7 @@ async fn child_tool_approval_routes_are_audited_and_stored() -> Result<()> {
                     ModelMessage::user("read through approval"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,
@@ -1846,6 +1891,7 @@ async fn failed_child_does_not_append_successful_parent_answer() -> Result<()> {
                     ModelMessage::user("apply skill"),
                 ]),
                 options: run_options(temp.path().to_path_buf()),
+                changeset_only_base_snapshot_id: None,
             },
             &mut handler,
             &mut approval,

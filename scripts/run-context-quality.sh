@@ -3,27 +3,21 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/run-evals.sh --deterministic [--output-dir DIR]
+Usage: scripts/run-context-quality.sh [--output-dir DIR]
 
-Runs Sigil deterministic eval cases with fake provider/tool plumbing only.
-The script does not call real models or network-backed providers.
+Runs the deterministic Context V0 quality evidence sweep.
+The script does not call real models, network-backed providers, embeddings, or vector indexes.
 
 Options:
-  --deterministic   Run deterministic conformance evals.
-  --output-dir DIR  Directory for generated JSONL, summary, and retained artifacts.
+  --output-dir DIR  Directory for generated JSONL, summary, and manifest artifacts.
   -h, --help        Show this help.
 USAGE
 }
 
-mode=""
 output_dir=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --deterministic)
-      mode="deterministic"
-      shift
-      ;;
     --output-dir)
       if [[ $# -lt 2 ]]; then
         echo "missing value for --output-dir" >&2
@@ -44,19 +38,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${mode}" != "deterministic" ]]; then
-  echo "missing required --deterministic mode" >&2
-  usage >&2
-  exit 2
-fi
-
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 cd "${repo_root}"
 
 if [[ -z "${output_dir}" ]]; then
   timestamp="$(date +%Y%m%d-%H%M%S)"
-  output_dir=".repo-local-dev/evals/deterministic-${timestamp}"
+  output_dir=".repo-local-dev/context-quality/context-v0-${timestamp}"
 fi
 
 case "${output_dir}" in
@@ -66,16 +54,16 @@ esac
 
 mkdir -p "${output_dir}"
 
-SIGIL_DETERMINISTIC_EVAL_REPORT_DIR="${output_dir}" \
-  cargo test -p sigil-kernel eval_report_writes_deterministic_artifacts -- --nocapture
+SIGIL_CONTEXT_QUALITY_REPORT_DIR="${output_dir}" \
+  cargo test -p sigil-kernel context_quality_report_writes_evidence_artifacts -- --nocapture
 
-for artifact in results.jsonl summary.md manifest.json; do
+for artifact in context-quality.jsonl summary.md manifest.json; do
   if [[ ! -s "${output_dir}/${artifact}" ]]; then
-    echo "deterministic eval did not produce non-empty ${artifact}" >&2
+    echo "context quality sweep did not produce non-empty ${artifact}" >&2
     exit 1
   fi
 done
 
-echo "wrote ${output_dir}/results.jsonl"
+echo "wrote ${output_dir}/context-quality.jsonl"
 echo "wrote ${output_dir}/summary.md"
 echo "wrote ${output_dir}/manifest.json"

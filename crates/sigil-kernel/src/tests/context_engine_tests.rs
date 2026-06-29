@@ -3,10 +3,12 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::{
-    ContextBodyRef, ContextDigestText, ContextDigestTextKind, ContextDigestV0Builder,
-    ContextInclusionReason, ContextItem, ContextPackOptions, ContextSensitivity, ContextSource,
+    CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION, CONTEXT_QUALITY_REPORT_SCHEMA_VERSION, ContextBodyRef,
+    ContextDigestText, ContextDigestTextKind, ContextDigestV0Builder, ContextInclusionReason,
+    ContextItem, ContextPackOptions, ContextQualityFindingKind, ContextSensitivity, ContextSource,
     ContextTrustLevel, SessionArchive, SessionArchiveEntry, VerificationVerdict,
-    estimate_context_token_cost, pack_context_items,
+    build_context_quality_evidence_pack, estimate_context_token_cost, pack_context_items,
+    write_context_quality_evidence_artifacts,
 };
 
 fn context_item(
@@ -162,6 +164,35 @@ fn context_item_secret_inclusion_requires_egress_decision() {
     excluded_secret
         .validate()
         .expect("excluded secret can be represented without an egress decision");
+}
+
+#[test]
+fn context_item_external_inclusion_requires_egress_decision() {
+    let included_external_error = context_item(
+        "external",
+        ContextSource::ToolObservation,
+        ContextTrustLevel::ToolObservation,
+        ContextSensitivity::External,
+        ContextInclusionReason::RetrievalHit,
+    )
+    .validate()
+    .expect_err("included external context must not bypass egress");
+    assert!(
+        included_external_error
+            .to_string()
+            .contains("included external context requires an egress decision")
+    );
+
+    let excluded_external = context_item(
+        "blocked-external",
+        ContextSource::ToolObservation,
+        ContextTrustLevel::ToolObservation,
+        ContextSensitivity::External,
+        ContextInclusionReason::ExcludedEgressDenied,
+    );
+    excluded_external
+        .validate()
+        .expect("excluded external context can be represented without an egress decision");
 }
 
 #[test]
@@ -362,7 +393,7 @@ fn context_packer_keeps_stable_prefix_before_dynamic_suffix_with_stable_ordering
 }
 
 #[test]
-fn context_packer_excludes_budget_overflow_and_secret_without_egress() -> Result<()> {
+fn context_packer_excludes_budget_overflow_secret_and_external_without_egress() -> Result<()> {
     let stable = pack_item(
         "stable",
         ContextSource::SystemPrompt,
@@ -392,9 +423,18 @@ fn context_packer_excludes_budget_overflow_and_secret_without_egress() -> Result
         Some(1.0),
     );
     secret.sensitivity = ContextSensitivity::Secret;
+    let mut external = pack_item(
+        "external",
+        ContextSource::ToolObservation,
+        ContextInclusionReason::RetrievalHit,
+        1,
+        Some(0.8),
+    );
+    external.trust_level = ContextTrustLevel::ToolObservation;
+    external.sensitivity = ContextSensitivity::External;
 
     let packed = pack_context_items(
-        vec![expensive, secret, cheap, stable],
+        vec![expensive, secret, external, cheap, stable],
         ContextPackOptions::new(5),
     )?;
 
@@ -433,5 +473,300 @@ fn context_packer_excludes_budget_overflow_and_secret_without_egress() -> Result
         secret.inclusion_reason,
         ContextInclusionReason::ExcludedSecret
     );
+    let external = packed
+        .excluded
+        .iter()
+        .find(|item| item.id == "external")
+        .expect("external item excluded");
+    assert_eq!(
+        external.inclusion_reason,
+        ContextInclusionReason::ExcludedEgressDenied
+    );
+    Ok(())
+}
+
+#[test]
+fn context_quality_pack_reports_included_excluded_sources_and_budget_pressure() -> Result<()> {
+    let high_score = pack_item(
+        "dynamic-high",
+        ContextSource::SessionArchive,
+        ContextInclusionReason::RetrievalHit,
+        2,
+        Some(0.9),
+    );
+    let low_score = pack_item(
+        "dynamic-low",
+        ContextSource::LspSymbol,
+        ContextInclusionReason::RetrievalHit,
+        2,
+        Some(0.2),
+    );
+    let expensive = pack_item(
+        "dynamic-expensive",
+        ContextSource::RepositoryFile,
+        ContextInclusionReason::RetrievalHit,
+        5,
+        Some(0.8),
+    );
+    let packed = pack_context_items(
+        vec![low_score, expensive, high_score],
+        ContextPackOptions::new(4),
+    )?;
+
+    let report = build_context_quality_evidence_pack(
+        "fixture-context-quality",
+        "parser validation",
+        &packed,
+        vec![(
+            "dynamic-expensive".to_owned(),
+            crate::ContextTruncation {
+                original_byte_len: 512,
+                indexed_byte_len: 128,
+                truncated: true,
+            },
+        )],
+    );
+
+    assert_eq!(
+        report.schema_version,
+        CONTEXT_QUALITY_EVIDENCE_SCHEMA_VERSION
+    );
+    assert_eq!(report.fixture_id, "fixture-context-quality");
+    assert_eq!(report.query, "parser validation");
+    assert_eq!(report.max_tokens, 4);
+    assert_eq!(report.used_tokens, 4);
+    assert_eq!(report.token_budget_remaining, 0);
+    assert_eq!(
+        report
+            .included
+            .iter()
+            .map(|item| (item.rank, item.id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(Some(1), "dynamic-high"), (Some(2), "dynamic-low")]
+    );
+    assert_eq!(
+        report.included_by_source.get("session_archive").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        report.included_by_source.get("lsp_symbol").copied(),
+        Some(1)
+    );
+    let excluded = report
+        .excluded
+        .iter()
+        .find(|item| item.id == "dynamic-expensive")
+        .expect("budget excluded item");
+    assert_eq!(
+        excluded.inclusion_reason,
+        ContextInclusionReason::ExcludedTokenBudget
+    );
+    assert_eq!(
+        excluded
+            .truncation
+            .as_ref()
+            .map(|truncation| truncation.truncated),
+        Some(true)
+    );
+    assert_eq!(
+        report
+            .excluded_by_reason
+            .get("excluded_token_budget")
+            .copied(),
+        Some(1)
+    );
+    assert!(report.findings.iter().any(|finding| {
+        finding.kind == ContextQualityFindingKind::TokenBudgetPressure
+            && finding.item_ids == vec!["dynamic-expensive"]
+    }));
+    let json = serde_json::to_value(&report)?;
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["included"][0]["id"], "dynamic-high");
+    assert_eq!(json["excluded_by_reason"]["excluded_token_budget"], 1);
+    Ok(())
+}
+
+#[test]
+fn context_quality_pack_distinguishes_safety_exclusions_ranking_and_recall_gaps() -> Result<()> {
+    let no_candidates = pack_context_items(Vec::<ContextItem>::new(), ContextPackOptions::new(4))?;
+    let recall = build_context_quality_evidence_pack(
+        "fixture-empty-context",
+        "unknown symbol",
+        &no_candidates,
+        Vec::new(),
+    );
+    assert!(recall.findings.iter().any(|finding| {
+        finding.kind == ContextQualityFindingKind::RecallInsufficient && finding.item_ids.is_empty()
+    }));
+
+    let unscored = pack_item(
+        "unscored-dynamic",
+        ContextSource::RepositoryFile,
+        ContextInclusionReason::RetrievalHit,
+        1,
+        None,
+    );
+    let mut secret = pack_item(
+        "secret-hit",
+        ContextSource::RepositoryFile,
+        ContextInclusionReason::RetrievalHit,
+        1,
+        Some(1.0),
+    );
+    secret.sensitivity = ContextSensitivity::Secret;
+    let mut external = pack_item(
+        "external-hit",
+        ContextSource::ToolObservation,
+        ContextInclusionReason::RetrievalHit,
+        1,
+        Some(0.8),
+    );
+    external.trust_level = ContextTrustLevel::ToolObservation;
+    external.sensitivity = ContextSensitivity::External;
+    let packed = pack_context_items(
+        vec![unscored, secret, external],
+        ContextPackOptions::new(10),
+    )?;
+    let report = build_context_quality_evidence_pack(
+        "fixture-safety-context",
+        "secret external",
+        &packed,
+        Vec::new(),
+    );
+
+    assert_eq!(
+        report.excluded_by_reason.get("excluded_secret").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        report
+            .excluded_by_reason
+            .get("excluded_egress_denied")
+            .copied(),
+        Some(1)
+    );
+    assert!(report.findings.iter().any(|finding| {
+        finding.kind == ContextQualityFindingKind::RankingInsufficient
+            && finding.item_ids == vec!["unscored-dynamic"]
+    }));
+    assert!(report.findings.iter().any(|finding| {
+        finding.kind == ContextQualityFindingKind::SafetyExclusion
+            && finding.item_ids == vec!["external-hit", "secret-hit"]
+    }));
+    Ok(())
+}
+
+#[test]
+fn context_quality_report_writes_evidence_artifacts() -> Result<()> {
+    let default_temp = tempfile::tempdir()?;
+    let output_dir = std::env::var_os("SIGIL_CONTEXT_QUALITY_REPORT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| default_temp.path().join("context-quality"));
+
+    let mut workspace_instruction = pack_item(
+        "workspace-instruction",
+        ContextSource::WorkspaceInstruction,
+        ContextInclusionReason::WorkspaceInstruction,
+        1,
+        Some(1.0),
+    );
+    workspace_instruction.trust_level = ContextTrustLevel::WorkspaceInstruction;
+
+    let good_pack = build_context_quality_evidence_pack(
+        "fixture-context-good",
+        "parser validation",
+        &pack_context_items(
+            vec![
+                workspace_instruction,
+                pack_item(
+                    "session-hit",
+                    ContextSource::SessionArchive,
+                    ContextInclusionReason::RetrievalHit,
+                    1,
+                    Some(0.9),
+                ),
+            ],
+            ContextPackOptions::new(8),
+        )?,
+        Vec::new(),
+    );
+    let budget_pack = build_context_quality_evidence_pack(
+        "fixture-context-budget-pressure",
+        "large implementation",
+        &pack_context_items(
+            vec![
+                pack_item(
+                    "repo-small",
+                    ContextSource::RepositoryFile,
+                    ContextInclusionReason::RetrievalHit,
+                    2,
+                    Some(0.8),
+                ),
+                pack_item(
+                    "repo-large",
+                    ContextSource::RepositoryFile,
+                    ContextInclusionReason::RetrievalHit,
+                    8,
+                    Some(0.7),
+                ),
+            ],
+            ContextPackOptions::new(4),
+        )?,
+        Vec::new(),
+    );
+    let mut secret = pack_item(
+        "secret-candidate",
+        ContextSource::RepositoryFile,
+        ContextInclusionReason::RetrievalHit,
+        1,
+        Some(1.0),
+    );
+    secret.sensitivity = ContextSensitivity::Secret;
+    let safety_pack = build_context_quality_evidence_pack(
+        "fixture-context-safety",
+        "credential handling",
+        &pack_context_items(vec![secret], ContextPackOptions::new(8))?,
+        Vec::new(),
+    );
+
+    let artifacts = write_context_quality_evidence_artifacts(
+        &output_dir,
+        &[good_pack, budget_pack, safety_pack],
+    )?;
+
+    assert!(artifacts.evidence_jsonl_path.exists());
+    assert!(artifacts.summary_path.exists());
+    assert!(artifacts.manifest_path.exists());
+
+    let jsonl = std::fs::read_to_string(&artifacts.evidence_jsonl_path)?;
+    assert_eq!(jsonl.lines().count(), 3);
+    assert!(jsonl.contains("\"fixture_id\":\"fixture-context-good\""));
+    assert!(jsonl.contains("\"fixture_id\":\"fixture-context-budget-pressure\""));
+    assert!(jsonl.contains("\"fixture_id\":\"fixture-context-safety\""));
+    assert!(jsonl.contains("\"kind\":\"token_budget_pressure\""));
+    assert!(jsonl.contains("\"kind\":\"safety_exclusion\""));
+
+    let summary = std::fs::read_to_string(&artifacts.summary_path)?;
+    assert!(summary.contains("# Sigil Context Quality Evidence"));
+    assert!(summary.contains("Total packs: 3"));
+    assert!(summary.contains("fixture-context-budget-pressure"));
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&artifacts.manifest_path)?)?;
+    assert_eq!(
+        manifest["report_schema_version"],
+        CONTEXT_QUALITY_REPORT_SCHEMA_VERSION
+    );
+    assert_eq!(manifest["pack_count"], 3);
+    assert_eq!(manifest["finding_counts"]["token_budget_pressure"], 1);
+    assert_eq!(manifest["finding_counts"]["safety_exclusion"], 1);
+    assert!(
+        manifest["fixture_ids"]
+            .as_array()
+            .expect("manifest fixture_ids should be an array")
+            .iter()
+            .any(|value| value == "fixture-context-good")
+    );
+
     Ok(())
 }

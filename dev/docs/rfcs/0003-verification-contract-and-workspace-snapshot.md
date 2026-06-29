@@ -574,6 +574,7 @@ Required deterministic tests:
 - 已将 workspace snapshot 大文件阈值纳入 `VerificationScope.max_file_bytes`，并作为 policy-bound scope coverage 参与验证范围覆盖判断；默认值仍沿用 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES`。
 - 已补充 verification scope profile MVP：`auto` / `rust` / `node` / `python` / `docs` 预设可生成对应 `VerificationScope`，`[verification]` 可通过 `scope_profile`、`extra_scope_excludes` 和 `generated_roots` 做低频 override；`/config` Permissions 只读展示当前 profile、关键 excludes、generated roots 与 advanced override 数量，不新增普通用户操作面。
 - 已完成 child verification / worktree merge 的最小产品链路展示：task sidebar / strip 会在 child merge 导致 parent verification stale 时显示 child task/status 和 `run parent check` 引导；session audit 中 child receipt link 会显示 linked/merged 状态和 parent re-check requirement，避免把 snapshot id / merge event id 当成普通用户动作。
+- E03.4 已完成：E14.7 的 merge review product surface 展示 pending/accepted/conflict/rejected/cancelled states，kernel `verification_child` reducer test 证明 child worktree `Passed` receipt 不会继承为 parent `Passed`，parent merge 后仍需 parent workspace evidence。
 - 已补齐新增 projected state 的 Session 级 durable replay adoption：session-list、agent-graph 和 dispatch-trace projection 可通过 `Session` 的 durable mixed-stream replay adapter 重建；dispatch trace projection 继续保持 egress payload redaction，腐败 stream/sequence gap 由读取层 fail closed。
 - 已确认当前 plugin integration 仅产生静态 manifest review/projection data；尚无 plugin hook command execution runtime，plugin-declared MCP server 也未自动进入 active startup/refresh path。未来启用这些 plugin-owned external process 时必须先产生 RFC-0002 unknown-dirty mutation evidence，verification reducer 才能消费。
 
