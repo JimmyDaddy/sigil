@@ -653,6 +653,10 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     ]);
 
     let rows = app.agent_sidebar_rows();
+    assert_eq!(
+        app.agent_graph_summary_line().as_deref(),
+        Some("graph: 1 agents · 1 active")
+    );
     assert!(rows.iter().any(|row| {
         row.label == "agent kernel map" && row.detail == "running · explore · chat" && !row.muted
     }));

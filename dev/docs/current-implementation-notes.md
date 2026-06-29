@@ -277,13 +277,13 @@ git config core.hooksPath .githooks
 ./scripts/check-staged-coverage.py
 ```
 
-staged gate 会先读取 staged source snapshot，再计算新增行覆盖率。可识别的 `enum`、`struct` 和 `union` 声明行不会进入可执行行分母，即使 LCOV 为这些行生成了 zero-count 记录。
+staged gate 会先读取 staged source snapshot，再检查 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。可识别的声明、导入和类型形状不会进入可执行新增行判断。
 
-为了缩短本地提交耗时，staged gate 只对 staged 业务文件所在 package 生成 LCOV；完整 workspace 覆盖率仍由显式 `./scripts/coverage.sh` 和 CI 校验。
+为了缩短本地提交耗时，staged gate 不再为每次提交生成 LCOV；完整 workspace 覆盖率仍由显式 `./scripts/coverage.sh` 和 CI 校验。
 
-staged gate 的默认新增可执行行覆盖率阈值是 `85%`，可用 `STAGED_COVERAGE_MIN_LINES=96` 临时提高到 release/CI 级严格检查。
+staged gate 只作为测试证据检查，不替代 targeted tests、`check-touched` 或完整 coverage gate。
 
-staged coverage 脚本的 diff 分类、LCov 解析和新增行覆盖率计算有独立 Python 单测：
+staged coverage 脚本的 diff 分类、同 crate 测试证据和覆盖率辅助解析有独立 Python 单测：
 
 ```bash
 python3 -m unittest scripts/test_check_staged_coverage.py

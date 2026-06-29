@@ -117,6 +117,37 @@ It does not own:
 4. Localhost app-server listener with auth.
 5. OpenAPI/SSE productization.
 
+## 8.1 Implementation Progress
+
+Core DTO semantics implemented:
+
+- `sigil-http` now exposes a versioned `HttpCommandEnvelope<T>` with
+  `command_id`, `client_id`, `session_id`, optional `expected_stream_sequence`
+  and optional `correlation_id`.
+- Unsupported command envelope versions fail closed before execution routing.
+- Protocol event envelopes retain durable/transient classification, and expose
+  explicit durable and transient view DTOs so clients can distinguish replayable
+  cursor-bearing events from live-only progress events.
+- Existing HTTP run registry and SSE buffer remain transport-thin; this slice
+  does not start an HTTP listener or create a new protocol crate.
+- Approval command protection is now implemented at the `sigil-http` registry
+  boundary: pending approvals and decision payloads carry
+  `approval_request_id`, `tool_call_hash`, `policy_version`, and `expires_at_ms`;
+  envelope-routed approval commands dedupe retries by
+  `(session_id, client_id, command_id)`; stale `expected_stream_sequence` values
+  fail closed; changed tool calls, changed policy, changed expiry, and expired
+  approvals are rejected before the pending approval is consumed.
+- The TUI runner command bridge pilot now covers the approval flow: AppAction
+  approval decisions are converted to runner-local envelope commands, the worker
+  loop de-duplicates repeated approval command ids, and legacy worker approval
+  commands remain available for compatibility. This intentionally avoids making
+  `sigil-tui` depend on the HTTP adapter while preserving the RFC command
+  envelope shape.
+
+Productization remains:
+
+- Localhost listener, OpenAPI and SSE productization are separate slices.
+
 ## 9. Acceptance Criteria
 
 - Client retry cannot execute command twice.

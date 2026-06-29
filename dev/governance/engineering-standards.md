@@ -117,11 +117,11 @@ cargo clippy --all-targets -- -D warnings
 git config core.hooksPath .githooks
 ```
 
-hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行覆盖率是否达到本地提交阈值。默认阈值是 `>= 85%`，适合日常 pre-commit；需要 release/CI 级严格检查时，可以通过 `STAGED_COVERAGE_MIN_LINES=96` 提高阈值，或直接运行完整 `./scripts/coverage.sh`。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；也不把 staged source 里可识别的 `enum` / `struct` / `union` 声明行当作可执行业务行。如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
+hook 会调用 `scripts/check-staged-coverage.py`，检查 staged 的 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。该检查只针对业务代码，不把测试文件纳入新增业务代码统计；也不把 staged source 里可识别的声明、导入和类型形状当作可执行业务行。如果业务文件同时有 staged 与 unstaged 修改，必须先整理 staging 后再提交。
 
-为缩短本地提交耗时，staged coverage gate 只对 staged 业务文件所在 package 运行 `scripts/coverage.sh --lcov`，并在脚本内对新增可执行行执行阈值判定；不要把它当成完整 workspace 覆盖率替代品。完整 workspace 覆盖率仍通过显式 `./scripts/coverage.sh` 和 CI 执行。RFC/session/mutation/verification 等核心语义变更优先补可复现的语义测试和 conformance case；不要为了满足本地 staged 行覆盖率而补无效断言或 pass-only 测试。
+为缩短本地提交耗时，staged gate 不再为每次提交运行 `cargo llvm-cov`。它只证明“业务代码改动有同 crate 测试证据”，不要把它当成完整 workspace 覆盖率替代品。完整 workspace 覆盖率仍通过显式 `./scripts/coverage.sh` 和 CI 执行。RFC/session/mutation/verification 等核心语义变更优先补可复现的语义测试和 conformance case；不要为了满足本地 staged gate 而补无效断言或 pass-only 测试。
 
-`scripts/check-staged-coverage.py` 必须继续复用 `scripts/coverage.sh --lcov` 生成的覆盖率数据，不另起一套覆盖率管线。调整 staged diff 分类、LCov 解析或覆盖率计算时，必须同步更新 `scripts/test_check_staged_coverage.py` 的纯函数测试。
+调整 staged diff 分类、同 crate 测试证据判断或覆盖率辅助解析时，必须同步更新 `scripts/test_check_staged_coverage.py` 的纯函数测试。
 
 ### 5.2 何时需要更强验证
 

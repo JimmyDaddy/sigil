@@ -8,10 +8,10 @@ use crate::{
     ApprovalMode, DurableEventType, ExecutionCoverageLabel, ExecutionCoverageSummary,
     JsonlSessionStore, MessageRole, MutationEventRecorder, SessionStreamRecord, Tool, ToolAccess,
     ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats, ToolEgressAudit, ToolErrorKind,
-    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolRegistry,
-    ToolRegistryScope, ToolResult, ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope,
-    VerificationScope, WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationScan,
-    provider::ToolCall,
+    ToolPreview, ToolPreviewCapability, ToolPreviewFile, ToolPreviewSnapshot, ToolReceiptMetadata,
+    ToolReceiptReplayDecision, ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult,
+    ToolResultMeta, ToolSpec, ToolSubjectKind, ToolSubjectScope, VerificationScope,
+    WorkspaceKnowledge, WorkspaceMutationDetected, WorkspaceMutationScan, provider::ToolCall,
 };
 
 #[test]
@@ -23,6 +23,36 @@ fn tool_diff_stats_ignore_file_headers() {
     assert_eq!(stats.added, 2);
     assert_eq!(stats.removed, 1);
     assert_eq!(stats.hunks, 1);
+}
+
+#[test]
+fn tool_receipt_non_idempotent_replay_is_denied() {
+    let receipt = ToolReceiptMetadata {
+        idempotency_key: None,
+        idempotent: false,
+        mutation_operation_ids: vec!["operation-1".to_owned()],
+        status: ToolReceiptStatus::Interrupted,
+    };
+
+    assert_eq!(
+        receipt.replay_decision(),
+        ToolReceiptReplayDecision::ReplayDenied
+    );
+}
+
+#[test]
+fn tool_receipt_idempotent_interrupted_replay_is_allowed() {
+    let receipt = ToolReceiptMetadata {
+        idempotency_key: Some("idem-tool-call-1".to_owned()),
+        idempotent: true,
+        mutation_operation_ids: Vec::new(),
+        status: ToolReceiptStatus::Interrupted,
+    };
+
+    assert_eq!(
+        receipt.replay_decision(),
+        ToolReceiptReplayDecision::ReplayAllowed
+    );
 }
 
 #[test]
@@ -1064,6 +1094,12 @@ fn bounded_diff_and_meta_helpers_cover_zero_budgets_and_empty_values() {
         returned_entries: Some(3),
         total_entries: Some(4),
         changed_files: vec!["src/lib.rs".to_owned()],
+        receipt: Some(ToolReceiptMetadata {
+            idempotency_key: Some("idem-secret-ish".to_owned()),
+            idempotent: true,
+            mutation_operation_ids: Vec::new(),
+            status: ToolReceiptStatus::Interrupted,
+        }),
         details: json!({"scope": "workspace"}),
     };
     let value = meta
@@ -1074,6 +1110,7 @@ fn bounded_diff_and_meta_helpers_cover_zero_budgets_and_empty_values() {
     assert_eq!(value["truncated"], true);
     assert_eq!(value["changed_files"][0], "src/lib.rs");
     assert_eq!(value["details"]["scope"], "workspace");
+    assert!(value.get("receipt").is_none());
 
     assert!(super::value_is_empty(&serde_json::Value::Null));
     assert!(super::value_is_empty(&json!([])));

@@ -116,6 +116,32 @@ Detailed capability data belongs in inspect details, not the main footer.
 4. Tool/egress/secret policy integration.
 5. Context/compaction hook integration after RFC-0006.
 
+## 8.1 Implementation Progress
+
+核心语义已实现：
+
+- Plugin manifest discovery uses static manifest parsing and digest validation
+  before code load.
+- Plugin trust projection binds trust to manifest digest, version and
+  capability digest, so changed manifests require a new review decision.
+- Plugin registration is gated before runtime content is loaded; untrusted or
+  disabled manifests do not register executable surfaces.
+- Plugin capabilities now expose a static policy summary that maps hook and MCP
+  capabilities to the normal tool safety vocabulary: tool category/access,
+  approval default, execution-backend requirement, egress logging, secret
+  access and mutation effect.
+- TUI plugin review shows the policy summary in compact inspect rows rather
+  than a full capability matrix in the default flow.
+
+Productization remains:
+
+- Hook and plugin-owned process execution still need their runtime bridge before
+  they can emit real tool execution, egress and RFC-0002 mutation receipts.
+- Plugin-owned process unknown-dirty recording remains gated by the future
+  plugin process runtime.
+- Context and compaction hooks remain gated until their RFC-0006 integration
+  boundary is implemented.
+
 ## 9. Acceptance Criteria
 
 - Extension code cannot run before trust decision.

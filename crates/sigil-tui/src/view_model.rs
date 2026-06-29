@@ -1,7 +1,11 @@
 use std::{collections::BTreeMap, env, path::Path};
 
 use ratatui::text::Line;
-use sigil_kernel::{ContextInclusionReason, ContextItem, ContextSource, PackedContext};
+use sigil_kernel::{
+    AgentMailboxStatus, AgentThreadStateProjection, ContextInclusionReason, ContextItem,
+    ContextSource, PackedContext, ResumeJobStateProjection, SessionLogEntry, SourcedFact,
+    TaskMemoryV1,
+};
 
 use crate::{
     app::{AppState, ComposerQueueAction, PaneFocus},
@@ -66,9 +70,9 @@ impl InfoRailViewModel {
                 .collect(),
             permission_lines: app.permission_card_lines(),
             agent_lines: app
-                .agent_sidebar_rows()
+                .agent_graph_summary_line()
                 .into_iter()
-                .map(|row| {
+                .chain(app.agent_sidebar_rows().into_iter().map(|row| {
                     format!(
                         "{} {}: {} {}",
                         row.focus_symbol(true),
@@ -76,7 +80,7 @@ impl InfoRailViewModel {
                         row.status_symbol(),
                         row.compact_detail()
                     )
-                })
+                }))
                 .collect(),
             mcp_lines: app.mcp_sidebar_lines(),
             code_lines: app.code_intelligence_sidebar_lines(),
@@ -169,6 +173,246 @@ pub(crate) struct QueueActionButtonViewModel {
     pub detail: String,
     pub selected: bool,
     pub destructive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskMemoryInspectViewModel {
+    pub summary: String,
+    pub objective: String,
+    pub decisions: Vec<String>,
+    pub files_changed: Vec<String>,
+    pub checks_run: Vec<String>,
+    pub unresolved: Vec<String>,
+}
+
+impl TaskMemoryInspectViewModel {
+    pub(crate) fn from_task_memory(memory: &TaskMemoryV1) -> Self {
+        Self {
+            summary: format!(
+                "memory: {} · snapshot {}",
+                compact_identifier(&memory.memory_id),
+                compact_identifier(&memory.valid_for_snapshot)
+            ),
+            objective: format!("objective: {}", compact_memory_text(&memory.objective)),
+            decisions: memory
+                .decisions
+                .iter()
+                .take(3)
+                .map(|decision| {
+                    let mut line = format!(
+                        "decision: {}{}",
+                        compact_memory_text(&decision.decision.text),
+                        fact_source_marker(&decision.decision)
+                    );
+                    if let Some(rationale) = &decision.rationale {
+                        line.push_str(&format!(" · why {}", compact_memory_text(&rationale.text)));
+                    }
+                    line
+                })
+                .collect(),
+            files_changed: memory
+                .files_changed
+                .iter()
+                .take(5)
+                .map(|file| format!("file: {}", file.path.display()))
+                .collect(),
+            checks_run: memory
+                .verification_results
+                .iter()
+                .take(5)
+                .map(|receipt| format!("check: {}", compact_identifier(receipt)))
+                .collect(),
+            unresolved: memory
+                .unresolved_issues
+                .iter()
+                .take(3)
+                .map(|fact| {
+                    format!(
+                        "unresolved: {}{}",
+                        compact_memory_text(&fact.text),
+                        fact_source_marker(fact)
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            "[memory]".to_owned(),
+            self.summary.clone(),
+            self.objective.clone(),
+        ];
+        lines.extend(non_empty_or_none(&self.decisions, "decision"));
+        lines.extend(non_empty_or_none(&self.files_changed, "file"));
+        lines.extend(non_empty_or_none(&self.checks_run, "check"));
+        lines.extend(non_empty_or_none(&self.unresolved, "unresolved"));
+        lines
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecoveryPanelViewModel {
+    pub title: String,
+    pub last_known: String,
+    pub risk_summary: String,
+    pub recommended_action: String,
+}
+
+impl RecoveryPanelViewModel {
+    pub(crate) fn from_entries(entries: &[SessionLogEntry], now_ms: u64) -> Option<Self> {
+        let resume_projection = ResumeJobStateProjection::from_entries(entries, now_ms);
+        let stale_jobs = resume_projection.stale_jobs();
+        let agent_projection = AgentThreadStateProjection::from_entries(entries);
+        let interrupted_mailbox = agent_projection
+            .mailbox_messages
+            .values()
+            .filter(|message| message.status == AgentMailboxStatus::Interrupted)
+            .count();
+        let pending_mailbox = agent_projection
+            .mailbox_messages
+            .values()
+            .filter(|message| {
+                matches!(
+                    message.status,
+                    AgentMailboxStatus::Queued | AgentMailboxStatus::Delivered
+                )
+            })
+            .count();
+        let interrupted_attempts = agent_projection
+            .threads
+            .values()
+            .flat_map(|thread| thread.attempts.values())
+            .filter(|attempt| attempt.interrupted.is_some())
+            .count();
+        if stale_jobs.is_empty()
+            && interrupted_mailbox == 0
+            && pending_mailbox == 0
+            && interrupted_attempts == 0
+        {
+            return None;
+        }
+
+        let last_known = stale_jobs
+            .first()
+            .map(|job| {
+                let task = job
+                    .intent
+                    .task_id
+                    .as_ref()
+                    .map(|task| task.as_str())
+                    .unwrap_or("session");
+                let step = job
+                    .lease
+                    .as_ref()
+                    .and_then(|lease| lease.step_id.as_ref())
+                    .map(|step| step.as_str())
+                    .unwrap_or("unknown step");
+                format!("last: {task} · {step}")
+            })
+            .unwrap_or_else(|| {
+                let mailbox = interrupted_mailbox + pending_mailbox;
+                if mailbox > 0 {
+                    format!("last: {mailbox} pending mailbox messages")
+                } else {
+                    format!("last: {interrupted_attempts} interrupted agent attempts")
+                }
+            });
+
+        let risk_summary = recovery_risk_summary(
+            stale_jobs.len(),
+            interrupted_mailbox,
+            pending_mailbox,
+            interrupted_attempts,
+        );
+        let recommended_action = match (
+            stale_jobs.len(),
+            interrupted_mailbox + pending_mailbox,
+            interrupted_attempts,
+        ) {
+            (0, 0, _) => "action: inspect attempt, then resume or mark abandoned".to_owned(),
+            (0, _, _) => "action: inspect mailbox, then resume or mark abandoned".to_owned(),
+            _ => "action: inspect recovery, then resume or mark abandoned".to_owned(),
+        };
+
+        Some(Self {
+            title: "Recovery".to_owned(),
+            last_known,
+            risk_summary,
+            recommended_action,
+        })
+    }
+
+    pub(crate) fn lines(&self) -> Vec<String> {
+        vec![
+            self.title.clone(),
+            format!("  {}", self.last_known),
+            format!("  risk: {}", self.risk_summary),
+            format!("  {}", self.recommended_action),
+        ]
+    }
+}
+
+fn recovery_risk_summary(
+    stale_jobs: usize,
+    interrupted_mailbox: usize,
+    pending_mailbox: usize,
+    interrupted_attempts: usize,
+) -> String {
+    let mut parts = Vec::new();
+    if stale_jobs > 0 {
+        parts.push(format!("{stale_jobs} stale jobs"));
+    }
+    if interrupted_mailbox > 0 {
+        parts.push(format!("{interrupted_mailbox} interrupted mailbox"));
+    }
+    if pending_mailbox > 0 {
+        parts.push(format!("{pending_mailbox} pending mailbox"));
+    }
+    if interrupted_attempts > 0 {
+        parts.push(format!("{interrupted_attempts} interrupted attempts"));
+    }
+    if parts.is_empty() {
+        "none".to_owned()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+fn non_empty_or_none(lines: &[String], label: &str) -> Vec<String> {
+    if lines.is_empty() {
+        vec![format!("{label}: none")]
+    } else {
+        lines.to_vec()
+    }
+}
+
+fn fact_source_marker(fact: &SourcedFact) -> &'static str {
+    match (fact.model_generated, fact.verified) {
+        (true, false) => " [model/unverified]",
+        (true, true) => " [model/verified]",
+        (false, true) => " [verified]",
+        (false, false) => "",
+    }
+}
+
+fn compact_identifier(value: &str) -> String {
+    compact_string(value, 24)
+}
+
+fn compact_memory_text(value: &str) -> String {
+    compact_string(value, 96)
+}
+
+fn compact_string(value: &str, max_chars: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let mut text = value.chars().take(keep).collect::<String>();
+    text.push_str("...");
+    text
 }
 
 // RFC-0006 keeps this adapter available for the provenance surface without adding another default

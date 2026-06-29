@@ -867,8 +867,51 @@ pub struct ToolResultMeta {
     pub returned_entries: Option<u64>,
     pub total_entries: Option<u64>,
     pub changed_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ToolReceiptMetadata>,
     #[serde(default)]
     pub details: Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolReceiptStatus {
+    Pending,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolReceiptMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub idempotent: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mutation_operation_ids: Vec<String>,
+    pub status: ToolReceiptStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolReceiptReplayDecision {
+    ReplayAllowed,
+    ReplayDenied,
+}
+
+impl ToolReceiptMetadata {
+    #[must_use]
+    pub fn replay_decision(&self) -> ToolReceiptReplayDecision {
+        if self.idempotent
+            && self.idempotency_key.is_some()
+            && self.status == ToolReceiptStatus::Interrupted
+        {
+            ToolReceiptReplayDecision::ReplayAllowed
+        } else {
+            ToolReceiptReplayDecision::ReplayDenied
+        }
+    }
 }
 
 impl Default for ToolResultMeta {
@@ -892,6 +935,7 @@ impl Default for ToolResultMeta {
             returned_entries: None,
             total_entries: None,
             changed_files: Vec::new(),
+            receipt: None,
             details: Value::Null,
         }
     }

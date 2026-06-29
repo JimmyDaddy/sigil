@@ -12,8 +12,13 @@ use crate::{
     execution_backend::ExecutionCoverageSummary,
     permission::ApprovalMode,
     session::{ControlEntry, SessionLogEntry},
-    tool::ToolCategory,
+    tool::{ToolAccess, ToolCategory},
+    verification::ToolEffect,
 };
+
+fn default_plugin_egress_logging() -> bool {
+    true
+}
 
 /// Canonical prefix for plugin manifest content digests.
 pub const PLUGIN_MANIFEST_DIGEST_PREFIX: &str = "sha256:";
@@ -89,6 +94,8 @@ impl PluginManifest {
             command: hook.command.clone(),
             args: hook.args.clone(),
             approval: hook.approval,
+            egress_logging: hook.egress_logging,
+            allow_secrets: hook.allow_secrets,
         });
         let mcp_capabilities = self
             .mcp_servers
@@ -99,6 +106,9 @@ impl PluginManifest {
                 args: server.args.clone(),
                 startup: server.startup,
                 required: server.required,
+                approval: server.trust.approval_default,
+                egress_logging: server.trust.egress_logging,
+                allow_secrets: server.trust.allow_secrets,
             });
         agent_capabilities
             .chain(skill_capabilities)
@@ -154,6 +164,10 @@ pub struct PluginHookRef {
     pub args: Vec<String>,
     #[serde(default)]
     pub approval: ApprovalMode,
+    #[serde(default = "default_plugin_egress_logging")]
+    pub egress_logging: bool,
+    #[serde(default)]
+    pub allow_secrets: bool,
 }
 
 impl PluginHookRef {
@@ -189,6 +203,10 @@ pub enum PluginCapability {
         #[serde(default)]
         args: Vec<String>,
         approval: ApprovalMode,
+        #[serde(default = "default_plugin_egress_logging")]
+        egress_logging: bool,
+        #[serde(default)]
+        allow_secrets: bool,
     },
     McpServer {
         name: String,
@@ -197,10 +215,65 @@ pub enum PluginCapability {
         args: Vec<String>,
         startup: McpServerStartup,
         required: bool,
+        #[serde(default)]
+        approval: ApprovalMode,
+        #[serde(default = "default_plugin_egress_logging")]
+        egress_logging: bool,
+        #[serde(default)]
+        allow_secrets: bool,
     },
 }
 
 impl PluginCapability {
+    /// Returns the normal tool/security policy that this capability must integrate with before it
+    /// can execute.
+    ///
+    /// This is review/audit metadata only. It does not grant execution by itself, and future
+    /// runtime code must still enforce the corresponding tool permission, execution backend,
+    /// egress logging, secret access and mutation recording paths.
+    #[must_use]
+    pub fn policy_summary(&self) -> PluginCapabilityPolicy {
+        match self {
+            Self::Agent { .. } | Self::Skill { .. } => PluginCapabilityPolicy {
+                tool_category: None,
+                tool_access: None,
+                approval_default: None,
+                execution_backend_required: false,
+                egress_logging: false,
+                allow_secrets: false,
+                mutation_effect: ToolEffect::ReadOnly,
+            },
+            Self::Hook {
+                approval,
+                egress_logging,
+                allow_secrets,
+                ..
+            } => PluginCapabilityPolicy {
+                tool_category: Some(ToolCategory::Custom),
+                tool_access: Some(ToolAccess::Execute),
+                approval_default: Some(*approval),
+                execution_backend_required: true,
+                egress_logging: *egress_logging,
+                allow_secrets: *allow_secrets,
+                mutation_effect: ToolEffect::Unknown,
+            },
+            Self::McpServer {
+                approval,
+                egress_logging,
+                allow_secrets,
+                ..
+            } => PluginCapabilityPolicy {
+                tool_category: Some(ToolCategory::Mcp),
+                tool_access: Some(ToolAccess::Network),
+                approval_default: Some(*approval),
+                execution_backend_required: true,
+                egress_logging: *egress_logging,
+                allow_secrets: *allow_secrets,
+                mutation_effect: ToolEffect::Unknown,
+            },
+        }
+    }
+
     /// Returns the execution-boundary summary for this plugin capability.
     ///
     /// This describes whether Sigil's local execution backend controls the capability execution.
@@ -241,6 +314,23 @@ impl PluginCapability {
             }
         }
     }
+}
+
+/// Static review summary showing how one plugin capability maps back to Sigil's normal tool
+/// permission, execution, egress, secret and mutation audit path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginCapabilityPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_category: Option<ToolCategory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_access: Option<ToolAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_default: Option<ApprovalMode>,
+    pub execution_backend_required: bool,
+    pub egress_logging: bool,
+    pub allow_secrets: bool,
+    pub mutation_effect: ToolEffect,
 }
 
 /// Trust state for one plugin manifest hash.

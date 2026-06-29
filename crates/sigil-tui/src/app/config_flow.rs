@@ -3081,7 +3081,16 @@ fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
                 command,
                 args,
                 approval,
-            } => Some((event, command, args, approval)),
+                egress_logging,
+                allow_secrets,
+            } => Some((
+                event,
+                command,
+                args,
+                approval,
+                egress_logging,
+                allow_secrets,
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -3090,7 +3099,9 @@ fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
         lines.push(render_config_readonly_row("Hook count", "0"));
         return lines;
     }
-    for (index, (event, command, args, approval)) in hooks.iter().enumerate() {
+    for (index, (event, command, args, approval, egress_logging, allow_secrets)) in
+        hooks.iter().enumerate()
+    {
         let label = format!("Hook {}", index + 1);
         lines.push(render_config_readonly_row(&label, event.as_str()));
         push_wrapped_readonly_rows(
@@ -3099,8 +3110,8 @@ fn render_plugin_hook_lines(capabilities: &[PluginCapability]) -> Vec<String> {
             &command_with_args(command, args),
         );
         lines.push(render_config_readonly_row(
-            &format!("{label} approval"),
-            approval.as_str(),
+            &format!("{label} policy"),
+            &plugin_capability_policy_summary(approval, **egress_logging, **allow_secrets),
         ));
     }
     lines
@@ -3116,7 +3127,19 @@ fn render_plugin_mcp_lines(capabilities: &[PluginCapability]) -> Vec<String> {
                 args,
                 startup,
                 required,
-            } => Some((name, command, args, startup, *required)),
+                approval,
+                egress_logging,
+                allow_secrets,
+            } => Some((
+                name,
+                command,
+                args,
+                startup,
+                *required,
+                approval,
+                egress_logging,
+                allow_secrets,
+            )),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -3125,7 +3148,11 @@ fn render_plugin_mcp_lines(capabilities: &[PluginCapability]) -> Vec<String> {
         lines.push(render_config_readonly_row("MCP count", "0"));
         return lines;
     }
-    for (index, (name, command, args, startup, required)) in servers.iter().enumerate() {
+    for (
+        index,
+        (name, command, args, startup, required, approval, egress_logging, allow_secrets),
+    ) in servers.iter().enumerate()
+    {
         let label = format!("MCP {}", index + 1);
         lines.push(render_config_readonly_row(&label, name.as_str()));
         push_wrapped_readonly_rows(
@@ -3141,8 +3168,29 @@ fn render_plugin_mcp_lines(capabilities: &[PluginCapability]) -> Vec<String> {
             &format!("{label} required"),
             bool_summary(*required),
         ));
+        lines.push(render_config_readonly_row(
+            &format!("{label} policy"),
+            &plugin_capability_policy_summary(approval, **egress_logging, **allow_secrets),
+        ));
     }
     lines
+}
+
+fn plugin_capability_policy_summary(
+    approval: &ApprovalMode,
+    egress_logging: bool,
+    allow_secrets: bool,
+) -> String {
+    format!(
+        "approval={} egress={} secrets={}",
+        approval.as_str(),
+        bool_summary(egress_logging),
+        secrets_summary(allow_secrets)
+    )
+}
+
+fn secrets_summary(allow_secrets: bool) -> &'static str {
+    if allow_secrets { "allowed" } else { "blocked" }
 }
 
 fn push_wrapped_readonly_rows(lines: &mut Vec<String>, label: &str, value: &str) {

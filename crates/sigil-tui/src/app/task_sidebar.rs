@@ -393,6 +393,7 @@ fn task_sidebar_hidden_step_summary(
             TaskStepStatus::Blocked => blocked += 1,
             TaskStepStatus::Cancelled => cancelled += 1,
             TaskStepStatus::Interrupted => interrupted += 1,
+            TaskStepStatus::Superseded => {}
         }
     }
     let mut parts = Vec::new();
@@ -435,6 +436,7 @@ fn task_step_status_kind(
         TaskStepStatus::Pending => StatusKind::Pending,
         TaskStepStatus::Running => StatusKind::Running,
         TaskStepStatus::Completed => StatusKind::Success,
+        TaskStepStatus::Superseded => StatusKind::Unknown,
         TaskStepStatus::Failed
         | TaskStepStatus::Blocked
         | TaskStepStatus::Cancelled
@@ -607,6 +609,7 @@ fn task_step_status_label(status: TaskStepStatus) -> &'static str {
         TaskStepStatus::Blocked => "blocked",
         TaskStepStatus::Cancelled => "cancelled",
         TaskStepStatus::Interrupted => "interrupted",
+        TaskStepStatus::Superseded => "superseded",
     }
 }
 

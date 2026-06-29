@@ -10,17 +10,17 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
     Agent, AgentApprovalRouteEntry, AgentArtifactRef, AgentFinalAnswerRef, AgentInvocationMode,
-    AgentInvocationSource, AgentMergeSafePointEntry, AgentProfileCapturedEntry, AgentProfileId,
-    AgentRole, AgentRouteId, AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry,
-    AgentRunContextSnapshot, AgentRunInput, AgentRunInterruptedEntry, AgentRunResult,
-    AgentThreadId, AgentThreadResult, AgentThreadResultRecordedEntry, AgentThreadStartedEntry,
-    AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
-    AgentUsageSummary, ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, Provider,
-    ProviderCapabilities, RunEvent, Session, SessionRef, SessionStats, TaskChildSessionEntry,
-    TaskChildSessionRunOutput, TaskChildSessionRunRequest, TaskChildSessionRunner,
-    TaskChildSessionStatus, TaskId, TaskRouteId, TaskRouteStatus, TaskStepSpec,
-    TaskSubagentApprovalRouteEntry, ToolApproval, ToolCall, ToolErrorKind, ToolRegistryScope,
-    ToolSpec, WorkspaceRootSnapshot, child_session_ref,
+    AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry,
+    AgentProfileCapturedEntry, AgentProfileId, AgentRole, AgentRouteId, AgentRouteStatus,
+    AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunInput,
+    AgentRunInterruptedEntry, AgentRunResult, AgentThreadId, AgentThreadResult,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
+    ApprovalHandler, ControlEntry, EventHandler, JsonlSessionStore, Provider, ProviderCapabilities,
+    RunEvent, Session, SessionRef, SessionStats, TaskChildSessionEntry, TaskChildSessionRunOutput,
+    TaskChildSessionRunRequest, TaskChildSessionRunner, TaskChildSessionStatus, TaskId,
+    TaskRouteId, TaskRouteStatus, TaskStepSpec, TaskSubagentApprovalRouteEntry, ToolApproval,
+    ToolCall, ToolErrorKind, ToolRegistryScope, ToolSpec, WorkspaceRootSnapshot, child_session_ref,
 };
 
 use crate::{
@@ -725,6 +725,35 @@ impl AgentSupervisor {
             }),
         )?;
         self.release_thread(&thread.thread_id);
+        Ok(())
+    }
+
+    pub fn record_chat_mailbox_consumed<H>(
+        &self,
+        session: &mut Session,
+        handler: &mut H,
+        thread: &AgentChatChildThread,
+        route_ids: &[AgentRouteId],
+    ) -> Result<()>
+    where
+        H: EventHandler + Send + ?Sized,
+    {
+        for route_id in route_ids {
+            append_control(
+                session,
+                handler,
+                ControlEntry::AgentMailboxMessage(AgentMailboxMessageEntry {
+                    route_id: route_id.clone(),
+                    source_thread_id: thread.parent_thread_id.clone(),
+                    target_thread_id: thread.thread_id.clone(),
+                    prompt_hash: String::new(),
+                    prompt: None,
+                    status: AgentMailboxStatus::Consumed,
+                    reason: None,
+                    updated_at_ms: None,
+                }),
+            )?;
+        }
         Ok(())
     }
 

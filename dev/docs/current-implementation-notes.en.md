@@ -276,13 +276,13 @@ Run staged coverage check directly:
 ./scripts/check-staged-coverage.py
 ```
 
-The staged gate reads the staged source snapshot before calculating added-line coverage. Recognized `enum`, `struct`, and `union` declaration lines are excluded from the executable-line denominator even when LCOV reports zero-count line records for them.
+The staged gate reads the staged source snapshot before checking whether Rust business-code executable additions have same-crate test-file changes. Recognized declarations, imports, and type shapes are excluded from the executable-addition decision.
 
-To keep local commits fast, the staged gate generates LCOV only for packages containing staged business-code files; full workspace coverage still belongs to explicit `./scripts/coverage.sh` runs and CI.
+To keep local commits fast, the staged gate no longer generates LCOV for every commit; full workspace coverage still belongs to explicit `./scripts/coverage.sh` runs and CI.
 
-The staged gate defaults to `85%` added executable-line coverage. Use `STAGED_COVERAGE_MIN_LINES=96` when a release/CI-grade staged check is needed.
+The staged gate is a test-evidence check, not a replacement for targeted tests, `check-touched`, or the full coverage gate.
 
-The staged coverage script has focused Python unit tests for diff classification, LCov parsing, and added-line coverage calculation:
+The staged coverage script has focused Python unit tests for diff classification, same-crate test evidence, and coverage parser helpers:
 
 ```bash
 python3 -m unittest scripts/test_check_staged_coverage.py

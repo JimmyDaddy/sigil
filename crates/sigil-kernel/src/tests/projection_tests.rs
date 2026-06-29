@@ -1,19 +1,28 @@
 use anyhow::Result;
 
 use crate::{
-    CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
-    CheckSpecRecordedEntry, ChildVerificationReceiptLinked, CompletionCriteria, ControlEntry,
-    DurableEventType, EventClass, EvidenceReceipt, EvidenceScope, FileProjectionStore,
-    JsonlSessionStore, ProjectionApplyDecision, ProjectionStore, ReadinessEvaluatedEntry,
+    AgentInvocationMode, AgentInvocationSource, AgentProfileCapturedEntry, AgentProfileId,
+    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentRouteId,
+    AgentRouteStatus, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadResult,
+    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
+    AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, ApprovalMode, CandidateCheck,
+    CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec, CheckSpecRecordedEntry,
+    ChildVerificationReceiptLinked, CompletionCriteria, ControlEntry, DispatchTraceKind,
+    DispatchTraceProjectionSnapshot, DispatchTraceStatus, DurableEventType, EventClass,
+    EvidenceReceipt, EvidenceScope, FileProjectionStore, JsonlSessionStore, PathTrustZone,
+    PermissionRisk, ProjectionApplyDecision, ProjectionStore, ReadinessEvaluatedEntry,
     ReadinessEvaluation, ReceiptStatus, RedactionState, RequiredAction, RunStatus,
     SandboxProfileRequirement, SessionListProjectionSnapshot, SessionLogEntry, SessionRef,
-    SessionStreamRecord, TaskId, TaskRunEntry, TaskRunStatus, ToolEffect, UsageStats,
-    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckRunEntry,
-    VerificationCheckRunStatus, VerificationPolicy, VerificationPolicyChangedEntry,
-    VerificationRecordedEntry, VerificationScope, VerificationStateProjection,
-    VerificationStateProjectionSnapshot, VerificationVerdict, VisibleCompletionState,
-    WorkspaceTrust, WorkspaceTrustDecisionEntry, WorkspaceTrustRequirement,
-    session_list_projection_from_records,
+    SessionStreamRecord, TaskId, TaskRunEntry, TaskRunStatus, ToolAccess, ToolApprovalAuditAction,
+    ToolApprovalEntry, ToolApprovalUserDecision, ToolEffect, ToolError, ToolErrorKind,
+    ToolExecutionEntry, ToolExecutionStatus, ToolOperation, ToolResultMeta, ToolSubjectAudit,
+    ToolSubjectKind, ToolSubjectScope, UsageStats, VerificationAutoRunPolicy, VerificationBinding,
+    VerificationCheckRunEntry, VerificationCheckRunStatus, VerificationPolicy,
+    VerificationPolicyChangedEntry, VerificationRecordedEntry, VerificationScope,
+    VerificationStateProjection, VerificationStateProjectionSnapshot, VerificationVerdict,
+    VisibleCompletionState, WorkspaceRootSnapshot, WorkspaceTrust, WorkspaceTrustDecisionEntry,
+    WorkspaceTrustRequirement, agent_graph_projection_from_records,
+    dispatch_trace_projection_from_records, session_list_projection_from_records,
 };
 
 fn workspace_trust_entry(workspace_id: &str, trust_event: &str) -> WorkspaceTrustDecisionEntry {
@@ -219,6 +228,141 @@ fn sample_task_run_entry() -> Result<TaskRunEntry> {
     })
 }
 
+fn sample_agent_profile_snapshot() -> Result<AgentProfileSnapshot> {
+    Ok(AgentProfileSnapshot {
+        snapshot_id: AgentProfileSnapshotId::new("snapshot_explore_1")?,
+        profile_id: AgentProfileId::new("explore")?,
+        source: AgentProfileSource::System,
+        source_hash: "sha256:source".to_owned(),
+        profile_hash: "sha256:profile".to_owned(),
+        resolved_tool_scope_hash: "sha256:tools".to_owned(),
+        resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+        resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+        resolved_skill_hashes: Vec::new(),
+        trust_state: AgentTrustState::Trusted,
+    })
+}
+
+fn sample_agent_started_entry() -> Result<AgentThreadStartedEntry> {
+    Ok(AgentThreadStartedEntry {
+        thread_id: AgentThreadId::new("thread_1")?,
+        parent_thread_id: Some(AgentThreadId::new("main")?),
+        parent_session_ref: SessionRef::new_relative("parent.jsonl")?,
+        thread_session_ref: SessionRef::new_relative("children/thread_1.jsonl")?,
+        profile_id: AgentProfileId::new("explore")?,
+        profile_snapshot_id: AgentProfileSnapshotId::new("snapshot_explore_1")?,
+        run_context: crate::AgentRunContextSnapshot {
+            profile_snapshot_id: AgentProfileSnapshotId::new("snapshot_explore_1")?,
+            provider: "deepseek".to_owned(),
+            model: "deepseek-v4-pro".to_owned(),
+            reasoning_effort: None,
+            workspace_root: WorkspaceRootSnapshot::new("/workspace")?,
+            effective_tool_scope_hash: "sha256:tools".to_owned(),
+            effective_permission_policy_hash: "sha256:permissions".to_owned(),
+            effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+            provider_capability_hash: "sha256:provider".to_owned(),
+            model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+            budget_policy_hash: "sha256:budget".to_owned(),
+            provider_background_handle_ref: None,
+        },
+        objective: "inspect kernel".to_owned(),
+        prompt_hash: "sha256:prompt".to_owned(),
+        invocation_mode: AgentInvocationMode::Background,
+        invocation_source: AgentInvocationSource::Task,
+        display_name: Some("kernel map".to_owned()),
+        created_at_ms: Some(42),
+    })
+}
+
+fn sample_agent_result_entry() -> Result<AgentThreadResultRecordedEntry> {
+    Ok(AgentThreadResultRecordedEntry {
+        result: AgentThreadResult {
+            thread_id: AgentThreadId::new("thread_1")?,
+            session_ref: SessionRef::new_relative("children/thread_1.jsonl")?,
+            status: AgentThreadTerminalStatus::Completed,
+            summary: "done".to_owned(),
+            summary_truncated: false,
+            original_summary_chars: None,
+            artifacts: Vec::new(),
+            changed_paths: vec!["src/lib.rs".to_owned()],
+            risks: Vec::new(),
+            followups: Vec::new(),
+            usage: Some(AgentUsageSummary {
+                input_tokens: 7,
+                output_tokens: 5,
+                total_tokens: 12,
+                cached_tokens: Some(3),
+            }),
+            output_hash: "sha256:done".to_owned(),
+            final_answer_ref: None,
+        },
+    })
+}
+
+fn sample_tool_subject(scope: ToolSubjectScope) -> ToolSubjectAudit {
+    ToolSubjectAudit {
+        kind: ToolSubjectKind::Path,
+        original: "src/lib.rs".to_owned(),
+        normalized: "src/lib.rs".to_owned(),
+        canonical_path: Some("/workspace/src/lib.rs".to_owned()),
+        scope,
+    }
+}
+
+fn sample_tool_approval_entry(action: ToolApprovalAuditAction) -> ToolApprovalEntry {
+    ToolApprovalEntry {
+        action,
+        call_id: "call_1".to_owned(),
+        tool_name: "write_file".to_owned(),
+        access: ToolAccess::Write,
+        operation: Some(ToolOperation::EditFile),
+        risk: Some(PermissionRisk::Medium),
+        subjects: vec![sample_tool_subject(ToolSubjectScope::External)],
+        subject_zones: vec![PathTrustZone::External],
+        policy_decision: ApprovalMode::Ask,
+        external_directory_required: true,
+        confirmation: None,
+        snapshot_required: true,
+        user_decision: Some(ToolApprovalUserDecision::Approved),
+        reason: Some("approved in test".to_owned()),
+        preview_hash: Some("sha256:preview".to_owned()),
+    }
+}
+
+fn sample_tool_execution_entry(status: ToolExecutionStatus) -> ToolExecutionEntry {
+    let mut metadata = ToolResultMeta {
+        duration_ms: Some(33),
+        bytes: Some(12),
+        returned_bytes: Some(12),
+        total_bytes: Some(48),
+        truncated: true,
+        omitted_bytes: Some(36),
+        changed_files: vec!["src/lib.rs".to_owned()],
+        ..ToolResultMeta::default()
+    };
+    metadata.exit_code = Some(if status == ToolExecutionStatus::Completed {
+        0
+    } else {
+        1
+    });
+    ToolExecutionEntry {
+        call_id: "call_1".to_owned(),
+        tool_name: "write_file".to_owned(),
+        status,
+        duration_ms: Some(34),
+        subjects: vec![sample_tool_subject(ToolSubjectScope::External)],
+        changed_files: vec!["src/lib.rs".to_owned()],
+        metadata,
+        error: (status == ToolExecutionStatus::Failed).then(|| ToolError {
+            kind: ToolErrorKind::Internal,
+            message: "redacted failure".to_owned(),
+            retryable: false,
+            details: serde_json::Value::Null,
+        }),
+        model_content_hash: Some("sha256:model-content".to_owned()),
+    }
+}
+
 #[test]
 fn verification_projection_snapshot_roundtrips_all_entry_vectors() -> Result<()> {
     let snapshot = VerificationStateProjectionSnapshot {
@@ -332,6 +476,248 @@ fn file_projection_store_rebuilds_session_list_projection() -> Result<()> {
             .map(|cursor| cursor.last_applied_stream_sequence),
         Some(1)
     );
+    Ok(())
+}
+
+#[test]
+fn agent_graph_projection_rebuilds_mixed_stream_and_store() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_path = temp.path().join("session.jsonl");
+    let legacy_profile = SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+        AgentProfileCapturedEntry {
+            snapshot: sample_agent_profile_snapshot()?,
+        },
+    ));
+    std::fs::write(
+        &session_path,
+        format!("{}\n", serde_json::to_string(&legacy_profile)?),
+    )?;
+    let session_store = JsonlSessionStore::new(&session_path)?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadStarted(sample_agent_started_entry()?),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadMessageRouted(AgentThreadMessageRoutedEntry {
+            route_id: AgentRouteId::new("route_1")?,
+            source_thread_id: AgentThreadId::new("main")?,
+            target_thread_id: AgentThreadId::new("thread_1")?,
+            prompt_hash: "sha256:prompt-route".to_owned(),
+            prompt: Some("continue inspection".to_owned()),
+            status: AgentRouteStatus::Requested,
+        }),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadResultRecorded(sample_agent_result_entry()?),
+    ))?;
+    let records = read_records(&session_store)?;
+
+    let projection = agent_graph_projection_from_records(&records)?;
+    let summary = projection.graph_summary();
+    let projection_store = FileProjectionStore::<AgentThreadStateProjection>::agent_graph(
+        temp.path().join("agent-graph.projection.json"),
+    );
+    let stored_state = projection_store.rebuild_agent_graph_from_records(&records)?;
+    let loaded_state = projection_store.load()?;
+
+    assert_eq!(projection.threads.len(), 1);
+    assert_eq!(summary.total_threads, 1);
+    assert_eq!(summary.terminal_threads, 1);
+    assert_eq!(summary.message_routes, 1);
+    assert_eq!(summary.open_routes, 1);
+    assert_eq!(summary.total_tokens, 12);
+    assert_eq!(summary.cached_tokens, 3);
+    assert_eq!(summary.changed_path_count, 1);
+    assert_eq!(stored_state, loaded_state);
+    assert_eq!(
+        loaded_state
+            .cursor
+            .as_ref()
+            .map(|cursor| cursor.last_applied_stream_sequence),
+        Some(records.len() as u64)
+    );
+    assert_eq!(
+        loaded_state
+            .projection
+            .threads
+            .get(&AgentThreadId::new("thread_1")?)
+            .and_then(|thread| thread.result.as_ref())
+            .map(|result| result.summary.as_str()),
+        Some("done")
+    );
+    Ok(())
+}
+
+#[test]
+fn file_projection_store_applies_agent_graph_idempotently() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentProfileCaptured(AgentProfileCapturedEntry {
+            snapshot: sample_agent_profile_snapshot()?,
+        }),
+    ))?;
+    let records = read_records(&session_store)?;
+    let projection_store = FileProjectionStore::<AgentThreadStateProjection>::agent_graph(
+        temp.path().join("agent-graph.projection.json"),
+    );
+
+    let first = projection_store.apply_agent_graph_record(&records[0])?;
+    let second = projection_store.apply_agent_graph_record(&records[0])?;
+    let loaded = projection_store.load()?;
+
+    assert_eq!(first, ProjectionApplyDecision::Apply);
+    assert_eq!(second, ProjectionApplyDecision::IgnoreAlreadyApplied);
+    assert_eq!(loaded.projection.profiles.len(), 1);
+    assert_eq!(
+        loaded
+            .cursor
+            .as_ref()
+            .map(|cursor| cursor.last_applied_event_id.as_str()),
+        Some(records[0].event_id())
+    );
+    Ok(())
+}
+
+#[test]
+fn dispatch_trace_projection_rebuilds_tool_agent_usage_and_readiness() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ToolApproval(sample_tool_approval_entry(
+            ToolApprovalAuditAction::Resolved,
+        )),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ToolExecution(Box::new(sample_tool_execution_entry(
+            ToolExecutionStatus::Started,
+        ))),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ToolEgress(Box::new(crate::ToolEgressEntry {
+            call_id: "call_1".to_owned(),
+            tool_name: "write_file".to_owned(),
+            destination: "filesystem".to_owned(),
+            operation: "write".to_owned(),
+            subjects: vec![sample_tool_subject(ToolSubjectScope::External)],
+            payload: serde_json::json!({"redacted": true, "bytes": 12}),
+            redacted: true,
+        })),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ToolExecution(Box::new(sample_tool_execution_entry(
+            ToolExecutionStatus::Completed,
+        ))),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadStarted(sample_agent_started_entry()?),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::AgentThreadResultRecorded(sample_agent_result_entry()?),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::UsageSnapshot(sample_usage()),
+    ))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ReadinessEvaluated(sample_readiness_entry()),
+    ))?;
+    let records = read_records(&session_store)?;
+
+    let projection = dispatch_trace_projection_from_records(&records)?;
+    let projection_store = FileProjectionStore::<DispatchTraceProjectionSnapshot>::dispatch_trace(
+        temp.path().join("dispatch-trace.projection.json"),
+    );
+    let stored_state = projection_store.rebuild_dispatch_trace_from_records(&records)?;
+    let loaded_state = projection_store.load()?;
+    let tool_trace = projection
+        .trace("tool:call_1")
+        .expect("tool dispatch trace should exist");
+    let agent_trace = projection
+        .trace("agent:thread_1")
+        .expect("agent dispatch trace should exist");
+
+    assert_eq!(tool_trace.kind, DispatchTraceKind::Tool);
+    assert_eq!(tool_trace.status, DispatchTraceStatus::Completed);
+    assert_eq!(tool_trace.tool_name.as_deref(), Some("write_file"));
+    assert_eq!(tool_trace.egress_count, 1);
+    assert_eq!(tool_trace.egress_redacted_count, 1);
+    assert_eq!(
+        tool_trace.egress_destinations,
+        vec!["filesystem".to_owned()]
+    );
+    assert!(tool_trace.observation_truncated);
+    assert_eq!(
+        tool_trace.model_content_hash.as_deref(),
+        Some("sha256:model-content")
+    );
+    assert_eq!(tool_trace.external_subject_count, 1);
+    assert_eq!(agent_trace.kind, DispatchTraceKind::Agent);
+    assert_eq!(agent_trace.status, DispatchTraceStatus::Completed);
+    assert_eq!(agent_trace.total_tokens, Some(12));
+    assert_eq!(projection.summary.total_traces, 2);
+    assert_eq!(projection.summary.tool_traces, 1);
+    assert_eq!(projection.summary.agent_traces, 1);
+    assert_eq!(projection.summary.egress_events, 1);
+    assert_eq!(projection.summary.redacted_egress_events, 1);
+    assert_eq!(projection.summary.truncated_observations, 1);
+    assert_eq!(
+        projection
+            .latest_usage
+            .as_ref()
+            .map(|usage| usage.prompt_tokens),
+        Some(11)
+    );
+    assert_eq!(
+        projection
+            .latest_readiness
+            .as_ref()
+            .map(|readiness| readiness.visible_state),
+        Some(VisibleCompletionState::CompletedUnverified)
+    );
+    assert_eq!(stored_state, loaded_state);
+    assert_eq!(
+        loaded_state
+            .cursor
+            .as_ref()
+            .map(|cursor| cursor.last_applied_stream_sequence),
+        Some(records.len() as u64)
+    );
+    Ok(())
+}
+
+#[test]
+fn dispatch_trace_projection_redacts_payload_and_replays_idempotently() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let session_store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    session_store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ToolEgress(Box::new(crate::ToolEgressEntry {
+            call_id: "call_1".to_owned(),
+            tool_name: "webfetch".to_owned(),
+            destination: "https://example.test".to_owned(),
+            operation: "request".to_owned(),
+            subjects: vec![sample_tool_subject(ToolSubjectScope::External)],
+            payload: serde_json::json!({"secret": "must-not-project"}),
+            redacted: true,
+        })),
+    ))?;
+    let records = read_records(&session_store)?;
+    let projection_store = FileProjectionStore::<DispatchTraceProjectionSnapshot>::dispatch_trace(
+        temp.path().join("dispatch-trace.projection.json"),
+    );
+
+    let first = projection_store.apply_dispatch_trace_record(&records[0])?;
+    let second = projection_store.apply_dispatch_trace_record(&records[0])?;
+    let loaded = projection_store.load()?;
+    let encoded = serde_json::to_string(&loaded.projection)?;
+
+    assert_eq!(first, ProjectionApplyDecision::Apply);
+    assert_eq!(second, ProjectionApplyDecision::IgnoreAlreadyApplied);
+    assert!(!encoded.contains("must-not-project"));
+    let destinations = loaded
+        .projection
+        .trace("tool:call_1")
+        .map(|trace| trace.egress_destinations.clone())
+        .unwrap_or_default();
+    assert_eq!(destinations, vec!["https://example.test".to_owned()]);
     Ok(())
 }
 

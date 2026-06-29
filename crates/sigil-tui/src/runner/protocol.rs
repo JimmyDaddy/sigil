@@ -15,6 +15,44 @@ use tokio::sync::oneshot;
 
 pub(crate) type McpElicitationResponseTx = oneshot::Sender<McpElicitationResponse>;
 
+pub(crate) const WORKER_COMMAND_PROTOCOL_VERSION: u16 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerCommandEnvelope<T> {
+    pub(crate) protocol_version: u16,
+    pub(crate) command_id: String,
+    pub(crate) client_id: String,
+    pub(crate) session_id: String,
+    pub(crate) expected_stream_sequence: Option<u64>,
+    pub(crate) correlation_id: Option<String>,
+    pub(crate) payload: T,
+}
+
+impl<T> WorkerCommandEnvelope<T> {
+    pub(crate) fn new(
+        command_id: impl Into<String>,
+        client_id: impl Into<String>,
+        session_id: impl Into<String>,
+        payload: T,
+    ) -> Self {
+        Self {
+            protocol_version: WORKER_COMMAND_PROTOCOL_VERSION,
+            command_id: command_id.into(),
+            client_id: client_id.into(),
+            session_id: session_id.into(),
+            expected_stream_sequence: None,
+            correlation_id: None,
+            payload,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerApprovalCommand {
+    Decision { call_id: String, approved: bool },
+    DecisionWithArgs { call_id: String, args_json: String },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueMoveDirection {
     Up,
@@ -93,6 +131,7 @@ pub enum WorkerCommand {
         call_id: String,
         args_json: String,
     },
+    ApprovalCommand(WorkerCommandEnvelope<WorkerApprovalCommand>),
     BackgroundActiveAgent,
     CancelRun,
     CancelTerminalTask {

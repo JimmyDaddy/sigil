@@ -1924,16 +1924,28 @@ fn worker_command_conversion_covers_remaining_variants_and_panics_for_config_upd
             call_id: "call-1".to_owned(),
             approved: true,
         }),
-        WorkerCommand::ApprovalDecision { call_id, approved }
-            if call_id == "call-1" && approved
+        WorkerCommand::ApprovalCommand(command)
+            if command.client_id == "sigil-tui"
+                && matches!(
+                    command.payload,
+                    crate::runner::WorkerApprovalCommand::Decision { ref call_id, approved }
+                        if call_id == "call-1" && approved
+                )
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::ApprovalDecisionWithArgs {
             call_id: "call-spawn".to_owned(),
             args_json: r#"{"mode":"background"}"#.to_owned(),
         }),
-        WorkerCommand::ApprovalDecisionWithArgs { call_id, args_json }
-            if call_id == "call-spawn" && args_json.contains("background")
+        WorkerCommand::ApprovalCommand(command)
+            if command.client_id == "sigil-tui"
+                && matches!(
+                    command.payload,
+                    crate::runner::WorkerApprovalCommand::DecisionWithArgs {
+                        ref call_id,
+                        ref args_json,
+                    } if call_id == "call-spawn" && args_json.contains("background")
+                )
     ));
     assert!(matches!(
         app.into_worker_command(AppAction::BackgroundActiveAgent),

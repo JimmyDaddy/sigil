@@ -742,6 +742,7 @@ fn project_model_meta_to_tool_result_meta(value: &serde_json::Value) -> Option<T
             .get("details")
             .cloned()
             .unwrap_or(serde_json::Value::Null),
+        ..ToolResultMeta::default()
     };
     if let Some(files) = object
         .get("changed_files")

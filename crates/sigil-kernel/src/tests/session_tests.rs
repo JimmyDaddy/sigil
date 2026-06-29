@@ -2456,6 +2456,17 @@ fn optional_durable_projections_return_none_for_in_memory_sessions() -> Result<(
             .try_agent_thread_state_projection_from_durable()?
             .is_none()
     );
+    assert!(session.try_agent_graph_projection_from_durable()?.is_none());
+    assert!(
+        session
+            .try_session_list_projection_from_durable()?
+            .is_none()
+    );
+    assert!(
+        session
+            .try_dispatch_trace_projection_from_durable()?
+            .is_none()
+    );
     assert!(
         session
             .try_agent_profile_trust_projection_from_durable()?
@@ -2747,6 +2758,143 @@ fn agent_thread_state_projection_replays_mixed_durable_stream_records() -> Resul
         Some(&started.thread_session_ref)
     );
     assert_eq!(thread.profile_id.as_ref(), Some(&started.profile_id));
+    Ok(())
+}
+
+#[test]
+fn session_list_projection_replays_from_session_durable_stream() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let identity = SessionLogEntry::Control(ControlEntry::SessionIdentity {
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-pro".to_owned(),
+    });
+    fs::write(&path, format!("{}\n", serde_json::to_string(&identity)?))?;
+    let store = JsonlSessionStore::new(&path)?;
+    store.append_session_entry_event(&SessionLogEntry::User(ModelMessage::user(
+        "Inspect durable replay adoption",
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::UsageSnapshot(
+        UsageStats {
+            prompt_tokens: 13,
+            completion_tokens: 5,
+            cache_hit_tokens: 7,
+            cache_miss_tokens: 6,
+            input_cost: 0.0,
+            output_cost: 0.0,
+            cache_savings: 0.0,
+            system_fingerprint: None,
+        },
+    )))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_session_list_projection_from_durable()?
+        .expect("durable session should replay session-list projection");
+    let entry = projection
+        .latest_session()
+        .expect("session-list projection should contain this session");
+
+    assert_eq!(entry.provider_name.as_deref(), Some("deepseek"));
+    assert_eq!(entry.model_name.as_deref(), Some("deepseek-v4-pro"));
+    assert_eq!(
+        entry.title.as_deref(),
+        Some("Inspect durable replay adoption")
+    );
+    assert_eq!(
+        entry.latest_usage.as_ref().map(|usage| usage.prompt_tokens),
+        Some(13)
+    );
+    Ok(())
+}
+
+#[test]
+fn dispatch_trace_projection_replays_from_session_durable_stream() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(ControlEntry::ToolEgress(
+        Box::new(ToolEgressEntry {
+            call_id: "call-egress".to_owned(),
+            tool_name: "webfetch".to_owned(),
+            destination: "https://example.test".to_owned(),
+            operation: "request".to_owned(),
+            subjects: vec![ToolSubjectAudit {
+                kind: ToolSubjectKind::NetworkEndpoint,
+                original: "https://example.test".to_owned(),
+                normalized: "https://example.test".to_owned(),
+                canonical_path: None,
+                scope: ToolSubjectScope::External,
+            }],
+            payload: serde_json::json!({"secret": "must-not-project"}),
+            redacted: true,
+        }),
+    )))?;
+    store.append_session_entry_event(&SessionLogEntry::Control(
+        ControlEntry::ReadinessEvaluated(sample_readiness_evaluated_entry()),
+    ))?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let projection = session
+        .try_dispatch_trace_projection_from_durable()?
+        .expect("durable session should replay dispatch-trace projection");
+    let trace = projection
+        .trace("tool:call-egress")
+        .expect("tool egress should materialize as dispatch trace");
+    let encoded = serde_json::to_string(&projection)?;
+
+    assert_eq!(projection.summary.egress_events, 1);
+    assert_eq!(projection.summary.redacted_egress_events, 1);
+    assert_eq!(trace.tool_name.as_deref(), Some("webfetch"));
+    assert_eq!(
+        trace.egress_destinations,
+        vec!["https://example.test".to_owned()]
+    );
+    assert_eq!(
+        projection
+            .latest_readiness
+            .as_ref()
+            .map(|readiness| readiness.visible_state),
+        Some(VisibleCompletionState::CompletedUnverified)
+    );
+    assert!(!encoded.contains("must-not-project"));
+    Ok(())
+}
+
+#[test]
+fn new_projection_adapters_fail_closed_on_corrupt_stream_sequence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let event = StoredEvent::new(
+        DurableEventType::UserMessageRecorded,
+        EventClass::Critical,
+        "event-gap".to_owned(),
+        "session-gap".to_owned(),
+        2,
+        serde_json::json!({
+            "session_log_entry": SessionLogEntry::User(ModelMessage::user("gap"))
+        }),
+    )?;
+    fs::write(&path, event.to_json_line()?)?;
+    let store = JsonlSessionStore::new(&path)?;
+    let session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+
+    let session_list_error = session
+        .try_session_list_projection_from_durable()
+        .expect_err("session-list adapter should fail closed on stream gap");
+    let dispatch_trace_error = session
+        .try_dispatch_trace_projection_from_durable()
+        .expect_err("dispatch-trace adapter should fail closed on stream gap");
+
+    assert!(
+        session_list_error
+            .to_string()
+            .contains("stream_sequence does not match expected sequence")
+    );
+    assert!(
+        dispatch_trace_error
+            .to_string()
+            .contains("stream_sequence does not match expected sequence")
+    );
     Ok(())
 }
 

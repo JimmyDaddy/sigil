@@ -96,6 +96,26 @@ It should not replay every old tool output into transcript.
 4. Context Engine retrieval integration.
 5. TUI memory inspect view.
 
+## 8.1 Implementation Progress
+
+核心语义已实现：
+
+- `CompactionRecord` can carry typed `TaskMemoryV1` while old sessions without
+  typed memory continue to load from the legacy text summary.
+- Deterministic extraction builds `TaskMemoryV1` from durable/control events
+  without inventing verification evidence from model text.
+- TUI session provider view now shows a compact memory inspect block when typed
+  memory exists, covering objective, decisions, files changed, checks run and
+  unresolved issues without replaying old tool output.
+
+Productization remains:
+
+- Model-assisted memory generation and sourced/unverified markings for model
+  summaries are still gated behind the optional model-summary slice.
+- Context Engine retrieval integration remains gated until RFC-0006 retrieval
+  adoption needs long-term task memory.
+- Memory editing is intentionally out of scope.
+
 ## 9. Acceptance Criteria
 
 - Compaction preserves task objective, constraints, decisions, files, commands and verification references.

@@ -12,6 +12,7 @@ use super::{
     super::{
         WorkerCommand, WorkerMessage,
         approval_bridge::{ApprovalSignal, ChannelApprovalHandler},
+        protocol::{WorkerApprovalCommand, WorkerCommandEnvelope},
     },
     common::{
         ApprovalFlowProvider, PlannedProvider, StreamPlan, WriteTool, spawn_test_worker,
@@ -83,6 +84,51 @@ fn approval_decision_is_forwarded_to_active_run() -> Result<()> {
     let envelope: serde_json::Value = serde_json::from_str(tool_result_message)?;
     assert_eq!(envelope["status"], "ok");
     assert_eq!(envelope["content"], "wrote file");
+
+    worker.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn approval_command_envelope_ignores_duplicate_command_ids() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace_root = temp.path().to_path_buf();
+    let session_log_path = temp
+        .path()
+        .join(".sigil/sessions/session-approval-command.jsonl");
+    let root_config = test_root_config(&workspace_root, "approval-flow", "approval-model");
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(WriteTool));
+    let agent = Agent::new(ApprovalFlowProvider, registry);
+    let worker = spawn_test_worker(root_config, session_log_path, agent, workspace_root)?;
+
+    worker.send(WorkerCommand::SubmitPrompt {
+        prompt: "write".to_owned(),
+        reasoning_effort: ReasoningEffort::Max,
+    })?;
+    let _ = worker.recv_until(|message| matches!(message, WorkerMessage::RunStarted { .. }))?;
+    let _ = worker.recv_until(|message| {
+        matches!(
+            message,
+            WorkerMessage::Event(event)
+                if matches!(event.as_ref(), RunEvent::ToolApprovalRequested { call, .. } if call.id == "call-1")
+        )
+    })?;
+
+    worker.send(approval_command("command-approval-1"))?;
+    worker.send(approval_command("command-approval-1"))?;
+
+    let duplicate_notice = worker.recv_until(|message| {
+        matches!(message, WorkerMessage::Notice(notice) if notice.contains("duplicate command command-approval-1 ignored"))
+    })?;
+    assert!(matches!(duplicate_notice, WorkerMessage::Notice(_)));
+
+    let finished =
+        worker.recv_until(|message| matches!(message, WorkerMessage::RunFinished { .. }))?;
+    let WorkerMessage::RunFinished { result, .. } = finished else {
+        panic!("expected run finished");
+    };
+    assert_eq!(result.tool_calls, 1);
 
     worker.shutdown()?;
     Ok(())
@@ -190,6 +236,18 @@ allowed_tools = ["grep"]
 
     worker.shutdown()?;
     Ok(())
+}
+
+fn approval_command(command_id: &str) -> WorkerCommand {
+    WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
+        command_id,
+        "sigil-tui-test",
+        "session-test",
+        WorkerApprovalCommand::Decision {
+            call_id: "call-1".to_owned(),
+            approved: true,
+        },
+    ))
 }
 
 #[test]

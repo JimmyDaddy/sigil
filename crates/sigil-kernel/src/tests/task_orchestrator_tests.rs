@@ -2221,6 +2221,10 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
         task_status_from_step_status(TaskStepStatus::Running),
         TaskRunStatus::Paused
     );
+    assert_eq!(
+        task_status_from_step_status(TaskStepStatus::Superseded),
+        TaskRunStatus::Paused
+    );
 
     assert_eq!(
         step_terminal_reason(&step_id, TaskStepStatus::Failed),
@@ -2233,6 +2237,10 @@ fn task_status_mapping_helpers_cover_terminal_edges() -> Result<()> {
     assert_eq!(
         step_terminal_reason(&step_id, TaskStepStatus::Cancelled),
         "step step_1 cancelled"
+    );
+    assert_eq!(
+        step_terminal_reason(&step_id, TaskStepStatus::Superseded),
+        "step step_1 superseded"
     );
     assert_eq!(
         step_terminal_reason(&step_id, TaskStepStatus::Pending),
@@ -4100,6 +4108,10 @@ fn run_status_from_step_status_covers_running_cancelled_and_interrupted() {
     assert_eq!(
         run_status_from_step_status(TaskStepStatus::Interrupted),
         crate::RunStatus::Interrupted
+    );
+    assert_eq!(
+        run_status_from_step_status(TaskStepStatus::Superseded),
+        crate::RunStatus::Cancelled
     );
 }
 

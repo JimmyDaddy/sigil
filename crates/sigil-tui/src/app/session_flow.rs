@@ -22,6 +22,7 @@ use super::{
         human_file_size, relative_age_label, truncate_session_view_text,
     },
 };
+use crate::view_model::{RecoveryPanelViewModel, TaskMemoryInspectViewModel};
 
 const SESSION_HISTORY_TITLE_LINE_MAX_BYTES: usize = 256 * 1024;
 impl AppState {
@@ -106,11 +107,24 @@ impl AppState {
         );
         let messages = session.messages();
         let mut lines = vec!["Provider:".to_owned()];
+        if let Some(panel) =
+            RecoveryPanelViewModel::from_entries(&self.current_session_entries, unix_time_ms())
+        {
+            lines.extend(panel.lines().into_iter().map(|line| format!("  {line}")));
+        }
         if let Some(record) = &self.latest_compaction_record {
             lines.push(format!(
                 "  summary: compacted={} tail={}",
                 record.compacted_message_count, record.retained_tail_message_count
             ));
+            if let Some(task_memory) = &record.task_memory {
+                lines.extend(
+                    TaskMemoryInspectViewModel::from_task_memory(task_memory)
+                        .lines()
+                        .into_iter()
+                        .map(|line| format!("  {line}")),
+                );
+            }
         }
         for message in messages {
             lines.push(render_model_message_line(&message));
@@ -911,6 +925,13 @@ fn render_model_message_line(message: &ModelMessage) -> String {
     }
 }
 
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
 fn render_session_log_entry(entry: &SessionLogEntry) -> String {
     match entry {
         SessionLogEntry::User(message)
@@ -1075,6 +1096,26 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 route.server_name,
                 task_route_status_label(route.status)
             ),
+            ControlEntry::JobIntentRecorded(entry) => format!(
+                "[ctl] job intent {} effect={} policy={}",
+                truncate_session_view_text(&entry.job_id, 32),
+                entry.expected_effect.as_str(),
+                truncate_session_view_text(&entry.tool_policy_hash, 16)
+            ),
+            ControlEntry::StepLeaseRecorded(entry) => format!(
+                "[ctl] step lease {} job={} status={} owner={}",
+                truncate_session_view_text(&entry.lease_id, 24),
+                truncate_session_view_text(&entry.job_id, 24),
+                step_lease_status_label(entry.status),
+                truncate_session_view_text(&entry.owner_process_id, 24)
+            ),
+            ControlEntry::StepLeaseHeartbeatRecorded(entry) => format!(
+                "[ctl] step lease heartbeat {} job={} at={} deadline={}",
+                truncate_session_view_text(&entry.lease_id, 24),
+                truncate_session_view_text(&entry.job_id, 24),
+                entry.observed_at_ms,
+                entry.next_deadline_ms
+            ),
             ControlEntry::CheckSpecRecorded(entry) => format!(
                 "[ctl] check spec {} source={} promotion={}",
                 truncate_session_view_text(&entry.trusted_check.check_spec.check_spec_id, 48),
@@ -1174,6 +1215,11 @@ fn render_session_log_entry(entry: &SessionLogEntry) -> String {
                 "[ctl] agent message {} status={}",
                 entry.route_id.as_str(),
                 agent_route_status_label(entry.status)
+            ),
+            ControlEntry::AgentMailboxMessage(entry) => format!(
+                "[ctl] agent mailbox {} status={}",
+                entry.route_id.as_str(),
+                agent_mailbox_status_label(entry.status)
             ),
             ControlEntry::AgentThreadResultRecorded(entry) => format!(
                 "[ctl] agent result {} status={}",
@@ -1418,6 +1464,7 @@ fn task_step_status_label(status: sigil_kernel::TaskStepStatus) -> &'static str 
         sigil_kernel::TaskStepStatus::Blocked => "blocked",
         sigil_kernel::TaskStepStatus::Cancelled => "cancelled",
         sigil_kernel::TaskStepStatus::Interrupted => "interrupted",
+        sigil_kernel::TaskStepStatus::Superseded => "superseded",
     }
 }
 
@@ -1429,6 +1476,15 @@ fn task_child_session_status_label(status: sigil_kernel::TaskChildSessionStatus)
         sigil_kernel::TaskChildSessionStatus::Cancelled => "cancelled",
         sigil_kernel::TaskChildSessionStatus::Interrupted => "interrupted",
         sigil_kernel::TaskChildSessionStatus::Unavailable => "unavailable",
+    }
+}
+
+fn step_lease_status_label(status: sigil_kernel::StepLeaseStatus) -> &'static str {
+    match status {
+        sigil_kernel::StepLeaseStatus::Acquired => "acquired",
+        sigil_kernel::StepLeaseStatus::Released => "released",
+        sigil_kernel::StepLeaseStatus::Interrupted => "interrupted",
+        sigil_kernel::StepLeaseStatus::Abandoned => "abandoned",
     }
 }
 
@@ -1745,6 +1801,17 @@ fn agent_route_status_label(status: sigil_kernel::AgentRouteStatus) -> &'static 
         sigil_kernel::AgentRouteStatus::Stale => "stale",
         sigil_kernel::AgentRouteStatus::Closed => "closed",
         sigil_kernel::AgentRouteStatus::Unknown => "unknown",
+    }
+}
+
+fn agent_mailbox_status_label(status: sigil_kernel::AgentMailboxStatus) -> &'static str {
+    match status {
+        sigil_kernel::AgentMailboxStatus::Queued => "queued",
+        sigil_kernel::AgentMailboxStatus::Delivered => "delivered",
+        sigil_kernel::AgentMailboxStatus::Consumed => "consumed",
+        sigil_kernel::AgentMailboxStatus::Rejected => "rejected",
+        sigil_kernel::AgentMailboxStatus::Interrupted => "interrupted",
+        sigil_kernel::AgentMailboxStatus::Unknown => "unknown",
     }
 }
 

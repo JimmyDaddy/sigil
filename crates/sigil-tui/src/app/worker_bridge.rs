@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
+use sha2::{Digest, Sha256};
 
 use super::{
     AgentView, AppAction, AppState, ApprovalAction, ApprovalDiagnosticSummary,
@@ -12,7 +13,10 @@ use super::{
     },
 };
 use crate::config_panel::{DEEPSEEK_PROVIDER_KEY, normalize_provider_name};
-use crate::runner::{CompactionTrigger, McpActivationStatus, WorkerCommand, WorkerMessage};
+use crate::runner::{
+    CompactionTrigger, McpActivationStatus, WorkerApprovalCommand, WorkerCommand,
+    WorkerCommandEnvelope, WorkerMessage,
+};
 use sigil_kernel::{
     ControlEntry, EventHandler, RunEvent, ToolCall, ToolDiffBudget, ToolExecutionStatus,
     ToolPreviewSnapshot, ToolResult,
@@ -829,11 +833,13 @@ impl AppState {
                 WorkerCommand::ContinueTask { task_id, guidance }
             }
             AppAction::ApprovalDecision { call_id, approved } => {
-                WorkerCommand::ApprovalDecision { call_id, approved }
+                self.approval_worker_command(WorkerApprovalCommand::Decision { call_id, approved })
             }
-            AppAction::ApprovalDecisionWithArgs { call_id, args_json } => {
-                WorkerCommand::ApprovalDecisionWithArgs { call_id, args_json }
-            }
+            AppAction::ApprovalDecisionWithArgs { call_id, args_json } => self
+                .approval_worker_command(WorkerApprovalCommand::DecisionWithArgs {
+                    call_id,
+                    args_json,
+                }),
             AppAction::BackgroundActiveAgent => WorkerCommand::BackgroundActiveAgent,
             AppAction::CancelRun => WorkerCommand::CancelRun,
             AppAction::CancelTerminalTask { task_id } => {
@@ -959,6 +965,46 @@ impl AppState {
             McpActivationStatus::Ready { added_tools },
         );
     }
+
+    fn approval_worker_command(&self, payload: WorkerApprovalCommand) -> WorkerCommand {
+        let session_id = self.session_log_path.display().to_string();
+        let command_id = stable_approval_command_id(&session_id, &payload);
+        WorkerCommand::ApprovalCommand(WorkerCommandEnvelope::new(
+            command_id,
+            "sigil-tui",
+            session_id,
+            payload,
+        ))
+    }
+}
+
+fn stable_approval_command_id(session_id: &str, payload: &WorkerApprovalCommand) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"sigil-tui-approval-command-v1\0");
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"\0");
+    match payload {
+        WorkerApprovalCommand::Decision { call_id, approved } => {
+            hasher.update(b"decision\0");
+            hasher.update(call_id.as_bytes());
+            hasher.update(b"\0");
+            let decision_label: &[u8] = if *approved { b"approve" } else { b"deny" };
+            hasher.update(decision_label);
+        }
+        WorkerApprovalCommand::DecisionWithArgs { call_id, args_json } => {
+            hasher.update(b"decision_with_args\0");
+            hasher.update(call_id.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(args_json.as_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+    let short_hash = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("tui-approval-{short_hash}")
 }
 
 fn task_run_status_label(status: sigil_kernel::TaskRunStatus) -> &'static str {

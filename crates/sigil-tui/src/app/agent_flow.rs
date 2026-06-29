@@ -14,9 +14,10 @@ use crate::{
 };
 use anyhow::Context;
 use sigil_kernel::{
-    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadProjection, AgentThreadStatus,
-    ControlEntry, JsonlSessionStore, SessionLogEntry, TaskChildSessionDisplayNameEntry,
-    TaskChildSessionEntry, TaskRunProjection, normalize_task_agent_display_name,
+    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadProjection, AgentThreadStateProjection,
+    AgentThreadStatus, ControlEntry, JsonlSessionStore, SessionLogEntry,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskRunProjection,
+    normalize_task_agent_display_name,
 };
 
 use super::{
@@ -60,6 +61,28 @@ impl AppState {
                 muted: item.muted,
             })
             .collect()
+    }
+
+    pub(crate) fn agent_graph_summary_line(&self) -> Option<String> {
+        let projection = AgentThreadStateProjection::from_entries(&self.current_session_entries);
+        let summary = projection.graph_summary();
+        if summary.total_threads == 0 {
+            return None;
+        }
+        let mut parts = vec![format!("graph: {} agents", summary.total_threads)];
+        if summary.active_threads > 0 {
+            parts.push(format!("{} active", summary.active_threads));
+        }
+        if summary.terminal_threads > 0 {
+            parts.push(format!("{} terminal", summary.terminal_threads));
+        }
+        if summary.open_routes > 0 {
+            parts.push(format!("{} open routes", summary.open_routes));
+        }
+        if summary.total_tokens > 0 {
+            parts.push(format!("{} tokens", summary.total_tokens));
+        }
+        Some(parts.join(" · "))
     }
 
     pub(crate) fn composer_agent_rows(&self) -> Vec<SidebarAgentRow> {

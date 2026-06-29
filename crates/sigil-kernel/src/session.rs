@@ -16,14 +16,15 @@ use sha2::{Digest, Sha256};
 use crate::{
     CompactionConfig, MemoryConfig, MemoryLoadReport,
     agent_thread::{
-        AgentApprovalRouteEntry, AgentElicitationRouteEntry, AgentMergeSafePointEntry,
-        AgentProfileCapturedEntry, AgentProfilePolicyEntry, AgentProfilePolicyProjection,
-        AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
-        AgentResultContinuationProjection, AgentRouteClosedEntry, AgentRunAttemptStartedEntry,
-        AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
-        AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry, AgentThreadResultRecordedEntry,
-        AgentThreadStartedEntry, AgentThreadStateProjection, AgentThreadStatusChangedEntry,
-        closed_agent_routes, interrupted_agent_attempts,
+        AgentApprovalRouteEntry, AgentElicitationRouteEntry, AgentMailboxMessageEntry,
+        AgentMergeSafePointEntry, AgentProfileCapturedEntry, AgentProfilePolicyEntry,
+        AgentProfilePolicyProjection, AgentProfileTrustEntry, AgentProfileTrustProjection,
+        AgentResultContinuationEntry, AgentResultContinuationProjection, AgentRouteClosedEntry,
+        AgentRunAttemptStartedEntry, AgentRunHeartbeatEntry, AgentRunInterruptedEntry,
+        AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadMessageRoutedEntry,
+        AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
+        AgentThreadStatusChangedEntry, closed_agent_routes, interrupted_agent_attempts,
+        interrupted_agent_mailbox_messages,
     },
     changeset::{ChangeSet, ChangeSetProjection, ChangeSetResult},
     conversation_queue::{
@@ -284,6 +285,12 @@ pub enum ControlEntry {
     TaskSubagentApprovalRoute(TaskSubagentApprovalRouteEntry),
     #[serde(alias = "TaskSubagentElicitationRoute")]
     TaskSubagentElicitationRoute(TaskSubagentElicitationRouteEntry),
+    #[serde(alias = "JobIntentRecorded")]
+    JobIntentRecorded(crate::resume::JobIntentEntry),
+    #[serde(alias = "StepLeaseRecorded")]
+    StepLeaseRecorded(crate::resume::StepLeaseEntry),
+    #[serde(alias = "StepLeaseHeartbeatRecorded")]
+    StepLeaseHeartbeatRecorded(crate::resume::StepLeaseHeartbeatEntry),
     #[serde(alias = "CheckSpecRecorded")]
     CheckSpecRecorded(CheckSpecRecordedEntry),
     #[serde(alias = "VerificationPolicyChanged")]
@@ -310,6 +317,8 @@ pub enum ControlEntry {
     AgentThreadStatusChanged(AgentThreadStatusChangedEntry),
     #[serde(alias = "AgentThreadMessageRouted")]
     AgentThreadMessageRouted(AgentThreadMessageRoutedEntry),
+    #[serde(alias = "AgentMailboxMessage")]
+    AgentMailboxMessage(AgentMailboxMessageEntry),
     #[serde(alias = "AgentThreadResultRecorded")]
     AgentThreadResultRecorded(AgentThreadResultRecordedEntry),
     #[serde(alias = "AgentResultContinuation")]
@@ -623,6 +632,13 @@ impl JsonlSessionStore {
 
         for closed_route in closed_agent_routes(&entries) {
             let entry = SessionLogEntry::Control(ControlEntry::AgentRouteClosed(closed_route));
+            append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
+            entries.push(entry);
+        }
+
+        for interrupted_message in interrupted_agent_mailbox_messages(&entries) {
+            let entry =
+                SessionLogEntry::Control(ControlEntry::AgentMailboxMessage(interrupted_message));
             append_session_entry_event_locked(&self.path, &mut file, &mut records, &entry)?;
             entries.push(entry);
         }
@@ -995,6 +1011,9 @@ fn control_entry_event_type(entry: &ControlEntry) -> DurableEventType {
         ControlEntry::TaskRun(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskPlan(_) => DurableEventType::TaskStatusChanged,
         ControlEntry::TaskStep(_) => DurableEventType::TaskStatusChanged,
+        ControlEntry::JobIntentRecorded(_) => DurableEventType::JobIntentRecorded,
+        ControlEntry::StepLeaseRecorded(_) => DurableEventType::StepLeaseRecorded,
+        ControlEntry::StepLeaseHeartbeatRecorded(_) => DurableEventType::StepLeaseHeartbeatRecorded,
         ControlEntry::CheckSpecRecorded(_) => DurableEventType::CheckSpecRecorded,
         ControlEntry::VerificationPolicyChanged(_) => DurableEventType::VerificationPolicyChanged,
         ControlEntry::VerificationCheckRun(_) => DurableEventType::VerificationCheckRun,
@@ -1594,6 +1613,38 @@ impl Session {
         TaskStateProjection::from_entries(&self.entries)
     }
 
+    /// Returns durable resume job state reconstructed from append-only control entries.
+    pub fn resume_job_state_projection(
+        &self,
+        now_ms: u64,
+    ) -> crate::resume::ResumeJobStateProjection {
+        crate::resume::ResumeJobStateProjection::from_entries(&self.entries, now_ms)
+    }
+
+    /// Rebuilds resume job state directly from the durable mixed-format event stream.
+    pub fn try_resume_job_state_projection_from_durable(
+        &self,
+        now_ms: u64,
+    ) -> Result<Option<crate::resume::ResumeJobStateProjection>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let mut projection = crate::resume::ResumeJobStateProjection::default();
+        for record in records {
+            let Some(event) = record.domain_event_record()? else {
+                continue;
+            };
+            let Some(entry) = session_entry_from_domain_event(&event.event)? else {
+                continue;
+            };
+            if let SessionLogEntry::Control(control) = entry {
+                projection.apply_control_entry(&control, now_ms);
+            }
+        }
+        Ok(Some(projection))
+    }
+
     /// Rebuilds task state directly from the durable mixed-format event stream.
     ///
     /// This is the RFC-0001 replay path for task projection. It preserves the existing infallible
@@ -1617,6 +1668,21 @@ impl Session {
         AgentThreadStateProjection::from_entries(&self.entries)
     }
 
+    /// Rebuilds the session list row for this session directly from the durable mixed-format
+    /// event stream.
+    ///
+    /// This is the RFC-0001 replay path for the productized session-list projection. It preserves
+    /// the UI/query projection boundary without requiring callers to manually read JSONL records.
+    pub fn try_session_list_projection_from_durable(
+        &self,
+    ) -> Result<Option<crate::projection::SessionListProjectionSnapshot>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        crate::projection::session_list_projection_from_records(&records).map(Some)
+    }
+
     /// Rebuilds agent thread state directly from the durable mixed-format event stream.
     ///
     /// This is the RFC-0001 replay path for the agent graph projection. It preserves the existing
@@ -1636,6 +1702,31 @@ impl Session {
         }
         projection.finalize_replay();
         Ok(Some(projection))
+    }
+
+    /// Rebuilds the agent graph projection directly from the durable mixed-format event stream.
+    ///
+    /// This is a product-surface alias for `try_agent_thread_state_projection_from_durable`, which
+    /// remains the lower-level domain name for the same projection state.
+    pub fn try_agent_graph_projection_from_durable(
+        &self,
+    ) -> Result<Option<AgentThreadStateProjection>> {
+        self.try_agent_thread_state_projection_from_durable()
+    }
+
+    /// Rebuilds the dispatch trace projection directly from the durable mixed-format event stream.
+    ///
+    /// Dispatch traces are a redacted materialized view over tool, agent, usage, readiness and
+    /// egress events. This method keeps new state adoption on the durable replay path instead of
+    /// requiring callers to project from in-memory legacy entries.
+    pub fn try_dispatch_trace_projection_from_durable(
+        &self,
+    ) -> Result<Option<crate::projection::DispatchTraceProjectionSnapshot>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        crate::projection::dispatch_trace_projection_from_records(&records).map(Some)
     }
 
     /// Returns durable agent profile trust decisions reconstructed from append-only control entries.

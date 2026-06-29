@@ -45,7 +45,8 @@ use super::{
     event_bridge::ChannelEventHandler,
     mcp_event_bridge::{ChannelMcpRuntimeEventHandler, McpRuntimeEvent},
     protocol::{
-        CompactionTrigger, McpActivationStatus, QueueMoveDirection, WorkerCommand, WorkerMessage,
+        CompactionTrigger, McpActivationStatus, QueueMoveDirection, WorkerApprovalCommand,
+        WorkerCommand, WorkerMessage,
     },
     session_flow::{auto_compact_session, load_session, session_compacted_message},
 };
@@ -91,6 +92,7 @@ pub(super) fn run_worker_loop<P>(
     let (task_result_tx, task_result_rx) = mpsc::channel::<RunTaskResult>();
     let (provider_status_tx, provider_status_rx) = mpsc::channel::<ProviderStatusTaskResult>();
     let mut active_run: Option<ActiveRun> = None;
+    let mut processed_worker_command_ids = BTreeSet::<String>::new();
     let mut provider_status_tasks = ProviderStatusTaskManager::new();
     let mut next_run_id = 1_u64;
     let mut discarded_run_ids = BTreeSet::new();
@@ -1250,6 +1252,46 @@ pub(super) fn run_worker_loop<P>(
                 } else {
                     let _ = message_tx.send(WorkerMessage::RunFailed(
                         "received stray approval decision without pending approval".to_owned(),
+                    ));
+                }
+            }
+            Ok(WorkerCommand::ApprovalCommand(command)) => {
+                if processed_worker_command_ids.contains(&command.command_id) {
+                    let _ = message_tx.send(WorkerMessage::Notice(format!(
+                        "duplicate command {} ignored",
+                        command.command_id
+                    )));
+                    continue;
+                }
+                let signal = match command.payload {
+                    WorkerApprovalCommand::Decision { call_id, approved } => {
+                        let approval = if approved {
+                            ToolApproval::Approve
+                        } else {
+                            ToolApproval::Deny {
+                                reason: "denied in TUI".to_owned(),
+                            }
+                        };
+                        ApprovalSignal::Decision { call_id, approval }
+                    }
+                    WorkerApprovalCommand::DecisionWithArgs { call_id, args_json } => {
+                        ApprovalSignal::Decision {
+                            call_id,
+                            approval: ToolApproval::ApproveWithArgs { args_json },
+                        }
+                    }
+                };
+                if let Some(active_run) = &active_run {
+                    if active_run.approval_tx.send(signal).is_ok() {
+                        processed_worker_command_ids.insert(command.command_id);
+                    } else {
+                        let _ = message_tx.send(WorkerMessage::RunFailed(
+                            "approval channel closed".to_owned(),
+                        ));
+                    }
+                } else {
+                    let _ = message_tx.send(WorkerMessage::RunFailed(
+                        "received stray approval command without pending approval".to_owned(),
                     ));
                 }
             }

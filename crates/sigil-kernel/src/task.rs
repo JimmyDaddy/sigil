@@ -14,6 +14,8 @@ use crate::{
 };
 
 pub const TASK_PLAN_UPDATE_TOOL_NAME: &str = "task_plan_update";
+/// Small bounded replan budget for one task planning run.
+pub const DEFAULT_TASK_MAX_PLAN_VERSIONS: usize = 3;
 /// Maximum number of Unicode scalar values allowed in a user-facing task agent display name.
 pub const TASK_AGENT_DISPLAY_NAME_MAX_CHARS: usize = 32;
 
@@ -209,6 +211,7 @@ pub enum TaskStepStatus {
     Blocked,
     Cancelled,
     Interrupted,
+    Superseded,
 }
 
 /// Runtime intent for a task graph step.
@@ -280,12 +283,17 @@ impl TaskStepStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Blocked | Self::Cancelled | Self::Interrupted
+            Self::Completed
+                | Self::Failed
+                | Self::Blocked
+                | Self::Cancelled
+                | Self::Interrupted
+                | Self::Superseded
         )
     }
 
     fn is_final(self) -> bool {
-        matches!(self, Self::Completed)
+        matches!(self, Self::Completed | Self::Superseded)
     }
 }
 
@@ -359,6 +367,7 @@ impl TaskStepSpec {
 pub struct TaskPlanUpdateContext {
     pub task_id: TaskId,
     pub max_plan_steps: usize,
+    pub max_plan_versions: usize,
 }
 
 /// Model-visible schema for the internal planner plan-update tool.
@@ -448,6 +457,13 @@ pub fn task_plan_update_entry(
         .map_err(|error| anyhow!("invalid task plan update arguments: {error}"))?;
     if args.plan_version == 0 {
         bail!("task plan version must be at least 1");
+    }
+    if usize::try_from(args.plan_version).unwrap_or(usize::MAX) > context.max_plan_versions {
+        bail!(
+            "task plan version {} exceeds maximum {}",
+            args.plan_version,
+            context.max_plan_versions
+        );
     }
     if args.steps.is_empty() {
         bail!("task plan must contain at least one step");
@@ -861,6 +877,7 @@ impl TaskStateProjection {
                     plan.status = TaskPlanStatus::Superseded;
                     task.superseded_plan_versions.insert(version);
                 }
+                supersede_plan_steps(task, version, entry.plan_version);
             }
         }
         let graph_result = TaskGraphProjection::from_plan_entry(entry);
@@ -1055,6 +1072,47 @@ impl TaskRunProjection {
                 &child.child_task_id,
             ))
             .map(String::as_str)
+    }
+}
+
+fn supersede_plan_steps(
+    task: &mut TaskRunProjection,
+    old_plan_version: u32,
+    new_plan_version: u32,
+) {
+    let Some(plan) = task.plans.get(&old_plan_version) else {
+        return;
+    };
+    let steps = plan.steps.clone();
+    for step in steps {
+        let key = (old_plan_version, step.step_id.clone());
+        if task
+            .steps
+            .get(&key)
+            .is_some_and(|projection| projection.status == TaskStepStatus::Completed)
+        {
+            continue;
+        }
+        task.steps.insert(
+            key,
+            TaskStepProjection {
+                task_id: task.task_id.clone(),
+                plan_version: old_plan_version,
+                step_id: step.step_id,
+                role: step.role,
+                status: TaskStepStatus::Superseded,
+                title: Some(step.title),
+                summary: None,
+                reason: Some(format!("superseded by accepted plan v{new_plan_version}")),
+            },
+        );
+    }
+    if task
+        .current_step
+        .as_ref()
+        .is_some_and(|current| current.0 == old_plan_version)
+    {
+        task.current_step = None;
     }
 }
 

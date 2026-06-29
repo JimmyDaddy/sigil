@@ -710,6 +710,25 @@ impl AgentRouteStatus {
     }
 }
 
+/// Durable mailbox delivery state for parent-to-child agent messages.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMailboxStatus {
+    Queued,
+    Delivered,
+    Consumed,
+    Rejected,
+    Interrupted,
+    #[serde(other)]
+    Unknown,
+}
+
+impl AgentMailboxStatus {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Consumed | Self::Rejected | Self::Interrupted)
+    }
+}
+
 /// Bounded usage summary for a completed child thread.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -825,6 +844,23 @@ pub struct AgentThreadMessageRoutedEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     pub status: AgentRouteStatus,
+}
+
+/// Append-only mailbox state for a parent-to-child message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentMailboxMessageEntry {
+    pub route_id: AgentRouteId,
+    pub source_thread_id: AgentThreadId,
+    pub target_thread_id: AgentThreadId,
+    pub prompt_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    pub status: AgentMailboxStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_ms: Option<u64>,
 }
 
 /// Append-only structured result for a terminal agent thread.
@@ -993,7 +1029,8 @@ pub struct AgentThreadClosedEntry {
 }
 
 /// Materialized agent-thread state reconstructed from append-only session entries.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct AgentThreadStateProjection {
     pub profiles: BTreeMap<AgentProfileSnapshotId, AgentProfileSnapshot>,
     pub threads: BTreeMap<AgentThreadId, AgentThreadProjection>,
@@ -1002,6 +1039,7 @@ pub struct AgentThreadStateProjection {
     pub approval_routes: BTreeMap<AgentRouteId, AgentApprovalRouteEntry>,
     pub elicitation_routes: BTreeMap<AgentRouteId, AgentElicitationRouteEntry>,
     pub message_routes: BTreeMap<AgentRouteId, AgentThreadMessageRoutedEntry>,
+    pub mailbox_messages: BTreeMap<AgentRouteId, AgentMailboxMessageEntry>,
     pub closed_routes: BTreeMap<AgentRouteId, AgentRouteClosedEntry>,
     pub legacy_task_thread_ids: BTreeSet<AgentThreadId>,
 }
@@ -1026,6 +1064,71 @@ impl AgentThreadStateProjection {
             .and_then(|thread_id| self.threads.get(thread_id))
     }
 
+    /// Returns a compact graph summary suitable for product surfaces and projection audits.
+    #[must_use]
+    pub fn graph_summary(&self) -> AgentGraphSummary {
+        let mut summary = AgentGraphSummary {
+            total_threads: self.threads.len() as u64,
+            message_routes: self.message_routes.len() as u64,
+            mailbox_messages: self.mailbox_messages.len() as u64,
+            approval_routes: self.approval_routes.len() as u64,
+            elicitation_routes: self.elicitation_routes.len() as u64,
+            ..AgentGraphSummary::default()
+        };
+        let mut changed_paths = BTreeSet::new();
+        for thread in self.threads.values() {
+            if thread.status.is_terminal() {
+                summary.terminal_threads += 1;
+            } else {
+                summary.active_threads += 1;
+            }
+            if thread.unresolved {
+                summary.unresolved_threads += 1;
+            }
+            match thread.invocation_mode {
+                Some(AgentInvocationMode::Foreground) => summary.foreground_threads += 1,
+                Some(AgentInvocationMode::Background) => summary.background_threads += 1,
+                Some(AgentInvocationMode::JoinBeforeFinal) => {
+                    summary.join_before_final_threads += 1
+                }
+                Some(AgentInvocationMode::Unknown) | None => {}
+            }
+            if let Some(result) = &thread.result {
+                if let Some(usage) = &result.usage {
+                    summary.input_tokens += usage.input_tokens;
+                    summary.output_tokens += usage.output_tokens;
+                    summary.total_tokens += usage.total_tokens;
+                    summary.cached_tokens += usage.cached_tokens.unwrap_or_default();
+                }
+                for path in &result.changed_paths {
+                    changed_paths.insert(path.clone());
+                }
+            }
+        }
+        summary.changed_path_count = changed_paths.len() as u64;
+        summary.open_routes = self
+            .message_routes
+            .values()
+            .filter(|route| !route.status.is_terminal())
+            .count() as u64
+            + self
+                .mailbox_messages
+                .values()
+                .filter(|message| !message.status.is_terminal())
+                .count() as u64
+            + self
+                .approval_routes
+                .values()
+                .filter(|route| !route.status.is_terminal())
+                .count() as u64
+            + self
+                .elicitation_routes
+                .values()
+                .filter(|route| !route.status.is_terminal())
+                .count() as u64;
+        summary
+    }
+
     pub(crate) fn apply_control_entry(&mut self, control: &ControlEntry) {
         match control {
             ControlEntry::AgentProfileCaptured(entry) => {
@@ -1038,6 +1141,7 @@ impl AgentThreadStateProjection {
                 self.message_routes
                     .insert(entry.route_id.clone(), entry.clone());
             }
+            ControlEntry::AgentMailboxMessage(entry) => self.apply_mailbox_message(entry),
             ControlEntry::AgentThreadResultRecorded(entry) => {
                 self.apply_result_recorded(&entry.result);
             }
@@ -1121,6 +1225,23 @@ impl AgentThreadStateProjection {
             }
             _ => {}
         }
+    }
+
+    fn apply_mailbox_message(&mut self, entry: &AgentMailboxMessageEntry) {
+        if let Some(existing) = self.mailbox_messages.get_mut(&entry.route_id) {
+            existing.status = entry.status;
+            existing.reason = entry.reason.clone();
+            existing.updated_at_ms = entry.updated_at_ms;
+            if !entry.prompt_hash.is_empty() {
+                existing.prompt_hash = entry.prompt_hash.clone();
+            }
+            if entry.prompt.is_some() {
+                existing.prompt = entry.prompt.clone();
+            }
+            return;
+        }
+        self.mailbox_messages
+            .insert(entry.route_id.clone(), entry.clone());
     }
 
     fn apply_thread_started(&mut self, entry: &AgentThreadStartedEntry) {
@@ -1301,7 +1422,8 @@ impl AgentThreadStateProjection {
 }
 
 /// Projection for one agent thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct AgentThreadProjection {
     pub thread_id: AgentThreadId,
     pub parent_thread_id: Option<AgentThreadId>,
@@ -1419,7 +1541,8 @@ impl AgentThreadProjection {
 }
 
 /// Projection for one provider run attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub struct AgentRunAttemptProjection {
     pub attempt_id: AgentRunAttemptId,
     pub provider: String,
@@ -1428,6 +1551,29 @@ pub struct AgentRunAttemptProjection {
     pub provider_background_handle_ref: Option<String>,
     pub interrupted: Option<String>,
     pub last_heartbeat_ms: Option<u64>,
+}
+
+/// Compact graph summary derived from the agent-thread projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentGraphSummary {
+    pub total_threads: u64,
+    pub active_threads: u64,
+    pub terminal_threads: u64,
+    pub unresolved_threads: u64,
+    pub foreground_threads: u64,
+    pub background_threads: u64,
+    pub join_before_final_threads: u64,
+    pub message_routes: u64,
+    pub mailbox_messages: u64,
+    pub approval_routes: u64,
+    pub elicitation_routes: u64,
+    pub open_routes: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_tokens: u64,
+    pub changed_path_count: u64,
 }
 
 /// Returns recovery entries for agent attempts that were started but never reached a terminal
@@ -1512,6 +1658,37 @@ pub fn closed_agent_routes(entries: &[SessionLogEntry]) -> Vec<AgentRouteClosedE
                     reason: "agent route closed during session restore".to_owned(),
                 },
             )
+        })
+        .collect()
+}
+
+/// Returns recovery entries for mailbox messages that were queued or delivered but not consumed
+/// before process restart.
+pub fn interrupted_agent_mailbox_messages(
+    entries: &[SessionLogEntry],
+) -> Vec<AgentMailboxMessageEntry> {
+    let mut messages = BTreeMap::<AgentRouteId, AgentMailboxMessageEntry>::new();
+    for entry in entries {
+        let SessionLogEntry::Control(control) = entry else {
+            continue;
+        };
+        if let ControlEntry::AgentMailboxMessage(entry) = control {
+            messages.insert(entry.route_id.clone(), entry.clone());
+        }
+    }
+    messages
+        .into_values()
+        .filter_map(|message| {
+            (!message.status.is_terminal()).then_some(AgentMailboxMessageEntry {
+                route_id: message.route_id,
+                source_thread_id: message.source_thread_id,
+                target_thread_id: message.target_thread_id,
+                prompt_hash: message.prompt_hash,
+                prompt: None,
+                status: AgentMailboxStatus::Interrupted,
+                reason: Some("agent mailbox message interrupted during session restore".to_owned()),
+                updated_at_ms: None,
+            })
         })
         .collect()
 }

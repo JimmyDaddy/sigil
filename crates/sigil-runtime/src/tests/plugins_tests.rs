@@ -9,7 +9,8 @@ use sigil_kernel::{
     AgentConfig, ApprovalMode, CodeIntelligenceConfig, CompactionConfig, McpServerStartup,
     MemoryConfig, PermissionConfig, PluginCapability, PluginSkillRef, PluginTrustDecision,
     PluginTrustEntry, ProviderCapabilities, ReasoningStreamSupport, RootConfig, SessionConfig,
-    SkillConfig, SkillIndexSnapshot, SkillSource, TaskConfig, WorkspaceConfig,
+    SkillConfig, SkillIndexSnapshot, SkillSource, TaskConfig, ToolAccess, ToolCategory, ToolEffect,
+    WorkspaceConfig,
 };
 
 use super::{
@@ -172,6 +173,8 @@ required = false
                 command: "scripts/check-tool-policy.sh".to_owned(),
                 args: Vec::new(),
                 approval: ApprovalMode::Ask,
+                egress_logging: true,
+                allow_secrets: false,
             },
             PluginCapability::McpServer {
                 name: "repo-tools".to_owned(),
@@ -179,6 +182,9 @@ required = false
                 args: vec!["server.js".to_owned()],
                 startup: McpServerStartup::Lazy,
                 required: false,
+                approval: ApprovalMode::Ask,
+                egress_logging: true,
+                allow_secrets: false,
             },
         ]
     );
@@ -218,6 +224,70 @@ path = "skills/review/SKILL.md"
     assert_eq!(report.manifests.len(), 1);
     assert_eq!(report.manifests[0].trust, PluginTrustDecision::NeedsReview);
     assert!(report.registrations.is_empty());
+}
+
+#[test]
+fn plugin_discovery_projects_tool_egress_secret_policy() {
+    let workspace = tempfile::tempdir().expect("workspace should create");
+    write_plugin_manifest(
+        workspace.path(),
+        "repo-review",
+        r#"id = "repo-review"
+name = "Repository Review"
+version = "0.1.0"
+
+[[hooks]]
+event = "pre_tool_use"
+command = "scripts/check-tool-policy.sh"
+approval = "deny"
+egress_logging = false
+allow_secrets = true
+
+[[mcp_servers]]
+name = "repo-tools"
+command = "node"
+args = ["server.js"]
+startup = "lazy"
+required = false
+
+[mcp_servers.trust]
+approval_default = "allow"
+egress_logging = false
+allow_secrets = true
+"#,
+    );
+
+    let report =
+        discover_workspace_plugins(workspace.path(), &[]).expect("plugin discovery should succeed");
+    let manifest = &report.manifests[0];
+    let hook = manifest
+        .capabilities
+        .iter()
+        .find(|capability| matches!(capability, PluginCapability::Hook { .. }))
+        .expect("hook capability should project");
+    let mcp = manifest
+        .capabilities
+        .iter()
+        .find(|capability| matches!(capability, PluginCapability::McpServer { .. }))
+        .expect("mcp capability should project");
+
+    let hook_policy = hook.policy_summary();
+    assert_eq!(hook_policy.tool_category, Some(ToolCategory::Custom));
+    assert_eq!(hook_policy.tool_access, Some(ToolAccess::Execute));
+    assert_eq!(hook_policy.approval_default, Some(ApprovalMode::Deny));
+    assert!(hook_policy.execution_backend_required);
+    assert!(!hook_policy.egress_logging);
+    assert!(hook_policy.allow_secrets);
+    assert_eq!(hook_policy.mutation_effect, ToolEffect::Unknown);
+
+    let mcp_policy = mcp.policy_summary();
+    assert_eq!(mcp_policy.tool_category, Some(ToolCategory::Mcp));
+    assert_eq!(mcp_policy.tool_access, Some(ToolAccess::Network));
+    assert_eq!(mcp_policy.approval_default, Some(ApprovalMode::Allow));
+    assert!(mcp_policy.execution_backend_required);
+    assert!(!mcp_policy.egress_logging);
+    assert!(mcp_policy.allow_secrets);
+    assert_eq!(mcp_policy.mutation_effect, ToolEffect::Unknown);
 }
 
 #[test]

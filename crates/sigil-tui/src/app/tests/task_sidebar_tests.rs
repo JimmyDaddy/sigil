@@ -23,6 +23,7 @@ fn verification_labels_cover_all_sidebar_variants() {
         (TaskStepStatus::Blocked, "blocked"),
         (TaskStepStatus::Cancelled, "cancelled"),
         (TaskStepStatus::Interrupted, "interrupted"),
+        (TaskStepStatus::Superseded, "superseded"),
     ] {
         assert_eq!(task_step_status_label(status), label);
     }

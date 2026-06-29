@@ -15,6 +15,7 @@ pub mod plan;
 pub mod plugin;
 pub mod projection;
 pub mod provider;
+pub mod resume;
 pub mod secret;
 pub mod session;
 pub mod skill;
@@ -32,10 +33,11 @@ pub use agent::{
 };
 pub use agent_thread::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentFinalAnswerRef,
-    AgentInvocationMode, AgentInvocationPolicy, AgentInvocationRequest, AgentInvocationSource,
-    AgentMergeSafePointEntry, AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry,
-    AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection,
-    AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
+    AgentGraphSummary, AgentInvocationMode, AgentInvocationPolicy, AgentInvocationRequest,
+    AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus, AgentMergeSafePointEntry,
+    AgentPermissionPolicy, AgentProfile, AgentProfileCapturedEntry, AgentProfileId,
+    AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
+    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
     AgentProfileTrustProjection, AgentResultContinuationEntry, AgentResultContinuationProjection,
     AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
     AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptProjection, AgentRunAttemptStartedEntry,
@@ -45,6 +47,7 @@ pub use agent_thread::{
     AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStateProjection,
     AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState,
     AgentUsageSummary, WorkspaceRootSnapshot, closed_agent_routes, interrupted_agent_attempts,
+    interrupted_agent_mailbox_messages,
 };
 pub use approval::{ApprovalHandler, AutoApproveHandler, ToolApproval};
 pub use changeset::{
@@ -131,23 +134,31 @@ pub use plan::{
     PlanApprovalScope, PlanApprovedEntry, plan_text_hash, plan_workspace_paths,
 };
 pub use plugin::{
-    PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginCapability, PluginHookRef, PluginManifest,
-    PluginManifestSnapshot, PluginSkillRef, PluginStateProjection, PluginTrustDecision,
-    PluginTrustEntry, plugin_manifest_digests_match, validate_plugin_capability_digest,
-    validate_plugin_id, validate_plugin_manifest_digest, validate_plugin_version,
+    PLUGIN_MANIFEST_DIGEST_PREFIX, PluginAgentRef, PluginCapability, PluginCapabilityPolicy,
+    PluginHookRef, PluginManifest, PluginManifestSnapshot, PluginSkillRef, PluginStateProjection,
+    PluginTrustDecision, PluginTrustEntry, plugin_manifest_digests_match,
+    validate_plugin_capability_digest, validate_plugin_id, validate_plugin_manifest_digest,
+    validate_plugin_version,
 };
 pub use projection::{
-    FILE_PROJECTION_STORE_SCHEMA_VERSION, FileProjectionStore, ProjectionRebuildOutput,
-    ProjectionRebuildReport, ProjectionStore, ProjectionStoreState,
-    SESSION_LIST_PROJECTION_SCHEMA_VERSION, SessionListProjectionEntry,
+    AGENT_GRAPH_PROJECTION_SCHEMA_VERSION, DISPATCH_TRACE_PROJECTION_SCHEMA_VERSION,
+    DispatchTraceEntry, DispatchTraceKind, DispatchTraceProjectionSnapshot, DispatchTraceStatus,
+    DispatchTraceSummary, DispatchTraceUsageSummary, FILE_PROJECTION_STORE_SCHEMA_VERSION,
+    FileProjectionStore, ProjectionRebuildOutput, ProjectionRebuildReport, ProjectionStore,
+    ProjectionStoreState, SESSION_LIST_PROJECTION_SCHEMA_VERSION, SessionListProjectionEntry,
     SessionListProjectionSnapshot, SessionListReadinessSummary, SessionListTaskSummary,
-    SessionListUsageSummary, session_list_projection_from_records,
+    SessionListUsageSummary, agent_graph_projection_from_records,
+    dispatch_trace_projection_from_records, session_list_projection_from_records,
 };
 pub use provider::{
     BackgroundTaskHandle, BackgroundTaskStatus, CompletionRequest, MessageRole, ModelMessage,
     PrefixSnapshot, Provider, ProviderCapabilities, ProviderChunk, ProviderContinuationState,
     ReasoningArtifact, ReasoningEffort, ReasoningStreamSupport, ResponseHandle, SessionStats,
     ToolCall, ToolCallCompletionIdPolicy, ToolCallStreamAccumulator, UsageStats,
+};
+pub use resume::{
+    JobId, JobIntentEntry, LeaseId, ResumeDisposition, ResumeJobProjection,
+    ResumeJobStateProjection, StepLeaseEntry, StepLeaseHeartbeatEntry, StepLeaseStatus,
 };
 pub use secret::{REDACTED_SECRET, SecretRedactor};
 pub use session::{
@@ -162,15 +173,15 @@ pub use skill::{
     SkillStateProjection, SkillTrustState,
 };
 pub use task::{
-    AgentRole, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PLAN_UPDATE_TOOL_NAME,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
-    TaskGraphProjection, TaskGraphStepProjection, TaskId, TaskIsolationMode, TaskPlanEntry,
-    TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus,
-    TaskRunEntry, TaskRunProjection, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
-    TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
-    TaskSubagentElicitationRouteEntry, child_session_ref, normalize_task_agent_display_name,
-    task_plan_update_entry, task_plan_update_result_content, task_plan_update_tool_spec,
-    validate_task_plan_graph_steps,
+    AgentRole, DEFAULT_TASK_MAX_PLAN_VERSIONS, SessionRef, TASK_AGENT_DISPLAY_NAME_MAX_CHARS,
+    TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskChildSessionStatus, TaskGraphProjection, TaskGraphStepProjection, TaskId,
+    TaskIsolationMode, TaskPlanEntry, TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus,
+    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec,
+    TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
+    child_session_ref, normalize_task_agent_display_name, task_plan_update_entry,
+    task_plan_update_result_content, task_plan_update_tool_spec, validate_task_plan_graph_steps,
 };
 pub use task_memory::{
     AttemptRef, BranchId, CommandReceiptId, FileChangeRef, SourcedDecision, SourcedFact,
@@ -191,9 +202,9 @@ pub use time::saturating_elapsed;
 pub use tool::{
     ScopedToolRegistry, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffBudget, ToolDiffStats,
     ToolEgressAudit, ToolError, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
-    ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolRegistry, ToolRegistryScope, ToolResult,
-    ToolResultMeta, ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind,
-    ToolSubjectScope,
+    ToolPreviewFileSnapshot, ToolPreviewSnapshot, ToolReceiptMetadata, ToolReceiptReplayDecision,
+    ToolReceiptStatus, ToolRegistry, ToolRegistryScope, ToolResult, ToolResultMeta,
+    ToolResultStatus, ToolResultSummary, ToolSpec, ToolSubject, ToolSubjectKind, ToolSubjectScope,
 };
 pub use verification::{
     ArtifactId, CandidateCheck, ChangesetId, CheckCommand, CheckDiscoverySource, CheckPromotion,

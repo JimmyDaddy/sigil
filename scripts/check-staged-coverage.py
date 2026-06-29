@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Check staged Rust business-code additions against line coverage."""
+"""Check staged Rust business-code additions have same-package test evidence.
+
+The script keeps its historical filename because `.githooks/pre-commit` and
+developer docs reference it, but the daily pre-commit metric is intentionally no
+longer line coverage. Full line coverage remains available through
+`scripts/coverage.sh` for release-grade checks.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -46,6 +51,16 @@ class StagedCoverageResult:
     failures: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class StagedTestEvidenceResult:
+    """Test-evidence result for staged business-code additions."""
+
+    checked_packages: int = 0
+    checked_files: int = 0
+    evidence_files: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+
 def run(
     args: list[str],
     *,
@@ -79,6 +94,22 @@ def is_business_rust_file(path: str) -> bool:
         and not name.endswith("_tests.rs")
         and not name.endswith("_test_support.rs")
     )
+
+
+def rust_test_package(path: str) -> str | None:
+    parts = path.split("/")
+    if len(parts) < 4 or parts[0] != "crates" or parts[2] != "src":
+        return None
+    package = parts[1]
+    name = Path(path).name
+    if (
+        "tests" in parts
+        or name == "tests.rs"
+        or name.endswith("_tests.rs")
+        or name.endswith("_test_support.rs")
+    ):
+        return package
+    return None
 
 
 def package_names_for_staged_files(staged_files: list[str]) -> list[str]:
@@ -388,13 +419,69 @@ def compute_staged_coverage(
     )
 
 
+def compute_staged_test_evidence(
+    staged_business_files: list[str],
+    all_staged_files: list[str],
+    added_lines: dict[str, dict[int, str]],
+    staged_sources: dict[str, str],
+) -> StagedTestEvidenceResult:
+    declaration_lines_by_path = {
+        path: non_executable_declaration_lines(source_text)
+        for path, source_text in staged_sources.items()
+    }
+    business_files_by_package: dict[str, list[str]] = {}
+    for path in staged_business_files:
+        executable_added_lines = [
+            line_no
+            for line_no, line in added_lines.get(path, {}).items()
+            if not is_non_executable_for_coverage(path, line_no, line, declaration_lines_by_path)
+        ]
+        if not executable_added_lines:
+            continue
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] == "crates":
+            business_files_by_package.setdefault(parts[1], []).append(path)
+
+    if not business_files_by_package:
+        return StagedTestEvidenceResult()
+
+    evidence_by_package: dict[str, list[str]] = {}
+    for path in all_staged_files:
+        package = rust_test_package(path)
+        if package is not None:
+            evidence_by_package.setdefault(package, []).append(path)
+
+    failures: list[str] = []
+    for package, business_files in sorted(business_files_by_package.items()):
+        if package in evidence_by_package:
+            continue
+        formatted_files = ", ".join(sorted(business_files))
+        failures.append(
+            f"{package}: executable business-code additions require same-package "
+            f"test changes; business files: {formatted_files}"
+        )
+
+    evidence_files = sorted(
+        path
+        for package in business_files_by_package
+        for path in evidence_by_package.get(package, [])
+    )
+    return StagedTestEvidenceResult(
+        checked_packages=len(business_files_by_package),
+        checked_files=sum(len(files) for files in business_files_by_package.values()),
+        evidence_files=evidence_files,
+        failures=failures,
+    )
+
+
 def main() -> int:
     repo_root = Path(git_output("rev-parse", "--show-toplevel").strip())
     os.chdir(repo_root)
 
+    all_staged_files = git_output("diff", "--cached", "--name-only", "--diff-filter=ACMR").splitlines()
     staged_files = [
         path
-        for path in git_output("diff", "--cached", "--name-only", "--diff-filter=ACMR").splitlines()
+        for path in all_staged_files
         if is_business_rust_file(path)
     ]
     if not staged_files:
@@ -416,48 +503,26 @@ def main() -> int:
         print("staged coverage: no added Rust business-code lines")
         return 0
     staged_sources = {path: git_output("show", f":{path}") for path in staged_files}
-    staged_packages = package_names_for_staged_files(staged_files)
-
-    with tempfile.TemporaryDirectory(prefix="sigil-staged-coverage-") as temp_dir:
-        lcov_path = Path(temp_dir) / "coverage.lcov"
-        env = os.environ.copy()
-        env["COVERAGE_SUMMARY_ONLY"] = "0"
-        env["COVERAGE_MIN_LINES"] = "0"
-        if staged_packages:
-            env["COVERAGE_PACKAGES"] = " ".join(staged_packages)
-        package_scope = (
-            f" for packages: {', '.join(staged_packages)}"
-            if staged_packages
-            else ""
-        )
-        print(f"staged coverage: running ./scripts/coverage.sh for line data{package_scope}")
-        run(
-            ["./scripts/coverage.sh", "--lcov", "--output-path", str(lcov_path)],
-            env=env,
-            capture=False,
-        )
-        coverage = parse_lcov(lcov_path, repo_root)
-
-    result = compute_staged_coverage(
+    result = compute_staged_test_evidence(
         staged_files,
+        all_staged_files,
         added_lines,
-        coverage,
-        staged_sources=staged_sources,
+        staged_sources,
     )
 
     if result.failures:
-        print(f"staged coverage: added business-code line coverage must be >= {MIN_COVERAGE:.2f}%")
+        print("staged coverage: executable business-code additions need same-package test evidence")
         for failure in result.failures:
             print(f"  - {failure}")
         return 1
 
-    if result.checked_lines == 0:
-        print("staged coverage: staged business-code additions had no instrumented lines")
+    if result.checked_files == 0:
+        print("staged coverage: staged business-code additions had no executable lines")
         return 0
 
     print(
-        f"staged coverage: ok, {result.checked_lines} added executable lines across "
-        f"{result.checked_files} file(s) meet >= {MIN_COVERAGE:.2f}%"
+        f"staged coverage: ok, {result.checked_files} business file(s) across "
+        f"{result.checked_packages} package(s) have same-package test evidence"
     )
     return 0
 

@@ -94,6 +94,37 @@ Do not present internal lease/idempotency details in the main path.
 4. Tool receipt/idempotency metadata.
 5. TUI recovery panel.
 
+## 7.1 Implementation Progress
+
+核心语义已实现：
+
+- Job intent and step lease are now first-class append-only control entries with
+  durable event types.
+- Resume job state can be reduced from session entries or rebuilt from the
+  mixed-format durable stream.
+- Expired acquired leases are projected as `InterruptedNeedsUser`, so restarted
+  sessions do not need to keep showing dead work as running.
+- Step lease heartbeat events extend matching acquired leases and leave
+  mismatched, interrupted or expired work in an explicit recovery state.
+- Tool result metadata can now carry receipt idempotency metadata, mutation
+  operation ids and a conservative replay decision helper; non-idempotent
+  receipts remain denied by default.
+- Agent mailbox messages are now durable control entries with queued,
+  delivered, consumed, rejected and interrupted states. Restore appends an
+  interrupted mailbox event for delivered messages that were not durably
+  consumed before process loss.
+- TUI audit view renders compact job intent, step lease and mailbox control
+  summaries.
+- TUI session view now shows a concise recovery panel when stale jobs,
+  interrupted mailbox messages or interrupted attempts are present.
+
+Productization remains:
+
+- Receipt metadata is not yet wired into automatic tool replay, and this RFC
+  still forbids silent replay of non-idempotent tools.
+- This does not resume OS processes, PTYs or external services from their
+  instruction pointer.
+
 ## 8. Acceptance Criteria
 
 - Restart does not report dead background tasks as running.

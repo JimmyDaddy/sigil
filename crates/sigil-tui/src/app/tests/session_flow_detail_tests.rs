@@ -718,6 +718,10 @@ fn render_task_control_entries_and_status_labels() -> Result<()> {
         task_step_status_label(sigil_kernel::TaskStepStatus::Interrupted),
         "interrupted"
     );
+    assert_eq!(
+        task_step_status_label(sigil_kernel::TaskStepStatus::Superseded),
+        "superseded"
+    );
 
     assert_eq!(
         task_child_session_status_label(sigil_kernel::TaskChildSessionStatus::Started),
@@ -1634,6 +1638,46 @@ fn provider_projection_covers_compaction_preview_states() {
     ]);
     let unavailable = app.provider_projection_lines().join("\n");
     assert!(unavailable.contains("/compact preview unavailable"));
+}
+
+#[test]
+fn provider_projection_surfaces_recovery_panel_for_stale_jobs() -> Result<()> {
+    let mut app = AppState::from_root_config(std::path::Path::new("sigil.toml"), &test_config());
+    app.sync_current_session_state(vec![
+        SessionLogEntry::Control(ControlEntry::JobIntentRecorded(
+            sigil_kernel::JobIntentEntry {
+                job_id: "job_1".to_owned(),
+                session_id: "session_1".to_owned(),
+                task_id: Some(sigil_kernel::TaskId::new("task_1")?),
+                agent_profile: None,
+                user_goal_event_id: "event-1".to_owned(),
+                tool_policy_hash: "sha256:policy".to_owned(),
+                expected_effect: sigil_kernel::ToolEffect::WorkspaceWrite,
+                created_at_ms: Some(1),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::StepLeaseRecorded(
+            sigil_kernel::StepLeaseEntry {
+                lease_id: "lease_1".to_owned(),
+                job_id: "job_1".to_owned(),
+                step_id: Some(sigil_kernel::TaskStepId::new("fix_typo")?),
+                owner_process_id: "pid-1".to_owned(),
+                deadline_ms: 10,
+                heartbeat_event_id: None,
+                status: sigil_kernel::StepLeaseStatus::Acquired,
+                updated_at_ms: Some(2),
+                reason: None,
+            },
+        )),
+    ]);
+
+    let lines = app.provider_projection_lines().join("\n");
+
+    assert!(lines.contains("Recovery"));
+    assert!(lines.contains("last: task_1 · fix_typo"));
+    assert!(lines.contains("risk: 1 stale jobs"));
+    assert!(lines.contains("action: inspect recovery, then resume or mark abandoned"));
+    Ok(())
 }
 
 #[test]

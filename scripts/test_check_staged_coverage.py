@@ -61,6 +61,24 @@ class StagedCoverageHelpersTests(unittest.TestCase):
 
         self.assertEqual(packages, ["sigil-kernel", "sigil-tui"])
 
+    def test_rust_test_package_detects_same_package_test_files(self) -> None:
+        self.assertEqual(
+            check_staged_coverage.rust_test_package(
+                "crates/sigil-kernel/src/tests/session_tests.rs"
+            ),
+            "sigil-kernel",
+        )
+        self.assertEqual(
+            check_staged_coverage.rust_test_package(
+                "crates/sigil-tui/src/app/tests/session_flow_tests.rs"
+            ),
+            "sigil-tui",
+        )
+        self.assertEqual(
+            check_staged_coverage.rust_test_package("crates/sigil-http/src/lib.rs"),
+            None,
+        )
+
     def test_non_executable_classifier_accepts_rust_type_shapes(self) -> None:
         non_executable = [
             "Stale { capability: String },",
@@ -274,6 +292,53 @@ pub fn render(value: Result<(), Error>) -> Result<(), Error> {
             result.failures,
             ["crates/example/src/lib.rs: no coverage data for staged business-code additions"],
         )
+
+    def test_compute_staged_test_evidence_accepts_same_package_tests(self) -> None:
+        result = check_staged_coverage.compute_staged_test_evidence(
+            ["crates/sigil-kernel/src/session.rs"],
+            [
+                "crates/sigil-kernel/src/session.rs",
+                "crates/sigil-kernel/src/tests/session_tests.rs",
+            ],
+            {"crates/sigil-kernel/src/session.rs": {10: "let value = run();"}},
+            {"crates/sigil-kernel/src/session.rs": "pub fn run() {\n    let value = run();\n}\n"},
+        )
+
+        self.assertEqual(result.checked_packages, 1)
+        self.assertEqual(result.checked_files, 1)
+        self.assertEqual(
+            result.evidence_files,
+            ["crates/sigil-kernel/src/tests/session_tests.rs"],
+        )
+        self.assertEqual(result.failures, [])
+
+    def test_compute_staged_test_evidence_rejects_missing_same_package_tests(self) -> None:
+        result = check_staged_coverage.compute_staged_test_evidence(
+            ["crates/sigil-kernel/src/session.rs"],
+            [
+                "crates/sigil-kernel/src/session.rs",
+                "crates/sigil-tui/src/app/tests/session_flow_tests.rs",
+            ],
+            {"crates/sigil-kernel/src/session.rs": {10: "let value = run();"}},
+            {"crates/sigil-kernel/src/session.rs": "pub fn run() {\n    let value = run();\n}\n"},
+        )
+
+        self.assertEqual(result.checked_packages, 1)
+        self.assertEqual(result.checked_files, 1)
+        self.assertEqual(len(result.failures), 1)
+        self.assertIn("sigil-kernel", result.failures[0])
+
+    def test_compute_staged_test_evidence_ignores_non_executable_additions(self) -> None:
+        result = check_staged_coverage.compute_staged_test_evidence(
+            ["crates/sigil-kernel/src/session.rs"],
+            ["crates/sigil-kernel/src/session.rs"],
+            {"crates/sigil-kernel/src/session.rs": {1: "pub enum Mode {", 2: "    Fast,"}},
+            {"crates/sigil-kernel/src/session.rs": "pub enum Mode {\n    Fast,\n}\n"},
+        )
+
+        self.assertEqual(result.checked_packages, 0)
+        self.assertEqual(result.checked_files, 0)
+        self.assertEqual(result.failures, [])
 
 
 if __name__ == "__main__":

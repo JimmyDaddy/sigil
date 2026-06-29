@@ -197,6 +197,7 @@ where
             .with_task_plan_update(TaskPlanUpdateContext {
                 task_id: request.task_id.clone(),
                 max_plan_steps,
+                max_plan_versions: crate::DEFAULT_TASK_MAX_PLAN_VERSIONS,
             });
         if let Err(error) = self
             .planner
@@ -1983,6 +1984,7 @@ fn run_status_from_step_status(status: TaskStepStatus) -> RunStatus {
         TaskStepStatus::Blocked => RunStatus::Blocked,
         TaskStepStatus::Cancelled => RunStatus::Cancelled,
         TaskStepStatus::Interrupted => RunStatus::Interrupted,
+        TaskStepStatus::Superseded => RunStatus::Cancelled,
     }
 }
 
@@ -2116,9 +2118,10 @@ fn task_status_from_step_status(status: TaskStepStatus) -> TaskRunStatus {
         TaskStepStatus::Failed => TaskRunStatus::Failed,
         TaskStepStatus::Cancelled => TaskRunStatus::Cancelled,
         TaskStepStatus::Interrupted => TaskRunStatus::Interrupted,
-        TaskStepStatus::Pending | TaskStepStatus::Running | TaskStepStatus::Blocked => {
-            TaskRunStatus::Paused
-        }
+        TaskStepStatus::Pending
+        | TaskStepStatus::Running
+        | TaskStepStatus::Blocked
+        | TaskStepStatus::Superseded => TaskRunStatus::Paused,
     }
 }
 
@@ -2128,6 +2131,7 @@ fn step_terminal_reason(step_id: &TaskStepId, status: TaskStepStatus) -> String 
         TaskStepStatus::Blocked => format!("step {} blocked", step_id.as_str()),
         TaskStepStatus::Cancelled => format!("step {} cancelled", step_id.as_str()),
         TaskStepStatus::Interrupted => format!("step {} interrupted", step_id.as_str()),
+        TaskStepStatus::Superseded => format!("step {} superseded", step_id.as_str()),
         TaskStepStatus::Pending | TaskStepStatus::Running | TaskStepStatus::Completed => {
             format!("step {} stopped", step_id.as_str())
         }

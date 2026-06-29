@@ -10,16 +10,17 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
-    Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource, AgentProfileId,
-    AgentRole, AgentRouteId, AgentRouteStatus, AgentRunOptions, AgentRunOutcome,
-    AgentThreadClosedEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadProjection,
-    AgentThreadResult, AgentThreadStatus, AgentThreadStatusChangedEntry, AgentThreadTerminalStatus,
-    AgentToolDelegate, AgentTrustState, AgentUsageSummary, ApprovalHandler, ApprovalMode,
-    ControlEntry, EventHandler, JsonlSessionStore, ModelMessage, PermissionConfig,
-    PermissionPreset, Provider, RootConfig, RunEvent, Session, SessionLogEntry, SessionRef,
-    TaskChildSessionStatus, TaskId, Tool, ToolAccess, ToolApproval, ToolCall, ToolCategory,
-    ToolContext, ToolErrorKind, ToolPreview, ToolPreviewCapability, ToolRegistry, ToolResult,
-    ToolResultMeta, ToolSpec, ToolSubject, saturating_elapsed,
+    Agent, AgentApprovalRouteEntry, AgentInvocationMode, AgentInvocationSource,
+    AgentMailboxMessageEntry, AgentMailboxStatus, AgentProfileId, AgentRole, AgentRouteId,
+    AgentRouteStatus, AgentRunOptions, AgentRunOutcome, AgentThreadClosedEntry, AgentThreadId,
+    AgentThreadMessageRoutedEntry, AgentThreadProjection, AgentThreadResult, AgentThreadStatus,
+    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentToolDelegate, AgentTrustState,
+    AgentUsageSummary, ApprovalHandler, ApprovalMode, ControlEntry, EventHandler,
+    JsonlSessionStore, ModelMessage, PermissionConfig, PermissionPreset, Provider, RootConfig,
+    RunEvent, Session, SessionLogEntry, SessionRef, TaskChildSessionStatus, TaskId, Tool,
+    ToolAccess, ToolApproval, ToolCall, ToolCategory, ToolContext, ToolErrorKind, ToolPreview,
+    ToolPreviewCapability, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject,
+    saturating_elapsed,
 };
 
 use crate::{
@@ -209,6 +210,7 @@ struct BackgroundChatAgentResult {
     usage: AgentUsageSummary,
     status: TaskChildSessionStatus,
     final_answer_ref: Option<sigil_kernel::AgentFinalAnswerRef>,
+    consumed_mailbox_route_ids: Vec<AgentRouteId>,
 }
 
 impl AgentToolBackgroundRuns {
@@ -1354,6 +1356,12 @@ impl AgentToolRuntime {
                     Some(output.usage),
                     output.final_answer_ref,
                 )?;
+                self.supervisor.record_chat_mailbox_consumed(
+                    session,
+                    handler,
+                    &thread,
+                    &output.consumed_mailbox_route_ids,
+                )?;
                 if let Some(warning) = budget_warning {
                     let _ = handler.handle(RunEvent::Notice(format!(
                         "agent budget warning after child completion: {warning}"
@@ -1514,6 +1522,16 @@ impl AgentToolRuntime {
             prompt: Some(prompt.clone()),
             status: AgentRouteStatus::Requested,
         };
+        let mailbox_queued = AgentMailboxMessageEntry {
+            route_id: route_id.clone(),
+            source_thread_id: source_thread_id.clone(),
+            target_thread_id: thread_id.clone(),
+            prompt_hash: prompt_hash.clone(),
+            prompt: Some(prompt.clone()),
+            status: AgentMailboxStatus::Queued,
+            reason: None,
+            updated_at_ms: None,
+        };
         let delivery = if thread.status.is_terminal() {
             Err(format!(
                 "agent thread {} is {}",
@@ -1562,6 +1580,19 @@ impl AgentToolRuntime {
                 },
             )
             .with_control_entry(ControlEntry::AgentThreadMessageRouted(requested))
+            .with_control_entry(ControlEntry::AgentMailboxMessage(mailbox_queued))
+            .with_control_entry(ControlEntry::AgentMailboxMessage(
+                AgentMailboxMessageEntry {
+                    route_id: route_id.clone(),
+                    source_thread_id: source_thread_id.clone(),
+                    target_thread_id: thread_id.clone(),
+                    prompt_hash: String::new(),
+                    prompt: None,
+                    status: AgentMailboxStatus::Delivered,
+                    reason: None,
+                    updated_at_ms: None,
+                },
+            ))
             .with_control_entry(ControlEntry::AgentThreadMessageRouted(
                 AgentThreadMessageRoutedEntry {
                     route_id,
@@ -1583,6 +1614,19 @@ impl AgentToolRuntime {
                 ),
             )
             .with_control_entry(ControlEntry::AgentThreadMessageRouted(requested))
+            .with_control_entry(ControlEntry::AgentMailboxMessage(mailbox_queued))
+            .with_control_entry(ControlEntry::AgentMailboxMessage(
+                AgentMailboxMessageEntry {
+                    route_id: route_id.clone(),
+                    source_thread_id: source_thread_id.clone(),
+                    target_thread_id: thread_id.clone(),
+                    prompt_hash: String::new(),
+                    prompt: None,
+                    status: AgentMailboxStatus::Rejected,
+                    reason: Some(reason),
+                    updated_at_ms: None,
+                },
+            ))
             .with_control_entry(ControlEntry::AgentThreadMessageRouted(
                 AgentThreadMessageRoutedEntry {
                     route_id,
@@ -2156,10 +2200,12 @@ async fn run_background_chat_agent(
             return Err(error);
         }
     };
+    let mut consumed_mailbox_route_ids = Vec::new();
 
     loop {
         let mut prompts = Vec::new();
         while let Ok(message) = mailbox_rx.try_recv() {
+            consumed_mailbox_route_ids.push(message.route_id.clone());
             prompts.push(format!(
                 "route {}:\n{}",
                 message.route_id.as_str(),
@@ -2213,6 +2259,7 @@ async fn run_background_chat_agent(
         usage,
         status,
         final_answer_ref,
+        consumed_mailbox_route_ids,
     })
 }
 

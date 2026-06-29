@@ -111,6 +111,14 @@ Main task UI should keep one recommended action per state, such as `continue`, `
 4. Bounded replanning and superseded steps.
 5. Write isolation integration with changeset/worktree support.
 
+## 9.1 Implementation Progress
+
+- E07.1 implemented plan schema, dependency metadata and durable graph projection.
+- E07.3 implemented review / verify state separation while keeping system verification authoritative.
+- E07.4 implemented bounded plan versions and `Superseded` projection semantics: accepting a newer plan version marks older plan versions superseded, preserves completed step history, marks unfinished old-plan steps as `Superseded`, clears current-step pointers to superseded plans, and surfaces the state in TUI summaries.
+- E07.2 read-only ready queue concurrency remains the next executable slice.
+- E07.5 write isolation remains gated until changeset/worktree isolation is ready.
+
 ## 10. Acceptance Criteria
 
 - Read-only steps can run concurrently without write permissions.

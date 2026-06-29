@@ -266,7 +266,7 @@ cargo clippy --all-targets -- -D warnings
 git config core.hooksPath .githooks
 ```
 
-pre-commit hook 通过 `scripts/check-staged-coverage.py` 检查 staged 的 Rust 业务代码新增可执行行覆盖率，默认要求 `>= 85%`；需要 release/CI 级严格检查时，可用 `STAGED_COVERAGE_MIN_LINES=96` 临时提高。检查范围为 `crates/*/src/**/*.rs`，排除测试文件与测试辅助文件。为了避免每次提交都重跑全 workspace 覆盖率，staged gate 只为 staged 业务文件所在 package 生成 LCOV，再按 staged 新增可执行行计算覆盖率；完整 workspace 覆盖率仍由显式 `./scripts/coverage.sh` 和 CI 承担。新增业务代码如果没有 coverage 数据视为不合格；同一业务文件同时存在 staged 与 unstaged 修改时必须先整理 staging，避免覆盖率结果和提交内容不一致。
+pre-commit hook 通过 `scripts/check-staged-coverage.py` 检查 staged 的 Rust 业务代码新增可执行行是否伴随同 crate 的测试文件改动。检查范围为 `crates/*/src/**/*.rs`，排除测试文件与测试辅助文件；可识别的声明、导入和类型形状不会被当作可执行新增行。为了避免每次提交都重跑 coverage，本地 hook 不再按新增行覆盖率阻塞提交；完整 workspace 覆盖率仍由显式 `./scripts/coverage.sh` 和 CI 承担。新增业务逻辑仍必须有可复现语义测试，不能用空测试或 pass-only 断言满足 hook。
 
 如果只改文档，可以不跑全量 gate，但至少确认：
 

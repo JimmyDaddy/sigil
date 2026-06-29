@@ -2941,6 +2941,7 @@ async fn task_plan_update_tool_writes_plan_and_audit() -> Result<()> {
             AgentRunInput::user("plan").with_task_plan_update(TaskPlanUpdateContext {
                 task_id: TaskId::new("task_1")?,
                 max_plan_steps: 4,
+                max_plan_versions: 1,
             }),
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),
@@ -3004,6 +3005,7 @@ async fn task_plan_update_tool_rejects_invalid_schema_without_plan_entry() -> Re
             AgentRunInput::user("plan").with_task_plan_update(TaskPlanUpdateContext {
                 task_id: TaskId::new("task_1")?,
                 max_plan_steps: 4,
+                max_plan_versions: 1,
             }),
             AgentRunOptions {
                 workspace_root: std::env::temp_dir(),

@@ -4,6 +4,7 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, MutexGuard},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -16,8 +17,83 @@ pub const DEFAULT_HTTP_TOKEN_ENV: &str = "SIGIL_HTTP_TOKEN";
 pub const HTTP_RUN_EVENT_SSE_NAME: &str = "run_event";
 /// Current schema version for HTTP protocol event envelopes.
 pub const HTTP_PROTOCOL_EVENT_SCHEMA_VERSION: u32 = 1;
+/// Current protocol command/event surface version.
+pub const HTTP_PROTOCOL_VERSION: u16 = 1;
 
 const HTTP_PROTOCOL_CURSOR_PREFIX: &str = "sigil-http-run-v1";
+
+/// Versioned command envelope shared by future HTTP, IDE, and TUI command bridges.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpCommandEnvelope<T> {
+    pub protocol_version: u16,
+    pub command_id: String,
+    pub client_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_stream_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    pub payload: T,
+}
+
+impl<T> HttpCommandEnvelope<T> {
+    /// Creates a command envelope using the current HTTP protocol version.
+    #[must_use]
+    pub fn new(
+        command_id: impl Into<String>,
+        client_id: impl Into<String>,
+        session_id: impl Into<String>,
+        payload: T,
+    ) -> Self {
+        Self {
+            protocol_version: HTTP_PROTOCOL_VERSION,
+            command_id: command_id.into(),
+            client_id: client_id.into(),
+            session_id: session_id.into(),
+            expected_stream_sequence: None,
+            correlation_id: None,
+            payload,
+        }
+    }
+
+    /// Adds an optimistic stream-sequence guard for stale-client protection.
+    #[must_use]
+    pub fn with_expected_stream_sequence(mut self, sequence: u64) -> Self {
+        self.expected_stream_sequence = Some(sequence);
+        self
+    }
+
+    /// Adds a durable-event correlation id.
+    #[must_use]
+    pub fn with_correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
+        self.correlation_id = Some(correlation_id.into());
+        self
+    }
+
+    /// Fails closed when a client sends an unsupported command envelope version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `protocol_version` does not match the current supported version.
+    pub fn ensure_supported(&self) -> Result<(), HttpProtocolVersionError> {
+        if self.protocol_version != HTTP_PROTOCOL_VERSION {
+            return Err(HttpProtocolVersionError::Unsupported {
+                supported: HTTP_PROTOCOL_VERSION,
+                received: self.protocol_version,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Protocol-version errors for command DTOs.
+#[derive(Debug, Clone, PartialEq, Eq, ThisError)]
+pub enum HttpProtocolVersionError {
+    /// Client command uses another protocol version.
+    #[error("unsupported http protocol version {received}; supported version is {supported}")]
+    Unsupported { supported: u16, received: u16 },
+}
 
 /// Configuration for the local HTTP/SSE adapter.
 ///
@@ -373,6 +449,51 @@ impl HttpProtocolEvent {
     pub fn is_durable(&self) -> bool {
         self.event_class == HttpProtocolEventClass::Durable
     }
+
+    /// Returns a DTO view that separates durable replayable events from transient live events.
+    #[must_use]
+    pub fn view(&self) -> HttpProtocolEventView {
+        match self.event_class {
+            HttpProtocolEventClass::Durable => {
+                HttpProtocolEventView::Durable(HttpDurableEventView {
+                    schema_version: self.schema_version,
+                    replay_id: self.replay_id.clone().unwrap_or_default(),
+                    run_event: self.run_event.clone(),
+                })
+            }
+            HttpProtocolEventClass::Transient => {
+                HttpProtocolEventView::Transient(HttpTransientEventView {
+                    schema_version: self.schema_version,
+                    run_event: self.run_event.clone(),
+                })
+            }
+        }
+    }
+}
+
+/// Explicit durable/transient event view used by future protocol clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "event_class")]
+pub enum HttpProtocolEventView {
+    Durable(HttpDurableEventView),
+    Transient(HttpTransientEventView),
+}
+
+/// Replayable event view with a cursor suitable for SSE `Last-Event-ID`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpDurableEventView {
+    pub schema_version: u32,
+    pub replay_id: String,
+    pub run_event: PublicRunEvent,
+}
+
+/// Process-local event view that is not replayable after reconnect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpTransientEventView {
+    pub schema_version: u32,
+    pub run_event: PublicRunEvent,
 }
 
 /// Durable HTTP replay cursor carried in SSE `id:` and `Last-Event-ID`.
@@ -799,6 +920,8 @@ pub struct HttpRunSnapshot {
     /// Pending approval call ids in deterministic order.
     #[serde(default)]
     pub pending_approval_call_ids: Vec<String>,
+    /// Registry-owned state sequence for stale-client command guards.
+    pub stream_sequence: u64,
 }
 
 /// Pending approval metadata registered by a running HTTP adapter driver.
@@ -809,12 +932,28 @@ pub struct HttpPendingApproval {
     pub call_id: String,
     /// Tool name shown to clients.
     pub tool_name: String,
+    /// Stable id for this approval request.
+    pub approval_request_id: String,
+    /// Hash of the exact tool call payload being approved.
+    pub tool_call_hash: String,
+    /// Policy version used to request approval.
+    pub policy_version: String,
+    /// Expiry timestamp in Unix milliseconds.
+    pub expires_at_ms: u64,
 }
 
 /// HTTP approval decision payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct HttpApprovalDecisionRequest {
+    /// Approval request id echoed from the pending approval snapshot.
+    pub approval_request_id: String,
+    /// Tool call hash echoed from the pending approval snapshot.
+    pub tool_call_hash: String,
+    /// Policy version echoed from the pending approval snapshot.
+    pub policy_version: String,
+    /// Expiry timestamp echoed from the pending approval snapshot.
+    pub expires_at_ms: u64,
     /// Explicit decision for the pending approval.
     pub decision: HttpApprovalDecision,
     /// Optional user-facing reason for audit and display.
@@ -856,6 +995,39 @@ pub struct HttpApprovalDecisionRecord {
     /// Optional user-facing reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Receipt for an envelope-routed approval command.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpApprovalCommandReceipt {
+    /// Command id used for retry de-duplication.
+    pub command_id: String,
+    /// Client that submitted the command.
+    pub client_id: String,
+    /// Session id from the command envelope.
+    pub session_id: String,
+    /// Run id receiving the approval.
+    pub run_id: String,
+    /// Tool call id receiving the approval.
+    pub call_id: String,
+    /// Optional optimistic state guard supplied by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_stream_sequence: Option<u64>,
+    /// Optional durable correlation id supplied by the client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Decision routed to the run driver.
+    pub decision: HttpApprovalDecisionRecord,
+    /// Whether this response was replayed from a prior command id.
+    pub replayed: bool,
+}
+
+impl HttpApprovalCommandReceipt {
+    fn replayed(mut self) -> Self {
+        self.replayed = true;
+        self
+    }
 }
 
 /// Start context delivered to the HTTP run driver.
@@ -970,6 +1142,42 @@ pub enum HttpRegistryError {
         run_id: String,
         message: String,
     },
+    /// The command envelope version is not supported.
+    #[error("http command protocol version rejected: {message}")]
+    UnsupportedProtocolVersion { message: String },
+    /// The command envelope points to a different session than the addressed run.
+    #[error(
+        "http command session {command_session_id} does not match run {run_id} session {run_session_id}"
+    )]
+    CommandSessionMismatch {
+        command_session_id: String,
+        run_id: String,
+        run_session_id: String,
+    },
+    /// The command was based on an older run stream sequence.
+    #[error(
+        "http command for run {run_id} is stale: expected stream sequence {expected}, current is {actual}"
+    )]
+    StaleCommandSequence {
+        run_id: String,
+        expected: u64,
+        actual: u64,
+    },
+    /// The approval request id no longer matches the pending request.
+    #[error("http approval request changed for run {run_id} call {call_id}")]
+    ApprovalRequestChanged { run_id: String, call_id: String },
+    /// The approval tool call hash no longer matches the pending request.
+    #[error("http approval tool call changed for run {run_id} call {call_id}")]
+    ApprovalToolCallChanged { run_id: String, call_id: String },
+    /// The approval policy version no longer matches the pending request.
+    #[error("http approval policy changed for run {run_id} call {call_id}")]
+    ApprovalPolicyChanged { run_id: String, call_id: String },
+    /// The approval expiry no longer matches the pending request.
+    #[error("http approval expiry changed for run {run_id} call {call_id}")]
+    ApprovalExpiryChanged { run_id: String, call_id: String },
+    /// The approval request expired before the user decision arrived.
+    #[error("http approval expired for run {run_id} call {call_id}")]
+    ApprovalExpired { run_id: String, call_id: String },
 }
 
 /// In-memory registry for HTTP adapter sessions, runs, cancellations, and approvals.
@@ -1171,7 +1379,76 @@ impl HttpSessionRunRegistry {
         run.pending_approvals
             .insert(approval.call_id.clone(), approval);
         run.status = HttpRunStatus::WaitingForApproval;
+        run.advance_stream_sequence();
         Ok(run.snapshot())
+    }
+
+    /// Routes one envelope-protected user approval command to an active run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command is stale, duplicated with an unsupported version, points
+    /// to the wrong session, or fails normal approval routing checks.
+    pub fn submit_approval_command(
+        &self,
+        run_id: &str,
+        call_id: &str,
+        command: HttpCommandEnvelope<HttpApprovalDecisionRequest>,
+    ) -> Result<HttpApprovalCommandReceipt, HttpRegistryError> {
+        command.ensure_supported().map_err(|error| {
+            HttpRegistryError::UnsupportedProtocolVersion {
+                message: error.to_string(),
+            }
+        })?;
+        let key = HttpCommandKey {
+            session_id: command.session_id.clone(),
+            client_id: command.client_id.clone(),
+            command_id: command.command_id.clone(),
+        };
+        {
+            let state = self.lock_state();
+            if let Some(receipt) = state.command_receipts.get(&key) {
+                return Ok(receipt.clone().replayed());
+            }
+            let run = state
+                .runs
+                .get(run_id)
+                .ok_or_else(|| HttpRegistryError::RunNotFound {
+                    run_id: run_id.to_owned(),
+                })?;
+            if run.session_id != command.session_id {
+                return Err(HttpRegistryError::CommandSessionMismatch {
+                    command_session_id: command.session_id,
+                    run_id: run_id.to_owned(),
+                    run_session_id: run.session_id.clone(),
+                });
+            }
+            if let Some(expected) = command.expected_stream_sequence
+                && expected != run.stream_sequence
+            {
+                return Err(HttpRegistryError::StaleCommandSequence {
+                    run_id: run_id.to_owned(),
+                    expected,
+                    actual: run.stream_sequence,
+                });
+            }
+        }
+
+        let record = self.submit_approval_decision(run_id, call_id, command.payload.clone())?;
+        let receipt = HttpApprovalCommandReceipt {
+            command_id: command.command_id,
+            client_id: command.client_id,
+            session_id: command.session_id,
+            run_id: run_id.to_owned(),
+            call_id: call_id.to_owned(),
+            expected_stream_sequence: command.expected_stream_sequence,
+            correlation_id: command.correlation_id,
+            decision: record,
+            replayed: false,
+        };
+        let mut state = self.lock_state();
+        state.command_receipts.insert(key, receipt.clone());
+        Ok(receipt)
     }
 
     /// Routes one user approval decision to an active run.
@@ -1197,6 +1474,13 @@ impl HttpSessionRunRegistry {
             if let Some(error) = run.approval_route_error(run_id, false) {
                 return Err(error);
             }
+            let pending = run.pending_approvals.get(call_id).ok_or_else(|| {
+                HttpRegistryError::ApprovalNotPending {
+                    run_id: run_id.to_owned(),
+                    call_id: call_id.to_owned(),
+                }
+            })?;
+            validate_approval_guard(run_id, call_id, pending, &request, current_unix_time_ms())?;
             let pending = run.pending_approvals.remove(call_id).ok_or_else(|| {
                 HttpRegistryError::ApprovalNotPending {
                     run_id: run_id.to_owned(),
@@ -1246,6 +1530,7 @@ impl HttpSessionRunRegistry {
         {
             run.status = HttpRunStatus::Running;
         }
+        run.advance_stream_sequence();
         Ok(record)
     }
 
@@ -1260,8 +1545,16 @@ impl HttpSessionRunRegistry {
 struct HttpRegistryState {
     sessions: BTreeMap<String, HttpSessionState>,
     runs: BTreeMap<String, HttpRunState>,
+    command_receipts: BTreeMap<HttpCommandKey, HttpApprovalCommandReceipt>,
     next_session_number: u64,
     next_run_number: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct HttpCommandKey {
+    session_id: String,
+    client_id: String,
+    command_id: String,
 }
 
 impl HttpRegistryState {
@@ -1302,6 +1595,7 @@ struct HttpRunState {
     pending_approvals: BTreeMap<String, HttpPendingApproval>,
     in_flight_approvals: BTreeMap<String, HttpPendingApproval>,
     approval_decisions: Vec<HttpApprovalDecisionRecord>,
+    stream_sequence: u64,
 }
 
 impl HttpRunState {
@@ -1321,6 +1615,7 @@ impl HttpRunState {
             pending_approvals: BTreeMap::new(),
             in_flight_approvals: BTreeMap::new(),
             approval_decisions: Vec::new(),
+            stream_sequence: 0,
         }
     }
 
@@ -1332,6 +1627,7 @@ impl HttpRunState {
             approval_mode: self.approval_mode,
             prompt_preview: self.prompt_preview.clone(),
             pending_approval_call_ids: self.pending_approvals.keys().cloned().collect(),
+            stream_sequence: self.stream_sequence,
         }
     }
 
@@ -1371,6 +1667,10 @@ impl HttpRunState {
             self.pending_approvals.insert(call_id.to_owned(), approval);
         }
     }
+
+    fn advance_stream_sequence(&mut self) {
+        self.stream_sequence = self.stream_sequence.saturating_add(1);
+    }
 }
 
 fn prompt_preview(prompt: &str) -> String {
@@ -1383,6 +1683,54 @@ fn prompt_preview(prompt: &str) -> String {
         preview.push_str("...");
     }
     preview
+}
+
+fn validate_approval_guard(
+    run_id: &str,
+    call_id: &str,
+    pending: &HttpPendingApproval,
+    request: &HttpApprovalDecisionRequest,
+    now_ms: u64,
+) -> Result<(), HttpRegistryError> {
+    if pending.approval_request_id != request.approval_request_id {
+        return Err(HttpRegistryError::ApprovalRequestChanged {
+            run_id: run_id.to_owned(),
+            call_id: call_id.to_owned(),
+        });
+    }
+    if pending.tool_call_hash != request.tool_call_hash {
+        return Err(HttpRegistryError::ApprovalToolCallChanged {
+            run_id: run_id.to_owned(),
+            call_id: call_id.to_owned(),
+        });
+    }
+    if pending.policy_version != request.policy_version {
+        return Err(HttpRegistryError::ApprovalPolicyChanged {
+            run_id: run_id.to_owned(),
+            call_id: call_id.to_owned(),
+        });
+    }
+    if pending.expires_at_ms != request.expires_at_ms {
+        return Err(HttpRegistryError::ApprovalExpiryChanged {
+            run_id: run_id.to_owned(),
+            call_id: call_id.to_owned(),
+        });
+    }
+    if now_ms >= pending.expires_at_ms {
+        return Err(HttpRegistryError::ApprovalExpired {
+            run_id: run_id.to_owned(),
+            call_id: call_id.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn current_unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            duration.as_millis().min(u128::from(u64::MAX)) as u64
+        })
 }
 
 #[cfg(test)]

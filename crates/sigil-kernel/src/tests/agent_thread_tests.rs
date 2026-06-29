@@ -2,19 +2,19 @@ use anyhow::Result;
 
 use crate::{
     AgentApprovalRouteEntry, AgentArtifactRef, AgentElicitationRouteEntry, AgentInvocationMode,
-    AgentInvocationPolicy, AgentInvocationSource, AgentMergeSafePointEntry, AgentProfile,
-    AgentProfileCapturedEntry, AgentProfileId, AgentProfileKind, AgentProfilePolicyEntry,
-    AgentProfilePolicyProjection, AgentProfileSnapshot, AgentProfileSnapshotId, AgentProfileSource,
-    AgentProfileTrustEntry, AgentProfileTrustProjection, AgentResultContinuationEntry,
-    AgentResultContinuationStatus, AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId,
-    AgentRouteStatus, AgentRunAttemptId, AgentRunAttemptStartedEntry, AgentRunContextSnapshot,
-    AgentRunHeartbeatEntry, AgentRunInterruptedEntry, AgentThreadClosedEntry,
-    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadMessageRoutedEntry, AgentThreadResult,
-    AgentThreadResultRecordedEntry, AgentThreadStartedEntry, AgentThreadStatus,
-    AgentThreadStatusChangedEntry, AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary,
-    ControlEntry, JsonlSessionStore, ModelMessage, Session, SessionLogEntry, SessionRef,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus, TaskId,
-    TaskStepId, WorkspaceRootSnapshot,
+    AgentInvocationPolicy, AgentInvocationSource, AgentMailboxMessageEntry, AgentMailboxStatus,
+    AgentMergeSafePointEntry, AgentProfile, AgentProfileCapturedEntry, AgentProfileId,
+    AgentProfileKind, AgentProfilePolicyEntry, AgentProfilePolicyProjection, AgentProfileSnapshot,
+    AgentProfileSnapshotId, AgentProfileSource, AgentProfileTrustEntry,
+    AgentProfileTrustProjection, AgentResultContinuationEntry, AgentResultContinuationStatus,
+    AgentResultPolicy, AgentRouteClosedEntry, AgentRouteId, AgentRouteStatus, AgentRunAttemptId,
+    AgentRunAttemptStartedEntry, AgentRunContextSnapshot, AgentRunHeartbeatEntry,
+    AgentRunInterruptedEntry, AgentThreadClosedEntry, AgentThreadDisplayNameEntry, AgentThreadId,
+    AgentThreadMessageRoutedEntry, AgentThreadResult, AgentThreadResultRecordedEntry,
+    AgentThreadStartedEntry, AgentThreadStatus, AgentThreadStatusChangedEntry,
+    AgentThreadTerminalStatus, AgentTrustState, AgentUsageSummary, ControlEntry, JsonlSessionStore,
+    ModelMessage, Session, SessionLogEntry, SessionRef, TaskChildSessionDisplayNameEntry,
+    TaskChildSessionEntry, TaskChildSessionStatus, TaskId, TaskStepId, WorkspaceRootSnapshot,
 };
 
 fn profile_id(value: &str) -> Result<AgentProfileId> {
@@ -1307,6 +1307,120 @@ fn closed_agent_routes_skip_terminal_and_already_closed_routes() -> Result<()> {
 
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].route_id.as_str(), "route_open");
+    Ok(())
+}
+
+#[test]
+fn agent_mailbox_projection_merges_status_updates() -> Result<()> {
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentMailboxMessage(
+            AgentMailboxMessageEntry {
+                route_id: route_id("mailbox_route")?,
+                source_thread_id: thread_id("main")?,
+                target_thread_id: thread_id("thread_1")?,
+                prompt_hash: "sha256:message".to_owned(),
+                prompt: Some("continue".to_owned()),
+                status: AgentMailboxStatus::Queued,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentMailboxMessage(
+            AgentMailboxMessageEntry {
+                route_id: route_id("mailbox_route")?,
+                source_thread_id: thread_id("main")?,
+                target_thread_id: thread_id("thread_1")?,
+                prompt_hash: String::new(),
+                prompt: None,
+                status: AgentMailboxStatus::Consumed,
+                reason: None,
+                updated_at_ms: Some(42),
+            },
+        )),
+    ];
+
+    let projection = crate::AgentThreadStateProjection::from_entries(&entries);
+    let mailbox = projection
+        .mailbox_messages
+        .get(&route_id("mailbox_route")?)
+        .expect("mailbox message projected");
+
+    assert_eq!(mailbox.status, AgentMailboxStatus::Consumed);
+    assert_eq!(mailbox.prompt_hash, "sha256:message");
+    assert_eq!(mailbox.prompt.as_deref(), Some("continue"));
+    assert_eq!(projection.graph_summary().mailbox_messages, 1);
+    assert_eq!(projection.graph_summary().open_routes, 0);
+    Ok(())
+}
+
+#[test]
+fn interrupted_agent_mailbox_messages_recover_pending_delivery() -> Result<()> {
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentMailboxMessage(
+            AgentMailboxMessageEntry {
+                route_id: route_id("pending_mailbox")?,
+                source_thread_id: thread_id("main")?,
+                target_thread_id: thread_id("thread_1")?,
+                prompt_hash: "sha256:message".to_owned(),
+                prompt: Some("continue".to_owned()),
+                status: AgentMailboxStatus::Delivered,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentMailboxMessage(
+            AgentMailboxMessageEntry {
+                route_id: route_id("consumed_mailbox")?,
+                source_thread_id: thread_id("main")?,
+                target_thread_id: thread_id("thread_2")?,
+                prompt_hash: "sha256:consumed".to_owned(),
+                prompt: None,
+                status: AgentMailboxStatus::Consumed,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )),
+    ];
+
+    let interrupted = crate::interrupted_agent_mailbox_messages(&entries);
+
+    assert_eq!(interrupted.len(), 1);
+    assert_eq!(interrupted[0].route_id.as_str(), "pending_mailbox");
+    assert_eq!(interrupted[0].status, AgentMailboxStatus::Interrupted);
+    assert!(interrupted[0].prompt.is_none());
+    Ok(())
+}
+
+#[test]
+fn session_restore_appends_interrupted_mailbox_message() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("session.jsonl");
+    let store = JsonlSessionStore::new(&path)?;
+    store.append(&SessionLogEntry::Control(
+        ControlEntry::AgentMailboxMessage(AgentMailboxMessageEntry {
+            route_id: route_id("restore_mailbox")?,
+            source_thread_id: thread_id("main")?,
+            target_thread_id: thread_id("thread_1")?,
+            prompt_hash: "sha256:message".to_owned(),
+            prompt: Some("continue".to_owned()),
+            status: AgentMailboxStatus::Delivered,
+            reason: None,
+            updated_at_ms: None,
+        }),
+    ))?;
+
+    let session = Session::load_from_store("deepseek", "deepseek-v4-pro", store)?;
+    let projection = session.agent_thread_state_projection();
+    let mailbox = projection
+        .mailbox_messages
+        .get(&route_id("restore_mailbox")?)
+        .expect("mailbox message projected after restore");
+
+    assert_eq!(mailbox.status, AgentMailboxStatus::Interrupted);
+    assert_eq!(
+        mailbox.reason.as_deref(),
+        Some("agent mailbox message interrupted during session restore")
+    );
     Ok(())
 }
 

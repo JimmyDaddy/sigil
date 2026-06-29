@@ -31,6 +31,8 @@ fn sample_manifest() -> PluginManifest {
             command: "scripts/check-tool-policy.sh".to_owned(),
             args: vec!["--strict".to_owned()],
             approval: ApprovalMode::Ask,
+            egress_logging: true,
+            allow_secrets: false,
         }],
         mcp_servers: vec![McpServerConfig {
             name: "repo-tools".to_owned(),
@@ -85,10 +87,14 @@ fn plugin_manifest_validation_accepts_reviewable_capabilities() -> Result<()> {
             command,
             args,
             approval,
+            egress_logging,
+            allow_secrets,
         } if event == "pre_tool_use"
             && command == "scripts/check-tool-policy.sh"
             && args == &vec!["--strict".to_owned()]
             && *approval == ApprovalMode::Ask
+            && *egress_logging
+            && !*allow_secrets
     ));
     assert!(matches!(
         &capabilities[3],
@@ -98,11 +104,17 @@ fn plugin_manifest_validation_accepts_reviewable_capabilities() -> Result<()> {
             args,
             startup,
             required,
+            approval,
+            egress_logging,
+            allow_secrets,
         } if name == "repo-tools"
             && command == "node"
             && args == &vec!["server.js".to_owned()]
             && *startup == McpServerStartup::Lazy
             && !*required
+            && *approval == ApprovalMode::Ask
+            && *egress_logging
+            && !*allow_secrets
     ));
     Ok(())
 }
@@ -135,6 +147,35 @@ fn plugin_capabilities_report_execution_coverage_boundaries() {
         mcp.user_copy
             .contains("local shell sandbox does not cover them")
     );
+}
+
+#[test]
+fn plugin_capabilities_map_to_normal_tool_secret_egress_policy() {
+    let capabilities = sample_manifest().capabilities();
+
+    let agent = capabilities[0].policy_summary();
+    assert_eq!(agent.tool_access, None);
+    assert!(!agent.execution_backend_required);
+    assert!(!agent.egress_logging);
+    assert!(!agent.allow_secrets);
+
+    let hook = capabilities[2].policy_summary();
+    assert_eq!(hook.tool_category, Some(crate::ToolCategory::Custom));
+    assert_eq!(hook.tool_access, Some(crate::ToolAccess::Execute));
+    assert_eq!(hook.approval_default, Some(ApprovalMode::Ask));
+    assert!(hook.execution_backend_required);
+    assert!(hook.egress_logging);
+    assert!(!hook.allow_secrets);
+    assert_eq!(hook.mutation_effect, crate::ToolEffect::Unknown);
+
+    let mcp = capabilities[3].policy_summary();
+    assert_eq!(mcp.tool_category, Some(crate::ToolCategory::Mcp));
+    assert_eq!(mcp.tool_access, Some(crate::ToolAccess::Network));
+    assert_eq!(mcp.approval_default, Some(ApprovalMode::Ask));
+    assert!(mcp.execution_backend_required);
+    assert!(mcp.egress_logging);
+    assert!(!mcp.allow_secrets);
+    assert_eq!(mcp.mutation_effect, crate::ToolEffect::Unknown);
 }
 
 #[test]
@@ -205,6 +246,8 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
             command: "scripts/hook.sh".to_owned(),
             args: Vec::new(),
             approval: ApprovalMode::Ask,
+            egress_logging: true,
+            allow_secrets: false,
         }
         .validate()
         .is_err()
@@ -215,6 +258,8 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
             command: " ".to_owned(),
             args: Vec::new(),
             approval: ApprovalMode::Ask,
+            egress_logging: true,
+            allow_secrets: false,
         }
         .validate()
         .is_err()
@@ -226,6 +271,9 @@ fn plugin_snapshot_capability_and_trust_validation_reject_required_edges() {
             args: Vec::new(),
             startup: McpServerStartup::Lazy,
             required: false,
+            approval: ApprovalMode::Ask,
+            egress_logging: true,
+            allow_secrets: false,
         }
         .validate()
         .is_err()

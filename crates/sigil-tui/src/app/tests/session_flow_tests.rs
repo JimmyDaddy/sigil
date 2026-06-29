@@ -604,6 +604,67 @@ fn restored_session_view_shows_compaction_block_and_restored_prompt_pressure() -
 }
 
 #[test]
+fn restored_session_view_shows_typed_task_memory_summary() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    let session_log_path = app.session_log_path.clone();
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::SessionIdentity {
+            provider_name: "deepseek".to_owned(),
+            model_name: "deepseek-v4-flash".to_owned(),
+        }),
+        SessionLogEntry::Control(ControlEntry::CompactionApplied(CompactionRecord {
+            summary: "Compacted older context.".to_owned(),
+            compacted_message_count: 4,
+            retained_tail_message_count: 2,
+            task_memory: Some(sigil_kernel::TaskMemoryV1 {
+                memory_id: "memory-readme-1".to_owned(),
+                branch_id: None,
+                valid_for_snapshot: "snapshot-readme-1".to_owned(),
+                supersedes: None,
+                source_event_ids: vec!["event-1".to_owned()],
+                objective: "Fix README typo".to_owned(),
+                constraints: Vec::new(),
+                decisions: vec![sigil_kernel::SourcedDecision {
+                    decision: sigil_kernel::SourcedFact::system_derived(
+                        "Use a focused README edit",
+                        "event-2",
+                    ),
+                    rationale: None,
+                }],
+                files_changed: vec![sigil_kernel::FileChangeRef::new("README.md")],
+                commands_run: Vec::new(),
+                verification_results: vec!["receipt-readme-check".to_owned()],
+                failed_attempts: Vec::new(),
+                risks: Vec::new(),
+                unresolved_issues: vec![sigil_kernel::SourcedFact::model_inferred(
+                    "Decide whether docs links need checking",
+                    "event-3",
+                )],
+            }),
+        })),
+        SessionLogEntry::User(ModelMessage::user("latest prompt")),
+    ];
+
+    app.handle_worker_message(WorkerMessage::SessionSwitched {
+        session_log_path,
+        provider_name: "deepseek".to_owned(),
+        model_name: "deepseek-v4-flash".to_owned(),
+        entries,
+    })?;
+
+    let lines = app.approval_preview_lines().join("\n");
+    assert!(lines.contains("[memory]"));
+    assert!(lines.contains("objective: Fix README typo"));
+    assert!(lines.contains("decision: Use a focused README edit"));
+    assert!(lines.contains("file: README.md"));
+    assert!(lines.contains("check: receipt-readme-check"));
+    assert!(
+        lines.contains("unresolved: Decide whether docs links need checking [model/unverified]")
+    );
+    Ok(())
+}
+
+#[test]
 fn session_view_mode_toggle_switches_between_provider_and_audit() -> Result<()> {
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
     app.handle_worker_message(WorkerMessage::SessionSwitched {

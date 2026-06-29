@@ -92,6 +92,7 @@ fn task_role_and_status_labels_are_stable() {
     assert!(TaskStepStatus::Completed.is_terminal());
     assert!(TaskStepStatus::Blocked.is_terminal());
     assert!(TaskStepStatus::Interrupted.is_terminal());
+    assert!(TaskStepStatus::Superseded.is_terminal());
     assert!(!TaskStepStatus::Running.is_terminal());
 }
 
@@ -183,6 +184,7 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
     let context = TaskPlanUpdateContext {
         task_id: task_id("task_1")?,
         max_plan_steps: 1,
+        max_plan_versions: 1,
     };
     let call = ToolCall {
         id: "call-1".to_owned(),
@@ -232,6 +234,30 @@ fn task_plan_update_parses_valid_plan_and_rejects_invalid_shapes() -> Result<()>
 }
 
 #[test]
+fn task_replan_budget_rejects_plan_versions_beyond_limit() -> Result<()> {
+    let context = TaskPlanUpdateContext {
+        task_id: task_id("task_1")?,
+        max_plan_steps: 1,
+        max_plan_versions: 2,
+    };
+    let call = ToolCall {
+        id: "call-1".to_owned(),
+        name: TASK_PLAN_UPDATE_TOOL_NAME.to_owned(),
+        args_json: r#"{"plan_version":3,"status":"accepted","steps":[{"step_id":"step_1","title":"inspect","role":"planner"}]}"#.to_owned(),
+    };
+
+    let error = task_plan_update_entry(&context, &call)
+        .expect_err("plan version above bounded replan budget should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("task plan version 3 exceeds maximum 2")
+    );
+    Ok(())
+}
+
+#[test]
 fn task_plan_update_tool_spec_explains_subagent_delegation_roles() {
     let spec = task_plan_update_tool_spec();
 
@@ -258,6 +284,7 @@ fn task_dag_schema_parses_valid_metadata_and_projects_graph() -> Result<()> {
     let context = TaskPlanUpdateContext {
         task_id: task_id("task_1")?,
         max_plan_steps: 3,
+        max_plan_versions: 1,
     };
     let call = ToolCall {
         id: "call-1".to_owned(),
@@ -721,20 +748,62 @@ fn task_projection_creates_placeholder_for_plan_before_run() -> Result<()> {
 
 #[test]
 fn task_projection_supersedes_previous_accepted_plan() -> Result<()> {
+    let completed_step = step_id("completed")?;
+    let pending_step = step_id("pending")?;
     let projection = TaskStateProjection::from_entries(&[
         SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
         SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
             task_id: task_id("task_1")?,
             plan_version: 1,
             status: TaskPlanStatus::Accepted,
-            steps: Vec::new(),
+            steps: vec![
+                TaskStepSpec {
+                    step_id: completed_step.clone(),
+                    title: "Completed".to_owned(),
+                    display_name: None,
+                    detail: None,
+                    role: AgentRole::Executor,
+                    depends_on: Vec::new(),
+                    mode: Some(TaskStepMode::Write),
+                    isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+                },
+                TaskStepSpec {
+                    step_id: pending_step.clone(),
+                    title: "Pending".to_owned(),
+                    display_name: None,
+                    detail: None,
+                    role: AgentRole::Planner,
+                    depends_on: Vec::new(),
+                    mode: Some(TaskStepMode::Read),
+                    isolation: Some(TaskIsolationMode::SharedReadOnly),
+                },
+            ],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 1,
+            step_id: completed_step.clone(),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Completed,
+            title: Some("Completed".to_owned()),
+            summary: Some("done".to_owned()),
             reason: None,
         })),
         SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
             task_id: task_id("task_1")?,
             plan_version: 2,
             status: TaskPlanStatus::Accepted,
-            steps: Vec::new(),
+            steps: vec![TaskStepSpec {
+                step_id: step_id("next")?,
+                title: "Next".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Planner,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            }],
             reason: Some("replan".to_owned()),
         })),
     ]);
@@ -748,6 +817,80 @@ fn task_projection_supersedes_previous_accepted_plan() -> Result<()> {
     assert_eq!(
         task.plans.get(&1).map(|plan| plan.status),
         Some(TaskPlanStatus::Superseded)
+    );
+    assert_eq!(
+        task.steps.get(&(1, completed_step)).map(|step| step.status),
+        Some(TaskStepStatus::Completed)
+    );
+    let pending_projection = task
+        .steps
+        .get(&(1, pending_step))
+        .ok_or_else(|| anyhow::anyhow!("missing superseded step"))?;
+    assert_eq!(pending_projection.status, TaskStepStatus::Superseded);
+    assert_eq!(
+        pending_projection.reason.as_deref(),
+        Some("superseded by accepted plan v2")
+    );
+    Ok(())
+}
+
+#[test]
+fn task_replan_projection_clears_current_step_from_superseded_plan() -> Result<()> {
+    let step = step_id("step_1")?;
+    let projection = TaskStateProjection::from_entries(&[
+        SessionLogEntry::Control(run_entry(TaskRunStatus::Started)?),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 1,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step.clone(),
+                title: "Running".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Executor,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Write),
+                isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+            }],
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskStep(TaskStepEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 1,
+            step_id: step.clone(),
+            role: AgentRole::Executor,
+            status: TaskStepStatus::Running,
+            title: Some("Running".to_owned()),
+            summary: None,
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::TaskPlan(TaskPlanEntry {
+            task_id: task_id("task_1")?,
+            plan_version: 2,
+            status: TaskPlanStatus::Accepted,
+            steps: vec![TaskStepSpec {
+                step_id: step_id("next")?,
+                title: "Next".to_owned(),
+                display_name: None,
+                detail: None,
+                role: AgentRole::Planner,
+                depends_on: Vec::new(),
+                mode: Some(TaskStepMode::Read),
+                isolation: Some(TaskIsolationMode::SharedReadOnly),
+            }],
+            reason: Some("replan".to_owned()),
+        })),
+    ]);
+    let task = projection
+        .tasks
+        .get(&task_id("task_1")?)
+        .ok_or_else(|| anyhow::anyhow!("missing task projection"))?;
+
+    assert_eq!(task.current_step, None);
+    assert_eq!(
+        task.steps.get(&(1, step)).map(|step| step.status),
+        Some(TaskStepStatus::Superseded)
     );
     Ok(())
 }

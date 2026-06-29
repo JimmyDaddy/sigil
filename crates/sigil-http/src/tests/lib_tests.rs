@@ -7,10 +7,12 @@ use serde_json::{Value, json};
 use sigil_kernel::{PublicRunEvent, PublicRunEventKind, ToolApprovalUserDecision};
 
 use super::{
-    DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_RUN_EVENT_SSE_NAME,
-    HttpApprovalDecision, HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig,
-    HttpAuthError, HttpPendingApproval, HttpProtocolEventBuffer, HttpProtocolEventClass,
-    HttpProtocolReplayError, HttpRegistryError, HttpRunApprovalMode, HttpRunDriver,
+    DEFAULT_HTTP_TOKEN_ENV, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION, HTTP_PROTOCOL_VERSION,
+    HTTP_RUN_EVENT_SSE_NAME, HttpApprovalCommandReceipt, HttpApprovalDecision,
+    HttpApprovalDecisionRecord, HttpApprovalDecisionRequest, HttpAuthConfig, HttpAuthError,
+    HttpCommandEnvelope, HttpPendingApproval, HttpProtocolEvent, HttpProtocolEventBuffer,
+    HttpProtocolEventClass, HttpProtocolEventView, HttpProtocolReplayError,
+    HttpProtocolVersionError, HttpRegistryError, HttpRunApprovalMode, HttpRunDriver,
     HttpRunDriverApproval, HttpRunDriverCancel, HttpRunDriverError, HttpRunDriverStart,
     HttpRunEventSequencer, HttpRunStartRequest, HttpRunStatus, HttpServerConfig,
     HttpServerConfigError, HttpSessionCreateRequest, HttpSessionRunRegistry, HttpSseError,
@@ -236,6 +238,78 @@ fn public_run_event_serializes_to_run_event_sse_frame() {
         sse.encode(),
         format!("event: run_event\ndata: {}\n\n", sse.data())
     );
+}
+
+#[test]
+fn command_envelope_preserves_version_retry_and_stale_client_fields() {
+    let envelope = HttpCommandEnvelope::new(
+        "command-1",
+        "client-tui",
+        "session-1",
+        json!({ "prompt": "hello" }),
+    )
+    .with_expected_stream_sequence(42)
+    .with_correlation_id("event-1");
+    let value = serde_json::to_value(&envelope).expect("command envelope should serialize");
+    let decoded: HttpCommandEnvelope<Value> =
+        serde_json::from_value(value).expect("command envelope should deserialize");
+
+    assert_eq!(decoded.protocol_version, HTTP_PROTOCOL_VERSION);
+    assert_eq!(decoded.command_id, "command-1");
+    assert_eq!(decoded.client_id, "client-tui");
+    assert_eq!(decoded.session_id, "session-1");
+    assert_eq!(decoded.expected_stream_sequence, Some(42));
+    assert_eq!(decoded.correlation_id.as_deref(), Some("event-1"));
+    assert_eq!(decoded.payload["prompt"], "hello");
+    assert_eq!(decoded.ensure_supported(), Ok(()));
+
+    let mut stale = decoded;
+    stale.protocol_version = HTTP_PROTOCOL_VERSION + 1;
+    assert_eq!(
+        stale.ensure_supported(),
+        Err(HttpProtocolVersionError::Unsupported {
+            supported: HTTP_PROTOCOL_VERSION,
+            received: HTTP_PROTOCOL_VERSION + 1,
+        })
+    );
+}
+
+#[test]
+fn protocol_event_view_separates_durable_and_transient_shapes() {
+    let durable = HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        1,
+        PublicRunEventKind::RunStarted {
+            prompt: "hello".to_owned(),
+        },
+    ))
+    .expect("durable event should build");
+    let transient = HttpProtocolEvent::from_run_event(PublicRunEvent::new(
+        "session-1",
+        "run-1",
+        2,
+        PublicRunEventKind::ReasoningDelta {
+            text: "thinking".to_owned(),
+        },
+    ))
+    .expect("transient event should build");
+
+    match durable.view() {
+        HttpProtocolEventView::Durable(view) => {
+            assert_eq!(view.schema_version, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
+            assert_eq!(view.replay_id, "sigil-http-run-v1:session-1:run-1:1");
+            assert_eq!(view.run_event.sequence, 1);
+        }
+        HttpProtocolEventView::Transient(_) => panic!("durable event should use durable view"),
+    }
+    match transient.view() {
+        HttpProtocolEventView::Transient(view) => {
+            assert_eq!(view.schema_version, HTTP_PROTOCOL_EVENT_SCHEMA_VERSION);
+            assert_eq!(view.run_event.sequence, 2);
+        }
+        HttpProtocolEventView::Durable(_) => panic!("transient event should use transient view"),
+    }
 }
 
 #[test]
@@ -678,10 +752,11 @@ fn approval_requests_and_decisions_are_routed_in_order() {
         .submit_approval_decision(
             &run.id,
             "call-a",
-            HttpApprovalDecisionRequest {
-                decision: HttpApprovalDecision::Approve,
-                reason: Some("read-only".to_owned()),
-            },
+            approval_decision(
+                "call-a",
+                HttpApprovalDecision::Approve,
+                Some("read-only".to_owned()),
+            ),
         )
         .expect("approval should route");
     assert_eq!(
@@ -705,10 +780,7 @@ fn approval_requests_and_decisions_are_routed_in_order() {
         .submit_approval_decision(
             &run.id,
             "call-b",
-            HttpApprovalDecisionRequest {
-                decision: HttpApprovalDecision::Deny,
-                reason: None,
-            },
+            approval_decision("call-b", HttpApprovalDecision::Deny, None),
         )
         .expect("denial should route");
 
@@ -723,6 +795,204 @@ fn approval_requests_and_decisions_are_routed_in_order() {
     assert_eq!(driver.approvals().len(), 2);
     assert_eq!(driver.approvals()[0].call_id, "call-a");
     assert_eq!(driver.approvals()[1].call_id, "call-b");
+}
+
+#[test]
+fn approval_command_deduplicates_retries_and_audits_client_fields() {
+    let (registry, driver) = registry_with_driver();
+    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("needs approval", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    let waiting = registry
+        .register_approval_request(&run.id, pending_approval("call-1", "write_file"))
+        .expect("approval should be pending");
+    let command = HttpCommandEnvelope::new(
+        "command-approval-1",
+        "client-tui",
+        &session.id,
+        approval_decision("call-1", HttpApprovalDecision::Approve, None),
+    )
+    .with_expected_stream_sequence(waiting.stream_sequence)
+    .with_correlation_id("event-approval-1");
+
+    let receipt = registry
+        .submit_approval_command(&run.id, "call-1", command.clone())
+        .expect("approval command should route");
+
+    assert_eq!(
+        receipt,
+        HttpApprovalCommandReceipt {
+            command_id: "command-approval-1".to_owned(),
+            client_id: "client-tui".to_owned(),
+            session_id: session.id.clone(),
+            run_id: run.id.clone(),
+            call_id: "call-1".to_owned(),
+            expected_stream_sequence: Some(waiting.stream_sequence),
+            correlation_id: Some("event-approval-1".to_owned()),
+            decision: HttpApprovalDecisionRecord {
+                run_id: run.id.clone(),
+                call_id: "call-1".to_owned(),
+                decision: ToolApprovalUserDecision::Approved,
+                reason: None,
+            },
+            replayed: false,
+        }
+    );
+
+    let replayed = registry
+        .submit_approval_command(&run.id, "call-1", command)
+        .expect("retried command should replay receipt");
+
+    assert!(replayed.replayed);
+    assert_eq!(replayed.command_id, "command-approval-1");
+    assert_eq!(driver.approvals().len(), 1);
+}
+
+#[test]
+fn approval_command_rejects_stale_stream_sequence() {
+    let (registry, driver) = registry_with_driver();
+    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("needs approval", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    registry
+        .register_approval_request(&run.id, pending_approval("call-1", "write_file"))
+        .expect("approval should be pending");
+    let command = HttpCommandEnvelope::new(
+        "command-stale",
+        "client-tui",
+        &session.id,
+        approval_decision("call-1", HttpApprovalDecision::Approve, None),
+    )
+    .with_expected_stream_sequence(0);
+
+    assert_eq!(
+        registry.submit_approval_command(&run.id, "call-1", command),
+        Err(HttpRegistryError::StaleCommandSequence {
+            run_id: run.id.clone(),
+            expected: 0,
+            actual: 1,
+        })
+    );
+    assert_eq!(
+        registry
+            .get_run(&run.id)
+            .expect("run should be readable")
+            .pending_approval_call_ids,
+        vec!["call-1"]
+    );
+    assert!(driver.approvals().is_empty());
+}
+
+#[test]
+fn approval_command_rejects_changed_tool_call_policy_and_expiry() {
+    let (registry, driver) = registry_with_driver();
+    let session = registry.create_session(HttpSessionCreateRequest::default());
+
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("changed tool call", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    registry
+        .register_approval_request(&run.id, pending_approval("call-tool", "write_file"))
+        .expect("approval should be pending");
+    let mut changed_tool = approval_decision(
+        "call-tool",
+        HttpApprovalDecision::Approve,
+        Some("ok".to_owned()),
+    );
+    changed_tool.tool_call_hash = "hash-changed".to_owned();
+    assert_eq!(
+        registry.submit_approval_decision(&run.id, "call-tool", changed_tool),
+        Err(HttpRegistryError::ApprovalToolCallChanged {
+            run_id: run.id.clone(),
+            call_id: "call-tool".to_owned(),
+        })
+    );
+
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("changed policy", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    registry
+        .register_approval_request(&run.id, pending_approval("call-policy", "bash"))
+        .expect("approval should be pending");
+    let mut changed_policy = approval_decision("call-policy", HttpApprovalDecision::Approve, None);
+    changed_policy.policy_version = "policy-v2".to_owned();
+    assert_eq!(
+        registry.submit_approval_decision(&run.id, "call-policy", changed_policy),
+        Err(HttpRegistryError::ApprovalPolicyChanged {
+            run_id: run.id.clone(),
+            call_id: "call-policy".to_owned(),
+        })
+    );
+
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("changed expiry", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    registry
+        .register_approval_request(&run.id, pending_approval("call-expiry", "edit_file"))
+        .expect("approval should be pending");
+    let mut changed_expiry = approval_decision("call-expiry", HttpApprovalDecision::Approve, None);
+    changed_expiry.expires_at_ms = u64::MAX - 1;
+    assert_eq!(
+        registry.submit_approval_decision(&run.id, "call-expiry", changed_expiry),
+        Err(HttpRegistryError::ApprovalExpiryChanged {
+            run_id: run.id.clone(),
+            call_id: "call-expiry".to_owned(),
+        })
+    );
+
+    assert!(driver.approvals().is_empty());
+}
+
+#[test]
+fn approval_command_rejects_expired_request_without_consuming_pending_call() {
+    let (registry, driver) = registry_with_driver();
+    let session = registry.create_session(HttpSessionCreateRequest::default());
+    let run = registry
+        .start_run(
+            &session.id,
+            run_start("expired approval", HttpRunApprovalMode::Ask),
+        )
+        .expect("run should start");
+    let mut expired = pending_approval("call-1", "bash");
+    expired.expires_at_ms = 0;
+    registry
+        .register_approval_request(&run.id, expired)
+        .expect("approval should be pending");
+    let mut decision = approval_decision("call-1", HttpApprovalDecision::Approve, None);
+    decision.expires_at_ms = 0;
+
+    assert_eq!(
+        registry.submit_approval_decision(&run.id, "call-1", decision),
+        Err(HttpRegistryError::ApprovalExpired {
+            run_id: run.id.clone(),
+            call_id: "call-1".to_owned(),
+        })
+    );
+    assert_eq!(
+        registry
+            .get_run(&run.id)
+            .expect("run should be readable")
+            .pending_approval_call_ids,
+        vec!["call-1"]
+    );
+    assert!(driver.approvals().is_empty());
 }
 
 #[test]
@@ -772,10 +1042,7 @@ fn approval_endpoint_only_accepts_ask_runs() {
             registry.submit_approval_decision(
                 &run.id,
                 "call-1",
-                HttpApprovalDecisionRequest {
-                    decision: HttpApprovalDecision::Approve,
-                    reason: None,
-                },
+                approval_decision("call-1", HttpApprovalDecision::Approve, None),
             ),
             Err(expected)
         );
@@ -800,10 +1067,11 @@ fn approval_routing_reports_missing_or_inactive_runs() {
         registry.submit_approval_decision(
             &run.id,
             "missing-call",
-            HttpApprovalDecisionRequest {
-                decision: HttpApprovalDecision::Deny,
-                reason: Some("no".to_owned()),
-            },
+            approval_decision(
+                "missing-call",
+                HttpApprovalDecision::Deny,
+                Some("no".to_owned()),
+            ),
         ),
         Err(HttpRegistryError::ApprovalNotPending {
             run_id: run.id.clone(),
@@ -824,10 +1092,7 @@ fn approval_routing_reports_missing_or_inactive_runs() {
         registry.submit_approval_decision(
             &run.id,
             "call",
-            HttpApprovalDecisionRequest {
-                decision: HttpApprovalDecision::Approve,
-                reason: None,
-            },
+            approval_decision("call", HttpApprovalDecision::Approve, None),
         ),
         Err(HttpRegistryError::RunNotActive { run_id: run.id })
     );
@@ -855,10 +1120,11 @@ fn duplicate_approval_submit_during_driver_route_is_rejected() {
         let result = duplicate_registry.submit_approval_decision(
             &duplicate_run_id,
             "call-1",
-            HttpApprovalDecisionRequest {
-                decision: HttpApprovalDecision::Deny,
-                reason: Some("duplicate".to_owned()),
-            },
+            approval_decision(
+                "call-1",
+                HttpApprovalDecision::Deny,
+                Some("duplicate".to_owned()),
+            ),
         );
         *lock(&duplicate_error_slot) = Some(result.expect_err("duplicate should be rejected"));
     }));
@@ -867,10 +1133,7 @@ fn duplicate_approval_submit_during_driver_route_is_rejected() {
         .submit_approval_decision(
             &run.id,
             "call-1",
-            HttpApprovalDecisionRequest {
-                decision: HttpApprovalDecision::Approve,
-                reason: None,
-            },
+            approval_decision("call-1", HttpApprovalDecision::Approve, None),
         )
         .expect("original approval should route");
 
@@ -911,10 +1174,7 @@ fn approval_driver_failure_keeps_pending_call() {
         registry.submit_approval_decision(
             &run.id,
             "call-1",
-            HttpApprovalDecisionRequest {
-                decision: HttpApprovalDecision::Approve,
-                reason: None,
-            },
+            approval_decision("call-1", HttpApprovalDecision::Approve, None),
         ),
         Err(HttpRegistryError::DriverRejected {
             operation: "approval",
@@ -948,8 +1208,14 @@ fn run_and_approval_dto_serde_shape_is_snake_case_and_explicit() {
     let missing_mode: HttpRunStartRequest =
         serde_json::from_value(json!({"prompt": "hello"})).expect("missing mode should parse");
     assert_eq!(missing_mode.approval_mode, None);
-    let decision: HttpApprovalDecisionRequest =
-        serde_json::from_value(json!({"decision": "deny"})).expect("decision should parse");
+    let decision: HttpApprovalDecisionRequest = serde_json::from_value(json!({
+        "approval_request_id": "approval-call-1",
+        "tool_call_hash": "hash-call-1",
+        "policy_version": "policy-v1",
+        "expires_at_ms": 9999999999999_u64,
+        "decision": "deny"
+    }))
+    .expect("decision should parse");
     assert_eq!(decision.decision, HttpApprovalDecision::Deny);
     assert_eq!(decision.reason, None);
     assert_eq!(
@@ -1015,7 +1281,38 @@ fn pending_approval(call_id: &str, tool_name: &str) -> HttpPendingApproval {
     HttpPendingApproval {
         call_id: call_id.to_owned(),
         tool_name: tool_name.to_owned(),
+        approval_request_id: approval_request_id(call_id),
+        tool_call_hash: tool_call_hash(call_id),
+        policy_version: policy_version(),
+        expires_at_ms: u64::MAX,
     }
+}
+
+fn approval_decision(
+    call_id: &str,
+    decision: HttpApprovalDecision,
+    reason: Option<String>,
+) -> HttpApprovalDecisionRequest {
+    HttpApprovalDecisionRequest {
+        approval_request_id: approval_request_id(call_id),
+        tool_call_hash: tool_call_hash(call_id),
+        policy_version: policy_version(),
+        expires_at_ms: u64::MAX,
+        decision,
+        reason,
+    }
+}
+
+fn approval_request_id(call_id: &str) -> String {
+    format!("approval-{call_id}")
+}
+
+fn tool_call_hash(call_id: &str) -> String {
+    format!("hash-{call_id}")
+}
+
+fn policy_version() -> String {
+    "policy-v1".to_owned()
 }
 
 #[derive(Default)]

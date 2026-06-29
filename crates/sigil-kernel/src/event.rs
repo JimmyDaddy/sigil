@@ -8,11 +8,11 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ChangeSet, ChangeSetResult, ControlEntry, ModelMessage, MutationCommitted, MutationPrepared,
-    PathTrustZone, PermissionConfirmation, PermissionRisk, ProviderContinuationState,
-    SessionLogEntry, TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview, ToolResult, ToolSpec,
-    ToolSubject, UsageStats, VerificationCheckRunEntry, VerificationRecordedEntry,
-    WorkspaceMutationDetected,
+    ChangeSet, ChangeSetResult, ControlEntry, JobIntentEntry, ModelMessage, MutationCommitted,
+    MutationPrepared, PathTrustZone, PermissionConfirmation, PermissionRisk,
+    ProviderContinuationState, SessionLogEntry, StepLeaseEntry, StepLeaseHeartbeatEntry,
+    TerminalTaskEntry, ToolCall, ToolOperation, ToolPreview, ToolResult, ToolSpec, ToolSubject,
+    UsageStats, VerificationCheckRunEntry, VerificationRecordedEntry, WorkspaceMutationDetected,
 };
 
 /// Current schema version for public run events consumed by external adapters.
@@ -85,6 +85,9 @@ pub enum DurableEventType {
     ChildVerificationReceiptLinked,
     ChildChangesetMerged,
     AgentMergeApplied,
+    JobIntentRecorded,
+    StepLeaseRecorded,
+    StepLeaseHeartbeatRecorded,
     WorkspaceTrustDecision,
     ContextSourceCaptured,
     EgressDecisionRecorded,
@@ -130,6 +133,9 @@ impl DurableEventType {
             Self::ChildVerificationReceiptLinked => "child_verification_receipt_linked",
             Self::ChildChangesetMerged => "child_changeset_merged",
             Self::AgentMergeApplied => "agent_merge_applied",
+            Self::JobIntentRecorded => "job_intent_recorded",
+            Self::StepLeaseRecorded => "step_lease_recorded",
+            Self::StepLeaseHeartbeatRecorded => "step_lease_heartbeat_recorded",
             Self::WorkspaceTrustDecision => "workspace_trust_decision",
             Self::ContextSourceCaptured => "context_source_captured",
             Self::EgressDecisionRecorded => "egress_decision_recorded",
@@ -175,6 +181,9 @@ impl DurableEventType {
             "child_verification_receipt_linked" => Self::ChildVerificationReceiptLinked,
             "child_changeset_merged" => Self::ChildChangesetMerged,
             "agent_merge_applied" => Self::AgentMergeApplied,
+            "job_intent_recorded" => Self::JobIntentRecorded,
+            "step_lease_recorded" => Self::StepLeaseRecorded,
+            "step_lease_heartbeat_recorded" => Self::StepLeaseHeartbeatRecorded,
             "workspace_trust_decision" => Self::WorkspaceTrustDecision,
             "context_source_captured" => Self::ContextSourceCaptured,
             "egress_decision_recorded" => Self::EgressDecisionRecorded,
@@ -257,6 +266,9 @@ pub const ALL_DURABLE_EVENT_TYPES: &[DurableEventType] = &[
     DurableEventType::ChildVerificationReceiptLinked,
     DurableEventType::ChildChangesetMerged,
     DurableEventType::AgentMergeApplied,
+    DurableEventType::JobIntentRecorded,
+    DurableEventType::StepLeaseRecorded,
+    DurableEventType::StepLeaseHeartbeatRecorded,
     DurableEventType::WorkspaceTrustDecision,
     DurableEventType::ContextSourceCaptured,
     DurableEventType::EgressDecisionRecorded,
@@ -494,6 +506,9 @@ pub enum DurableDomainEvent {
     ChildVerificationReceiptLinked(DomainPayload),
     ChildChangesetMerged(DomainPayload),
     AgentMergeApplied(DomainPayload),
+    JobIntentRecorded(DomainPayload),
+    StepLeaseRecorded(DomainPayload),
+    StepLeaseHeartbeatRecorded(DomainPayload),
     WorkspaceTrustDecision(DomainPayload),
     ContextSourceCaptured(DomainPayload),
     EgressDecisionRecorded(DomainPayload),
@@ -547,6 +562,9 @@ impl DurableDomainEvent {
             }
             Self::ChildChangesetMerged(_) => DurableEventType::ChildChangesetMerged,
             Self::AgentMergeApplied(_) => DurableEventType::AgentMergeApplied,
+            Self::JobIntentRecorded(_) => DurableEventType::JobIntentRecorded,
+            Self::StepLeaseRecorded(_) => DurableEventType::StepLeaseRecorded,
+            Self::StepLeaseHeartbeatRecorded(_) => DurableEventType::StepLeaseHeartbeatRecorded,
             Self::WorkspaceTrustDecision(_) => DurableEventType::WorkspaceTrustDecision,
             Self::ContextSourceCaptured(_) => DurableEventType::ContextSourceCaptured,
             Self::EgressDecisionRecorded(_) => DurableEventType::EgressDecisionRecorded,
@@ -592,6 +610,9 @@ impl DurableDomainEvent {
             | Self::ChildVerificationReceiptLinked(payload)
             | Self::ChildChangesetMerged(payload)
             | Self::AgentMergeApplied(payload)
+            | Self::JobIntentRecorded(payload)
+            | Self::StepLeaseRecorded(payload)
+            | Self::StepLeaseHeartbeatRecorded(payload)
             | Self::WorkspaceTrustDecision(payload)
             | Self::ContextSourceCaptured(payload)
             | Self::EgressDecisionRecorded(payload)
@@ -634,6 +655,9 @@ pub enum TypedDomainEvent {
     WorkspaceMutationDetected(WorkspaceMutationDetected),
     VerificationRecorded(VerificationRecordedEntry),
     VerificationCheckRun(VerificationCheckRunEntry),
+    JobIntentRecorded(JobIntentEntry),
+    StepLeaseRecorded(StepLeaseEntry),
+    StepLeaseHeartbeatRecorded(StepLeaseHeartbeatEntry),
     TaskStatusChanged(ControlEntry),
     AgentThread(ControlEntry),
     TerminalTask(TerminalTaskEntry),
@@ -691,6 +715,17 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
         DurableEventType::VerificationCheckRun => {
             TypedDomainEvent::VerificationCheckRun(decode_verification_check_run(&event)?)
         }
+        DurableEventType::JobIntentRecorded => {
+            TypedDomainEvent::JobIntentRecorded(decode_job_intent_recorded(&event)?)
+        }
+        DurableEventType::StepLeaseRecorded => {
+            TypedDomainEvent::StepLeaseRecorded(decode_step_lease_recorded(&event)?)
+        }
+        DurableEventType::StepLeaseHeartbeatRecorded => {
+            TypedDomainEvent::StepLeaseHeartbeatRecorded(decode_step_lease_heartbeat_recorded(
+                &event,
+            )?)
+        }
         DurableEventType::TaskStatusChanged => {
             let control = decode_control_entry(&event)?;
             match control {
@@ -706,6 +741,7 @@ pub fn decode_typed_stored_event(event: StoredEvent) -> Result<TypedStoredEventD
                     ControlEntry::AgentThreadStarted(_)
                     | ControlEntry::AgentThreadStatusChanged(_)
                     | ControlEntry::AgentThreadMessageRouted(_)
+                    | ControlEntry::AgentMailboxMessage(_)
                     | ControlEntry::AgentThreadResultRecorded(_)
                     | ControlEntry::AgentThreadDisplayName(_)
                     | ControlEntry::AgentThreadClosed(_) => TypedDomainEvent::AgentThread(control),
@@ -756,6 +792,27 @@ fn decode_verification_check_run(event: &StoredEvent) -> Result<VerificationChec
     match decode_control_entry(event)? {
         ControlEntry::VerificationCheckRun(entry) => Ok(entry),
         _ => bail!("verification check run event carried non-check-run payload"),
+    }
+}
+
+fn decode_job_intent_recorded(event: &StoredEvent) -> Result<JobIntentEntry> {
+    match decode_control_entry(event)? {
+        ControlEntry::JobIntentRecorded(entry) => Ok(entry),
+        _ => bail!("job intent recorded event carried non-job-intent payload"),
+    }
+}
+
+fn decode_step_lease_recorded(event: &StoredEvent) -> Result<StepLeaseEntry> {
+    match decode_control_entry(event)? {
+        ControlEntry::StepLeaseRecorded(entry) => Ok(entry),
+        _ => bail!("step lease recorded event carried non-step-lease payload"),
+    }
+}
+
+fn decode_step_lease_heartbeat_recorded(event: &StoredEvent) -> Result<StepLeaseHeartbeatEntry> {
+    match decode_control_entry(event)? {
+        ControlEntry::StepLeaseHeartbeatRecorded(entry) => Ok(entry),
+        _ => bail!("step lease heartbeat event carried non-step-lease-heartbeat payload"),
     }
 }
 
@@ -838,6 +895,11 @@ fn domain_event_from_payload(
         }
         DurableEventType::ChildChangesetMerged => DurableDomainEvent::ChildChangesetMerged(payload),
         DurableEventType::AgentMergeApplied => DurableDomainEvent::AgentMergeApplied(payload),
+        DurableEventType::JobIntentRecorded => DurableDomainEvent::JobIntentRecorded(payload),
+        DurableEventType::StepLeaseRecorded => DurableDomainEvent::StepLeaseRecorded(payload),
+        DurableEventType::StepLeaseHeartbeatRecorded => {
+            DurableDomainEvent::StepLeaseHeartbeatRecorded(payload)
+        }
         DurableEventType::WorkspaceTrustDecision => {
             DurableDomainEvent::WorkspaceTrustDecision(payload)
         }
@@ -1309,6 +1371,9 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::TaskChildSessionDisplayName(_) => "task_child_session_display_name",
         ControlEntry::TaskSubagentApprovalRoute(_) => "task_subagent_approval_route",
         ControlEntry::TaskSubagentElicitationRoute(_) => "task_subagent_elicitation_route",
+        ControlEntry::JobIntentRecorded(_) => "job_intent_recorded",
+        ControlEntry::StepLeaseRecorded(_) => "step_lease_recorded",
+        ControlEntry::StepLeaseHeartbeatRecorded(_) => "step_lease_heartbeat_recorded",
         ControlEntry::CheckSpecRecorded(_) => "check_spec_recorded",
         ControlEntry::VerificationPolicyChanged(_) => "verification_policy_changed",
         ControlEntry::VerificationCheckRun(_) => "verification_check_run",
@@ -1322,6 +1387,7 @@ fn control_entry_kind(entry: &ControlEntry) -> &'static str {
         ControlEntry::AgentThreadStarted(_) => "agent_thread_started",
         ControlEntry::AgentThreadStatusChanged(_) => "agent_thread_status_changed",
         ControlEntry::AgentThreadMessageRouted(_) => "agent_thread_message_routed",
+        ControlEntry::AgentMailboxMessage(_) => "agent_mailbox_message",
         ControlEntry::AgentThreadResultRecorded(_) => "agent_thread_result_recorded",
         ControlEntry::AgentResultContinuation(_) => "agent_result_continuation",
         ControlEntry::AgentThreadDisplayName(_) => "agent_thread_display_name",

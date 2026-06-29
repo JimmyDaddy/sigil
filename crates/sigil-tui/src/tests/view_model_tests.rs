@@ -1,15 +1,18 @@
 use std::{collections::BTreeMap, path::Path};
 
+use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use sigil_kernel::{
-    AgentConfig, AgentRole, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig,
-    ContextBodyRef, ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource,
-    ContextTrustLevel, ControlEntry, EventHandler, MemoryConfig, PackedContext, PermissionConfig,
-    RootConfig, RunEvent, SessionConfig, SessionLogEntry, SessionRef, TaskId, TaskPlanEntry,
-    TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId, TaskStepSpec,
-    TaskStepStatus, ToolAccess, ToolCall, ToolCategory, ToolPreviewCapability, ToolResult,
-    ToolResultMeta, ToolSpec, WorkspaceConfig,
+    AgentConfig, AgentMailboxMessageEntry, AgentMailboxStatus, AgentRole, AgentRouteId,
+    AgentThreadId, CodeIntelStartup, CodeIntelligenceConfig, CompactionConfig, ContextBodyRef,
+    ContextInclusionReason, ContextItem, ContextSensitivity, ContextSource, ContextTrustLevel,
+    ControlEntry, EventHandler, FileChangeRef, JobIntentEntry, MemoryConfig, PackedContext,
+    PermissionConfig, RootConfig, RunEvent, SessionConfig, SessionLogEntry, SessionRef,
+    SourcedDecision, SourcedFact, StepLeaseEntry, StepLeaseStatus, TaskId, TaskMemoryV1,
+    TaskPlanEntry, TaskPlanStatus, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepId,
+    TaskStepSpec, TaskStepStatus, ToolAccess, ToolCall, ToolCategory, ToolEffect,
+    ToolPreviewCapability, ToolResult, ToolResultMeta, ToolSpec, WorkspaceConfig,
 };
 
 use super::*;
@@ -64,6 +67,107 @@ fn context_item(
         inclusion_reason,
         body_ref: ContextBodyRef::inline("context"),
     }
+}
+
+#[test]
+fn task_memory_inspect_view_model_summarizes_without_tool_output_replay() {
+    let memory = TaskMemoryV1 {
+        memory_id: "memory-1234567890abcdef".to_owned(),
+        branch_id: None,
+        valid_for_snapshot: "snapshot-1234567890abcdef".to_owned(),
+        supersedes: None,
+        source_event_ids: vec!["event-1".to_owned()],
+        objective: "Fix the README typo without changing package commands".to_owned(),
+        constraints: Vec::new(),
+        decisions: vec![SourcedDecision {
+            decision: SourcedFact::model_inferred("Use a targeted edit", "event-1"),
+            rationale: Some(SourcedFact::system_derived(
+                "Only README.md changed",
+                "event-2",
+            )),
+        }],
+        files_changed: vec![FileChangeRef::new("README.md")],
+        commands_run: Vec::new(),
+        verification_results: vec!["check-readme".to_owned()],
+        failed_attempts: Vec::new(),
+        risks: Vec::new(),
+        unresolved_issues: vec![SourcedFact::model_inferred(
+            "Run docs link check later",
+            "event-3",
+        )],
+    };
+
+    let lines = TaskMemoryInspectViewModel::from_task_memory(&memory).lines();
+
+    assert!(lines.iter().any(|line| line == "[memory]"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("objective: Fix the README typo"))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("decision: Use a targeted edit [model/unverified]"))
+    );
+    assert!(lines.iter().any(|line| line == "file: README.md"));
+    assert!(lines.iter().any(|line| line == "check: check-readme"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("unresolved: Run docs link check later [model/unverified]"))
+    );
+}
+
+#[test]
+fn recovery_panel_view_model_summarizes_stale_jobs_and_mailbox() -> Result<()> {
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::JobIntentRecorded(JobIntentEntry {
+            job_id: "job_1".to_owned(),
+            session_id: "session_1".to_owned(),
+            task_id: Some(TaskId::new("task_1")?),
+            agent_profile: None,
+            user_goal_event_id: "event-1".to_owned(),
+            tool_policy_hash: "sha256:policy".to_owned(),
+            expected_effect: ToolEffect::WorkspaceWrite,
+            created_at_ms: Some(1),
+        })),
+        SessionLogEntry::Control(ControlEntry::StepLeaseRecorded(StepLeaseEntry {
+            lease_id: "lease_1".to_owned(),
+            job_id: "job_1".to_owned(),
+            step_id: Some(TaskStepId::new("fix_typo")?),
+            owner_process_id: "pid-1".to_owned(),
+            deadline_ms: 10,
+            heartbeat_event_id: None,
+            status: StepLeaseStatus::Acquired,
+            updated_at_ms: Some(2),
+            reason: None,
+        })),
+        SessionLogEntry::Control(ControlEntry::AgentMailboxMessage(
+            AgentMailboxMessageEntry {
+                route_id: AgentRouteId::new("route_1")?,
+                source_thread_id: AgentThreadId::new("main")?,
+                target_thread_id: AgentThreadId::new("agent_1")?,
+                prompt_hash: "sha256:prompt".to_owned(),
+                prompt: None,
+                status: AgentMailboxStatus::Interrupted,
+                reason: Some("restore".to_owned()),
+                updated_at_ms: None,
+            },
+        )),
+    ];
+
+    let panel = RecoveryPanelViewModel::from_entries(&entries, 20)
+        .expect("stale recovery state should show panel");
+    let lines = panel.lines().join("\n");
+
+    assert!(lines.contains("Recovery"));
+    assert!(lines.contains("last: task_1 · fix_typo"));
+    assert!(lines.contains("1 stale jobs"));
+    assert!(lines.contains("1 interrupted mailbox"));
+    assert!(lines.contains("inspect recovery, then resume or mark abandoned"));
+    assert!(RecoveryPanelViewModel::from_entries(&[], 20).is_none());
+    Ok(())
 }
 
 #[test]

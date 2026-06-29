@@ -31,6 +31,7 @@ use super::{
     agent_terminal_status_from_task_child, task_child_status_from_outcome,
     tool_scope_is_write_capable,
 };
+use crate::AgentToolRuntime;
 
 #[derive(Default)]
 struct RecordingEventHandler {
@@ -721,6 +722,55 @@ fn send_agent_message_reports_inactive_thread_and_missing_mailbox() -> Result<()
         .expect("message should be queued");
     assert_eq!(received.route_id, route_id);
     assert_eq!(received.prompt, "continue");
+    Ok(())
+}
+
+#[tokio::test]
+async fn route_agent_message_records_mailbox_delivery_state() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut budget = AgentBudgetPolicy::from_root_config(&root_config());
+    budget.max_threads = 2;
+    budget.max_parallel_readonly = 2;
+    budget.max_background_threads = 1;
+    let supervisor = supervisor_with_budget(budget)?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash");
+    let mut handler = RecordingEventHandler::default();
+    let mut background_start = chat_child_start(EXPLORE_PROFILE_ID, temp.path().to_path_buf())?;
+    background_start.invocation_mode = AgentInvocationMode::Background;
+    let background =
+        supervisor.begin_chat_child_thread(&mut session, &mut handler, background_start)?;
+    let mut runtime = AgentToolRuntime::new(supervisor, root_config(), ToolRegistry::new());
+
+    let (_result, controls) = runtime
+        .route_agent_message(
+            &mut session,
+            background.thread_id.clone(),
+            "continue".to_owned(),
+            &run_options(temp.path().to_path_buf()),
+        )
+        .await?;
+
+    let mailbox_statuses = controls
+        .iter()
+        .filter_map(|control| match control {
+            sigil_kernel::ControlEntry::AgentMailboxMessage(entry) => Some(entry.status),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mailbox_statuses,
+        vec![
+            sigil_kernel::AgentMailboxStatus::Queued,
+            sigil_kernel::AgentMailboxStatus::Delivered
+        ]
+    );
+    let projection = session.agent_thread_state_projection();
+    let mailbox = projection
+        .mailbox_messages
+        .values()
+        .next()
+        .expect("mailbox message should be projected");
+    assert_eq!(mailbox.status, sigil_kernel::AgentMailboxStatus::Delivered);
     Ok(())
 }
 

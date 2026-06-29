@@ -573,6 +573,7 @@ Required deterministic tests:
 - 已将 workspace snapshot 大文件阈值纳入 `VerificationScope.max_file_bytes`，并作为 policy-bound scope coverage 参与验证范围覆盖判断；默认值仍沿用 `MAX_WORKSPACE_SNAPSHOT_FILE_BYTES`。
 - 已补充 verification scope profile MVP：`auto` / `rust` / `node` / `python` / `docs` 预设可生成对应 `VerificationScope`，`[verification]` 可通过 `scope_profile`、`extra_scope_excludes` 和 `generated_roots` 做低频 override；`/config` Permissions 只读展示当前 profile、关键 excludes、generated roots 与 advanced override 数量，不新增普通用户操作面。
 - 已完成 child verification / worktree merge 的最小产品链路展示：task sidebar / strip 会在 child merge 导致 parent verification stale 时显示 child task/status 和 `run parent check` 引导；session audit 中 child receipt link 会显示 linked/merged 状态和 parent re-check requirement，避免把 snapshot id / merge event id 当成普通用户动作。
+- 已补齐新增 projected state 的 Session 级 durable replay adoption：session-list、agent-graph 和 dispatch-trace projection 可通过 `Session` 的 durable mixed-stream replay adapter 重建；dispatch trace projection 继续保持 egress payload redaction，腐败 stream/sequence gap 由读取层 fail closed。
 - 已确认当前 plugin integration 仅产生静态 manifest review/projection data；尚无 plugin hook command execution runtime，plugin-declared MCP server 也未自动进入 active startup/refresh path。未来启用这些 plugin-owned external process 时必须先产生 RFC-0002 unknown-dirty mutation evidence，verification reducer 才能消费。
 
 Productization remains：
@@ -583,7 +584,7 @@ Productization remains：
 - 扩展 verification scope profile 的后续工作只剩真实项目校准：默认/profile presets、配置文件 override 和 TUI 只读摘要已落地；更多语言专用生成目录或依赖缓存应按项目证据追加，避免把普通用户操作面做复杂。
 - 完成 workspace trust UX：首次进入 workspace gate、基础 audit provenance、`/config` trust/long-term policy 摘要、repo-local instruction 降级展示、task sidebar/strip 与 session audit 的 trust/approval 解释已落地。
 - child verification / worktree merge 产品链路的默认 TUI 展示已完成：child receipt link、merge 后 parent re-check 引导和 session audit trace 已落地；后续如引入真正 worktree merge review UI，应继续复用该 trace，不得让 child `Passed` 直接继承为 parent `Passed`。
-- 继续把后续新增 historical/projected state 接入 RFC-0001 durable replay；现有核心 task、verification、agent thread、terminal、changeset、plan、skill、plugin、profile trust/policy、continuation 和 queue projection 已具备 mixed-format stream replay 入口。
+- 继续把后续新增 historical/projected state 接入 RFC-0001 durable replay；现有核心 task、verification、agent thread/agent graph、session list、dispatch trace、terminal、changeset、plan、skill、plugin、profile trust/policy、continuation 和 queue projection 已具备 mixed-format stream replay 入口。
 
 ## 16. Open Questions
 
