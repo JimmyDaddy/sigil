@@ -199,6 +199,10 @@ cargo test -p sigil-tui tool_card_parse_helpers_cover_fallbacks_defaults_and_met
 cargo test -p sigil-kernel root_config_loads_linux_bubblewrap_execution_backend -- --nocapture
 cargo test -p sigil-tools-builtin linux_bubblewrap -- --nocapture
 ruby -e "require 'yaml'; YAML.load_file('.github/workflows/sandbox-conformance.yml'); puts 'ok'"
+gh workflow run sandbox-conformance.yml --repo JimmyDaddy/sigil --ref main
+gh run watch 28369483689 --repo JimmyDaddy/sigil --exit-status
 ```
 
 注意：`macos_seatbelt` 只证明 macOS non-interactive command backend 的最小 enforcement。Docker backend 已通过本机真实 daemon conformance，但只覆盖 non-interactive command execution。完整跨平台 sandbox、persistent terminal sandbox 和 MCP/plugin 进程隔离仍属于后续切片。E05.3 的 terminal metadata 只让 durable state 清楚记录 local process / local PTY 能力边界，不提供额外隔离。E05.4 的 coverage label 只说明哪些边界不受 local shell sandbox 覆盖，不提供额外隔离。
+
+`Sandbox Conformance` run `28369483689` 验证了默认 diagnostic-only workflow 行为：host namespace preflight 成功记录 unsupported runner，Linux Bubblewrap conformance step 被跳过，workflow 以 success 结束。该结果不是 Bubblewrap conformance success；E05.8 仍 gated。
