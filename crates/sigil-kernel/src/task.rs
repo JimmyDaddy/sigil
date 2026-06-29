@@ -1174,6 +1174,97 @@ impl TaskGraphProjection {
             })
             .collect()
     }
+
+    #[must_use]
+    pub fn ready_queue(
+        &self,
+        statuses: &BTreeMap<(u32, TaskStepId), TaskStepProjection>,
+        options: TaskReadyQueueOptions,
+    ) -> TaskReadyQueue {
+        let ready_steps = self.ready_steps(statuses);
+        let running_steps = self.running_steps(statuses);
+        let running_write = running_steps
+            .iter()
+            .any(|step| !step.is_parallel_read_only());
+        if running_write {
+            return TaskReadyQueue {
+                read_only_batch: Vec::new(),
+                sequential_step: None,
+                deferred: ready_steps
+                    .into_iter()
+                    .map(|step| TaskReadyDeferredStep {
+                        step_id: step.step_id.clone(),
+                        reason: TaskReadyDeferredReason::RunningWrite,
+                    })
+                    .collect(),
+            };
+        }
+
+        let running_read_only = running_steps
+            .iter()
+            .filter(|step| step.is_parallel_read_only())
+            .count();
+        let read_only_capacity = options
+            .max_concurrent_read_only
+            .saturating_sub(running_read_only);
+        let mut read_only_batch = Vec::new();
+        let mut sequential_step = None;
+        let mut deferred = Vec::new();
+        let mut ready_write_steps = Vec::new();
+
+        for step in ready_steps {
+            if step.is_parallel_read_only() {
+                if read_only_batch.len() < read_only_capacity {
+                    read_only_batch.push(step.clone());
+                } else {
+                    deferred.push(TaskReadyDeferredStep {
+                        step_id: step.step_id.clone(),
+                        reason: TaskReadyDeferredReason::ConcurrencyBudget,
+                    });
+                }
+            } else {
+                ready_write_steps.push(step);
+            }
+        }
+
+        let may_start_write = read_only_batch.is_empty() && running_read_only == 0;
+        if may_start_write {
+            sequential_step = ready_write_steps.first().map(|step| (*step).clone());
+        }
+        for (index, step) in ready_write_steps.into_iter().enumerate() {
+            if may_start_write && index == 0 {
+                continue;
+            }
+            deferred.push(TaskReadyDeferredStep {
+                step_id: step.step_id.clone(),
+                reason: if running_read_only > 0 {
+                    TaskReadyDeferredReason::RunningReadOnly
+                } else {
+                    TaskReadyDeferredReason::SequentialWrite
+                },
+            });
+        }
+
+        TaskReadyQueue {
+            read_only_batch,
+            sequential_step,
+            deferred,
+        }
+    }
+
+    fn running_steps<'a>(
+        &'a self,
+        statuses: &'a BTreeMap<(u32, TaskStepId), TaskStepProjection>,
+    ) -> Vec<&'a TaskGraphStepProjection> {
+        self.steps
+            .iter()
+            .filter(|step| {
+                statuses
+                    .get(&(self.graph_version, step.step_id.clone()))
+                    .is_some_and(|status| status.status == TaskStepStatus::Running)
+            })
+            .collect()
+    }
 }
 
 /// One task graph step as materialized for scheduling and TUI summaries.
@@ -1196,6 +1287,49 @@ impl TaskGraphStepProjection {
             isolation: step.effective_isolation(),
         }
     }
+
+    #[must_use]
+    pub fn is_parallel_read_only(&self) -> bool {
+        matches!(
+            self.mode,
+            TaskStepMode::Read | TaskStepMode::Review | TaskStepMode::Verify
+        ) && self.isolation == TaskIsolationMode::SharedReadOnly
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskReadyQueueOptions {
+    pub max_concurrent_read_only: usize,
+}
+
+impl TaskReadyQueueOptions {
+    #[must_use]
+    pub fn new(max_concurrent_read_only: usize) -> Self {
+        Self {
+            max_concurrent_read_only,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReadyQueue {
+    pub read_only_batch: Vec<TaskGraphStepProjection>,
+    pub sequential_step: Option<TaskGraphStepProjection>,
+    pub deferred: Vec<TaskReadyDeferredStep>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReadyDeferredStep {
+    pub step_id: TaskStepId,
+    pub reason: TaskReadyDeferredReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskReadyDeferredReason {
+    ConcurrencyBudget,
+    RunningReadOnly,
+    RunningWrite,
+    SequentialWrite,
 }
 
 /// Projection for one task step.

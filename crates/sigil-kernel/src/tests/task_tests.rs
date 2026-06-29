@@ -5,9 +5,10 @@ use crate::{
     TASK_AGENT_DISPLAY_NAME_MAX_CHARS, TASK_PLAN_UPDATE_TOOL_NAME,
     TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskChildSessionStatus,
     TaskGraphProjection, TaskId, TaskIsolationMode, TaskPlanEntry, TaskPlanStatus,
-    TaskPlanUpdateContext, TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunStatus,
-    TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepSpec, TaskStepStatus,
-    TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
+    TaskPlanUpdateContext, TaskReadyDeferredReason, TaskReadyQueueOptions, TaskRouteId,
+    TaskRouteStatus, TaskRunEntry, TaskRunStatus, TaskStateProjection, TaskStepEntry, TaskStepId,
+    TaskStepMode, TaskStepProjection, TaskStepSpec, TaskStepStatus, TaskSubagentApprovalRouteEntry,
+    TaskSubagentElicitationRouteEntry, ToolCall, child_session_ref,
     normalize_task_agent_display_name, task_plan_update_entry, task_plan_update_result_content,
     task_plan_update_tool_spec, validate_task_plan_graph_steps,
 };
@@ -32,6 +33,50 @@ fn run_entry(status: TaskRunStatus) -> Result<ControlEntry> {
         status,
         reason: None,
     }))
+}
+
+fn read_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
+    Ok(TaskStepSpec {
+        step_id: step_id(id)?,
+        title: format!("Read {id}"),
+        display_name: None,
+        detail: None,
+        role: AgentRole::SubagentRead,
+        depends_on,
+        mode: Some(TaskStepMode::Read),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    })
+}
+
+fn write_step(id: &str, depends_on: Vec<TaskStepId>) -> Result<TaskStepSpec> {
+    Ok(TaskStepSpec {
+        step_id: step_id(id)?,
+        title: format!("Write {id}"),
+        display_name: None,
+        detail: None,
+        role: AgentRole::Executor,
+        depends_on,
+        mode: Some(TaskStepMode::Write),
+        isolation: Some(TaskIsolationMode::SequentialWorkspaceWrite),
+    })
+}
+
+fn step_projection(
+    task_id: TaskId,
+    plan_version: u32,
+    step_id: &str,
+    status: TaskStepStatus,
+) -> Result<TaskStepProjection> {
+    Ok(TaskStepProjection {
+        task_id,
+        plan_version,
+        step_id: crate::TaskStepId::new(step_id)?,
+        role: AgentRole::Executor,
+        status,
+        title: Some(step_id.to_owned()),
+        summary: None,
+        reason: None,
+    })
 }
 
 #[test]
@@ -409,6 +454,161 @@ fn task_dag_schema_rejects_missing_dependencies_cycles_and_bad_isolation() -> Re
     let mut over_isolated_read = read_step;
     over_isolated_read.isolation = Some(TaskIsolationMode::SequentialWorkspaceWrite);
     assert!(validate_task_plan_graph_steps(&[over_isolated_read, write_step]).is_err());
+    Ok(())
+}
+
+#[test]
+fn task_dag_read_only_ready_queue_batches_independent_read_steps() -> Result<()> {
+    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![
+            read_step("read_a", Vec::new())?,
+            read_step("read_b", Vec::new())?,
+            write_step("write", vec![step_id("read_a")?, step_id("read_b")?])?,
+        ],
+        reason: None,
+    })?;
+
+    let queue = graph.ready_queue(
+        &std::collections::BTreeMap::new(),
+        TaskReadyQueueOptions::new(2),
+    );
+
+    assert_eq!(
+        queue
+            .read_only_batch
+            .iter()
+            .map(|step| step.step_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["read_a", "read_b"]
+    );
+    assert!(queue.sequential_step.is_none());
+    assert!(queue.deferred.iter().all(|step| {
+        step.reason == TaskReadyDeferredReason::SequentialWrite
+            || step.reason == TaskReadyDeferredReason::ConcurrencyBudget
+    }));
+    Ok(())
+}
+
+#[test]
+fn task_dag_read_only_ready_queue_respects_concurrency_budget() -> Result<()> {
+    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![
+            read_step("read_a", Vec::new())?,
+            read_step("read_b", Vec::new())?,
+        ],
+        reason: None,
+    })?;
+
+    let queue = graph.ready_queue(
+        &std::collections::BTreeMap::new(),
+        TaskReadyQueueOptions::new(1),
+    );
+
+    assert_eq!(queue.read_only_batch.len(), 1);
+    assert_eq!(queue.read_only_batch[0].step_id.as_str(), "read_a");
+    assert_eq!(queue.deferred.len(), 1);
+    assert_eq!(queue.deferred[0].step_id.as_str(), "read_b");
+    assert_eq!(
+        queue.deferred[0].reason,
+        TaskReadyDeferredReason::ConcurrencyBudget
+    );
+    Ok(())
+}
+
+#[test]
+fn task_dag_read_only_ready_queue_keeps_write_steps_sequential() -> Result<()> {
+    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![
+            read_step("read", Vec::new())?,
+            write_step("write", Vec::new())?,
+        ],
+        reason: None,
+    })?;
+
+    let queue = graph.ready_queue(
+        &std::collections::BTreeMap::new(),
+        TaskReadyQueueOptions::new(4),
+    );
+
+    assert_eq!(queue.read_only_batch.len(), 1);
+    assert_eq!(queue.read_only_batch[0].step_id.as_str(), "read");
+    assert!(queue.sequential_step.is_none());
+    assert_eq!(queue.deferred.len(), 1);
+    assert_eq!(queue.deferred[0].step_id.as_str(), "write");
+    assert_eq!(
+        queue.deferred[0].reason,
+        TaskReadyDeferredReason::SequentialWrite
+    );
+
+    let completed_read_statuses = std::collections::BTreeMap::from([(
+        (1, step_id("read")?),
+        step_projection(task_id("task_1")?, 1, "read", TaskStepStatus::Completed)?,
+    )]);
+    let write_queue = graph.ready_queue(&completed_read_statuses, TaskReadyQueueOptions::new(4));
+    assert!(write_queue.read_only_batch.is_empty());
+    assert_eq!(
+        write_queue
+            .sequential_step
+            .as_ref()
+            .map(|step| step.step_id.as_str()),
+        Some("write")
+    );
+    Ok(())
+}
+
+#[test]
+fn task_dag_read_only_ready_queue_blocks_when_write_is_running() -> Result<()> {
+    let graph = TaskGraphProjection::from_plan_entry(&TaskPlanEntry {
+        task_id: task_id("task_1")?,
+        plan_version: 1,
+        status: TaskPlanStatus::Accepted,
+        steps: vec![
+            write_step("write", Vec::new())?,
+            read_step("read", Vec::new())?,
+        ],
+        reason: None,
+    })?;
+    let statuses = std::collections::BTreeMap::from([(
+        (1, step_id("write")?),
+        step_projection(task_id("task_1")?, 1, "write", TaskStepStatus::Running)?,
+    )]);
+
+    let queue = graph.ready_queue(&statuses, TaskReadyQueueOptions::new(4));
+
+    assert!(queue.read_only_batch.is_empty());
+    assert!(queue.sequential_step.is_none());
+    assert!(queue.deferred.iter().any(|step| {
+        step.step_id.as_str() == "read" && step.reason == TaskReadyDeferredReason::RunningWrite
+    }));
+    Ok(())
+}
+
+#[test]
+fn task_dag_read_only_write_denial_rejects_shared_read_only_write_step() -> Result<()> {
+    let unsafe_write = TaskStepSpec {
+        step_id: step_id("write")?,
+        title: "Unsafe write".to_owned(),
+        display_name: None,
+        detail: None,
+        role: AgentRole::Executor,
+        depends_on: Vec::new(),
+        mode: Some(TaskStepMode::Write),
+        isolation: Some(TaskIsolationMode::SharedReadOnly),
+    };
+
+    let error = validate_task_plan_graph_steps(&[unsafe_write])
+        .expect_err("write steps must not claim shared_read_only isolation");
+
+    assert!(error.to_string().contains("cannot use shared_read_only"));
     Ok(())
 }
 

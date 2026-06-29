@@ -121,6 +121,18 @@ isolation = "require_sandbox"
 
 这个 backend 会通过 `/usr/bin/sandbox-exec` 运行命令，允许读取文件系统、限制写入到命令工作目录，并且不在 sandbox profile 中开放网络访问。它不覆盖 persistent terminal、MCP server、plugin 或远端工具。
 
+如需让非交互命令通过容器执行，可以显式配置 Docker：
+
+```toml
+[execution]
+backend = "docker"
+isolation = "require_sandbox"
+profile = "build_offline"
+container_image = "rust:1.94.1"
+```
+
+Sigil 不会隐式选择或拉取容器镜像。选择 Docker backend 但未配置 `container_image` 时，启动和 doctor 检查会 fail closed。Docker backend 会 bind mount 命令工作目录，将 offline profile 映射为 `--network none`，并且只报告它预期能强制的 capability。Persistent terminal、MCP server、plugin 和远端工具仍需要独立的 coverage label。
+
 ## MCP Trust
 
 MCP server 可以暴露 tools、resources、prompts 和 elicitation requests。每个 server 都应显式配置 trust policy：

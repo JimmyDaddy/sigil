@@ -9,8 +9,9 @@ use super::{
 };
 use crate::{
     AgentConfig, AgentRole, ApprovalMode, ExecutionBackendCapabilities, ExecutionBackendKind,
-    ExecutionIsolationPolicy, ExecutionSandboxProfile, SkillConfig, StorageConfig, StorageRoot,
-    TaskConfig, TaskMode, WorkspaceConfig,
+    ExecutionCapability, ExecutionIsolationPolicy, ExecutionSandboxFallback,
+    ExecutionSandboxProfile, SkillConfig, StorageConfig, StorageRoot, TaskConfig, TaskMode,
+    WorkspaceConfig,
 };
 
 #[test]
@@ -954,6 +955,8 @@ model = "deepseek-v4-flash"
         config.execution.profile,
         ExecutionSandboxProfile::Unconfined
     );
+    assert_eq!(config.execution.fallback, ExecutionSandboxFallback::Deny);
+    assert_eq!(config.execution.container_image, None);
 }
 
 #[test]
@@ -968,6 +971,7 @@ model = "deepseek-v4-flash"
 backend = "local"
 isolation = "require_sandbox"
 profile = "build_offline"
+fallback = "prompt"
 "#,
     )
     .expect("execution config should parse");
@@ -981,6 +985,7 @@ profile = "build_offline"
         config.execution.profile,
         ExecutionSandboxProfile::BuildOffline
     );
+    assert_eq!(config.execution.fallback, ExecutionSandboxFallback::Prompt);
 }
 
 #[test]
@@ -1005,6 +1010,38 @@ isolation = "require_sandbox"
     assert_eq!(
         config.execution.isolation,
         ExecutionIsolationPolicy::RequireSandbox
+    );
+}
+
+#[test]
+fn root_config_loads_docker_execution_backend() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[execution]
+backend = "docker"
+isolation = "require_sandbox"
+profile = "build_networked"
+container_image = "rust:1.94.1"
+"#,
+    )
+    .expect("docker execution config should parse");
+
+    assert_eq!(config.execution.backend, ExecutionBackendKind::Docker);
+    assert_eq!(
+        config.execution.isolation,
+        ExecutionIsolationPolicy::RequireSandbox
+    );
+    assert_eq!(
+        config.execution.profile,
+        ExecutionSandboxProfile::BuildNetworked
+    );
+    assert_eq!(
+        config.execution.container_image.as_deref(),
+        Some("rust:1.94.1")
     );
 }
 
@@ -1060,6 +1097,29 @@ fn execution_config_profiles_validate_backend_capabilities() {
     build_networked
         .validate_profile_capabilities(sandbox_capabilities)
         .expect("build_networked does not require network isolation");
+}
+
+#[test]
+fn execution_capability_requirements_report_missing_capabilities() {
+    let build_offline = crate::ExecutionConfig {
+        profile: ExecutionSandboxProfile::BuildOffline,
+        ..crate::ExecutionConfig::default()
+    };
+    let requirements = build_offline.required_capabilities();
+
+    assert!(requirements.filesystem_isolation);
+    assert!(requirements.network_isolation);
+    assert!(requirements.process_isolation);
+
+    let missing = ExecutionBackendCapabilities::default().missing_requirements(requirements);
+    assert_eq!(
+        missing,
+        vec![
+            ExecutionCapability::FilesystemIsolation,
+            ExecutionCapability::NetworkIsolation,
+            ExecutionCapability::ProcessIsolation
+        ]
+    );
 }
 
 #[test]

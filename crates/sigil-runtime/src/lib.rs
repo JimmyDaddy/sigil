@@ -38,10 +38,12 @@ use sigil_provider_openai_compat::{
 pub mod agent_profile_registry;
 pub mod agent_supervisor;
 pub mod agent_tools;
+pub mod context;
 pub mod context_window;
 pub mod doctor;
 pub mod paths;
 pub mod plugins;
+pub mod product_view;
 pub mod provider_config;
 pub mod provider_status;
 pub mod session_control;
@@ -63,6 +65,7 @@ pub use agent_tools::{
     register_agent_tools, register_agent_tools_with_registry, register_agent_tools_with_workspace,
     register_agent_tools_with_workspace_and_entries,
 };
+pub use context::context_items_from_task_memory;
 pub use context_window::{
     ContextWindowSource, ResolvedContextWindow, effective_compaction_config,
     resolve_context_window_tokens,
@@ -79,6 +82,10 @@ pub use plugins::{
     PluginHookRegistration, PluginMcpServerRegistration, PluginRegistrations,
     discover_workspace_plugins, discover_workspace_plugins_with_project_assets_root,
     merge_plugin_mcp_servers, merge_plugin_skill_descriptors,
+};
+pub use product_view::{
+    AgentGraphProductSummary, agent_graph_product_summary_from_entries,
+    agent_graph_product_summary_from_session_log,
 };
 pub use provider_config::{
     ANTHROPIC_PROVIDER_KEY, DEEPSEEK_PROVIDER_KEY, DEFAULT_SETUP_API_KEY_ENV,

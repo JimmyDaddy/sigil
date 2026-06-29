@@ -13,6 +13,7 @@ pub enum ExecutionBackendKind {
     #[default]
     Local,
     MacosSeatbelt,
+    Docker,
 }
 
 impl ExecutionBackendKind {
@@ -21,7 +22,61 @@ impl ExecutionBackendKind {
         match self {
             Self::Local => "local",
             Self::MacosSeatbelt => "macos_seatbelt",
+            Self::Docker => "docker",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCapability {
+    FilesystemIsolation,
+    NetworkIsolation,
+    ProcessIsolation,
+    ResourceLimits,
+    PersistentPty,
+    WorkspaceSnapshot,
+}
+
+impl ExecutionCapability {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FilesystemIsolation => "filesystem_isolation",
+            Self::NetworkIsolation => "network_isolation",
+            Self::ProcessIsolation => "process_isolation",
+            Self::ResourceLimits => "resource_limits",
+            Self::PersistentPty => "persistent_pty",
+            Self::WorkspaceSnapshot => "workspace_snapshot",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionCapabilityRequirements {
+    pub filesystem_isolation: bool,
+    pub network_isolation: bool,
+    pub process_isolation: bool,
+    pub resource_limits: bool,
+    pub persistent_pty: bool,
+    pub workspace_snapshot: bool,
+}
+
+impl ExecutionCapabilityRequirements {
+    #[must_use]
+    pub fn requires_basic_sandbox(self) -> bool {
+        self.filesystem_isolation && self.process_isolation
+    }
+
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        !self.filesystem_isolation
+            && !self.network_isolation
+            && !self.process_isolation
+            && !self.resource_limits
+            && !self.persistent_pty
+            && !self.workspace_snapshot
     }
 }
 
@@ -47,6 +102,33 @@ impl ExecutionBackendCapabilities {
     pub fn supports_required_sandbox(self) -> bool {
         self.filesystem_isolation && self.process_isolation
     }
+
+    #[must_use]
+    pub fn missing_requirements(
+        self,
+        requirements: ExecutionCapabilityRequirements,
+    ) -> Vec<ExecutionCapability> {
+        let mut missing = Vec::new();
+        if requirements.filesystem_isolation && !self.filesystem_isolation {
+            missing.push(ExecutionCapability::FilesystemIsolation);
+        }
+        if requirements.network_isolation && !self.network_isolation {
+            missing.push(ExecutionCapability::NetworkIsolation);
+        }
+        if requirements.process_isolation && !self.process_isolation {
+            missing.push(ExecutionCapability::ProcessIsolation);
+        }
+        if requirements.resource_limits && !self.resource_limits {
+            missing.push(ExecutionCapability::ResourceLimits);
+        }
+        if requirements.persistent_pty && !self.persistent_pty {
+            missing.push(ExecutionCapability::PersistentPty);
+        }
+        if requirements.workspace_snapshot && !self.workspace_snapshot {
+            missing.push(ExecutionCapability::WorkspaceSnapshot);
+        }
+        missing
+    }
 }
 
 /// User-configurable execution policy.
@@ -59,6 +141,10 @@ pub struct ExecutionConfig {
     pub isolation: ExecutionIsolationPolicy,
     #[serde(default)]
     pub profile: ExecutionSandboxProfile,
+    #[serde(default)]
+    pub fallback: ExecutionSandboxFallback,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_image: Option<String>,
 }
 
 /// Required isolation level for command execution.
@@ -76,6 +162,30 @@ impl ExecutionIsolationPolicy {
     #[must_use]
     pub fn requires_sandbox(self) -> bool {
         matches!(self, Self::RequireSandbox)
+    }
+}
+
+/// What to do when the requested backend cannot satisfy the requested profile.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionSandboxFallback {
+    /// Fail closed. This is the only fallback that preserves sandbox invariants without UI input.
+    #[default]
+    Deny,
+    /// Ask the user before relaxing enforcement. Non-interactive entrypoints should treat this as deny.
+    Prompt,
+    /// Explicitly relax to unconfined local execution. This is an advanced escape hatch.
+    Unconfined,
+}
+
+impl ExecutionSandboxFallback {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::Prompt => "prompt",
+            Self::Unconfined => "unconfined",
+        }
     }
 }
 
@@ -101,6 +211,7 @@ impl ExecutionSandboxProfile {
                 profile: self,
                 summary: "unconfined local execution",
                 requires_sandbox: false,
+                requirements: ExecutionCapabilityRequirements::default(),
                 requires_network_isolation: false,
                 network_allowed: true,
                 dependency_caches_read_only: false,
@@ -109,6 +220,11 @@ impl ExecutionSandboxProfile {
                 profile: self,
                 summary: "workspace-write sandbox",
                 requires_sandbox: true,
+                requirements: ExecutionCapabilityRequirements {
+                    filesystem_isolation: true,
+                    process_isolation: true,
+                    ..ExecutionCapabilityRequirements::default()
+                },
                 requires_network_isolation: false,
                 network_allowed: false,
                 dependency_caches_read_only: false,
@@ -117,6 +233,12 @@ impl ExecutionSandboxProfile {
                 profile: self,
                 summary: "offline build sandbox with read-only dependency caches",
                 requires_sandbox: true,
+                requirements: ExecutionCapabilityRequirements {
+                    filesystem_isolation: true,
+                    network_isolation: true,
+                    process_isolation: true,
+                    ..ExecutionCapabilityRequirements::default()
+                },
                 requires_network_isolation: true,
                 network_allowed: false,
                 dependency_caches_read_only: true,
@@ -125,6 +247,11 @@ impl ExecutionSandboxProfile {
                 profile: self,
                 summary: "networked build sandbox with read-only dependency caches",
                 requires_sandbox: true,
+                requirements: ExecutionCapabilityRequirements {
+                    filesystem_isolation: true,
+                    process_isolation: true,
+                    ..ExecutionCapabilityRequirements::default()
+                },
                 requires_network_isolation: false,
                 network_allowed: true,
                 dependency_caches_read_only: true,
@@ -139,9 +266,113 @@ pub struct ExecutionSandboxProfileSpec {
     pub profile: ExecutionSandboxProfile,
     pub summary: &'static str,
     pub requires_sandbox: bool,
+    pub requirements: ExecutionCapabilityRequirements,
     pub requires_network_isolation: bool,
     pub network_allowed: bool,
     pub dependency_caches_read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionBackendSelectionDecision {
+    Selected,
+    Unavailable,
+    MissingCapabilities,
+    FallbackDenied,
+    FallbackPromptRequired,
+    FallbackUnconfined,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionBackendSelectionDiagnostic {
+    pub requested_backend: ExecutionBackendKind,
+    pub selected_backend: Option<ExecutionBackendKind>,
+    pub requested_profile: ExecutionSandboxProfile,
+    pub fallback: ExecutionSandboxFallback,
+    pub requirements: ExecutionCapabilityRequirements,
+    pub capabilities: Option<ExecutionBackendCapabilities>,
+    pub missing_capabilities: Vec<ExecutionCapability>,
+    pub platform_available: bool,
+    pub availability_reason: Option<String>,
+    pub decision: ExecutionBackendSelectionDecision,
+}
+
+impl ExecutionBackendSelectionDiagnostic {
+    #[must_use]
+    pub fn selected(config: &ExecutionConfig, capabilities: ExecutionBackendCapabilities) -> Self {
+        Self {
+            requested_backend: config.backend,
+            selected_backend: Some(config.backend),
+            requested_profile: config.profile,
+            fallback: config.fallback,
+            requirements: config.required_capabilities(),
+            capabilities: Some(capabilities),
+            missing_capabilities: Vec::new(),
+            platform_available: true,
+            availability_reason: None,
+            decision: ExecutionBackendSelectionDecision::Selected,
+        }
+    }
+
+    #[must_use]
+    pub fn unavailable(config: &ExecutionConfig, availability_reason: impl Into<String>) -> Self {
+        Self {
+            requested_backend: config.backend,
+            selected_backend: None,
+            requested_profile: config.profile,
+            fallback: config.fallback,
+            requirements: config.required_capabilities(),
+            capabilities: None,
+            missing_capabilities: Vec::new(),
+            platform_available: false,
+            availability_reason: Some(availability_reason.into()),
+            decision: match config.fallback {
+                ExecutionSandboxFallback::Deny => ExecutionBackendSelectionDecision::FallbackDenied,
+                ExecutionSandboxFallback::Prompt => {
+                    ExecutionBackendSelectionDecision::FallbackPromptRequired
+                }
+                ExecutionSandboxFallback::Unconfined => {
+                    ExecutionBackendSelectionDecision::FallbackUnconfined
+                }
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn missing_capabilities(
+        config: &ExecutionConfig,
+        capabilities: ExecutionBackendCapabilities,
+    ) -> Self {
+        Self {
+            requested_backend: config.backend,
+            selected_backend: None,
+            requested_profile: config.profile,
+            fallback: config.fallback,
+            requirements: config.required_capabilities(),
+            capabilities: Some(capabilities),
+            missing_capabilities: capabilities.missing_requirements(config.required_capabilities()),
+            platform_available: true,
+            availability_reason: None,
+            decision: match config.fallback {
+                ExecutionSandboxFallback::Deny => ExecutionBackendSelectionDecision::FallbackDenied,
+                ExecutionSandboxFallback::Prompt => {
+                    ExecutionBackendSelectionDecision::FallbackPromptRequired
+                }
+                ExecutionSandboxFallback::Unconfined => {
+                    ExecutionBackendSelectionDecision::FallbackUnconfined
+                }
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn missing_capability_labels(&self) -> Vec<&'static str> {
+        self.missing_capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -216,8 +447,18 @@ impl ExecutionConfig {
     }
 
     #[must_use]
+    pub fn required_capabilities(&self) -> ExecutionCapabilityRequirements {
+        let mut requirements = self.profile_spec().requirements;
+        if self.isolation.requires_sandbox() {
+            requirements.filesystem_isolation = true;
+            requirements.process_isolation = true;
+        }
+        requirements
+    }
+
+    #[must_use]
     pub fn requires_sandbox(&self) -> bool {
-        self.isolation.requires_sandbox() || self.profile_spec().requires_sandbox
+        self.isolation.requires_sandbox() || self.required_capabilities().requires_basic_sandbox()
     }
 
     pub fn validate_profile_capabilities(
@@ -225,6 +466,11 @@ impl ExecutionConfig {
         capabilities: ExecutionBackendCapabilities,
     ) -> std::result::Result<(), String> {
         let spec = self.profile_spec();
+        let requirements = self.required_capabilities();
+        let missing = capabilities.missing_requirements(requirements);
+        if missing.is_empty() {
+            return Ok(());
+        }
         if self.requires_sandbox() && !capabilities.supports_required_sandbox() {
             if self.isolation.requires_sandbox() && !spec.requires_sandbox {
                 return Err(
@@ -237,13 +483,23 @@ impl ExecutionConfig {
                 self.profile
             ));
         }
-        if spec.requires_network_isolation && !capabilities.network_isolation {
+        if spec.requires_network_isolation
+            && missing.contains(&ExecutionCapability::NetworkIsolation)
+        {
             return Err(format!(
                 "execution profile {:?} requires network isolation",
                 self.profile
             ));
         }
-        Ok(())
+        let missing = missing
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(format!(
+            "execution profile {:?} requires missing capabilities: {missing}",
+            self.profile
+        ))
     }
 }
 

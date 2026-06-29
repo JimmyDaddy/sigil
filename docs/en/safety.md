@@ -121,6 +121,18 @@ isolation = "require_sandbox"
 
 This backend runs commands through `/usr/bin/sandbox-exec`, allows filesystem reads, restricts writes to the command working directory, and omits network access from the sandbox profile. It does not cover the persistent terminal, MCP servers, plugins, or remote tools.
 
+For container-backed non-interactive commands, configure Docker explicitly:
+
+```toml
+[execution]
+backend = "docker"
+isolation = "require_sandbox"
+profile = "build_offline"
+container_image = "rust:1.94.1"
+```
+
+Sigil does not choose or pull a container image implicitly. If Docker is selected without `container_image`, startup and doctor checks fail closed. The Docker backend bind-mounts the command working directory, maps offline profiles to `--network none`, and reports only the capabilities the backend is expected to enforce. Persistent terminal, MCP servers, plugins, and remote tools still need separate coverage labels.
+
 ## MCP Trust
 
 MCP servers can expose tools, resources, prompts, and elicitation requests. Configure each server with an explicit trust policy:

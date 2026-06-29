@@ -2052,11 +2052,12 @@ impl Session {
         }
 
         let summary = summarize_messages(&raw_messages[..compacted_message_count]);
+        let task_memory = self.default_compaction_task_memory(&summary, compacted_message_count)?;
         let record = CompactionRecord {
             summary,
             compacted_message_count,
             retained_tail_message_count: raw_messages.len().saturating_sub(compacted_message_count),
-            task_memory: None,
+            task_memory,
         };
         self.append_control(ControlEntry::CompactionApplied(record.clone()))?;
         self.stats.last_prompt_tokens = 0;
@@ -2097,11 +2098,12 @@ impl Session {
             return Ok(None);
         }
 
+        let summary = summarize_messages(&raw_messages[..compacted_message_count]);
         let record = CompactionRecord {
-            summary: summarize_messages(&raw_messages[..compacted_message_count]),
+            task_memory: self.default_compaction_task_memory(&summary, compacted_message_count)?,
+            summary,
             compacted_message_count,
             retained_tail_message_count: raw_messages.len().saturating_sub(compacted_message_count),
-            task_memory: None,
         };
         Ok(Some(CompactionPreview {
             folded_messages: raw_messages[..compacted_message_count].to_vec(),
@@ -2149,6 +2151,52 @@ impl Session {
             apply_usage_projection_record(&mut stats, &mut cursor, &record)?;
         }
         Ok(Some(stats))
+    }
+
+    fn default_compaction_task_memory(
+        &self,
+        summary: &str,
+        compacted_message_count: usize,
+    ) -> Result<Option<crate::TaskMemoryV1>> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let records = JsonlSessionStore::read_event_records(store.path())?;
+        let Some(valid_for_snapshot) = latest_task_memory_workspace_snapshot_id(&records)? else {
+            return Ok(None);
+        };
+        let digest = Sha256::digest(
+            format!(
+                "{}\n{}\n{}\n{}",
+                store.path().display(),
+                compacted_message_count,
+                valid_for_snapshot,
+                summary
+            )
+            .as_bytes(),
+        );
+        let memory = crate::extract_task_memory_from_stream_records(
+            &records,
+            crate::TaskMemoryExtractionInput {
+                memory_id: format!("task-memory:{digest:x}"),
+                valid_for_snapshot,
+                branch_id: None,
+                supersedes: latest_compaction_record(&self.entries)
+                    .and_then(|record| record.task_memory)
+                    .map(|memory| memory.memory_id),
+                objective: None,
+            },
+        )?;
+        if memory.source_event_ids.is_empty()
+            && memory.files_changed.is_empty()
+            && memory.commands_run.is_empty()
+            && memory.verification_results.is_empty()
+            && memory.failed_attempts.is_empty()
+            && memory.unresolved_issues.is_empty()
+        {
+            return Ok(None);
+        }
+        Ok(Some(memory))
     }
 
     pub fn ensure_identity_entry(&mut self) -> Result<()> {
@@ -2688,6 +2736,41 @@ pub fn latest_compaction_record(entries: &[SessionLogEntry]) -> Option<Compactio
         SessionLogEntry::Control(ControlEntry::CompactionApplied(record)) => Some(record.clone()),
         _ => None,
     })
+}
+
+fn latest_task_memory_workspace_snapshot_id(
+    records: &[SessionStreamRecord],
+) -> Result<Option<crate::WorkspaceSnapshotId>> {
+    for record in records.iter().rev() {
+        match record {
+            SessionStreamRecord::Stored(event)
+                if event.event_kind() == Some(DurableEventType::MutationCommitted) =>
+            {
+                let committed: crate::MutationCommitted =
+                    serde_json::from_value(event.payload.clone())
+                        .context("failed to decode mutation commit for compaction task memory")?;
+                return Ok(Some(committed.workspace_snapshot_id));
+            }
+            SessionStreamRecord::Stored(event) => {
+                if let Some(SessionLogEntry::Control(ControlEntry::VerificationRecorded(
+                    verification,
+                ))) = session_entry_from_stored_event(event)?
+                {
+                    return Ok(Some(verification.receipt.binding.workspace_snapshot_id));
+                }
+            }
+            SessionStreamRecord::Legacy { entry, .. } => {
+                if let SessionLogEntry::Control(ControlEntry::VerificationRecorded(verification)) =
+                    entry.as_ref()
+                {
+                    return Ok(Some(
+                        verification.receipt.binding.workspace_snapshot_id.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn session_stats_from_entries(entries: &[SessionLogEntry]) -> SessionStats {

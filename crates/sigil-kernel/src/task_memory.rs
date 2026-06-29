@@ -4,9 +4,10 @@ use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ArtifactId, ChangeSetResultStatus, ControlEntry, DurableEventType, EventId, MutationCommitted,
-    MutationSubject, ReceiptId, SessionLogEntry, SessionStreamRecord, ToolExecutionStatus,
-    WorkspaceSnapshotId,
+    ArtifactId, ChangeSetResultStatus, ContextBodyRef, ContextInclusionReason, ContextItem,
+    ContextSensitivity, ContextSource, ContextTrustLevel, ControlEntry, DurableEventType, EventId,
+    MutationCommitted, MutationSubject, ReceiptId, SessionLogEntry, SessionStreamRecord,
+    ToolExecutionStatus, WorkspaceSnapshotId,
 };
 
 pub type TaskMemoryId = String;
@@ -56,6 +57,18 @@ impl SourcedFact {
             confidence_percent: None,
             model_generated: true,
             verified: false,
+        }
+    }
+
+    #[must_use]
+    pub fn model_inferred_with_confidence(
+        text: impl Into<String>,
+        source_event_id: impl Into<EventId>,
+        confidence_percent: Option<u8>,
+    ) -> Self {
+        Self {
+            confidence_percent,
+            ..Self::model_inferred(text, source_event_id)
         }
     }
 
@@ -232,6 +245,68 @@ impl TaskMemoryV1 {
         }
         Ok(())
     }
+
+    pub fn merge_model_summary(&mut self, summary: ModelAssistedTaskMemorySummary) -> Result<()> {
+        for fact in summary.constraints {
+            self.constraints
+                .push(model_summary_fact(fact, &summary.source_event_id));
+        }
+        for decision in summary.decisions {
+            self.decisions.push(SourcedDecision {
+                decision: model_summary_fact(decision.decision, &summary.source_event_id),
+                rationale: decision
+                    .rationale
+                    .map(|rationale| model_summary_fact(rationale, &summary.source_event_id)),
+            });
+        }
+        for fact in summary.risks {
+            self.risks
+                .push(model_summary_fact(fact, &summary.source_event_id));
+        }
+        for fact in summary.unresolved_issues {
+            self.unresolved_issues
+                .push(model_summary_fact(fact, &summary.source_event_id));
+        }
+        self.validate()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelAssistedMemoryFact {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelAssistedMemoryDecision {
+    pub decision: ModelAssistedMemoryFact,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<ModelAssistedMemoryFact>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelAssistedTaskMemorySummary {
+    pub source_event_id: EventId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<ModelAssistedMemoryFact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<ModelAssistedMemoryDecision>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risks: Vec<ModelAssistedMemoryFact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_issues: Vec<ModelAssistedMemoryFact>,
+}
+
+fn model_summary_fact(fact: ModelAssistedMemoryFact, source_event_id: &str) -> SourcedFact {
+    SourcedFact::model_inferred_with_confidence(
+        fact.text,
+        source_event_id.to_owned(),
+        fact.confidence_percent,
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -273,6 +348,69 @@ pub fn extract_task_memory_from_stream_records(
         }
     }
     builder.finish()
+}
+
+pub fn task_memory_context_items(memory: &TaskMemoryV1) -> Result<Vec<ContextItem>> {
+    memory.validate()?;
+    let mut items = Vec::new();
+    items.push(task_memory_context_item(
+        format!("task-memory:{}:objective", memory.memory_id),
+        memory.source_event_ids.first().cloned(),
+        memory.objective.clone(),
+        0.95,
+    ));
+    for (index, decision) in memory.decisions.iter().enumerate() {
+        items.push(task_memory_context_item(
+            format!("task-memory:{}:decision:{index}", memory.memory_id),
+            decision.decision.source_event_id.clone(),
+            decision.decision.text.clone(),
+            0.85,
+        ));
+    }
+    for (index, issue) in memory.unresolved_issues.iter().enumerate() {
+        items.push(task_memory_context_item(
+            format!("task-memory:{}:unresolved:{index}", memory.memory_id),
+            issue.source_event_id.clone(),
+            issue.text.clone(),
+            0.8,
+        ));
+    }
+    for (index, file) in memory.files_changed.iter().enumerate() {
+        let body = format!("changed file: {}", file.path.display());
+        items.push(task_memory_context_item(
+            format!("task-memory:{}:file:{index}", memory.memory_id),
+            file.source_event_id.clone(),
+            body,
+            0.7,
+        ));
+    }
+    for item in &items {
+        item.validate()?;
+    }
+    Ok(items)
+}
+
+fn task_memory_context_item(
+    id: String,
+    source_event_id: Option<EventId>,
+    body: String,
+    score: f32,
+) -> ContextItem {
+    ContextItem {
+        id,
+        source: ContextSource::TaskDigest,
+        source_event_id: source_event_id.clone(),
+        trust_level: ContextTrustLevel::ToolObservation,
+        sensitivity: ContextSensitivity::Repository,
+        egress_decision: None,
+        repo_revision: None,
+        token_cost: crate::estimate_context_token_cost(&body),
+        score: Some(score),
+        inclusion_reason: ContextInclusionReason::RetrievalHit,
+        body_ref: source_event_id
+            .map(ContextBodyRef::DurableEvent)
+            .unwrap_or_else(|| ContextBodyRef::inline(&body)),
+    }
 }
 
 fn session_entry_from_stream_record(

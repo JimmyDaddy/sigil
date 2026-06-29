@@ -4,8 +4,10 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
+    process::{Command as StdCommand, Stdio},
     sync::{Arc, Mutex as StdMutex},
-    time::UNIX_EPOCH,
+    thread,
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -20,13 +22,14 @@ use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus,
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
     ChangeSetValidationKind, ChangeSetValidationStatus, CommittedFileMutation, ExecutionBackend,
-    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig, ExecutionFuture,
-    ExecutionReceipt, ExecutionRequest, FileType, MutationBatchId, MutationBatchStatus,
-    MutationEventRecorder, MutationSubject, TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess,
-    ToolCategory, ToolContext, ToolDiffStats, ToolErrorKind, ToolOperation, ToolPreview,
-    ToolPreviewCapability, ToolPreviewFile, ToolRegistry, ToolResult, ToolResultMeta, ToolSpec,
-    ToolSubject, ToolSubjectScope, delete_file_with_mutation, delete_file_with_mutation_in_batch,
-    write_file_with_mutation, write_file_with_mutation_in_batch,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionBackendSelectionDiagnostic,
+    ExecutionConfig, ExecutionFuture, ExecutionReceipt, ExecutionRequest, ExecutionSandboxFallback,
+    FileType, MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject,
+    TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffStats,
+    ToolErrorKind, ToolOperation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
+    ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
+    delete_file_with_mutation, delete_file_with_mutation_in_batch, write_file_with_mutation,
+    write_file_with_mutation_in_batch,
 };
 use similar::TextDiff;
 use tokio::{process::Command, task};
@@ -246,6 +249,58 @@ impl ExecutionBackend for MacosSeatbeltExecutionBackend {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DockerExecutionBackend {
+    docker: PathBuf,
+    image: String,
+    network_allowed: bool,
+}
+
+impl DockerExecutionBackend {
+    #[must_use]
+    pub fn new(docker: PathBuf, image: String, network_allowed: bool) -> Self {
+        Self {
+            docker,
+            image,
+            network_allowed,
+        }
+    }
+
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        self.docker.is_file()
+    }
+
+    #[must_use]
+    pub fn image(&self) -> &str {
+        &self.image
+    }
+}
+
+impl ExecutionBackend for DockerExecutionBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Docker
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities {
+            filesystem_isolation: true,
+            network_isolation: true,
+            process_isolation: true,
+            resource_limits: false,
+            persistent_pty: false,
+            workspace_snapshot: false,
+        }
+    }
+
+    fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
+        let docker = self.docker.clone();
+        let image = self.image.clone();
+        let network_allowed = self.network_allowed;
+        Box::pin(async move { docker_execute(docker, image, network_allowed, request).await })
+    }
+}
+
 /// Builds the configured execution backend for built-in tools.
 ///
 /// # Errors
@@ -257,11 +312,50 @@ pub fn build_execution_backend(config: &ExecutionConfig) -> Result<Arc<dyn Execu
         ExecutionBackendKind::Local => Arc::new(LocalExecutionBackend),
         ExecutionBackendKind::MacosSeatbelt => {
             let backend = MacosSeatbeltExecutionBackend::default();
-            ensure_macos_seatbelt_available(&backend)?;
+            if let Err(error) = ensure_macos_seatbelt_available(&backend) {
+                return fallback_or_error(
+                    config,
+                    ExecutionBackendSelectionDiagnostic::unavailable(config, error.to_string()),
+                );
+            }
+            Arc::new(backend)
+        }
+        ExecutionBackendKind::Docker => {
+            let Some(image) = config
+                .container_image
+                .as_ref()
+                .map(|image| image.trim())
+                .filter(|image| !image.is_empty())
+            else {
+                return fallback_or_error(
+                    config,
+                    ExecutionBackendSelectionDiagnostic::unavailable(
+                        config,
+                        "docker execution backend requires [execution].container_image",
+                    ),
+                );
+            };
+            let Some(docker) = find_executable_on_path("docker") else {
+                return fallback_or_error(
+                    config,
+                    ExecutionBackendSelectionDiagnostic::unavailable(
+                        config,
+                        "docker execution backend requires docker on PATH",
+                    ),
+                );
+            };
+            let backend = DockerExecutionBackend::new(
+                docker,
+                image.to_owned(),
+                config.profile_spec().network_allowed,
+            );
+            ensure_docker_available(&backend)?;
             Arc::new(backend)
         }
     };
-    validate_execution_backend(config, backend.as_ref())?;
+    if let Err(diagnostic) = validate_execution_backend(config, backend.as_ref()) {
+        return fallback_or_error(config, diagnostic);
+    }
     Ok(backend)
 }
 
@@ -278,18 +372,142 @@ fn ensure_macos_seatbelt_available(backend: &MacosSeatbeltExecutionBackend) -> R
     Ok(())
 }
 
+fn ensure_docker_available(backend: &DockerExecutionBackend) -> Result<()> {
+    if !backend.is_available() {
+        bail!(
+            "docker execution backend requires docker executable at {}",
+            backend.docker.display()
+        );
+    }
+    docker_check(
+        &backend.docker,
+        &["version", "--format", "{{.Server.Version}}"],
+        "docker daemon is unavailable",
+    )?;
+    docker_check(
+        &backend.docker,
+        &["image", "inspect", backend.image()],
+        &format!(
+            "docker execution backend requires configured image {}",
+            backend.image()
+        ),
+    )?;
+    Ok(())
+}
+
+fn docker_check(docker: &Path, args: &[&str], failure_context: &str) -> Result<()> {
+    let output = command_output_with_timeout(docker, args, Duration::from_secs(3))
+        .with_context(|| format!("failed to run docker availability check: {failure_context}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        bail!("{failure_context}: {detail}");
+    }
+    Ok(())
+}
+
+fn command_output_with_timeout(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    let mut child = StdCommand::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map_err(Into::into);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let output = child.wait_with_output()?;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "{} {} timed out after {}ms{}",
+                program.display(),
+                args.join(" "),
+                timeout.as_millis(),
+                if stderr.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim())
+                }
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn validate_execution_backend(
     config: &ExecutionConfig,
     backend: &dyn ExecutionBackend,
-) -> Result<()> {
-    if let Err(reason) = config.validate_profile_capabilities(backend.capabilities()) {
-        bail!(
-            "execution sandbox profile {:?} cannot be satisfied by {:?} backend: {reason}",
-            config.profile,
-            backend.kind()
-        );
+) -> std::result::Result<(), ExecutionBackendSelectionDiagnostic> {
+    if config
+        .validate_profile_capabilities(backend.capabilities())
+        .is_err()
+    {
+        return Err(ExecutionBackendSelectionDiagnostic::missing_capabilities(
+            config,
+            backend.capabilities(),
+        ));
     }
     Ok(())
+}
+
+fn fallback_or_error(
+    config: &ExecutionConfig,
+    diagnostic: ExecutionBackendSelectionDiagnostic,
+) -> Result<Arc<dyn ExecutionBackend>> {
+    match config.fallback {
+        ExecutionSandboxFallback::Unconfined => Ok(Arc::new(LocalExecutionBackend)),
+        ExecutionSandboxFallback::Deny | ExecutionSandboxFallback::Prompt => {
+            bail!("{}", execution_backend_selection_error(config, &diagnostic))
+        }
+    }
+}
+
+fn execution_backend_selection_error(
+    config: &ExecutionConfig,
+    diagnostic: &ExecutionBackendSelectionDiagnostic,
+) -> String {
+    let missing = diagnostic.missing_capability_labels();
+    let missing = if missing.is_empty() {
+        "none".to_owned()
+    } else {
+        missing.join(", ")
+    };
+    let availability = diagnostic
+        .availability_reason
+        .as_deref()
+        .unwrap_or("available");
+    let fallback = match diagnostic.fallback {
+        ExecutionSandboxFallback::Deny => "fallback denied",
+        ExecutionSandboxFallback::Prompt => "fallback requires user prompt",
+        ExecutionSandboxFallback::Unconfined => "fallback unconfined",
+    };
+    if let Err(reason) =
+        config.validate_profile_capabilities(diagnostic.capabilities.unwrap_or_default())
+    {
+        return format!(
+            "execution backend selection failed: requested_backend={}, requested_profile={:?}, missing_capabilities={missing}, availability={availability}, {fallback}: {reason}",
+            diagnostic.requested_backend.as_str(),
+            diagnostic.requested_profile,
+        );
+    }
+    format!(
+        "execution backend selection failed: requested_backend={}, requested_profile={:?}, missing_capabilities={missing}, availability={availability}, {fallback}",
+        diagnostic.requested_backend.as_str(),
+        diagnostic.requested_profile,
+    )
 }
 
 async fn local_execute(
@@ -345,6 +563,72 @@ async fn macos_seatbelt_execute(
     .await
 }
 
+async fn docker_execute(
+    docker: PathBuf,
+    image: String,
+    network_allowed: bool,
+    request: ExecutionRequest,
+) -> Result<ExecutionReceipt> {
+    let canonical_cwd = fs::canonicalize(&request.cwd)
+        .with_context(|| format!("failed to canonicalize cwd {}", request.cwd.display()))?;
+    let mount = format!(
+        "type=bind,src={},dst={}",
+        canonical_cwd.display(),
+        canonical_cwd.display()
+    );
+    let mut command = Command::new(&docker);
+    command
+        .arg("run")
+        .arg("--rm")
+        .arg("--workdir")
+        .arg(&canonical_cwd)
+        .arg("--mount")
+        .arg(mount);
+    if !network_allowed {
+        command.arg("--network").arg("none");
+    }
+    if let Some(user) = current_user_group_flag().await? {
+        command.arg("--user").arg(user);
+    }
+    for (key, value) in &request.env {
+        command.arg("--env").arg(format!("{key}={value}"));
+    }
+    command
+        .arg(image)
+        .arg(&request.program)
+        .args(&request.args)
+        .kill_on_drop(true);
+
+    command_output_to_receipt(
+        ExecutionBackendKind::Docker,
+        DockerExecutionBackend::new(docker, String::new(), network_allowed).capabilities(),
+        command,
+        request.timeout_duration(),
+    )
+    .await
+}
+
+async fn current_user_group_flag() -> Result<Option<String>> {
+    if !cfg!(unix) {
+        return Ok(None);
+    }
+    let uid = short_command_output("id", &["-u"]).await?;
+    let gid = short_command_output("id", &["-g"]).await?;
+    Ok(Some(format!("{uid}:{gid}")))
+}
+
+async fn short_command_output(program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program).args(args).output().await?;
+    if !output.status.success() {
+        bail!(
+            "{program} {} failed with exit {:?}",
+            args.join(" "),
+            output.status.code()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 fn macos_seatbelt_workspace_write_profile(workspace_root: &Path) -> String {
     let workspace = macos_seatbelt_string_literal(&workspace_root.to_string_lossy());
     format!(
@@ -360,6 +644,17 @@ fn macos_seatbelt_workspace_write_profile(workspace_root: &Path) -> String {
 
 fn macos_seatbelt_string_literal(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn find_executable_on_path(program: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 async fn command_output_to_receipt(

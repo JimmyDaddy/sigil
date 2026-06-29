@@ -848,6 +848,84 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
 }
 
 #[test]
+fn agent_graph_summary_uses_durable_projection_when_entries_are_stale() -> Result<()> {
+    let temp = tempdir()?;
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    app.session_log_path = temp.path().join(".sigil/sessions/parent.jsonl");
+    let profile_id = sigil_kernel::AgentProfileId::new("explore")?;
+    let snapshot_id = sigil_kernel::AgentProfileSnapshotId::new("snapshot_explore_1")?;
+    let thread_id = sigil_kernel::AgentThreadId::new("thread_1")?;
+    let entries = vec![
+        SessionLogEntry::Control(ControlEntry::AgentProfileCaptured(
+            sigil_kernel::AgentProfileCapturedEntry {
+                snapshot: sigil_kernel::AgentProfileSnapshot {
+                    snapshot_id: snapshot_id.clone(),
+                    profile_id: profile_id.clone(),
+                    source: sigil_kernel::AgentProfileSource::System,
+                    source_hash: "sha256:source".to_owned(),
+                    profile_hash: "sha256:profile".to_owned(),
+                    resolved_tool_scope_hash: "sha256:tools".to_owned(),
+                    resolved_permission_policy_hash: "sha256:permissions".to_owned(),
+                    resolved_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    resolved_skill_hashes: Vec::new(),
+                    trust_state: sigil_kernel::AgentTrustState::Trusted,
+                },
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStarted(
+            sigil_kernel::AgentThreadStartedEntry {
+                thread_id: thread_id.clone(),
+                parent_thread_id: Some(sigil_kernel::AgentThreadId::new("main")?),
+                parent_session_ref: sigil_kernel::SessionRef::new_relative("parent.jsonl")?,
+                thread_session_ref: sigil_kernel::SessionRef::new_relative(
+                    "children/thread_1.jsonl",
+                )?,
+                profile_id,
+                profile_snapshot_id: snapshot_id.clone(),
+                run_context: sigil_kernel::AgentRunContextSnapshot {
+                    profile_snapshot_id: snapshot_id,
+                    provider: "deepseek".to_owned(),
+                    model: "deepseek-v4-pro".to_owned(),
+                    reasoning_effort: None,
+                    workspace_root: sigil_kernel::WorkspaceRootSnapshot::new(
+                        temp.path().display().to_string(),
+                    )?,
+                    effective_tool_scope_hash: "sha256:tools".to_owned(),
+                    effective_permission_policy_hash: "sha256:permissions".to_owned(),
+                    effective_mcp_scope_hash: "sha256:mcp".to_owned(),
+                    provider_capability_hash: "sha256:provider".to_owned(),
+                    model_visible_agent_index_hash: Some("sha256:index".to_owned()),
+                    budget_policy_hash: "sha256:budget".to_owned(),
+                    provider_background_handle_ref: None,
+                },
+                objective: "inspect kernel".to_owned(),
+                prompt_hash: "sha256:prompt".to_owned(),
+                invocation_mode: sigil_kernel::AgentInvocationMode::Background,
+                invocation_source: sigil_kernel::AgentInvocationSource::Chat,
+                display_name: Some("kernel map".to_owned()),
+                created_at_ms: Some(42),
+            },
+        )),
+        SessionLogEntry::Control(ControlEntry::AgentThreadStatusChanged(
+            sigil_kernel::AgentThreadStatusChangedEntry {
+                thread_id,
+                status: sigil_kernel::AgentThreadStatus::Running,
+                reason: None,
+                updated_at_ms: None,
+            },
+        )),
+    ];
+    write_session_log(&app.session_log_path, &entries)?;
+    app.current_session_entries.clear();
+
+    assert_eq!(
+        app.agent_graph_summary_line().as_deref(),
+        Some("graph: 1 agents · 1 active")
+    );
+    Ok(())
+}
+
+#[test]
 fn agent_sidebar_rows_keep_completed_status_when_read_agent_result_fails() -> Result<()> {
     let temp = tempdir()?;
     let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());

@@ -102,9 +102,12 @@ pub use event::{
     stable_event_hash, stable_event_uuid,
 };
 pub use execution_backend::{
-    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig,
-    ExecutionCoverageLabel, ExecutionCoverageSummary, ExecutionFuture, ExecutionIsolationPolicy,
-    ExecutionReceipt, ExecutionRequest, ExecutionSandboxProfile, ExecutionSandboxProfileSpec,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
+    ExecutionBackendSelectionDecision, ExecutionBackendSelectionDiagnostic, ExecutionCapability,
+    ExecutionCapabilityRequirements, ExecutionConfig, ExecutionCoverageLabel,
+    ExecutionCoverageSummary, ExecutionFuture, ExecutionIsolationPolicy, ExecutionReceipt,
+    ExecutionRequest, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    ExecutionSandboxProfileSpec,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{
@@ -177,6 +180,7 @@ pub use task::{
     TASK_PLAN_UPDATE_TOOL_NAME, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
     TaskChildSessionStatus, TaskGraphProjection, TaskGraphStepProjection, TaskId,
     TaskIsolationMode, TaskPlanEntry, TaskPlanProjection, TaskPlanStatus, TaskPlanUpdateContext,
+    TaskReadyDeferredReason, TaskReadyDeferredStep, TaskReadyQueue, TaskReadyQueueOptions,
     TaskRouteId, TaskRouteStatus, TaskRunEntry, TaskRunProjection, TaskRunStatus,
     TaskStateProjection, TaskStepEntry, TaskStepId, TaskStepMode, TaskStepProjection, TaskStepSpec,
     TaskStepStatus, TaskSubagentApprovalRouteEntry, TaskSubagentElicitationRouteEntry,
@@ -184,9 +188,10 @@ pub use task::{
     task_plan_update_result_content, task_plan_update_tool_spec, validate_task_plan_graph_steps,
 };
 pub use task_memory::{
-    AttemptRef, BranchId, CommandReceiptId, FileChangeRef, SourcedDecision, SourcedFact,
+    AttemptRef, BranchId, CommandReceiptId, FileChangeRef, ModelAssistedMemoryDecision,
+    ModelAssistedMemoryFact, ModelAssistedTaskMemorySummary, SourcedDecision, SourcedFact,
     TaskMemoryExtractionInput, TaskMemoryId, TaskMemoryV1, VerificationReceiptId,
-    extract_task_memory_from_stream_records,
+    extract_task_memory_from_stream_records, task_memory_context_items,
 };
 pub use task_orchestrator::{
     LegacyTaskChildSessionRunner, SequentialTaskOrchestrator, SequentialTaskRequest,

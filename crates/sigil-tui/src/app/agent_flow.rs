@@ -15,9 +15,9 @@ use crate::{
 use anyhow::Context;
 use sigil_kernel::{
     AgentResultContinuationProjection, AgentThreadDisplayNameEntry, AgentThreadId,
-    AgentThreadProjection, AgentThreadStateProjection, AgentThreadStatus, ControlEntry,
-    JsonlSessionStore, SessionLogEntry, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
-    TaskRunProjection, normalize_task_agent_display_name,
+    AgentThreadProjection, AgentThreadStatus, ControlEntry, JsonlSessionStore, SessionLogEntry,
+    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskRunProjection,
+    normalize_task_agent_display_name,
 };
 
 use super::{
@@ -64,55 +64,17 @@ impl AppState {
     }
 
     pub(crate) fn agent_graph_summary_line(&self) -> Option<String> {
-        let projection = AgentThreadStateProjection::from_entries(&self.current_session_entries);
-        let continuation_projection =
-            AgentResultContinuationProjection::from_entries(&self.current_session_entries);
-        let mut seen = std::collections::BTreeSet::new();
-        let visible_threads = projection
-            .thread_replay_order
-            .iter()
-            .filter(|thread_id| seen.insert((*thread_id).clone()))
-            .filter_map(|thread_id| projection.threads.get(thread_id))
-            .filter(|thread| !thread.closed && thread.status != AgentThreadStatus::Closed)
-            .collect::<Vec<_>>();
-        if visible_threads.is_empty() {
-            return None;
+        match sigil_runtime::agent_graph_product_summary_from_session_log(&self.session_log_path) {
+            Ok(Some(summary)) => Some(summary.display_line()),
+            Ok(None) => sigil_runtime::agent_graph_product_summary_from_entries(
+                &self.current_session_entries,
+            )
+            .map(|summary| summary.display_line()),
+            Err(_) => sigil_runtime::agent_graph_product_summary_from_entries(
+                &self.current_session_entries,
+            )
+            .map(|summary| summary.with_projection_degraded().display_line()),
         }
-        let active_threads = visible_threads
-            .iter()
-            .filter(|thread| {
-                let continuation_unresolved = continuation_projection
-                    .statuses
-                    .get(&thread.thread_id)
-                    .is_some_and(|status| status.is_unresolved());
-                !agent_thread_effective_status(thread, continuation_unresolved).is_terminal()
-            })
-            .count();
-        let terminal_threads = visible_threads.len().saturating_sub(active_threads);
-        let total_tokens = visible_threads.iter().fold(0u64, |total, thread| {
-            total
-                + thread
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.usage.as_ref())
-                    .map(|usage| usage.total_tokens)
-                    .unwrap_or_default()
-        });
-        let mut parts = vec![format!("graph: {} agents", visible_threads.len())];
-        if active_threads > 0 {
-            parts.push(format!("{active_threads} active"));
-        }
-        if terminal_threads > 0 {
-            parts.push(format!("{terminal_threads} terminal"));
-        }
-        let summary = projection.graph_summary();
-        if summary.open_routes > 0 {
-            parts.push(format!("{} open routes", summary.open_routes));
-        }
-        if total_tokens > 0 {
-            parts.push(format!("{total_tokens} tokens"));
-        }
-        Some(parts.join(" · "))
     }
 
     pub(crate) fn composer_agent_rows(&self) -> Vec<SidebarAgentRow> {

@@ -219,6 +219,15 @@ allow_secrets = false
 
     assert!(!report.has_errors(), "{report:#?}");
     assert_eq!(report.overall_status(), DoctorStatus::Warn);
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "execution:sandbox"
+                && check.status == DoctorStatus::Ok
+                && check.message.contains("backend=local")
+                && check.message.contains("capabilities=none"))
+    );
     assert!(!rendered.contains("test-secret-key"));
     assert!(rendered.contains("resolved from config plaintext"));
     assert!(report.checks.iter().any(|check| {
@@ -244,6 +253,87 @@ allow_secrets = false
                 && check.status == DoctorStatus::Ok
                 && check.message.contains("command=available"))
     );
+    Ok(())
+}
+
+#[test]
+fn doctor_reports_execution_sandbox_backend_errors() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[execution]
+backend = "docker"
+isolation = "require_sandbox"
+profile = "build_offline"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+api_key = "test-secret-key"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(report.has_errors(), "{report:#?}");
+    assert!(report.checks.iter().any(|check| {
+        check.name == "execution:sandbox"
+            && check.status == DoctorStatus::Error
+            && check
+                .message
+                .contains("docker execution backend requires [execution].container_image")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|text| text.contains("container_image"))
+    }));
+    Ok(())
+}
+
+#[test]
+fn doctor_warns_when_sandbox_falls_back_to_unconfined_local() -> Result<()> {
+    let temp = tempdir()?;
+    let workspace = temp.path().to_path_buf();
+    let config_path = workspace.join("sigil.toml");
+    fs::write(
+        &config_path,
+        r#"[workspace]
+root = "."
+
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[execution]
+backend = "docker"
+isolation = "require_sandbox"
+fallback = "unconfined"
+
+[providers.deepseek]
+model = "deepseek-v4-flash"
+api_key = "test-secret-key"
+"#,
+    )?;
+
+    let report = build_doctor_report(&config_path, &workspace);
+
+    assert!(report.checks.iter().any(|check| {
+        check.name == "execution:sandbox"
+            && check.status == DoctorStatus::Warn
+            && check.message.contains("backend=local")
+            && check
+                .remediation
+                .as_deref()
+                .is_some_and(|text| text.contains("fallback relaxed"))
+    }));
     Ok(())
 }
 

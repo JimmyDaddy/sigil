@@ -4048,6 +4048,66 @@ fn compaction_persists_record_and_projects_summary_plus_tail() -> Result<()> {
 }
 
 #[test]
+fn compaction_attaches_task_memory_from_durable_evidence() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let store = JsonlSessionStore::new(temp.path().join("session.jsonl"))?;
+    let mut session = Session::new("deepseek", "deepseek-v4-flash").with_store(store);
+    session.append_user_message(ModelMessage::user("step one"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("step two".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_user_message(ModelMessage::user("step three"))?;
+    session.append_assistant_message(ModelMessage::assistant(
+        Some("step four".to_owned()),
+        Vec::new(),
+    ))?;
+    session.append_durable_event(
+        DurableEventType::MutationCommitted,
+        EventClass::Critical,
+        serde_json::json!({
+            "operation_id": "op-readme",
+            "batch_id": null,
+            "workspace_id": "workspace-1",
+            "observed_after_hash": "sha256:after",
+            "workspace_revision": 3,
+            "workspace_snapshot_id": "snapshot-readme",
+            "committed_subject": {
+                "file": {
+                    "path": "README.md",
+                    "file_type": "file"
+                }
+            }
+        }),
+    )?;
+
+    let record = session.compact_now(&CompactionConfig {
+        enabled: true,
+        soft_threshold_ratio: 0.5,
+        hard_threshold_ratio: 0.8,
+        context_window_tokens: Some(1000),
+        tail_messages: 2,
+    })?;
+
+    let memory = record
+        .task_memory
+        .as_ref()
+        .expect("durable mutation evidence should produce typed task memory");
+    assert_eq!(memory.valid_for_snapshot, "snapshot-readme");
+    assert!(memory.files_changed.iter().any(|file| {
+        file.path == std::path::Path::new("README.md")
+            && file.mutation_receipt_id.as_deref() == Some("op-readme")
+    }));
+    assert!(
+        session
+            .latest_compaction_record()
+            .and_then(|saved| saved.task_memory)
+            .is_some_and(|saved| saved.valid_for_snapshot == "snapshot-readme")
+    );
+    Ok(())
+}
+
+#[test]
 fn can_compact_requires_a_safe_boundary() -> Result<()> {
     let mut session = Session::new("deepseek", "deepseek-v4-flash");
     session.append_assistant_message(ModelMessage::assistant(

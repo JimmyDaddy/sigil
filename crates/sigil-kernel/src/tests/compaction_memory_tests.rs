@@ -5,11 +5,12 @@ use crate::{
     ChangeSetFileAction, ChangeSetFileResult, ChangeSetFileResultStatus, ChangeSetId,
     ChangeSetResult, ChangeSetResultStatus, CompactionRecord, ControlEntry, DurableEventType,
     EventClass, EvidenceReceipt, EvidenceScope, FileChangeRef, FileType, LegacyEvent,
+    ModelAssistedMemoryDecision, ModelAssistedMemoryFact, ModelAssistedTaskMemorySummary,
     MutationCommitted, MutationSubject, ReceiptStatus, RedactionState, SessionLogEntry,
     SessionStreamRecord, SourcedDecision, SourcedFact, StoredEvent, TaskMemoryExtractionInput,
     TaskMemoryV1, TaskRunEntry, TaskRunStatus, TaskStepEntry, TaskStepStatus, ToolExecutionEntry,
     ToolExecutionStatus, ToolResultMeta, VerificationBinding, VerificationReceipt,
-    VerificationRecordedEntry, extract_task_memory_from_stream_records,
+    VerificationRecordedEntry, extract_task_memory_from_stream_records, task_memory_context_items,
 };
 
 fn sample_task_memory() -> TaskMemoryV1 {
@@ -120,6 +121,102 @@ fn compaction_memory_model_generated_fact_cannot_create_verified_evidence() {
             .to_string()
             .contains("cannot be verified without durable evidence")
     );
+}
+
+#[test]
+fn compaction_model_summary_marks_imported_facts_unverified() -> Result<()> {
+    let mut memory = sample_task_memory();
+
+    memory.merge_model_summary(ModelAssistedTaskMemorySummary {
+        source_event_id: "event-model-summary".to_owned(),
+        constraints: vec![ModelAssistedMemoryFact {
+            text: "Keep plugin trust decisions inspectable".to_owned(),
+            confidence_percent: Some(75),
+        }],
+        decisions: vec![ModelAssistedMemoryDecision {
+            decision: ModelAssistedMemoryFact {
+                text: "Defer plugin process execution".to_owned(),
+                confidence_percent: Some(80),
+            },
+            rationale: Some(ModelAssistedMemoryFact {
+                text: "No durable plugin-owned process runtime exists yet".to_owned(),
+                confidence_percent: Some(70),
+            }),
+        }],
+        risks: vec![ModelAssistedMemoryFact {
+            text: "Model summary may miss an unresolved edge".to_owned(),
+            confidence_percent: Some(60),
+        }],
+        unresolved_issues: vec![ModelAssistedMemoryFact {
+            text: "Hook output still needs egress policy checks".to_owned(),
+            confidence_percent: None,
+        }],
+    })?;
+
+    let imported_constraint = memory
+        .constraints
+        .iter()
+        .find(|fact| fact.text == "Keep plugin trust decisions inspectable")
+        .expect("model imported constraint should exist");
+    assert!(imported_constraint.model_generated);
+    assert!(!imported_constraint.verified);
+    assert_eq!(imported_constraint.confidence_percent, Some(75));
+    assert_eq!(
+        imported_constraint.source_event_id.as_deref(),
+        Some("event-model-summary")
+    );
+    assert!(memory.decisions.iter().any(|decision| {
+        decision.decision.model_generated
+            && !decision.decision.verified
+            && decision
+                .rationale
+                .as_ref()
+                .is_some_and(|rationale| rationale.model_generated && !rationale.verified)
+    }));
+    Ok(())
+}
+
+#[test]
+fn compaction_model_summary_rejects_invalid_confidence() {
+    let mut memory = sample_task_memory();
+
+    let error = memory
+        .merge_model_summary(ModelAssistedTaskMemorySummary {
+            source_event_id: "event-model-summary".to_owned(),
+            constraints: vec![ModelAssistedMemoryFact {
+                text: "too confident".to_owned(),
+                confidence_percent: Some(101),
+            }],
+            decisions: Vec::new(),
+            risks: Vec::new(),
+            unresolved_issues: Vec::new(),
+        })
+        .expect_err("invalid model confidence should fail");
+
+    assert!(error.to_string().contains("confidence must be 0..=100"));
+}
+
+#[test]
+fn compaction_memory_context_items_preserve_task_memory_provenance() -> Result<()> {
+    let memory = sample_task_memory();
+
+    let items = task_memory_context_items(&memory)?;
+
+    assert!(items.iter().any(|item| {
+        item.id == "task-memory:mem-1:objective"
+            && item.source == crate::ContextSource::TaskDigest
+            && item.trust_level == crate::ContextTrustLevel::ToolObservation
+            && item.sensitivity == crate::ContextSensitivity::Repository
+            && item.source_event_id.as_deref() == Some("event-1")
+    }));
+    assert!(items.iter().any(|item| {
+        item.id == "task-memory:mem-1:decision:0"
+            && item.source_event_id.as_deref() == Some("event-2")
+    }));
+    assert!(items.iter().any(|item| {
+        item.id == "task-memory:mem-1:file:0" && item.source_event_id.as_deref() == Some("event-4")
+    }));
+    Ok(())
 }
 
 #[test]

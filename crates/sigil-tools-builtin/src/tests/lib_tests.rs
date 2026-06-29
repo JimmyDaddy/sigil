@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
@@ -20,7 +20,7 @@ use tokio::time::{Duration, sleep};
 
 use super::{
     ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
-    EditFileTool, GlobTool, GrepTool, ListTool, LocalExecutionBackend,
+    DockerExecutionBackend, EditFileTool, GlobTool, GrepTool, ListTool, LocalExecutionBackend,
     MacosSeatbeltExecutionBackend, ReadFileTool, TerminalInputTool, TerminalProcessManagers,
     TerminalStartRequest, TerminalStartTool, WriteFileTool, register_builtin_tools,
     register_builtin_tools_with_paths,
@@ -28,7 +28,7 @@ use super::{
 
 use serial_test::serial;
 #[cfg(unix)]
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
 fn bash_tool(test_root: &Path) -> BashTool {
     BashTool {
@@ -130,6 +130,7 @@ fn macos_seatbelt_backend_does_not_satisfy_offline_build_profile() {
         backend: ExecutionBackendKind::MacosSeatbelt,
         isolation: ExecutionIsolationPolicy::RequireSandbox,
         profile: sigil_kernel::ExecutionSandboxProfile::BuildOffline,
+        ..ExecutionConfig::default()
     };
 
     let error = config
@@ -137,6 +138,194 @@ fn macos_seatbelt_backend_does_not_satisfy_offline_build_profile() {
         .expect_err("build_offline requires proven network isolation");
 
     assert!(error.contains("network isolation"));
+}
+
+#[test]
+fn docker_backend_requires_explicit_container_image() {
+    let result = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::Docker,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        ..ExecutionConfig::default()
+    });
+
+    let Err(error) = result else {
+        panic!("docker backend must fail closed without explicit container image");
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("docker execution backend requires [execution].container_image")
+    );
+}
+
+#[test]
+fn backend_selection_only_unconfined_fallback_relaxes_to_local() -> Result<()> {
+    let prompt_result = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::Docker,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        fallback: sigil_kernel::ExecutionSandboxFallback::Prompt,
+        ..ExecutionConfig::default()
+    });
+    let Err(error) = prompt_result else {
+        panic!("prompt fallback should not relax inside non-interactive backend builder");
+    };
+    assert!(error.to_string().contains("fallback requires user prompt"));
+
+    let backend = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::Docker,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        fallback: sigil_kernel::ExecutionSandboxFallback::Unconfined,
+        ..ExecutionConfig::default()
+    })?;
+
+    assert_eq!(backend.kind(), ExecutionBackendKind::Local);
+    Ok(())
+}
+
+#[test]
+fn docker_backend_declares_only_enforced_mvp_capabilities() {
+    let backend = DockerExecutionBackend::new(
+        PathBuf::from("/usr/bin/docker"),
+        "rust:1.94.1".to_owned(),
+        false,
+    );
+    let capabilities = backend.capabilities();
+
+    assert_eq!(backend.kind(), ExecutionBackendKind::Docker);
+    assert_eq!(backend.image(), "rust:1.94.1");
+    assert!(capabilities.filesystem_isolation);
+    assert!(capabilities.network_isolation);
+    assert!(capabilities.process_isolation);
+    assert!(!capabilities.resource_limits);
+    assert!(!capabilities.persistent_pty);
+    assert!(!capabilities.workspace_snapshot);
+}
+
+#[test]
+#[cfg(unix)]
+fn docker_backend_checks_daemon_and_configured_image_before_selection() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let docker = temp.path().join("docker");
+    let calls_path = temp.path().join("calls.txt");
+    fs::write(
+        &docker,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n---\\n' \"$@\" >> {}\ncase \"$1 $2\" in\n  'version --format') printf '29.3.0\\n' ;;\n  'image inspect') printf '{{}}\\n' ;;\n  *) printf 'unexpected docker check' >&2; exit 9 ;;\nesac\n",
+            calls_path.display()
+        ),
+    )?;
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755))?;
+    let backend = DockerExecutionBackend::new(docker, "rust:1.94.1".to_owned(), false);
+
+    super::ensure_docker_available(&backend)?;
+
+    let calls = fs::read_to_string(calls_path)?;
+    assert!(calls.contains("version\n---\n--format\n---\n{{.Server.Version}}\n---\n"));
+    assert!(calls.contains("image\n---\ninspect\n---\nrust:1.94.1\n---\n"));
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn docker_execution_backend_builds_offline_container_command() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let docker = temp.path().join("docker");
+    let args_path = temp.path().join("args.txt");
+    fs::write(
+        &docker,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf fake-docker-ok\n",
+            args_path.display()
+        ),
+    )?;
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755))?;
+    let backend = DockerExecutionBackend::new(docker, "rust:1.94.1".to_owned(), false);
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "cargo".to_owned(),
+            args: vec![
+                "test".to_owned(),
+                "-p".to_owned(),
+                "sigil-kernel".to_owned(),
+            ],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::from([("RUST_LOG".to_owned(), "debug".to_owned())]),
+            timeout_ms: None,
+            timeout_secs: 5,
+        })
+        .await?;
+
+    assert_eq!(receipt.backend, ExecutionBackendKind::Docker);
+    assert_eq!(receipt.exit_code, Some(0));
+    assert_eq!(String::from_utf8_lossy(&receipt.stdout), "fake-docker-ok");
+    let args = fs::read_to_string(args_path)?;
+    assert!(args.contains("run\n"));
+    assert!(args.contains("--rm\n"));
+    assert!(args.contains("--workdir\n"));
+    assert!(args.contains("--mount\n"));
+    assert!(args.contains("--network\nnone\n"));
+    assert!(args.contains("--env\nRUST_LOG=debug\n"));
+    assert!(args.contains("rust:1.94.1\ncargo\ntest\n-p\nsigil-kernel\n"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a healthy local Docker daemon and SIGIL_DOCKER_CONFORMANCE_IMAGE with sh+wget"]
+#[cfg(unix)]
+async fn docker_execution_backend_real_daemon_conformance() -> Result<()> {
+    let image = std::env::var("SIGIL_DOCKER_CONFORMANCE_IMAGE")
+        .context("set SIGIL_DOCKER_CONFORMANCE_IMAGE to a local image with sh and wget")?;
+    let backend = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::Docker,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        profile: sigil_kernel::ExecutionSandboxProfile::BuildOffline,
+        container_image: Some(image),
+        ..ExecutionConfig::default()
+    })?;
+    let temp = tempfile::tempdir()?;
+    fs::write(temp.path().join("input.txt"), "from-host")?;
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                concat!(
+                    "command -v wget >/dev/null || { echo missing-wget >&2; exit 8; }; ",
+                    "cat input.txt; ",
+                    "printf from-container > output.txt; ",
+                    "if wget -q -T 2 -O - https://example.com >/dev/null 2>&1; ",
+                    "then echo network-unexpected; exit 7; ",
+                    "else echo network-blocked; fi"
+                )
+                .to_owned(),
+            ],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_ms: Some(10_000),
+            timeout_secs: 10,
+        })
+        .await?;
+
+    assert_eq!(receipt.backend, ExecutionBackendKind::Docker);
+    assert_eq!(receipt.exit_code, Some(0));
+    let stdout = String::from_utf8_lossy(&receipt.stdout);
+    assert!(stdout.contains("from-host"));
+    assert!(stdout.contains("network-blocked"));
+    assert_eq!(
+        fs::read_to_string(temp.path().join("output.txt"))?,
+        "from-container"
+    );
+    let metadata = fs::metadata(temp.path().join("output.txt"))?;
+    let expected_user = super::current_user_group_flag()
+        .await?
+        .expect("unix backend should report uid:gid");
+    let expected_parts: Vec<_> = expected_user.split(':').collect();
+    assert_eq!(metadata.uid().to_string(), expected_parts[0]);
+    assert_eq!(metadata.gid().to_string(), expected_parts[1]);
+    Ok(())
 }
 
 #[test]
