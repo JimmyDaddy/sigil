@@ -67,6 +67,7 @@ impl InfoRailViewModel {
                 } else {
                     "memory: off".to_owned()
                 }))
+                .chain(app.task_memory_sidebar_lines())
                 .collect(),
             permission_lines: app.permission_card_lines(),
             agent_lines: app

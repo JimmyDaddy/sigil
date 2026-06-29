@@ -1286,7 +1286,10 @@ fn render_agent_tool_preview(
     if tool_name_matches(&summary.tool_name, "read_agent_result") {
         return render_agent_result_page_preview(summary, accent, max_content_width, palette);
     }
-    if tool_name_matches(&summary.tool_name, "spawn_agent") && !summary.preview_lines.is_empty() {
+    if tool_name_matches(&summary.tool_name, "spawn_agent")
+        && summary.preview_kind == ToolPreviewKind::Markdown
+        && !summary.preview_lines.is_empty()
+    {
         return render_agent_summary_preview(
             summary,
             accent,
@@ -1399,8 +1402,9 @@ fn render_agent_status_preview(
             )],
         ));
     }
-    if let Some(action_hint) =
-        agent_payload_string(summary, "action_hint").filter(|hint| !hint.is_empty())
+    if let Some(action_hint) = agent_payload_string(summary, "action_hint")
+        .or_else(|| agent_payload_string(summary, "next_action"))
+        .filter(|hint| !hint.is_empty())
     {
         lines.push(timeline_content_line(
             accent,

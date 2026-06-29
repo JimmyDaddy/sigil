@@ -2007,6 +2007,31 @@ impl AppState {
         ]
     }
 
+    pub(crate) fn task_memory_sidebar_lines(&self) -> Vec<String> {
+        let Some(task_memory) = self
+            .latest_compaction_record
+            .as_ref()
+            .and_then(|record| record.task_memory.as_ref())
+        else {
+            return vec!["task memory: none yet".to_owned()];
+        };
+
+        let mut parts = vec!["task memory: ready".to_owned()];
+        if !task_memory.decisions.is_empty() {
+            parts.push(format!("{} decisions", task_memory.decisions.len()));
+        }
+        if !task_memory.files_changed.is_empty() {
+            parts.push(format!("{} files", task_memory.files_changed.len()));
+        }
+        if !task_memory.unresolved_issues.is_empty() {
+            parts.push(format!(
+                "{} unresolved",
+                task_memory.unresolved_issues.len()
+            ));
+        }
+        vec![parts.join(" · ")]
+    }
+
     pub(crate) fn task_sidebar_lines(&self) -> Vec<String> {
         task_sidebar::task_sidebar_lines(&self.current_session_entries)
     }

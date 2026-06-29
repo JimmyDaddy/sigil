@@ -167,6 +167,7 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
     let streaming_plain = transcript_plain(streaming.clone());
     assert!(streaming_plain.contains("thinking"));
     assert!(!streaming_plain.contains("thought"));
+    assert!(app.collapsible_thinking_entry_indices().is_empty());
     assert!(streaming.iter().any(|line| {
         line.spans
             .iter()
@@ -188,6 +189,7 @@ fn reasoning_delta_keeps_latest_thinking_expanded_until_tool_starts() -> Result<
     let collapsed_plain = transcript_plain(collapsed.clone());
     assert!(collapsed_plain.contains("thought"));
     assert!(!collapsed_plain.contains("thinking"));
+    assert_eq!(app.collapsible_thinking_entry_indices().len(), 1);
     assert!(collapsed.iter().any(|line| {
         line.spans
             .iter()
@@ -912,6 +914,33 @@ fn child_agent_transcript_lines_cover_load_states_and_viewport_edges() -> Result
     let restored = transcript_plain(app.transcript_lines(12));
     assert!(restored.contains("child prompt"));
     assert!(restored.contains("child answer"));
+    Ok(())
+}
+
+#[test]
+fn running_child_agent_transcript_keeps_latest_thinking_active() -> Result<()> {
+    let mut app = AppState::from_root_config(Path::new("sigil.toml"), &test_config());
+    sync_child_agent_for_transcript_tests(&mut app)?;
+    let timeline_entries = vec![TimelineEntry {
+        role: TimelineRole::Thinking,
+        text: "child step 1\nchild step 2\nchild step 3\nchild step 4".to_owned(),
+    }];
+    let rendered_body_lines = app.render_child_timeline_body_lines(&timeline_entries);
+    app.active_agent_child_transcript = Some(super::super::ActiveAgentChildTranscript {
+        path: PathBuf::from("children/task_1/step_1-child_1.jsonl"),
+        file_signature: super::super::ChildTranscriptFileSignature::empty(),
+        timeline_entries,
+        rendered_body_lines,
+        total_timeline_entries: 1,
+        transcript_truncated: false,
+        load_error: None,
+    });
+
+    let rendered = transcript_plain(app.transcript_lines(16));
+
+    assert!(rendered.contains("thinking"));
+    assert!(!rendered.contains("thought"));
+    assert!(rendered.contains("child step 4"));
     Ok(())
 }
 

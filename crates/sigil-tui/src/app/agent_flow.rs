@@ -14,10 +14,10 @@ use crate::{
 };
 use anyhow::Context;
 use sigil_kernel::{
-    AgentThreadDisplayNameEntry, AgentThreadId, AgentThreadProjection, AgentThreadStateProjection,
-    AgentThreadStatus, ControlEntry, JsonlSessionStore, SessionLogEntry,
-    TaskChildSessionDisplayNameEntry, TaskChildSessionEntry, TaskRunProjection,
-    normalize_task_agent_display_name,
+    AgentResultContinuationProjection, AgentThreadDisplayNameEntry, AgentThreadId,
+    AgentThreadProjection, AgentThreadStateProjection, AgentThreadStatus, ControlEntry,
+    JsonlSessionStore, SessionLogEntry, TaskChildSessionDisplayNameEntry, TaskChildSessionEntry,
+    TaskRunProjection, normalize_task_agent_display_name,
 };
 
 use super::{
@@ -65,22 +65,52 @@ impl AppState {
 
     pub(crate) fn agent_graph_summary_line(&self) -> Option<String> {
         let projection = AgentThreadStateProjection::from_entries(&self.current_session_entries);
-        let summary = projection.graph_summary();
-        if summary.total_threads == 0 {
+        let continuation_projection =
+            AgentResultContinuationProjection::from_entries(&self.current_session_entries);
+        let mut seen = std::collections::BTreeSet::new();
+        let visible_threads = projection
+            .thread_replay_order
+            .iter()
+            .filter(|thread_id| seen.insert((*thread_id).clone()))
+            .filter_map(|thread_id| projection.threads.get(thread_id))
+            .filter(|thread| !thread.closed && thread.status != AgentThreadStatus::Closed)
+            .collect::<Vec<_>>();
+        if visible_threads.is_empty() {
             return None;
         }
-        let mut parts = vec![format!("graph: {} agents", summary.total_threads)];
-        if summary.active_threads > 0 {
-            parts.push(format!("{} active", summary.active_threads));
+        let active_threads = visible_threads
+            .iter()
+            .filter(|thread| {
+                let continuation_unresolved = continuation_projection
+                    .statuses
+                    .get(&thread.thread_id)
+                    .is_some_and(|status| status.is_unresolved());
+                !agent_thread_effective_status(thread, continuation_unresolved).is_terminal()
+            })
+            .count();
+        let terminal_threads = visible_threads.len().saturating_sub(active_threads);
+        let total_tokens = visible_threads.iter().fold(0u64, |total, thread| {
+            total
+                + thread
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.usage.as_ref())
+                    .map(|usage| usage.total_tokens)
+                    .unwrap_or_default()
+        });
+        let mut parts = vec![format!("graph: {} agents", visible_threads.len())];
+        if active_threads > 0 {
+            parts.push(format!("{active_threads} active"));
         }
-        if summary.terminal_threads > 0 {
-            parts.push(format!("{} terminal", summary.terminal_threads));
+        if terminal_threads > 0 {
+            parts.push(format!("{terminal_threads} terminal"));
         }
+        let summary = projection.graph_summary();
         if summary.open_routes > 0 {
             parts.push(format!("{} open routes", summary.open_routes));
         }
-        if summary.total_tokens > 0 {
-            parts.push(format!("{} tokens", summary.total_tokens));
+        if total_tokens > 0 {
+            parts.push(format!("{total_tokens} tokens"));
         }
         Some(parts.join(" · "))
     }
@@ -563,6 +593,8 @@ impl AppState {
             sigil_kernel::TaskStateProjection::from_entries(&self.current_session_entries);
         let agent_projection =
             sigil_kernel::AgentThreadStateProjection::from_entries(&self.current_session_entries);
+        let continuation_projection =
+            AgentResultContinuationProjection::from_entries(&self.current_session_entries);
         let latest_task = task_projection.latest_task();
         let mut seen = std::collections::BTreeSet::new();
         let mut child_ordinal = 0usize;
@@ -575,10 +607,15 @@ impl AppState {
                     continue;
                 }
                 child_ordinal += 1;
+                let continuation_unresolved = continuation_projection
+                    .statuses
+                    .get(thread_id)
+                    .is_some_and(|status| status.is_unresolved());
                 items.push(agent_sidebar_item_from_thread(
                     thread,
                     latest_task,
                     child_ordinal,
+                    continuation_unresolved,
                 ));
             }
         }
@@ -1011,8 +1048,10 @@ fn agent_sidebar_item_from_thread(
     thread: &AgentThreadProjection,
     latest_task: Option<&TaskRunProjection>,
     ordinal: usize,
+    continuation_unresolved: bool,
 ) -> AgentSidebarItem {
     let legacy_child = latest_task.and_then(|task| legacy_child_for_thread(task, thread));
+    let status = agent_thread_effective_status(thread, continuation_unresolved);
     let label = if let (Some(task), Some(child)) = (latest_task, legacy_child.as_ref()) {
         task_child_agent_display_name(task, child, ordinal)
     } else {
@@ -1021,7 +1060,7 @@ fn agent_sidebar_item_from_thread(
     let detail = if let Some(child) = legacy_child.as_ref() {
         format!(
             "{} · {} · v{}:{}",
-            agent_thread_status_label(thread.status),
+            agent_thread_status_label(status),
             child.role.as_str(),
             child.plan_version,
             child.step_id.as_str()
@@ -1029,7 +1068,7 @@ fn agent_sidebar_item_from_thread(
     } else {
         format!(
             "{} · {} · {}",
-            agent_thread_status_label(thread.status),
+            agent_thread_status_label(status),
             agent_thread_profile_label(thread),
             agent_thread_source_label(thread)
         )
@@ -1048,6 +1087,17 @@ fn agent_sidebar_item_from_thread(
         }),
         thread_id: Some(thread.thread_id.clone()),
         muted: thread.thread_session_ref.is_none(),
+    }
+}
+
+fn agent_thread_effective_status(
+    thread: &AgentThreadProjection,
+    continuation_unresolved: bool,
+) -> AgentThreadStatus {
+    if continuation_unresolved && thread.status == AgentThreadStatus::Failed {
+        AgentThreadStatus::Running
+    } else {
+        thread.status
     }
 }
 
@@ -1343,17 +1393,17 @@ mod tests {
     fn agent_thread_sidebar_item_uses_objective_profile_and_ordinal_fallbacks() -> anyhow::Result<()>
     {
         let objective = test_thread("thread_objective", "Review kernel", Some("reader"))?;
-        let from_objective = agent_sidebar_item_from_thread(&objective, None, 1);
+        let from_objective = agent_sidebar_item_from_thread(&objective, None, 1, false);
         assert_eq!(from_objective.label, "agent Review kernel");
         assert_eq!(from_objective.detail, "started · reader · unknown");
 
         let profile = test_thread("thread_profile", "   ", Some("reader-agent"))?;
-        let from_profile = agent_sidebar_item_from_thread(&profile, None, 2);
+        let from_profile = agent_sidebar_item_from_thread(&profile, None, 2, false);
         assert_eq!(from_profile.label, "agent reader agent");
         assert_eq!(from_profile.detail, "started · reader-agent · unknown");
 
         let ordinal = test_thread("thread_ordinal", "   ", None)?;
-        let from_ordinal = agent_sidebar_item_from_thread(&ordinal, None, 3);
+        let from_ordinal = agent_sidebar_item_from_thread(&ordinal, None, 3, false);
         assert_eq!(from_ordinal.label, "agent agent 3");
         assert_eq!(from_ordinal.detail, "started · agent · unknown");
         Ok(())

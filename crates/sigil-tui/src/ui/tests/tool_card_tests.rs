@@ -296,6 +296,26 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
             }
         }
     }));
+    let running_spawn_result = parsed_summary(json!({
+        "tool_name": "spawn_agent",
+        "status": "ok",
+        "preview_kind": "json",
+        "preview_lines": [
+            "{",
+            "  \"coalescing_key\": \"wait_agent:agent_chat_1\",",
+            "  \"next_action\": \"continue independent parent work\"",
+            "}"
+        ],
+        "preview_value": {
+            "thread_id": "agent_chat_1",
+            "display_name": "mailbox audit",
+            "status": "running",
+            "terminal": false,
+            "reason": "agent tool spawned child session",
+            "result_available": false,
+            "next_action": "continue independent parent work"
+        }
+    }));
     let wait_ready = parsed_summary(json!({
         "tool_name": "wait_agent",
         "status": "ok",
@@ -362,6 +382,7 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
     let wait_display = build_tool_card_display(&wait_result);
     let named_wait_display = build_tool_card_display(&named_wait_result);
     let spawn_display = build_tool_card_display(&spawn_result);
+    let running_spawn_display = build_tool_card_display(&running_spawn_result);
     let wait_ready_display = build_tool_card_display(&wait_ready);
     let message_display = build_tool_card_display(&message_result);
     let close_display = build_tool_card_display(&close_result);
@@ -370,6 +391,11 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
     let read_text = plain_text(&render_tool_preview_body(&read_result, accent_rose(), 96));
     let wait_text = plain_text(&render_tool_preview_body(&wait_result, accent_rose(), 96));
     let spawn_text = plain_text(&render_tool_preview_body(&spawn_result, accent_rose(), 96));
+    let running_spawn_text = plain_text(&render_tool_preview_body(
+        &running_spawn_result,
+        accent_rose(),
+        96,
+    ));
     let wait_ready_text = plain_text(&render_tool_preview_body(&wait_ready, accent_rose(), 96));
     let missing_payload_text = plain_text(&render_tool_preview_body(
         &missing_payload,
@@ -404,6 +430,15 @@ fn tool_card_renders_agent_tool_status_and_result_pages() {
         Some("summary truncated · read_agent_result available")
     );
     assert!(spawn_text.contains("Use read_agent_result"));
+    assert_eq!(
+        running_spawn_display.title.plain(),
+        "Started agent mailbox audit"
+    );
+    assert_eq!(running_spawn_display.status.label, "RUNNING");
+    assert!(running_spawn_text.contains("running · mailbox audit"));
+    assert!(running_spawn_text.contains("agent tool spawned child session"));
+    assert!(running_spawn_text.contains("action continue independent parent work"));
+    assert!(!running_spawn_text.contains("coalescing_key"));
 
     assert_eq!(wait_ready_display.status.label, "DONE");
     assert_eq!(wait_ready_display.summary.as_deref(), Some("result ready"));

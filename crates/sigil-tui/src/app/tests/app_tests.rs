@@ -660,6 +660,35 @@ fn agent_sidebar_rows_project_agent_thread_entries() -> Result<()> {
     assert!(rows.iter().any(|row| {
         row.label == "agent kernel map" && row.detail == "running · explore · chat" && !row.muted
     }));
+    let base_entries = app.current_session_entries.clone();
+    let mut recovering_entries = app.current_session_entries.clone();
+    recovering_entries.push(SessionLogEntry::Control(
+        ControlEntry::AgentThreadStatusChanged(sigil_kernel::AgentThreadStatusChangedEntry {
+            thread_id: thread_id.clone(),
+            status: sigil_kernel::AgentThreadStatus::Failed,
+            reason: Some("provider stream timed out".to_owned()),
+            updated_at_ms: None,
+        }),
+    ));
+    recovering_entries.push(SessionLogEntry::Control(
+        ControlEntry::AgentResultContinuation(sigil_kernel::AgentResultContinuationEntry {
+            thread_id: thread_id.clone(),
+            status: sigil_kernel::AgentResultContinuationStatus::Started,
+            reason: Some("parent continuation is handling replacement".to_owned()),
+            updated_at_ms: None,
+        }),
+    ));
+    app.sync_current_session_state(recovering_entries.clone());
+    let recovering_rows = app.agent_sidebar_rows();
+    assert!(recovering_rows.iter().any(|row| {
+        row.label == "agent kernel map" && row.detail == "running · explore · chat" && !row.muted
+    }));
+    assert_eq!(
+        app.agent_graph_summary_line().as_deref(),
+        Some("graph: 1 agents · 1 active")
+    );
+
+    app.sync_current_session_state(base_entries);
 
     app.input = "/agent thread_1".to_owned();
     assert!(app.submit_input()?.is_none());

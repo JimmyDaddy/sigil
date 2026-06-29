@@ -661,6 +661,14 @@ fn restored_session_view_shows_typed_task_memory_summary() -> Result<()> {
     assert!(
         lines.contains("unresolved: Decide whether docs links need checking [model/unverified]")
     );
+    let view_model = crate::view_model::UiViewModel::from_app(&app);
+    assert!(
+        view_model
+            .info_rail
+            .session_lines
+            .iter()
+            .any(|line| line == "task memory: ready · 1 decisions · 1 files · 1 unresolved")
+    );
     Ok(())
 }
 

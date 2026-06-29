@@ -253,19 +253,24 @@ impl AppState {
     pub(super) fn has_collapsible_thinking_blocks(&self) -> bool {
         self.timeline
             .iter()
-            .any(|entry| self.thinking_entry_is_collapsible(entry))
+            .enumerate()
+            .any(|(index, entry)| self.thinking_entry_is_collapsible(index, entry))
     }
 
     pub(crate) fn collapsible_thinking_entry_indices(&self) -> Vec<usize> {
         self.timeline
             .iter()
             .enumerate()
-            .filter_map(|(index, entry)| self.thinking_entry_is_collapsible(entry).then_some(index))
+            .filter_map(|(index, entry)| {
+                self.thinking_entry_is_collapsible(index, entry)
+                    .then_some(index)
+            })
             .collect()
     }
 
-    fn thinking_entry_is_collapsible(&self, entry: &TimelineEntry) -> bool {
+    fn thinking_entry_is_collapsible(&self, entry_index: usize, entry: &TimelineEntry) -> bool {
         entry.role == TimelineRole::Thinking
+            && self.streaming_reasoning_index != Some(entry_index)
             && crate::ui::thinking_has_collapsed_content(&entry.text)
     }
 
@@ -765,6 +770,10 @@ impl AppState {
         options.selected_tool_activity_key = None;
         options.hovered_tool_activity_key = None;
         options.streaming_assistant_index = None;
+        options.streaming_reasoning_index = active_child_transcript_reasoning_index(
+            timeline_entries,
+            self.active_child_is_running(),
+        );
         for (index, entry) in timeline_entries.iter().enumerate() {
             let rendered =
                 crate::ui::render_timeline_entry_lines_with_options(entry, &options, index);
@@ -780,6 +789,13 @@ impl AppState {
             let _ = body.pop();
         }
         body
+    }
+
+    fn active_child_is_running(&self) -> bool {
+        matches!(self.active_agent_view, AgentView::Child { .. })
+            && self
+                .active_agent_thread_projection()
+                .is_some_and(|thread| !thread.status.is_terminal())
     }
 
     pub(crate) fn selected_timeline_line_range(&self) -> Option<Range<usize>> {
@@ -1240,6 +1256,19 @@ pub(super) fn text_by_display_columns(text: &str, start: usize, end: usize) -> S
         display_column = next_column;
     }
     output
+}
+
+fn active_child_transcript_reasoning_index(
+    timeline_entries: &[TimelineEntry],
+    child_running: bool,
+) -> Option<usize> {
+    if !child_running {
+        return None;
+    }
+    let last_index = timeline_entries
+        .iter()
+        .rposition(|entry| !entry.text.trim().is_empty())?;
+    (timeline_entries[last_index].role == TimelineRole::Thinking).then_some(last_index)
 }
 
 pub(super) fn clipboard_copy_status(text: &str) -> String {

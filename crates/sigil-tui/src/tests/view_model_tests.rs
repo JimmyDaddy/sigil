@@ -192,6 +192,13 @@ fn ui_view_model_projects_info_rail_and_composer_state() {
     assert!(
         view_model
             .info_rail
+            .session_lines
+            .iter()
+            .any(|line| line == "task memory: none yet")
+    );
+    assert!(
+        view_model
+            .info_rail
             .code_lines
             .iter()
             .any(|line| line == "status: off")
