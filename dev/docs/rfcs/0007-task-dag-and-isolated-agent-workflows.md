@@ -10,6 +10,7 @@
 - Depends on: [RFC-0001 Durable Event Stream and Event Taxonomy](0001-durable-event-stream-and-event-taxonomy.md)
 - Depends on: [RFC-0002 Crash-consistent Mutation Protocol](0002-crash-consistent-mutation-protocol.md)
 - Depends on: [RFC-0003 Verification Contract and Workspace Snapshot](0003-verification-contract-and-workspace-snapshot.md)
+- Depends on: [RFC-0014 Write Isolation and Worktree Merge](0014-write-isolation-and-worktree-merge.md)
 
 ## 1. Summary
 
@@ -117,7 +118,7 @@ Main task UI should keep one recommended action per state, such as `continue`, `
 - E07.2 implemented read-only ready queue batching with concurrency budget, running-write exclusion, sequential write handoff and shared-read-only write denial coverage.
 - E07.3 implemented review / verify state separation while keeping system verification authoritative.
 - E07.4 implemented bounded plan versions and `Superseded` projection semantics: accepting a newer plan version marks older plan versions superseded, preserves completed step history, marks unfinished old-plan steps as `Superseded`, clears current-step pointers to superseded plans, and surfaces the state in TUI summaries.
-- E07.5 write isolation remains gated until changeset/worktree isolation is ready.
+- E07.5 write isolation remains gated until RFC-0014 changeset/worktree isolation is ready.
 
 ## 10. Acceptance Criteria
 
@@ -140,6 +141,6 @@ cargo test -p sigil-tui task_sidebar
 
 ## 12. Open Questions
 
-- Whether write isolation should start with changeset-only before worktree support.
+- Whether RFC-0014 write isolation should start with changeset-only before worktree support.
 - Whether read-only fanout should be configured per task or globally.
 - How much DAG detail belongs in the main task strip versus a task detail panel.

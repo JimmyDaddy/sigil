@@ -10,6 +10,7 @@
 - Architecture snapshot: [Sigil Rust Agent 核心技术方案](../sigil-rust-agent-core-technical-solution.md)
 - Depends on: [RFC-0001 Durable Event Stream and Event Taxonomy](0001-durable-event-stream-and-event-taxonomy.md)
 - Depends on: [RFC-0002 Crash-consistent Mutation Protocol](0002-crash-consistent-mutation-protocol.md)
+- Depends on: [RFC-0014 Write Isolation and Worktree Merge](0014-write-isolation-and-worktree-merge.md) for future child/worktree merge productization
 
 ## 1. Summary
 
@@ -583,7 +584,7 @@ Productization remains：
 - MCP lifecycle verification UX bridge 已落地：`WorkspaceMutationDetected(tool_name="mcp_server:<name>")` 会投影为用户可读的 `MCP server <name>` source reason 和 `refresh MCP or run check` recovery hint；task sidebar / strip / session detail 不再只显示内部 unknown-dirty token。
 - 扩展 verification scope profile 的后续工作只剩真实项目校准：默认/profile presets、配置文件 override 和 TUI 只读摘要已落地；更多语言专用生成目录或依赖缓存应按项目证据追加，避免把普通用户操作面做复杂。
 - 完成 workspace trust UX：首次进入 workspace gate、基础 audit provenance、`/config` trust/long-term policy 摘要、repo-local instruction 降级展示、task sidebar/strip 与 session audit 的 trust/approval 解释已落地。
-- child verification / worktree merge 产品链路的默认 TUI 展示已完成：child receipt link、merge 后 parent re-check 引导和 session audit trace 已落地；后续如引入真正 worktree merge review UI，应继续复用该 trace，不得让 child `Passed` 直接继承为 parent `Passed`。
+- child verification / worktree merge 产品链路的默认 TUI 展示已完成：child receipt link、merge 后 parent re-check 引导和 session audit trace 已落地；后续如通过 RFC-0014 引入真正 worktree merge review UI，应继续复用该 trace，不得让 child `Passed` 直接继承为 parent `Passed`。
 - 继续把后续新增 historical/projected state 接入 RFC-0001 durable replay；现有核心 task、verification、agent thread/agent graph、session list、dispatch trace、terminal、changeset、plan、skill、plugin、profile trust/policy、continuation 和 queue projection 已具备 mixed-format stream replay 入口。
 
 ## 16. Open Questions
