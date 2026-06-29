@@ -1,6 +1,6 @@
 # RFC-0008 Thread Projection and Agent Graph Observability
 
-状态：draft / E08.1-E08.4 implemented / E08.6 product adoption planned
+状态：draft / E08.1-E08.4 and E08.6 implemented / E08.5 gated
 
 创建日期：2026-06-28
 
@@ -124,13 +124,14 @@ cargo test -p sigil-tui session
 - 已新增 dispatch trace projection：tool trace 以 `call_id` 聚合 approval、execution、egress、observation truncation、changed files 和 error kind；agent trace 以 `thread_id` 聚合 start/status/result、profile、parent thread 和 token usage。
 - 已新增 file-backed dispatch trace projection store specialization，支持 duplicate replay idempotence 和 redacted inspect summary。
 - Dispatch trace projection 不保存 streaming token deltas、egress payload 或 raw tool result content；仅保存 hash、destination、计数、redaction/truncation metadata 和 bounded summary fields。
+- E08.6 已新增 runtime agent graph product-view adapter over durable session logs，并迁移 TUI agent summary consumer；active turn、approval 和 transient progress 仍保持 live runtime state 边界，projection lag 不作为交互真相来源。
 
 本阶段没有引入 SQLite，也没有让 active approval/tool execution 依赖 projection。
 
 2026-06-29 审计补充：
 
 - 当前是 projection infrastructure + selected adapter adoption，不是所有 TUI/product views 全面 projection-first。
-- E08.6 跟踪下一步：审计并迁移适合的历史/审计产品视图，同时保持 active turn、approval 和 transient progress 使用 live runtime state。
+- E08.5 SQLite/materialized view 继续 gated：只有桌面端、server 或跨会话查询出现真实查询压力，且 file-backed durable replay 不再足够时才升级。
 
 ## 11. Open Questions
 

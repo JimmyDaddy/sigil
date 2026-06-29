@@ -1,6 +1,6 @@
 # RFC-0010 Structured Compaction and Task Memory
 
-状态：draft / E10.1/E10.2/E10.5 implemented / E10.6 planned
+状态：draft / E10.1-E10.6 implemented / productization remains
 
 创建日期：2026-06-28
 
@@ -105,20 +105,25 @@ It should not replay every old tool output into transcript.
   typed memory continue to load from the legacy text summary.
 - Deterministic extraction builds `TaskMemoryV1` from durable/control events
   without inventing verification evidence from model text.
+- Model-assisted task memory import preserves `model_generated=true`,
+  `verified=false`, confidence and source event metadata instead of creating
+  evidence.
+- TaskMemoryV1 can be converted into RFC-0006 ContextItems with TaskDigest
+  source, trust/sensitivity labels, token cost and durable event provenance.
 - TUI session provider view now shows a compact memory inspect block when typed
   memory exists, covering objective, decisions, files changed, checks run and
   unresolved issues without replaying old tool output.
+- Default store-backed compaction attaches deterministic `TaskMemoryV1` when
+  the durable stream has workspace snapshot evidence; store-less or
+  insufficient-evidence sessions keep textual fallback.
 
 Productization remains:
 
-- Default compaction flow still needs E10.6 to attach deterministic
-  `TaskMemoryV1` automatically when durable evidence exists. Until then, the
-  inspect view may be empty for sessions whose latest compaction record has
-  `task_memory: None`.
-- Model-assisted memory generation and sourced/unverified markings for model
-  summaries are still gated behind the optional model-summary slice.
-- Context Engine retrieval integration remains gated until RFC-0006 retrieval
-  adoption needs long-term task memory.
+- Typed memory remains evidence-referencing, not a fact source: compaction and
+  model summaries cannot create verification evidence or change completion
+  verdicts.
+- Cross-session retention, memory editing and branch/worktree invalidation UX
+  remain future productization topics.
 - Memory editing is intentionally out of scope.
 
 ## 9. Acceptance Criteria

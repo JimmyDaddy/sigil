@@ -1,6 +1,6 @@
 # RFC-0007 Task DAG and Isolated Agent Workflows
 
-状态：draft / E07.1/E07.3/E07.4 implemented / E07.2 planned / E07.5 gated
+状态：draft / E07.1-E07.4 implemented / E07.5 gated
 
 创建日期：2026-06-28
 
@@ -114,9 +114,9 @@ Main task UI should keep one recommended action per state, such as `continue`, `
 ## 9.1 Implementation Progress
 
 - E07.1 implemented plan schema, dependency metadata and durable graph projection.
+- E07.2 implemented read-only ready queue batching with concurrency budget, running-write exclusion, sequential write handoff and shared-read-only write denial coverage.
 - E07.3 implemented review / verify state separation while keeping system verification authoritative.
 - E07.4 implemented bounded plan versions and `Superseded` projection semantics: accepting a newer plan version marks older plan versions superseded, preserves completed step history, marks unfinished old-plan steps as `Superseded`, clears current-step pointers to superseded plans, and surfaces the state in TUI summaries.
-- E07.2 read-only ready queue concurrency remains the next executable slice.
 - E07.5 write isolation remains gated until changeset/worktree isolation is ready.
 
 ## 10. Acceptance Criteria
