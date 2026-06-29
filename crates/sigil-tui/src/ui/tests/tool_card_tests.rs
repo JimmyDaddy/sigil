@@ -487,6 +487,18 @@ fn tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation() {
         summary: Some("0 lines · 0 B".to_owned()),
         metadata: ToolCardMetadata {
             exit_code: Some(0),
+            execution_backend: Some("docker".to_owned()),
+            execution_network_policy: Some("denied".to_owned()),
+            ..ToolCardMetadata::default()
+        },
+        ..base_summary("bash")
+    };
+    let timed_out = ToolCardRender {
+        is_error: true,
+        error_kind: Some("timeout".to_owned()),
+        metadata: ToolCardMetadata {
+            execution_timeout_source: Some("wall_clock".to_owned()),
+            execution_cleanup_status: Some("completed".to_owned()),
             ..ToolCardMetadata::default()
         },
         ..base_summary("bash")
@@ -526,6 +538,16 @@ fn tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation() {
     assert_eq!(
         tool_display_summary(&no_output).as_deref(),
         Some("(no output)")
+    );
+    assert_eq!(
+        build_tool_card_display(&no_output).status.detail.as_deref(),
+        Some("exit 0 · docker network denied")
+    );
+    let timeout_display = build_tool_card_display(&timed_out);
+    assert_eq!(timeout_display.status.label, "TIMEOUT");
+    assert_eq!(
+        timeout_display.status.detail.as_deref(),
+        Some("timeout wall_clock · cleanup completed")
     );
 
     let diff_text = plain_text(&diff_lines);
@@ -1356,7 +1378,15 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
     let metadata = parse_tool_metadata(&json!({
         "details": {
             "mcp": {"server": "filesystem", "tool": "stat", "trust_class": "workspace"},
-            "code_intelligence": {"server": "rust-analyzer", "capability": "workspace/symbol", "returned": 2, "total": 4}
+            "code_intelligence": {"server": "rust-analyzer", "capability": "workspace/symbol", "returned": 2, "total": 4},
+            "execution": {
+                "backend": "docker",
+                "network": {"policy": "denied"},
+                "resources": {
+                    "timeout_source": "wall_clock",
+                    "cleanup": {"status": "completed"}
+                }
+            }
         }
     }));
     let subjects = parse_mcp_call_subjects(Some(&json!({
@@ -1388,6 +1418,16 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
     assert_eq!(metadata.code_server.as_deref(), Some("rust-analyzer"));
     assert_eq!(metadata.returned_entries, Some(2));
     assert_eq!(metadata.total_entries, Some(4));
+    assert_eq!(metadata.execution_backend.as_deref(), Some("docker"));
+    assert_eq!(metadata.execution_network_policy.as_deref(), Some("denied"));
+    assert_eq!(
+        metadata.execution_timeout_source.as_deref(),
+        Some("wall_clock")
+    );
+    assert_eq!(
+        metadata.execution_cleanup_status.as_deref(),
+        Some("completed")
+    );
     assert_eq!(subjects, (None, None, None));
     assert_eq!(ToolPreviewKind::Markdown.label(), "md");
     assert_eq!(ToolPreviewKind::Json.description(), "structured preview");

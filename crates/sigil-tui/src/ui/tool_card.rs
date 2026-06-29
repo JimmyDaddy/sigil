@@ -2106,6 +2106,10 @@ struct ToolCardMetadata {
     code_capability: Option<String>,
     returned_entries: Option<u64>,
     total_entries: Option<u64>,
+    execution_backend: Option<String>,
+    execution_network_policy: Option<String>,
+    execution_timeout_source: Option<String>,
+    execution_cleanup_status: Option<String>,
     terminal_task_id: Option<String>,
     terminal_status: Option<String>,
     terminal_command: Option<String>,
@@ -2184,16 +2188,47 @@ fn tool_display_status(summary: &ToolCardRender) -> ToolCardDisplayStatus {
         match summary.error_kind.as_deref() {
             Some("approval_denied") | Some("permission_denied") => "DENIED",
             Some("interrupted") => "INTERRUPTED",
+            Some("timeout") => "TIMEOUT",
             _ => "ERROR",
         }
     } else {
         "OK"
     };
     let detail = if tool_name_matches(&summary.tool_name, "bash") {
-        summary
+        let mut details = Vec::new();
+        if let Some(code) = summary.metadata.exit_code {
+            details.push(format!("exit {code}"));
+        }
+        if let Some(network_policy) = &summary.metadata.execution_network_policy {
+            let network_label = summary
+                .metadata
+                .execution_backend
+                .as_deref()
+                .map(|backend| format!("{backend} network {network_policy}"))
+                .unwrap_or_else(|| format!("network {network_policy}"));
+            details.push(network_label);
+        }
+        if let Some(timeout_source) = summary
             .metadata
-            .exit_code
-            .map(|code| format!("exit {code}"))
+            .execution_timeout_source
+            .as_deref()
+            .filter(|source| *source != "none")
+        {
+            details.push(format!("timeout {timeout_source}"));
+        }
+        if let Some(cleanup_status) = summary
+            .metadata
+            .execution_cleanup_status
+            .as_deref()
+            .filter(|status| *status != "not_needed")
+        {
+            details.push(format!("cleanup {cleanup_status}"));
+        }
+        if details.is_empty() {
+            None
+        } else {
+            Some(details.join(" · "))
+        }
     } else {
         summary
             .metadata
@@ -3026,6 +3061,30 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
                     .and_then(|details| details.get("total"))
                     .and_then(Value::as_u64)
             }),
+        execution_backend: details
+            .and_then(|details| details.get("execution"))
+            .and_then(|execution| execution.get("backend"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        execution_network_policy: details
+            .and_then(|details| details.get("execution"))
+            .and_then(|execution| execution.get("network"))
+            .and_then(|network| network.get("policy"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        execution_timeout_source: details
+            .and_then(|details| details.get("execution"))
+            .and_then(|execution| execution.get("resources"))
+            .and_then(|resources| resources.get("timeout_source"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        execution_cleanup_status: details
+            .and_then(|details| details.get("execution"))
+            .and_then(|execution| execution.get("resources"))
+            .and_then(|resources| resources.get("cleanup"))
+            .and_then(|cleanup| cleanup.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         terminal_task_id: terminal_context
             .and_then(|details| details.get("task_id"))
             .and_then(Value::as_str)

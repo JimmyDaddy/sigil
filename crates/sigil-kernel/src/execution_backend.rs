@@ -13,6 +13,7 @@ pub enum ExecutionBackendKind {
     #[default]
     Local,
     MacosSeatbelt,
+    LinuxBubblewrap,
     Docker,
 }
 
@@ -22,6 +23,7 @@ impl ExecutionBackendKind {
         match self {
             Self::Local => "local",
             Self::MacosSeatbelt => "macos_seatbelt",
+            Self::LinuxBubblewrap => "linux_bubblewrap",
             Self::Docker => "docker",
         }
     }
@@ -129,6 +131,189 @@ impl ExecutionBackendCapabilities {
         }
         missing
     }
+}
+
+/// Network policy outcome reported by an execution backend for a single command.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionNetworkPolicy {
+    /// Network access was intentionally allowed for this execution.
+    Allowed,
+    /// Network access was denied by a backend with network enforcement.
+    Denied,
+    /// The backend cannot enforce the requested network policy.
+    Unsupported,
+    /// No reliable network policy information was available.
+    #[default]
+    Unknown,
+}
+
+impl ExecutionNetworkPolicy {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Denied => "denied",
+            Self::Unsupported => "unsupported",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Auditable network policy receipt attached to an execution receipt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionNetworkReceipt {
+    pub policy: ExecutionNetworkPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl ExecutionNetworkReceipt {
+    #[must_use]
+    pub fn allowed(reason: impl Into<String>) -> Self {
+        Self {
+            policy: ExecutionNetworkPolicy::Allowed,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn denied(reason: impl Into<String>) -> Self {
+        Self {
+            policy: ExecutionNetworkPolicy::Denied,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            policy: ExecutionNetworkPolicy::Unsupported,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn unknown(reason: impl Into<String>) -> Self {
+        Self {
+            policy: ExecutionNetworkPolicy::Unknown,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn is_denied(&self) -> bool {
+        self.policy == ExecutionNetworkPolicy::Denied
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionResourceLimitKind {
+    WallClockTimeout,
+    CpuTime,
+    Memory,
+    ProcessCount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionResourceLimitReceipt {
+    pub kind: ExecutionResourceLimitKind,
+    pub value: String,
+}
+
+impl ExecutionResourceLimitReceipt {
+    #[must_use]
+    pub fn new(kind: ExecutionResourceLimitKind, value: impl Into<String>) -> Self {
+        Self {
+            kind,
+            value: value.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionTimeoutSource {
+    #[default]
+    None,
+    WallClock,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionCleanupStatus {
+    #[default]
+    NotNeeded,
+    Completed,
+    Failed,
+    Unsupported,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionCleanupReceipt {
+    pub status: ExecutionCleanupStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl ExecutionCleanupReceipt {
+    #[must_use]
+    pub fn not_needed() -> Self {
+        Self {
+            status: ExecutionCleanupStatus::NotNeeded,
+            reason: None,
+        }
+    }
+
+    #[must_use]
+    pub fn completed(reason: impl Into<String>) -> Self {
+        Self {
+            status: ExecutionCleanupStatus::Completed,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn failed(reason: impl Into<String>) -> Self {
+        Self {
+            status: ExecutionCleanupStatus::Failed,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn unsupported(reason: impl Into<String>) -> Self {
+        Self {
+            status: ExecutionCleanupStatus::Unsupported,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[must_use]
+    pub fn unknown(reason: impl Into<String>) -> Self {
+        Self {
+            status: ExecutionCleanupStatus::Unknown,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ExecutionResourceReceipt {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied_limits: Vec<ExecutionResourceLimitReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsupported_limits: Vec<ExecutionResourceLimitReceipt>,
+    #[serde(default)]
+    pub timeout_source: ExecutionTimeoutSource,
+    #[serde(default)]
+    pub cleanup: ExecutionCleanupReceipt,
 }
 
 /// User-configurable execution policy.
@@ -516,6 +701,12 @@ pub struct ExecutionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     pub timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_count_limit: Option<u32>,
 }
 
 impl ExecutionRequest {
@@ -530,6 +721,12 @@ impl ExecutionRequest {
         }
         (self.timeout_secs > 0).then(|| Duration::from_secs(self.timeout_secs))
     }
+
+    #[must_use]
+    pub fn timeout_millis(&self) -> Option<u64> {
+        self.timeout_ms
+            .or_else(|| (self.timeout_secs > 0).then(|| self.timeout_secs.saturating_mul(1000)))
+    }
 }
 
 /// Result captured by an execution backend.
@@ -538,6 +735,10 @@ impl ExecutionRequest {
 pub struct ExecutionReceipt {
     pub backend: ExecutionBackendKind,
     pub capabilities: ExecutionBackendCapabilities,
+    #[serde(default)]
+    pub network: ExecutionNetworkReceipt,
+    #[serde(default)]
+    pub resources: ExecutionResourceReceipt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default)]

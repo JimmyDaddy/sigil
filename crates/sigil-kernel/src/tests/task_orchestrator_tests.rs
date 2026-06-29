@@ -74,6 +74,8 @@ impl ExecutionBackend for FakeTaskExecutionBackend {
             Ok(ExecutionReceipt {
                 backend: ExecutionBackendKind::Local,
                 capabilities: ExecutionBackendCapabilities::default(),
+                network: Default::default(),
+                resources: Default::default(),
                 exit_code: if failed { Some(1) } else { Some(0) },
                 stdout: format!("fake backend executed {}\n", request.program).into_bytes(),
                 stderr: if failed {
@@ -4017,6 +4019,7 @@ fn task_test_verification_receipt(
             sandbox_profile_hash: "sandbox".to_owned(),
             execution_backend: None,
             execution_backend_capabilities: None,
+            execution_network: Default::default(),
             workspace_trust_snapshot_id: "trust".to_owned(),
             approval_event_id: None,
             sandbox_decision_id: None,

@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DurableEventType, EventClass, EventId, ExecutionBackend, ExecutionBackendCapabilities,
-    ExecutionBackendKind, ExecutionRequest, Session, SessionId, StoredEvent,
-    WorkspaceMutationDetected,
+    ExecutionBackendKind, ExecutionNetworkReceipt, ExecutionRequest, ExecutionResourceReceipt,
+    Session, SessionId, StoredEvent, WorkspaceMutationDetected,
     session::{ControlEntry, SessionLogEntry},
     stable_event_uuid,
 };
@@ -1497,6 +1497,8 @@ pub struct VerificationBinding {
     pub execution_backend: Option<ExecutionBackendKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_backend_capabilities: Option<ExecutionBackendCapabilities>,
+    #[serde(default)]
+    pub execution_network: ExecutionNetworkReceipt,
     pub workspace_trust_snapshot_id: WorkspaceTrustSnapshotId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_event_id: Option<EventId>,
@@ -2449,9 +2451,11 @@ pub async fn run_verification_check(
                 request.policy.sandbox_profile,
                 command_output.backend,
                 command_output.backend_capabilities,
+                &command_output.network,
             ),
             execution_backend: Some(command_output.backend),
             execution_backend_capabilities: Some(command_output.backend_capabilities),
+            execution_network: command_output.network.clone(),
             workspace_trust_snapshot_id: request.workspace_trust_snapshot_id,
             approval_event_id,
             sandbox_decision_id,
@@ -2470,6 +2474,8 @@ pub async fn run_verification_check(
 struct CheckCommandOutput {
     backend: ExecutionBackendKind,
     backend_capabilities: ExecutionBackendCapabilities,
+    network: ExecutionNetworkReceipt,
+    resources: ExecutionResourceReceipt,
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
@@ -2502,6 +2508,9 @@ async fn execute_check_command(
         timeout_secs: timeout_ms
             .map(|timeout_ms| timeout_ms.saturating_add(999) / 1000)
             .unwrap_or(0),
+        cpu_time_ms: None,
+        memory_limit_bytes: None,
+        process_count_limit: None,
     };
     let receipt = execution_backend.execute(request).await.with_context(|| {
         format!(
@@ -2513,6 +2522,8 @@ async fn execute_check_command(
     Ok(CheckCommandOutput {
         backend: receipt.backend,
         backend_capabilities: receipt.capabilities,
+        network: receipt.network,
+        resources: receipt.resources,
         exit_code: receipt.exit_code,
         stdout: truncated_lossy(&receipt.stdout),
         stderr: truncated_lossy(&receipt.stderr),
@@ -2576,6 +2587,8 @@ fn append_command_finished_event(
             "elapsed_ms": elapsed_ms,
             "execution_backend": command_output.backend,
             "execution_backend_capabilities": command_output.backend_capabilities,
+            "execution_network": command_output.network,
+            "execution_resources": command_output.resources,
             "stdout_preview": command_output.stdout,
             "stderr_preview": command_output.stderr,
         }),
@@ -2714,6 +2727,7 @@ fn sandbox_profile_hash_for_execution(
     requirement: SandboxProfileRequirement,
     backend: ExecutionBackendKind,
     capabilities: ExecutionBackendCapabilities,
+    network: &ExecutionNetworkReceipt,
 ) -> SandboxProfileHash {
     let filesystem_isolation = capability_bit("filesystem", capabilities.filesystem_isolation);
     let network_isolation = capability_bit("network", capabilities.network_isolation);
@@ -2732,10 +2746,11 @@ fn sandbox_profile_hash_for_execution(
             resource_limits.as_str(),
             persistent_pty.as_str(),
             workspace_snapshot.as_str(),
+            network.policy.as_str(),
         ],
         "",
         "",
-        "v2",
+        "v3",
     )
 }
 
@@ -2853,8 +2868,29 @@ fn receipt_has_matching_sandbox_backend(
         return false;
     };
     capabilities.supports_required_sandbox()
+        && receipt_network_is_consistent_with_capabilities(
+            &receipt.binding.execution_network,
+            capabilities,
+        )
         && receipt.binding.sandbox_profile_hash
-            == sandbox_profile_hash_for_execution(requirement, backend, capabilities)
+            == sandbox_profile_hash_for_execution(
+                requirement,
+                backend,
+                capabilities,
+                &receipt.binding.execution_network,
+            )
+}
+
+fn receipt_network_is_consistent_with_capabilities(
+    network: &ExecutionNetworkReceipt,
+    capabilities: ExecutionBackendCapabilities,
+) -> bool {
+    match network.policy {
+        crate::ExecutionNetworkPolicy::Denied => capabilities.network_isolation,
+        crate::ExecutionNetworkPolicy::Allowed => true,
+        crate::ExecutionNetworkPolicy::Unsupported => !capabilities.network_isolation,
+        crate::ExecutionNetworkPolicy::Unknown => false,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

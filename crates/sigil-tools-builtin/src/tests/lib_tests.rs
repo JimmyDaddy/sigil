@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use sigil_kernel::{
     ChangeSet, ChangeSetFile, ChangeSetFileAction, ChangeSetId, ChangeSetRisk, DurableEventType,
-    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionConfig,
-    ExecutionIsolationPolicy, ExecutionReceipt, ExecutionRequest, JsonlSessionStore,
+    ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
+    ExecutionConfig, ExecutionIsolationPolicy, ExecutionNetworkPolicy, ExecutionReceipt,
+    ExecutionRequest, ExecutionResourceLimitKind, ExecutionTimeoutSource, JsonlSessionStore,
     MutationEventRecorder, SessionStreamRecord, TerminalExecutionBackendCapabilities,
     TerminalExecutionBackendKind, TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId,
     TerminalTaskStatus, Tool, ToolAccess, ToolCall, ToolContext, ToolErrorKind, ToolOperation,
@@ -20,10 +21,10 @@ use tokio::time::{Duration, sleep};
 
 use super::{
     ApplyChangeSetTool, BashTool, BuiltinToolPaths, ChangeSetArtifactStore, DeleteFileTool,
-    DockerExecutionBackend, EditFileTool, GlobTool, GrepTool, ListTool, LocalExecutionBackend,
-    MacosSeatbeltExecutionBackend, ReadFileTool, TerminalInputTool, TerminalProcessManagers,
-    TerminalStartRequest, TerminalStartTool, WriteFileTool, register_builtin_tools,
-    register_builtin_tools_with_paths,
+    DockerExecutionBackend, EditFileTool, GlobTool, GrepTool, LinuxBubblewrapExecutionBackend,
+    ListTool, LocalExecutionBackend, MacosSeatbeltExecutionBackend, ReadFileTool,
+    TerminalInputTool, TerminalProcessManagers, TerminalStartRequest, TerminalStartTool,
+    WriteFileTool, register_builtin_tools, register_builtin_tools_with_paths,
 };
 
 use serial_test::serial;
@@ -141,6 +142,158 @@ fn macos_seatbelt_backend_does_not_satisfy_offline_build_profile() {
 }
 
 #[test]
+fn linux_bubblewrap_backend_declares_enforced_mvp_capabilities() {
+    let backend = LinuxBubblewrapExecutionBackend::new(PathBuf::from("/usr/bin/bwrap"), false);
+    let capabilities = backend.capabilities();
+
+    assert_eq!(backend.kind(), ExecutionBackendKind::LinuxBubblewrap);
+    assert!(capabilities.filesystem_isolation);
+    assert!(capabilities.network_isolation);
+    assert!(capabilities.process_isolation);
+    assert!(!capabilities.resource_limits);
+    assert!(!capabilities.persistent_pty);
+    assert!(!capabilities.workspace_snapshot);
+}
+
+#[test]
+#[cfg(not(target_os = "linux"))]
+fn linux_bubblewrap_backend_fails_closed_on_non_linux() {
+    let result = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::LinuxBubblewrap,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        ..ExecutionConfig::default()
+    });
+    let Err(error) = result else {
+        panic!("linux_bubblewrap backend must fail closed on non-Linux");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("linux_bubblewrap execution backend requires bwrap on PATH")
+            || error
+                .to_string()
+                .contains("linux_bubblewrap execution backend is only available on Linux")
+    );
+}
+
+#[test]
+fn linux_bubblewrap_args_mount_workspace_scratch_and_disable_network_by_default() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let scratch = temp.path().join("scratch");
+    fs::create_dir_all(&workspace)?;
+    fs::create_dir_all(&scratch)?;
+    let canonical_workspace = fs::canonicalize(&workspace)?;
+    let canonical_scratch = fs::canonicalize(&scratch)?;
+    let request = ExecutionRequest {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), "true".to_owned()],
+        cwd: canonical_workspace.clone(),
+        env: BTreeMap::from([(
+            "SIGIL_SCRATCH_DIR".to_owned(),
+            canonical_scratch.to_string_lossy().into_owned(),
+        )]),
+        timeout_ms: None,
+        timeout_secs: 5,
+        cpu_time_ms: None,
+        memory_limit_bytes: None,
+        process_count_limit: None,
+    };
+
+    let args = super::linux_bubblewrap_args(&canonical_workspace, &request, false)
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    let workspace_text = canonical_workspace.to_string_lossy();
+    let scratch_text = canonical_scratch.to_string_lossy();
+    assert!(args.iter().any(|arg| arg == "--unshare-net"));
+    assert!(args.windows(3).any(|window| {
+        window[0] == "--bind"
+            && window[1] == workspace_text.as_ref()
+            && window[2] == workspace_text.as_ref()
+    }));
+    assert!(args.windows(3).any(|window| {
+        window[0] == "--bind"
+            && window[1] == scratch_text.as_ref()
+            && window[2] == scratch_text.as_ref()
+    }));
+    assert!(
+        args.windows(2)
+            .any(|window| window[0] == "--chdir" && window[1] == workspace_text.as_ref())
+    );
+
+    let networked_args = super::linux_bubblewrap_args(&canonical_workspace, &request, true)
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(!networked_args.contains(&"--unshare-net".to_owned()));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires Linux host with bubblewrap user/mount namespaces and wget"]
+#[cfg(target_os = "linux")]
+async fn linux_bubblewrap_execution_backend_real_conformance() -> Result<()> {
+    let backend = super::build_execution_backend(&ExecutionConfig {
+        backend: ExecutionBackendKind::LinuxBubblewrap,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        profile: sigil_kernel::ExecutionSandboxProfile::BuildOffline,
+        ..ExecutionConfig::default()
+    })?;
+    let temp = tempfile::tempdir()?;
+    let workspace = temp.path().join("workspace");
+    fs::create_dir_all(&workspace)?;
+    fs::write(workspace.join("input.txt"), "from-host")?;
+    let external_path = temp.path().join("outside.txt");
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                concat!(
+                    "command -v wget >/dev/null || { echo missing-wget >&2; exit 8; }; ",
+                    "cat input.txt; ",
+                    "printf from-bwrap > output.txt; ",
+                    "if printf external > \"$OUTSIDE_PATH\" 2>/dev/null; ",
+                    "then echo external-write-unexpected; exit 7; ",
+                    "else echo external-write-blocked; fi; ",
+                    "if wget -q -T 2 -O - https://example.com >/dev/null 2>&1; ",
+                    "then echo network-unexpected; exit 9; ",
+                    "else echo network-blocked; fi"
+                )
+                .to_owned(),
+            ],
+            cwd: workspace.clone(),
+            env: BTreeMap::from([(
+                "OUTSIDE_PATH".to_owned(),
+                external_path.to_string_lossy().into_owned(),
+            )]),
+            timeout_ms: Some(10_000),
+            timeout_secs: 10,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        })
+        .await?;
+
+    assert_eq!(receipt.backend, ExecutionBackendKind::LinuxBubblewrap);
+    assert_eq!(receipt.network.policy, ExecutionNetworkPolicy::Denied);
+    assert_eq!(receipt.exit_code, Some(0));
+    let stdout = String::from_utf8_lossy(&receipt.stdout);
+    assert!(stdout.contains("from-host"));
+    assert!(stdout.contains("external-write-blocked"));
+    assert!(stdout.contains("network-blocked"));
+    assert_eq!(
+        fs::read_to_string(workspace.join("output.txt"))?,
+        "from-bwrap"
+    );
+    assert!(!external_path.exists());
+    Ok(())
+}
+
+#[test]
 fn docker_backend_requires_explicit_container_image() {
     let result = super::build_execution_backend(&ExecutionConfig {
         backend: ExecutionBackendKind::Docker,
@@ -254,10 +407,22 @@ async fn docker_execution_backend_builds_offline_container_command() -> Result<(
             env: BTreeMap::from([("RUST_LOG".to_owned(), "debug".to_owned())]),
             timeout_ms: None,
             timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await?;
 
     assert_eq!(receipt.backend, ExecutionBackendKind::Docker);
+    assert_eq!(receipt.network.policy, ExecutionNetworkPolicy::Denied);
+    assert!(
+        receipt
+            .network
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("--network none")
+    );
     assert_eq!(receipt.exit_code, Some(0));
     assert_eq!(String::from_utf8_lossy(&receipt.stdout), "fake-docker-ok");
     let args = fs::read_to_string(args_path)?;
@@ -268,6 +433,42 @@ async fn docker_execution_backend_builds_offline_container_command() -> Result<(
     assert!(args.contains("--network\nnone\n"));
     assert!(args.contains("--env\nRUST_LOG=debug\n"));
     assert!(args.contains("rust:1.94.1\ncargo\ntest\n-p\nsigil-kernel\n"));
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn docker_execution_backend_networked_receipt_allows_network() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let docker = temp.path().join("docker");
+    let args_path = temp.path().join("args.txt");
+    fs::write(
+        &docker,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf fake-docker-ok\n",
+            args_path.display()
+        ),
+    )?;
+    fs::set_permissions(&docker, fs::Permissions::from_mode(0o755))?;
+    let backend = DockerExecutionBackend::new(docker, "rust:1.94.1".to_owned(), true);
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "cargo".to_owned(),
+            args: vec!["test".to_owned()],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        })
+        .await?;
+
+    assert_eq!(receipt.network.policy, ExecutionNetworkPolicy::Allowed);
+    let args = fs::read_to_string(args_path)?;
+    assert!(!args.contains("--network\nnone\n"));
     Ok(())
 }
 
@@ -306,6 +507,9 @@ async fn docker_execution_backend_real_daemon_conformance() -> Result<()> {
             env: BTreeMap::new(),
             timeout_ms: Some(10_000),
             timeout_secs: 10,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await?;
 
@@ -380,15 +584,109 @@ async fn local_execution_backend_runs_command_without_sandbox_claims() -> Result
             env: BTreeMap::new(),
             timeout_ms: None,
             timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await?;
 
     assert_eq!(receipt.backend, ExecutionBackendKind::Local);
+    assert_eq!(receipt.network.policy, ExecutionNetworkPolicy::Unknown);
     assert_eq!(receipt.exit_code, Some(0));
     assert_eq!(String::from_utf8_lossy(&receipt.stdout), "backend-ok");
     assert!(receipt.stderr.is_empty());
     assert!(!receipt.timed_out);
     Ok(())
+}
+
+#[tokio::test]
+async fn execution_backend_records_timeout_cleanup_and_unsupported_limits() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let backend = LocalExecutionBackend;
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), "sleep 5".to_owned()],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_ms: Some(20),
+            timeout_secs: 1,
+            cpu_time_ms: Some(100),
+            memory_limit_bytes: Some(1024),
+            process_count_limit: Some(2),
+        })
+        .await?;
+
+    assert!(receipt.timed_out);
+    assert_eq!(
+        receipt.resources.timeout_source,
+        ExecutionTimeoutSource::WallClock
+    );
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Completed
+    );
+    assert!(receipt.resources.applied_limits.iter().any(|limit| {
+        limit.kind == ExecutionResourceLimitKind::WallClockTimeout && limit.value == "20ms"
+    }));
+    assert_eq!(receipt.resources.unsupported_limits.len(), 3);
+    assert!(receipt.resources.unsupported_limits.iter().any(|limit| {
+        limit.kind == ExecutionResourceLimitKind::CpuTime && limit.value == "100ms"
+    }));
+    assert!(receipt.resources.unsupported_limits.iter().any(|limit| {
+        limit.kind == ExecutionResourceLimitKind::Memory && limit.value == "1024 bytes"
+    }));
+    assert!(receipt.resources.unsupported_limits.iter().any(|limit| {
+        limit.kind == ExecutionResourceLimitKind::ProcessCount && limit.value == "2 processes"
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn execution_backend_timeout_cleans_process_group_children() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let pid_file = temp.path().join("child.pid");
+    let backend = LocalExecutionBackend;
+    let script = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
+
+    let receipt = backend
+        .execute(ExecutionRequest {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), script],
+            cwd: temp.path().to_path_buf(),
+            env: BTreeMap::new(),
+            timeout_ms: Some(100),
+            timeout_secs: 1,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
+        })
+        .await?;
+
+    assert!(receipt.timed_out);
+    assert_eq!(
+        receipt.resources.cleanup.status,
+        ExecutionCleanupStatus::Completed
+    );
+    let pid = fs::read_to_string(pid_file)?.trim().to_owned();
+    for _ in 0..20 {
+        if !process_is_running(&pid) {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!("child process {pid} should have been cleaned up after timeout");
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid)
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[tokio::test]
@@ -414,10 +712,14 @@ async fn macos_seatbelt_execution_backend_allows_workspace_write_and_denies_exte
             env: BTreeMap::new(),
             timeout_ms: None,
             timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await?;
 
     assert_eq!(receipt.backend, ExecutionBackendKind::MacosSeatbelt);
+    assert_eq!(receipt.network.policy, ExecutionNetworkPolicy::Unsupported);
     assert_eq!(receipt.exit_code, Some(1));
     assert_eq!(
         fs::read_to_string(workspace_root.join("allowed.txt"))?,
@@ -502,6 +804,9 @@ async fn sandbox_conformance_macos_seatbelt_enforces_filesystem_write_claim() ->
             env: BTreeMap::new(),
             timeout_ms: None,
             timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await?;
 
@@ -536,6 +841,9 @@ async fn sandbox_conformance_macos_seatbelt_missing_binary_fails_closed() -> Res
             env: BTreeMap::new(),
             timeout_ms: None,
             timeout_secs: 5,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await
         .expect_err("missing sandbox-exec should fail closed before command execution");
@@ -567,6 +875,9 @@ async fn local_execution_backend_allows_explicit_no_timeout() -> Result<()> {
             env: BTreeMap::new(),
             timeout_ms: None,
             timeout_secs: 0,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await?;
 
@@ -589,6 +900,9 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
             env: BTreeMap::new(),
             timeout_ms: Some(1),
             timeout_secs: 1,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await?;
     assert!(timed_out.timed_out);
@@ -604,6 +918,9 @@ async fn local_execution_backend_reports_timeout_and_spawn_errors() -> Result<()
             env: BTreeMap::new(),
             timeout_ms: None,
             timeout_secs: 1,
+            cpu_time_ms: None,
+            memory_limit_bytes: None,
+            process_count_limit: None,
         })
         .await
         .expect_err("missing program should surface spawn error");
@@ -634,6 +951,8 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
         ExecutionReceipt {
             backend: ExecutionBackendKind::Local,
             capabilities: ExecutionBackendCapabilities::default(),
+            network: Default::default(),
+            resources: Default::default(),
             exit_code: None,
             stdout: Vec::new(),
             stderr: Vec::new(),
@@ -651,6 +970,8 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
         ExecutionReceipt {
             backend: ExecutionBackendKind::Local,
             capabilities: ExecutionBackendCapabilities::default(),
+            network: Default::default(),
+            resources: Default::default(),
             exit_code: Some(0),
             stdout: b"stdout".to_vec(),
             stderr: b"stderr".to_vec(),
@@ -669,6 +990,8 @@ fn bash_execution_request_and_receipt_mapping_are_stable() -> Result<()> {
         ExecutionReceipt {
             backend: ExecutionBackendKind::Local,
             capabilities: ExecutionBackendCapabilities::default(),
+            network: Default::default(),
+            resources: Default::default(),
             exit_code: Some(7),
             stdout: Vec::new(),
             stderr: b"bad".to_vec(),
@@ -1830,6 +2153,10 @@ async fn bash_tool_injects_scratch_dir_env() -> Result<()> {
 
     assert!(matches!(result.status, ToolResultStatus::Ok));
     assert_eq!(result.content, "ok");
+    assert_eq!(
+        result.metadata.details["execution"]["network"]["policy"],
+        json!("unknown")
+    );
     assert_eq!(
         fs::read_to_string(temp.path().join("cache/tmp/probe"))?,
         "bash-ok"

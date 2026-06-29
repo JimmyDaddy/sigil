@@ -1,0 +1,58 @@
+name: Sandbox Conformance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN_VERSION: 1.94.1
+
+jobs:
+  linux-bubblewrap:
+    name: Linux Bubblewrap
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Bubblewrap tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap wget
+
+      - name: Host namespace diagnostics
+        run: |
+          set -euxo pipefail
+          bwrap --version
+          sysctl kernel.unprivileged_userns_clone || true
+          bwrap \
+            --die-with-parent \
+            --unshare-pid \
+            --unshare-net \
+            --ro-bind / / \
+            --proc /proc \
+            --dev /dev \
+            /bin/true
+
+      - name: Linux Bubblewrap conformance
+        run: |
+          cargo test --locked \
+            -p sigil-tools-builtin \
+            tests::linux_bubblewrap_execution_backend_real_conformance \
+            -- --ignored --exact --nocapture

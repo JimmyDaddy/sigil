@@ -104,10 +104,12 @@ pub use event::{
 pub use execution_backend::{
     ExecutionBackend, ExecutionBackendCapabilities, ExecutionBackendKind,
     ExecutionBackendSelectionDecision, ExecutionBackendSelectionDiagnostic, ExecutionCapability,
-    ExecutionCapabilityRequirements, ExecutionConfig, ExecutionCoverageLabel,
-    ExecutionCoverageSummary, ExecutionFuture, ExecutionIsolationPolicy, ExecutionReceipt,
-    ExecutionRequest, ExecutionSandboxFallback, ExecutionSandboxProfile,
-    ExecutionSandboxProfileSpec,
+    ExecutionCapabilityRequirements, ExecutionCleanupReceipt, ExecutionCleanupStatus,
+    ExecutionConfig, ExecutionCoverageLabel, ExecutionCoverageSummary, ExecutionFuture,
+    ExecutionIsolationPolicy, ExecutionNetworkPolicy, ExecutionNetworkReceipt, ExecutionReceipt,
+    ExecutionRequest, ExecutionResourceLimitKind, ExecutionResourceLimitReceipt,
+    ExecutionResourceReceipt, ExecutionSandboxFallback, ExecutionSandboxProfile,
+    ExecutionSandboxProfileSpec, ExecutionTimeoutSource,
 };
 pub use memory::{MemoryLoadReport, inspect_memory_documents};
 pub use mutation::{

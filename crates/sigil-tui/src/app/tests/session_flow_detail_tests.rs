@@ -315,6 +315,7 @@ fn render_verification_control_entries_for_audit_view() -> Result<()> {
                     sandbox_profile_hash: "sandbox-local".to_owned(),
                     execution_backend: None,
                     execution_backend_capabilities: None,
+                    execution_network: Default::default(),
                     workspace_trust_snapshot_id: "trust-1".to_owned(),
                     approval_event_id: None,
                     sandbox_decision_id: None,

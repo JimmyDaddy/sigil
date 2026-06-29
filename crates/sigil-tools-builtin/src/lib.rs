@@ -23,8 +23,10 @@ use sigil_kernel::{
     ChangeSetId, ChangeSetResult, ChangeSetResultStatus, ChangeSetRisk, ChangeSetValidation,
     ChangeSetValidationKind, ChangeSetValidationStatus, CommittedFileMutation, ExecutionBackend,
     ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionBackendSelectionDiagnostic,
-    ExecutionConfig, ExecutionFuture, ExecutionReceipt, ExecutionRequest, ExecutionSandboxFallback,
-    FileType, MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject,
+    ExecutionCleanupReceipt, ExecutionConfig, ExecutionFuture, ExecutionNetworkReceipt,
+    ExecutionReceipt, ExecutionRequest, ExecutionResourceLimitKind, ExecutionResourceLimitReceipt,
+    ExecutionResourceReceipt, ExecutionSandboxFallback, ExecutionTimeoutSource, FileType,
+    MutationBatchId, MutationBatchStatus, MutationEventRecorder, MutationSubject,
     TerminalTaskEntry, TerminalTaskId, Tool, ToolAccess, ToolCategory, ToolContext, ToolDiffStats,
     ToolErrorKind, ToolOperation, ToolPreview, ToolPreviewCapability, ToolPreviewFile,
     ToolRegistry, ToolResult, ToolResultMeta, ToolSpec, ToolSubject, ToolSubjectScope,
@@ -32,6 +34,7 @@ use sigil_kernel::{
     write_file_with_mutation_in_batch,
 };
 use similar::TextDiff;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::{process::Command, task};
 
 mod terminal_process;
@@ -205,12 +208,14 @@ impl ExecutionBackend for LocalExecutionBackend {
 #[derive(Debug, Clone)]
 pub struct MacosSeatbeltExecutionBackend {
     sandbox_exec: PathBuf,
+    network_allowed: bool,
 }
 
 impl Default for MacosSeatbeltExecutionBackend {
     fn default() -> Self {
         Self {
             sandbox_exec: PathBuf::from("/usr/bin/sandbox-exec"),
+            network_allowed: false,
         }
     }
 }
@@ -218,7 +223,16 @@ impl Default for MacosSeatbeltExecutionBackend {
 impl MacosSeatbeltExecutionBackend {
     #[must_use]
     pub fn new(sandbox_exec: PathBuf) -> Self {
-        Self { sandbox_exec }
+        Self {
+            sandbox_exec,
+            network_allowed: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_network_allowed(mut self, network_allowed: bool) -> Self {
+        self.network_allowed = network_allowed;
+        self
     }
 
     #[must_use]
@@ -245,7 +259,68 @@ impl ExecutionBackend for MacosSeatbeltExecutionBackend {
 
     fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
         let sandbox_exec = self.sandbox_exec.clone();
-        Box::pin(async move { macos_seatbelt_execute(sandbox_exec, request).await })
+        let network_allowed = self.network_allowed;
+        Box::pin(
+            async move { macos_seatbelt_execute(sandbox_exec, network_allowed, request).await },
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LinuxBubblewrapExecutionBackend {
+    bwrap: PathBuf,
+    network_allowed: bool,
+}
+
+impl Default for LinuxBubblewrapExecutionBackend {
+    fn default() -> Self {
+        Self {
+            bwrap: PathBuf::from("bwrap"),
+            network_allowed: false,
+        }
+    }
+}
+
+impl LinuxBubblewrapExecutionBackend {
+    #[must_use]
+    pub fn new(bwrap: PathBuf, network_allowed: bool) -> Self {
+        Self {
+            bwrap,
+            network_allowed,
+        }
+    }
+
+    #[must_use]
+    pub fn bwrap_path(&self) -> &Path {
+        &self.bwrap
+    }
+
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        cfg!(target_os = "linux") && self.bwrap.is_file()
+    }
+}
+
+impl ExecutionBackend for LinuxBubblewrapExecutionBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::LinuxBubblewrap
+    }
+
+    fn capabilities(&self) -> ExecutionBackendCapabilities {
+        ExecutionBackendCapabilities {
+            filesystem_isolation: true,
+            network_isolation: true,
+            process_isolation: true,
+            resource_limits: false,
+            persistent_pty: false,
+            workspace_snapshot: false,
+        }
+    }
+
+    fn execute(&self, request: ExecutionRequest) -> ExecutionFuture<'_> {
+        let bwrap = self.bwrap.clone();
+        let network_allowed = self.network_allowed;
+        Box::pin(async move { linux_bubblewrap_execute(bwrap, network_allowed, request).await })
     }
 }
 
@@ -311,8 +386,29 @@ pub fn build_execution_backend(config: &ExecutionConfig) -> Result<Arc<dyn Execu
     let backend: Arc<dyn ExecutionBackend> = match config.backend {
         ExecutionBackendKind::Local => Arc::new(LocalExecutionBackend),
         ExecutionBackendKind::MacosSeatbelt => {
-            let backend = MacosSeatbeltExecutionBackend::default();
+            let backend = MacosSeatbeltExecutionBackend::default()
+                .with_network_allowed(config.profile_spec().network_allowed);
             if let Err(error) = ensure_macos_seatbelt_available(&backend) {
+                return fallback_or_error(
+                    config,
+                    ExecutionBackendSelectionDiagnostic::unavailable(config, error.to_string()),
+                );
+            }
+            Arc::new(backend)
+        }
+        ExecutionBackendKind::LinuxBubblewrap => {
+            let Some(bwrap) = find_executable_on_path("bwrap") else {
+                return fallback_or_error(
+                    config,
+                    ExecutionBackendSelectionDiagnostic::unavailable(
+                        config,
+                        "linux_bubblewrap execution backend requires bwrap on PATH",
+                    ),
+                );
+            };
+            let backend =
+                LinuxBubblewrapExecutionBackend::new(bwrap, config.profile_spec().network_allowed);
+            if let Err(error) = ensure_linux_bubblewrap_available(&backend) {
                 return fallback_or_error(
                     config,
                     ExecutionBackendSelectionDiagnostic::unavailable(config, error.to_string()),
@@ -372,6 +468,40 @@ fn ensure_macos_seatbelt_available(backend: &MacosSeatbeltExecutionBackend) -> R
     Ok(())
 }
 
+fn ensure_linux_bubblewrap_available(backend: &LinuxBubblewrapExecutionBackend) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        bail!("linux_bubblewrap execution backend is only available on Linux");
+    }
+    if !backend.is_available() {
+        bail!(
+            "linux_bubblewrap execution backend requires {}",
+            backend.bwrap_path().display()
+        );
+    }
+    bubblewrap_check(
+        backend.bwrap_path(),
+        &["--version"],
+        "bubblewrap executable is unavailable",
+    )?;
+    bubblewrap_check(
+        backend.bwrap_path(),
+        &[
+            "--die-with-parent",
+            "--unshare-pid",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "/bin/true",
+        ],
+        "bubblewrap namespace smoke test failed",
+    )?;
+    Ok(())
+}
+
 fn ensure_docker_available(backend: &DockerExecutionBackend) -> Result<()> {
     if !backend.is_available() {
         bail!(
@@ -392,6 +522,24 @@ fn ensure_docker_available(backend: &DockerExecutionBackend) -> Result<()> {
             backend.image()
         ),
     )?;
+    Ok(())
+}
+
+fn bubblewrap_check(bwrap: &Path, args: &[&str], failure_context: &str) -> Result<()> {
+    let output =
+        command_output_with_timeout(bwrap, args, Duration::from_secs(3)).with_context(|| {
+            format!("failed to run bubblewrap availability check: {failure_context}")
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim()
+        } else {
+            stdout.trim()
+        };
+        bail!("{failure_context}: {detail}");
+    }
     Ok(())
 }
 
@@ -522,11 +670,19 @@ async fn local_execute(
         .envs(&request.env)
         .kill_on_drop(true);
 
-    command_output_to_receipt(backend, capabilities, command, request.timeout_duration()).await
+    command_output_to_receipt(
+        backend,
+        capabilities,
+        ExecutionNetworkReceipt::unknown("local backend does not report network enforcement"),
+        command,
+        &request,
+    )
+    .await
 }
 
 async fn macos_seatbelt_execute(
     sandbox_exec: PathBuf,
+    network_allowed: bool,
     request: ExecutionRequest,
 ) -> Result<ExecutionReceipt> {
     if !cfg!(target_os = "macos") {
@@ -554,13 +710,117 @@ async fn macos_seatbelt_execute(
         .envs(&request.env)
         .kill_on_drop(true);
 
+    let network = if network_allowed {
+        ExecutionNetworkReceipt::allowed("profile allows network access")
+    } else {
+        ExecutionNetworkReceipt::unsupported(
+            "macos_seatbelt backend does not enforce network denial",
+        )
+    };
     command_output_to_receipt(
         ExecutionBackendKind::MacosSeatbelt,
         capabilities,
+        network,
         command,
-        request.timeout_duration(),
+        &request,
     )
     .await
+}
+
+async fn linux_bubblewrap_execute(
+    bwrap: PathBuf,
+    network_allowed: bool,
+    request: ExecutionRequest,
+) -> Result<ExecutionReceipt> {
+    if !cfg!(target_os = "linux") {
+        bail!("linux_bubblewrap execution backend is only available on Linux");
+    }
+    if !bwrap.is_file() {
+        bail!(
+            "linux_bubblewrap execution backend requires {}",
+            bwrap.display()
+        );
+    }
+
+    let canonical_cwd = fs::canonicalize(&request.cwd)
+        .with_context(|| format!("failed to canonicalize cwd {}", request.cwd.display()))?;
+    let capabilities = LinuxBubblewrapExecutionBackend::default().capabilities();
+
+    let mut command = Command::new(&bwrap);
+    command
+        .args(linux_bubblewrap_args(
+            &canonical_cwd,
+            &request,
+            network_allowed,
+        ))
+        .arg(&request.program)
+        .args(&request.args)
+        .current_dir(&canonical_cwd)
+        .envs(&request.env)
+        .kill_on_drop(true);
+
+    let network = if network_allowed {
+        ExecutionNetworkReceipt::allowed("profile allows network access")
+    } else {
+        ExecutionNetworkReceipt::denied("bubblewrap uses --unshare-net")
+    };
+    command_output_to_receipt(
+        ExecutionBackendKind::LinuxBubblewrap,
+        capabilities,
+        network,
+        command,
+        &request,
+    )
+    .await
+}
+
+fn linux_bubblewrap_args(
+    canonical_cwd: &Path,
+    request: &ExecutionRequest,
+    network_allowed: bool,
+) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("--die-with-parent"),
+        OsString::from("--new-session"),
+        OsString::from("--unshare-pid"),
+    ];
+    if !network_allowed {
+        args.push(OsString::from("--unshare-net"));
+    }
+    args.extend([
+        OsString::from("--ro-bind"),
+        OsString::from("/"),
+        OsString::from("/"),
+        OsString::from("--bind"),
+        canonical_cwd.as_os_str().to_owned(),
+        canonical_cwd.as_os_str().to_owned(),
+        OsString::from("--tmpfs"),
+        OsString::from("/tmp"),
+        OsString::from("--proc"),
+        OsString::from("/proc"),
+        OsString::from("--dev"),
+        OsString::from("/dev"),
+    ]);
+    if let Some(scratch_dir) = request
+        .env
+        .get(SIGIL_SCRATCH_DIR_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .and_then(|path| fs::canonicalize(path).ok())
+        .filter(|path| !path.starts_with(canonical_cwd))
+    {
+        args.extend([
+            OsString::from("--bind"),
+            scratch_dir.as_os_str().to_owned(),
+            scratch_dir.as_os_str().to_owned(),
+        ]);
+    }
+    args.extend([
+        OsString::from("--chdir"),
+        canonical_cwd.as_os_str().to_owned(),
+        OsString::from("--"),
+    ]);
+    args
 }
 
 async fn docker_execute(
@@ -599,11 +859,17 @@ async fn docker_execute(
         .args(&request.args)
         .kill_on_drop(true);
 
+    let network = if network_allowed {
+        ExecutionNetworkReceipt::allowed("profile allows network access")
+    } else {
+        ExecutionNetworkReceipt::denied("docker run uses --network none")
+    };
     command_output_to_receipt(
         ExecutionBackendKind::Docker,
         DockerExecutionBackend::new(docker, String::new(), network_allowed).capabilities(),
+        network,
         command,
-        request.timeout_duration(),
+        &request,
     )
     .await
 }
@@ -660,34 +926,218 @@ fn find_executable_on_path(program: &str) -> Option<PathBuf> {
 async fn command_output_to_receipt(
     backend: ExecutionBackendKind,
     capabilities: ExecutionBackendCapabilities,
+    network: ExecutionNetworkReceipt,
     mut command: Command,
-    timeout: Option<std::time::Duration>,
+    request: &ExecutionRequest,
 ) -> Result<ExecutionReceipt> {
-    let output = match timeout {
-        Some(timeout) => match tokio::time::timeout(timeout, command.output()).await {
-            Ok(output) => output?,
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    configure_execution_process_group(&mut command);
+
+    let mut child = command.spawn()?;
+    let process_id = child.id();
+    let stdout_task = child
+        .stdout
+        .take()
+        .map(|stdout| tokio::spawn(read_pipe_to_end(stdout)));
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(read_pipe_to_end(stderr)));
+
+    let (exit_code, timed_out, cleanup) = match request.timeout_duration() {
+        Some(timeout) => match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => (status?.code(), false, ExecutionCleanupReceipt::not_needed()),
             Err(_) => {
-                return Ok(ExecutionReceipt {
-                    backend,
-                    capabilities,
-                    exit_code: None,
-                    stdout: Vec::new(),
-                    stderr: Vec::new(),
-                    timed_out: true,
-                });
+                let cleanup = cleanup_timed_out_child(&mut child, process_id).await;
+                (None, true, cleanup)
             }
         },
-        None => command.output().await?,
+        None => (
+            child.wait().await?.code(),
+            false,
+            ExecutionCleanupReceipt::not_needed(),
+        ),
     };
+    let stdout = join_pipe_task(stdout_task).await?;
+    let stderr = join_pipe_task(stderr_task).await?;
+    let resources = resource_receipt_for_request(request, timed_out, cleanup);
 
     Ok(ExecutionReceipt {
         backend,
         capabilities,
-        exit_code: output.status.code(),
-        stdout: output.stdout,
-        stderr: output.stderr,
-        timed_out: false,
+        network,
+        resources,
+        exit_code,
+        stdout,
+        stderr,
+        timed_out,
     })
+}
+
+async fn read_pipe_to_end<R>(mut pipe: R) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut output = Vec::new();
+    pipe.read_to_end(&mut output).await?;
+    Ok(output)
+}
+
+async fn join_pipe_task(task: Option<tokio::task::JoinHandle<Result<Vec<u8>>>>) -> Result<Vec<u8>> {
+    match task {
+        Some(task) => task.await.context("execution output reader task failed")?,
+        None => Ok(Vec::new()),
+    }
+}
+
+fn resource_receipt_for_request(
+    request: &ExecutionRequest,
+    timed_out: bool,
+    cleanup: ExecutionCleanupReceipt,
+) -> ExecutionResourceReceipt {
+    let mut applied_limits = Vec::new();
+    if let Some(timeout_ms) = request.timeout_millis() {
+        applied_limits.push(ExecutionResourceLimitReceipt::new(
+            ExecutionResourceLimitKind::WallClockTimeout,
+            format!("{timeout_ms}ms"),
+        ));
+    }
+    let mut unsupported_limits = Vec::new();
+    if let Some(cpu_time_ms) = request.cpu_time_ms {
+        unsupported_limits.push(ExecutionResourceLimitReceipt::new(
+            ExecutionResourceLimitKind::CpuTime,
+            format!("{cpu_time_ms}ms"),
+        ));
+    }
+    if let Some(memory_limit_bytes) = request.memory_limit_bytes {
+        unsupported_limits.push(ExecutionResourceLimitReceipt::new(
+            ExecutionResourceLimitKind::Memory,
+            format!("{memory_limit_bytes} bytes"),
+        ));
+    }
+    if let Some(process_count_limit) = request.process_count_limit {
+        unsupported_limits.push(ExecutionResourceLimitReceipt::new(
+            ExecutionResourceLimitKind::ProcessCount,
+            format!("{process_count_limit} processes"),
+        ));
+    }
+    ExecutionResourceReceipt {
+        applied_limits,
+        unsupported_limits,
+        timeout_source: if timed_out {
+            ExecutionTimeoutSource::WallClock
+        } else {
+            ExecutionTimeoutSource::None
+        },
+        cleanup,
+    }
+}
+
+async fn cleanup_timed_out_child(
+    child: &mut tokio::process::Child,
+    process_id: Option<u32>,
+) -> ExecutionCleanupReceipt {
+    #[cfg(unix)]
+    if let Some(process_id) = process_id
+        && let Err(error) = send_signal_to_process_group(process_id, "TERM").await
+    {
+        let kill_result = force_kill_child(child, Some(process_id)).await;
+        return ExecutionCleanupReceipt::failed(format!(
+            "failed to send SIGTERM to process group {process_id}: {error}; {}",
+            cleanup_result_reason(&kill_result)
+        ));
+    }
+
+    match tokio::time::timeout(Duration::from_millis(500), child.wait()).await {
+        Ok(Ok(_)) => ExecutionCleanupReceipt::completed("process exited after timeout cleanup"),
+        Ok(Err(error)) => {
+            ExecutionCleanupReceipt::failed(format!("process cleanup wait failed: {error}"))
+        }
+        Err(_) => force_kill_after_grace(child, process_id).await,
+    }
+}
+
+async fn force_kill_after_grace(
+    child: &mut tokio::process::Child,
+    process_id: Option<u32>,
+) -> ExecutionCleanupReceipt {
+    #[cfg(unix)]
+    if let Some(process_id) = process_id {
+        match send_signal_to_process_group(process_id, "KILL").await {
+            Ok(()) => match child.wait().await {
+                Ok(_) => {
+                    return ExecutionCleanupReceipt::completed(format!(
+                        "sent SIGKILL to process group {process_id}"
+                    ));
+                }
+                Err(error) => {
+                    return ExecutionCleanupReceipt::failed(format!(
+                        "sent SIGKILL to process group {process_id}; wait failed: {error}"
+                    ));
+                }
+            },
+            Err(error) => {
+                let fallback = force_kill_child(child, Some(process_id)).await;
+                return ExecutionCleanupReceipt::failed(format!(
+                    "failed to send SIGKILL to process group {process_id}: {error}; {}",
+                    cleanup_result_reason(&fallback)
+                ));
+            }
+        }
+    }
+    force_kill_child(child, process_id).await
+}
+
+async fn force_kill_child(
+    child: &mut tokio::process::Child,
+    process_id: Option<u32>,
+) -> ExecutionCleanupReceipt {
+    match child.start_kill() {
+        Ok(()) => match child.wait().await {
+            Ok(_) => ExecutionCleanupReceipt::completed(format!(
+                "killed child process {}",
+                process_id.unwrap_or_default()
+            )),
+            Err(error) => {
+                ExecutionCleanupReceipt::failed(format!("child process kill wait failed: {error}"))
+            }
+        },
+        Err(error) => {
+            ExecutionCleanupReceipt::failed(format!("failed to kill child process: {error}"))
+        }
+    }
+}
+
+fn cleanup_result_reason(receipt: &ExecutionCleanupReceipt) -> String {
+    receipt
+        .reason
+        .clone()
+        .unwrap_or_else(|| format!("fallback cleanup status {:?}", receipt.status))
+}
+
+#[cfg(unix)]
+async fn send_signal_to_process_group(process_id: u32, signal: &str) -> Result<()> {
+    let status = Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(format!("-{process_id}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .status()
+        .await
+        .with_context(|| format!("failed to invoke kill -{signal} -{process_id}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("kill -{signal} -{process_id} exited with {status}");
+    }
+}
+
+fn configure_execution_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    command.process_group(0);
 }
 
 #[derive(Default)]
@@ -1864,6 +2314,9 @@ fn bash_execution_request(
         )]),
         timeout_ms: None,
         timeout_secs,
+        cpu_time_ms: None,
+        memory_limit_bytes: None,
+        process_count_limit: None,
     }
 }
 
@@ -1873,12 +2326,21 @@ fn bash_tool_result_from_execution_receipt(
     receipt: ExecutionReceipt,
 ) -> Result<ToolResult> {
     if receipt.timed_out {
-        return Ok(ToolResult::error(
+        let mut result = ToolResult::error(
             call_id,
             tool_name,
             ToolErrorKind::Timeout,
             "bash command timed out",
-        ));
+        );
+        result.metadata = ToolResultMeta {
+            exit_code: receipt.exit_code,
+            stdout_bytes: Some(receipt.stdout.len() as u64),
+            stderr_bytes: Some(receipt.stderr.len() as u64),
+            total_bytes: Some(receipt.stdout.len() as u64 + receipt.stderr.len() as u64),
+            details: execution_receipt_details(&receipt),
+            ..ToolResultMeta::default()
+        };
+        return Ok(result);
     }
     let stdout = String::from_utf8_lossy(&receipt.stdout);
     let stderr = String::from_utf8_lossy(&receipt.stderr);
@@ -1906,6 +2368,7 @@ fn bash_tool_result_from_execution_receipt(
         total_bytes: Some(receipt.stdout.len() as u64 + receipt.stderr.len() as u64),
         returned_lines: Some(limited_stdout.returned_lines + limited_stderr.returned_lines),
         total_lines: Some(limited_stdout.total_lines + limited_stderr.total_lines),
+        details: execution_receipt_details(&receipt),
         ..ToolResultMeta::default()
     };
     if receipt.exit_code == Some(0) {
@@ -1925,6 +2388,17 @@ fn bash_tool_result_from_execution_receipt(
         result.metadata = metadata;
         Ok(result)
     }
+}
+
+fn execution_receipt_details(receipt: &ExecutionReceipt) -> Value {
+    json!({
+        "execution": {
+            "backend": receipt.backend,
+            "capabilities": receipt.capabilities,
+            "network": receipt.network,
+            "resources": receipt.resources,
+        }
+    })
 }
 
 #[async_trait]

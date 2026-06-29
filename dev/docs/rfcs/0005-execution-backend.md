@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / E05.1-E05.7 implemented / E05.9 implemented with real Docker conformance / E05.16 minimal doctor implemented / productization remains
+状态：draft / E05.1-E05.7 implemented / E05.8 backend code implemented, Linux conformance pending / E05.9 implemented with real Docker conformance / E05.16 minimal doctor implemented / productization remains
 
 创建日期：2026-06-28
 
@@ -84,6 +84,7 @@ pub trait ExecutionBackend {
 - 已将 runtime 的 local tool registry 构建接入 `RootConfig.execution`。
 - 已将 verification check runner 迁移到 `ExecutionBackend::execute`，并新增毫秒级 timeout 支持，避免 RFC-0003 policy timeout 在 backend 边界丢精度。
 - 已将 `/task` orchestrator 接入 runtime 配置的 execution backend；自动或手动 `RunCheck` action 不再绕过 backend。
+- 已新增 execution network receipt：每次执行记录 `allowed` / `denied` / `unsupported` / `unknown`。Local 记录 `unknown`；macOS Seatbelt 当前记录 `unsupported`；Docker offline profile 通过 `--network none` 记录 `denied`，networked profile 记录 `allowed`。verification binding 和 `sandbox_profile_hash` 已纳入该 receipt，bash tool card 状态细节显示 network policy，避免只凭 capability bool 信任网络隔离。
 - 已增加 fail-closed policy：当配置要求 sandbox 或选择需要 sandbox 的 profile preset 时，`LocalBackend` 会拒绝构建工具 registry，而不是静默继续裸跑。
 - 已新增 coarse sandbox profile presets：`unconfined`、`workspace_write`、`build_offline`、`build_networked`。
   - `workspace_write` 和 `build_*` 要求 filesystem + process isolation。
@@ -121,6 +122,16 @@ pub trait ExecutionBackend {
   - `doctor` 输出 `execution:sandbox` 行，显示 backend、profile、fallback 和 capability summary。
   - sandbox backend 缺少配置或依赖时给出 remediation。
   - 显式 `fallback = "unconfined"` 时展示 warn，不把降级后的 local execution 宣传为 sandbox。
+- 已实现 E05.12 resource / cleanup core semantics：
+  - `ExecutionRequest` 支持 CPU time、memory、process count 请求字段；unsupported limits 不会被写成 applied。
+  - `ExecutionReceipt.resources` 记录 applied limits、unsupported limits、timeout source 和 cleanup result。
+  - Local non-interactive backend timeout path 使用 process group 做 best-effort cleanup，并把结果写入 receipt。
+  - verification durable check payload 记录 `execution_resources`，TUI bash tool card 显示 timeout/cleanup 简短事实。
+- 已实现 E05.8 Linux Bubblewrap backend code path：
+  - 新增 `backend = "linux_bubblewrap"`。
+  - backend selection 在非 Linux、缺 `bwrap` 或 namespace smoke check 失败时 fail closed。
+  - non-interactive command path 使用 bwrap 构造 read-only host root、writable workspace/cwd、writable `$SIGIL_SCRATCH_DIR`、tmpfs `/tmp`、PID namespace、die-with-parent 和 offline `--unshare-net`。
+  - 已有 Linux-only ignored conformance test 和手动 `Sandbox Conformance` GitHub Actions workflow；真实 Linux+bwrap namespace/network conformance 尚未运行，因此 E05.8 仍不能标记 done。
 - 已保留 `bash` 的 timeout、stdout/stderr metadata、exit-code error 和 scratch env 行为。
 
 ## 6. Productization Remains
@@ -133,17 +144,17 @@ pub trait ExecutionBackend {
 2026-06-29 productization slice expansion:
 
 - E05.7 Sandbox Capability Matrix and Backend Selection Contract：已实现 backend selection、fallback、diagnostics 和 profile requirement taxonomy。该切片是后续完整 OS Sandbox 的直接入口。
-- E05.8 Linux Bubblewrap Backend MVP：Linux non-interactive command backend，要求真实 bwrap conformance 或保持 gated。
+- E05.8 Linux Bubblewrap Backend MVP：backend code 已实现，要求真实 Linux+bwrap conformance 后才能从 gated 转 done。
 - E05.9 Container Backend MVP：已实现 Docker non-interactive backend code path、fake-Docker 参数构造测试和显式 real-Docker conformance test；本机已用 `redis:8-alpine` 完成真实 daemon/mount/network/ownership 验证。
 - E05.10 Windows Restricted Backend Spike：Windows restricted token / job object / cleanup 能力验证，必须有 Windows 环境。
-- E05.11 Network Policy Enforcement and Receipt：把 network allowed/denied/unsupported/unknown 做成 receipt，不再只依赖 capability bool。
-- E05.12 Resource Limits and Process Cleanup：明确 timeout、process tree cleanup 和 resource limit receipt。
+- E05.11 Network Policy Enforcement and Receipt：已完成 network allowed/denied/unsupported/unknown receipt、verification binding/hash 集成和 bash metadata 展示；macOS Seatbelt 仍不宣传网络隔离。
+- E05.12 Resource Limits and Process Cleanup：已完成 core semantics 和 Local non-interactive cleanup path；container/bwrap/Windows/PTY 等 backend-specific cleanup 继续由后续切片落地。
 - E05.13 Persistent Terminal Sandbox Backend：为 PTY/long-lived process 定义 start/input/resize/kill/cleanup 的 sandbox lifecycle。
 - E05.14 MCP Stdio Sandbox Handoff：本地 stdio MCP server 通过 execution backend 或明确标记 outside local sandbox。
 - E05.15 Plugin Hook Process Sandbox Handoff：未来插件 hook command runtime 必须经过 execution backend 或显式 unconfined/unsupported。
 - E05.16 Sandbox Product Surface and Doctor：已实现 minimal doctor 展示；TUI tool/approval card 的更完整 coverage surface 仍可后续扩展。
 
-E05.8 仍适合通过 GitHub Actions 的 Ubuntu runner 安装 `bubblewrap` 后验证，但应等 `linux_bubblewrap` backend code 存在后再启用 CI job。E05.9 同时保留 fake-Docker request construction 测试和显式 real-Docker conformance 测试；后者需要健康 Docker daemon 与本机已有镜像。
+E05.8 已新增手动 `Sandbox Conformance` workflow，通过 GitHub Actions 的 Ubuntu runner 安装 `bubblewrap` 后运行 ignored Linux conformance test。当前 `linux_bubblewrap` backend code 和 workflow 均已存在，下一步需要触发 workflow 或在 Linux 本机运行 ignored test 并记录结果。E05.9 同时保留 fake-Docker request construction 测试和显式 real-Docker conformance 测试；后者需要健康 Docker daemon 与本机已有镜像。
 
 ## 7. Validation
 
@@ -177,6 +188,13 @@ cargo test -p sigil-tools-builtin backend_selection
 cargo test -p sigil-tools-builtin docker_execution_backend_builds_offline_container_command
 SIGIL_DOCKER_CONFORMANCE_IMAGE=redis:8-alpine cargo test -p sigil-tools-builtin tests::docker_execution_backend_real_daemon_conformance -- --ignored --exact --nocapture
 cargo test -p sigil-runtime doctor
+cargo test -p sigil-tools-builtin execution_backend_records_timeout_cleanup_and_unsupported_limits -- --nocapture
+cargo test -p sigil-tools-builtin execution_backend_timeout_cleans_process_group_children -- --nocapture
+cargo test -p sigil-tui tool_card_render_bash_and_diff_previews_cover_no_output_and_truncation -- --nocapture
+cargo test -p sigil-tui tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources -- --nocapture
+cargo test -p sigil-kernel root_config_loads_linux_bubblewrap_execution_backend -- --nocapture
+cargo test -p sigil-tools-builtin linux_bubblewrap -- --nocapture
+ruby -e "require 'yaml'; YAML.load_file('.github/workflows/sandbox-conformance.yml'); puts 'ok'"
 ```
 
 注意：`macos_seatbelt` 只证明 macOS non-interactive command backend 的最小 enforcement。Docker backend 已通过本机真实 daemon conformance，但只覆盖 non-interactive command execution。完整跨平台 sandbox、persistent terminal sandbox 和 MCP/plugin 进程隔离仍属于后续切片。E05.3 的 terminal metadata 只让 durable state 清楚记录 local process / local PTY 能力边界，不提供额外隔离。E05.4 的 coverage label 只说明哪些边界不受 local shell sandbox 覆盖，不提供额外隔离。

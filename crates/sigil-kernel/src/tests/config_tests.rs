@@ -1014,6 +1014,36 @@ isolation = "require_sandbox"
 }
 
 #[test]
+fn root_config_loads_linux_bubblewrap_execution_backend() {
+    let config: RootConfig = toml::from_str(
+        r#"
+[agent]
+provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[execution]
+backend = "linux_bubblewrap"
+isolation = "require_sandbox"
+profile = "build_offline"
+"#,
+    )
+    .expect("linux bubblewrap execution config should parse");
+
+    assert_eq!(
+        config.execution.backend,
+        ExecutionBackendKind::LinuxBubblewrap
+    );
+    assert_eq!(
+        config.execution.isolation,
+        ExecutionIsolationPolicy::RequireSandbox
+    );
+    assert_eq!(
+        config.execution.profile,
+        ExecutionSandboxProfile::BuildOffline
+    );
+}
+
+#[test]
 fn root_config_loads_docker_execution_backend() {
     let config: RootConfig = toml::from_str(
         r#"

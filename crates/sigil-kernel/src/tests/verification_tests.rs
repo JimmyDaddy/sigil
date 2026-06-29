@@ -10,18 +10,18 @@ use crate::{
     CandidateCheck, CheckCommand, CheckDiscoverySource, CheckPromotion, CheckSpec,
     CheckSpecRecordedEntry, ChildVerificationReceiptLinked, CompletionCriteria, DurableEventType,
     EvidenceReceipt, EvidenceScope, ExecutionBackend, ExecutionBackendCapabilities,
-    ExecutionBackendKind, ExecutionFuture, ExecutionReceipt, ExecutionRequest,
-    FileMetadataPlatform, FileType, JsonlSessionStore, MAX_WORKSPACE_SNAPSHOT_FILE_BYTES,
-    ReadinessInput, ReadinessProjectionMode, ReadinessReason, ReceiptStatus, RedactionState,
-    RequiredAction, RunStatus, SandboxProfileRequirement, Session, SessionLogEntry,
-    SessionStreamRecord, SnapshotEntryState, ToolEffect, VerificationAutoRunPolicy,
-    VerificationBinding, VerificationCheckConfig, VerificationCheckRunEntry,
-    VerificationCheckRunRequest, VerificationCheckRunStatus, VerificationConfig,
-    VerificationPolicy, VerificationReceipt, VerificationScope, VerificationSkipDecision,
-    VerificationStaleCause, VerificationStaleReason, VerificationStateProjection,
-    VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge, WorkspaceMutationDetected,
-    WorkspaceMutationDetectionReason, WorkspaceMutationEvidence, WorkspaceSnapshotEntry,
-    WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
+    ExecutionBackendKind, ExecutionFuture, ExecutionNetworkPolicy, ExecutionNetworkReceipt,
+    ExecutionReceipt, ExecutionRequest, FileMetadataPlatform, FileType, JsonlSessionStore,
+    MAX_WORKSPACE_SNAPSHOT_FILE_BYTES, ReadinessInput, ReadinessProjectionMode, ReadinessReason,
+    ReceiptStatus, RedactionState, RequiredAction, RunStatus, SandboxProfileRequirement, Session,
+    SessionLogEntry, SessionStreamRecord, SnapshotEntryState, ToolEffect,
+    VerificationAutoRunPolicy, VerificationBinding, VerificationCheckConfig,
+    VerificationCheckRunEntry, VerificationCheckRunRequest, VerificationCheckRunStatus,
+    VerificationConfig, VerificationPolicy, VerificationReceipt, VerificationScope,
+    VerificationSkipDecision, VerificationStaleCause, VerificationStaleReason,
+    VerificationStateProjection, VerificationVerdict, VisibleCompletionState, WorkspaceKnowledge,
+    WorkspaceMutationDetected, WorkspaceMutationDetectionReason, WorkspaceMutationEvidence,
+    WorkspaceSnapshotEntry, WorkspaceSnapshotManifestV1, WorkspaceTrust, WorkspaceTrustRequirement,
     build_workspace_snapshot, build_workspace_snapshot_for_event, check_specs_from_user_config,
     discover_candidate_checks, discover_candidate_checks_with_user_config, evaluate_readiness,
     run_verification_check, session::ControlEntry,
@@ -52,6 +52,10 @@ impl ExecutionBackend for FakeVerificationBackend {
             Ok(ExecutionReceipt {
                 backend: ExecutionBackendKind::Local,
                 capabilities: ExecutionBackendCapabilities::default(),
+                network: ExecutionNetworkReceipt::unknown(
+                    "fake local backend does not report network enforcement",
+                ),
+                resources: Default::default(),
                 exit_code: if timed_out {
                     None
                 } else if failed {
@@ -96,6 +100,8 @@ impl ExecutionBackend for FakeSandboxVerificationBackend {
             Ok(ExecutionReceipt {
                 backend: ExecutionBackendKind::MacosSeatbelt,
                 capabilities,
+                network: ExecutionNetworkReceipt::denied("fake sandbox denied network"),
+                resources: Default::default(),
                 exit_code: Some(0),
                 stdout: format!("fake sandbox executed {}\n", request.program).into_bytes(),
                 stderr: Vec::new(),
@@ -741,12 +747,16 @@ fn verification_check_runner_records_durable_check_and_passed_receipt() -> Resul
     );
     assert!(recorded.receipt.receipt.workspace_snapshot_id.is_some());
 
-    let event_types = JsonlSessionStore::read_event_records(&store_path)?
+    let stored_events = JsonlSessionStore::read_event_records(&store_path)?
         .into_iter()
         .filter_map(|record| match record {
-            SessionStreamRecord::Stored(event) => Some(event.event_type),
+            SessionStreamRecord::Stored(event) => Some(event),
             SessionStreamRecord::Legacy { .. } => None,
         })
+        .collect::<Vec<_>>();
+    let event_types = stored_events
+        .iter()
+        .map(|event| event.event_type.clone())
         .collect::<Vec<_>>();
     assert_eq!(
         event_types,
@@ -754,6 +764,10 @@ fn verification_check_runner_records_durable_check_and_passed_receipt() -> Resul
             DurableEventType::CommandFinished.as_str().to_owned(),
             DurableEventType::CheckFinished.as_str().to_owned(),
         ]
+    );
+    assert_eq!(
+        stored_events[0].payload["execution_network"]["policy"],
+        serde_json::json!("unknown")
     );
     Ok(())
 }
@@ -807,6 +821,10 @@ fn verification_check_runner_binds_receipt_to_actual_sandbox_backend() -> Result
         recorded.receipt.binding.execution_backend,
         Some(ExecutionBackendKind::MacosSeatbelt)
     );
+    assert_eq!(
+        recorded.receipt.binding.execution_network.policy,
+        ExecutionNetworkPolicy::Denied
+    );
     let capabilities = recorded
         .receipt
         .binding
@@ -818,7 +836,8 @@ fn verification_check_runner_binds_receipt_to_actual_sandbox_backend() -> Result
         super::sandbox_profile_hash_for_execution(
             SandboxProfileRequirement::Sandboxed,
             ExecutionBackendKind::MacosSeatbelt,
-            capabilities
+            capabilities,
+            &recorded.receipt.binding.execution_network,
         )
     );
     assert_ne!(
@@ -864,17 +883,50 @@ fn sandbox_required_policy_rejects_receipt_without_matching_backend_binding() {
     input.verification_receipts[0]
         .binding
         .execution_backend_capabilities = Some(ExecutionBackendCapabilities::default());
+    input.verification_receipts[0].binding.execution_network =
+        ExecutionNetworkReceipt::unknown("legacy local receipt");
     input.verification_receipts[0].binding.sandbox_profile_hash =
         super::sandbox_profile_hash_for_execution(
             SandboxProfileRequirement::Sandboxed,
             ExecutionBackendKind::Local,
             ExecutionBackendCapabilities::default(),
+            &input.verification_receipts[0].binding.execution_network,
         );
 
     let local_evaluation = evaluate_readiness(&input);
 
     assert_eq!(
         local_evaluation.verification_verdict,
+        VerificationVerdict::Missing
+    );
+
+    let inconsistent_network_capabilities = ExecutionBackendCapabilities {
+        filesystem_isolation: true,
+        network_isolation: true,
+        process_isolation: true,
+        resource_limits: false,
+        persistent_pty: false,
+        workspace_snapshot: false,
+    };
+    input.verification_receipts[0].binding.execution_backend =
+        Some(ExecutionBackendKind::MacosSeatbelt);
+    input.verification_receipts[0]
+        .binding
+        .execution_backend_capabilities = Some(inconsistent_network_capabilities);
+    input.verification_receipts[0].binding.execution_network =
+        ExecutionNetworkReceipt::unsupported("backend cannot enforce network denial");
+    input.verification_receipts[0].binding.sandbox_profile_hash =
+        super::sandbox_profile_hash_for_execution(
+            SandboxProfileRequirement::Sandboxed,
+            ExecutionBackendKind::MacosSeatbelt,
+            inconsistent_network_capabilities,
+            &input.verification_receipts[0].binding.execution_network,
+        );
+
+    let unsupported_network_evaluation = evaluate_readiness(&input);
+
+    assert_eq!(
+        unsupported_network_evaluation.verification_verdict,
         VerificationVerdict::Missing
     );
 
@@ -891,11 +943,14 @@ fn sandbox_required_policy_rejects_receipt_without_matching_backend_binding() {
     input.verification_receipts[0]
         .binding
         .execution_backend_capabilities = Some(capabilities);
+    input.verification_receipts[0].binding.execution_network =
+        ExecutionNetworkReceipt::denied("fake sandbox denied network");
     input.verification_receipts[0].binding.sandbox_profile_hash =
         super::sandbox_profile_hash_for_execution(
             SandboxProfileRequirement::Sandboxed,
             ExecutionBackendKind::MacosSeatbelt,
             capabilities,
+            &input.verification_receipts[0].binding.execution_network,
         );
 
     let sandbox_evaluation = evaluate_readiness(&input);
@@ -1286,6 +1341,8 @@ fn check_failure_reason_covers_timeout_and_signal_edges() {
     let timeout_without_configured_ms = super::CheckCommandOutput {
         backend: ExecutionBackendKind::Local,
         backend_capabilities: ExecutionBackendCapabilities::default(),
+        network: Default::default(),
+        resources: Default::default(),
         exit_code: None,
         stdout: String::new(),
         stderr: String::new(),
@@ -1299,6 +1356,8 @@ fn check_failure_reason_covers_timeout_and_signal_edges() {
     let terminated_without_exit_code = super::CheckCommandOutput {
         backend: ExecutionBackendKind::Local,
         backend_capabilities: ExecutionBackendCapabilities::default(),
+        network: Default::default(),
+        resources: Default::default(),
         exit_code: None,
         stdout: String::new(),
         stderr: String::new(),
@@ -3657,6 +3716,7 @@ fn verification_receipt(
             sandbox_profile_hash: "sandbox-local".to_owned(),
             execution_backend: None,
             execution_backend_capabilities: None,
+            execution_network: Default::default(),
             workspace_trust_snapshot_id: "trust-1".to_owned(),
             approval_event_id: None,
             sandbox_decision_id: None,
