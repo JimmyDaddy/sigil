@@ -17,8 +17,9 @@ use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_s
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sigil_kernel::{
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionSandboxProfile,
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus, terminal_cleanup_receipt_for_status,
 };
 use tokio::{
     fs::{self, File, OpenOptions},
@@ -669,6 +670,9 @@ impl TerminalProcessManager {
             created_at_ms,
             execution_backend: Some(execution_backend),
             execution_backend_capabilities: Some(execution_backend_capabilities),
+            enforcement_backend: Some(ExecutionBackendKind::Local),
+            enforcement_backend_capabilities: Some(ExecutionBackendCapabilities::default()),
+            sandbox_profile: Some(ExecutionSandboxProfile::Unconfined),
         };
         let initial_entry = TerminalTaskEntry {
             handle: handle.clone(),
@@ -676,6 +680,7 @@ impl TerminalProcessManager {
             output_preview: None,
             output_hash: None,
             output_truncated: false,
+            cleanup: None,
             updated_at_ms: created_at_ms,
         };
         write_task_meta(&artifacts.absolute_meta, &initial_entry).await?;
@@ -932,6 +937,7 @@ async fn finalize_terminal_summary(
     entry.output_preview = (!log_summary.preview.is_empty()).then_some(log_summary.preview);
     entry.output_hash = (!log_summary.sha256.is_empty()).then_some(log_summary.sha256);
     entry.output_truncated = log_summary.truncated;
+    entry.cleanup = terminal_cleanup_receipt_for_status(&entry.status);
     entry.updated_at_ms = current_epoch_ms();
     let cloned = entry.clone();
     drop(entry);

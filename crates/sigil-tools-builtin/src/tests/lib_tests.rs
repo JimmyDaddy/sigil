@@ -72,17 +72,25 @@ fn terminal_entry_details_serializes_execution_backend_metadata() -> Result<()> 
             created_at_ms: 100,
             execution_backend: Some(TerminalExecutionBackendKind::LocalPty),
             execution_backend_capabilities: Some(TerminalExecutionBackendCapabilities::local_pty()),
+            enforcement_backend: Some(sigil_kernel::ExecutionBackendKind::Local),
+            enforcement_backend_capabilities: Some(
+                sigil_kernel::ExecutionBackendCapabilities::default(),
+            ),
+            sandbox_profile: Some(sigil_kernel::ExecutionSandboxProfile::Unconfined),
         },
         status: TerminalTaskStatus::Running,
         output_preview: Some("tail".to_owned()),
         output_hash: Some("sha256:terminal".to_owned()),
         output_truncated: false,
+        cleanup: None,
         updated_at_ms: 120,
     };
 
     let details = super::terminal_entry_details(&entry);
 
     assert_eq!(details["execution_backend"], json!("local_pty"));
+    assert_eq!(details["enforcement_backend"], json!("local"));
+    assert_eq!(details["sandbox_profile"], json!("unconfined"));
     assert_eq!(
         details["execution_backend_capabilities"]["persistent_pty"],
         json!(true)

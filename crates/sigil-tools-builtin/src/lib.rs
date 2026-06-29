@@ -2940,6 +2940,19 @@ fn terminal_entry_details(entry: &TerminalTaskEntry) -> Value {
         "execution_backend_capabilities".to_owned(),
         json!(entry.handle.execution_backend_capabilities),
     );
+    details_object.insert(
+        "enforcement_backend".to_owned(),
+        json!(entry.handle.enforcement_backend),
+    );
+    details_object.insert(
+        "enforcement_backend_capabilities".to_owned(),
+        json!(entry.handle.enforcement_backend_capabilities),
+    );
+    details_object.insert(
+        "sandbox_profile".to_owned(),
+        json!(entry.handle.sandbox_profile),
+    );
+    details_object.insert("cleanup".to_owned(), json!(entry.cleanup));
     details
 }
 

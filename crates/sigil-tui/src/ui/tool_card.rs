@@ -791,24 +791,49 @@ fn terminal_task_display_status(summary: &ToolCardRender) -> ToolCardDisplayStat
         _ if summary.is_error => "ERROR",
         _ => "OK",
     };
-    let detail = match summary.metadata.terminal_status.as_deref() {
-        Some("exited") => summary
-            .metadata
-            .terminal_exit_code
-            .map(|code| format!("exit {code}")),
-        Some("failed") => summary
-            .metadata
-            .terminal_failed_reason
-            .as_deref()
-            .map(|reason| truncate_inline_text(reason, 80)),
-        _ => None,
-    };
+    let mut details = Vec::new();
+    match summary.metadata.terminal_status.as_deref() {
+        Some("exited") => {
+            if let Some(code) = summary.metadata.terminal_exit_code {
+                details.push(format!("exit {code}"));
+            }
+        }
+        Some("failed") => {
+            if let Some(reason) = summary.metadata.terminal_failed_reason.as_deref() {
+                details.push(truncate_inline_text(reason, 80));
+            }
+        }
+        _ => {}
+    }
+    if let Some(boundary) = terminal_execution_boundary_detail(summary) {
+        details.push(boundary);
+    }
+    if let Some(cleanup_status) = summary
+        .metadata
+        .terminal_cleanup_status
+        .as_deref()
+        .filter(|status| *status != "not_needed")
+    {
+        details.push(format!("cleanup {cleanup_status}"));
+    }
     ToolCardDisplayStatus {
         label,
-        detail,
+        detail: (!details.is_empty()).then(|| details.join(" · ")),
         kind: terminal_task_status_kind(summary),
         is_error: summary.is_error
             || matches!(summary.metadata.terminal_status.as_deref(), Some("failed")),
+    }
+}
+
+fn terminal_execution_boundary_detail(summary: &ToolCardRender) -> Option<String> {
+    let backend = summary.metadata.terminal_enforcement_backend.as_deref();
+    let profile = summary.metadata.terminal_sandbox_profile.as_deref();
+    match (backend, profile) {
+        (Some("local"), Some("unconfined")) => Some("local unconfined".to_owned()),
+        (Some(backend), Some(profile)) => Some(format!("{backend} {profile}")),
+        (Some(backend), None) => Some(backend.to_owned()),
+        (None, Some(profile)) => Some(profile.to_owned()),
+        (None, None) => None,
     }
 }
 
@@ -2110,6 +2135,9 @@ struct ToolCardMetadata {
     execution_network_policy: Option<String>,
     execution_timeout_source: Option<String>,
     execution_cleanup_status: Option<String>,
+    terminal_enforcement_backend: Option<String>,
+    terminal_sandbox_profile: Option<String>,
+    terminal_cleanup_status: Option<String>,
     terminal_task_id: Option<String>,
     terminal_status: Option<String>,
     terminal_command: Option<String>,
@@ -3082,6 +3110,19 @@ fn parse_tool_metadata(value: &Value) -> ToolCardMetadata {
             .and_then(|details| details.get("execution"))
             .and_then(|execution| execution.get("resources"))
             .and_then(|resources| resources.get("cleanup"))
+            .and_then(|cleanup| cleanup.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        terminal_enforcement_backend: terminal_context
+            .and_then(|details| details.get("enforcement_backend"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        terminal_sandbox_profile: terminal_context
+            .and_then(|details| details.get("sandbox_profile"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        terminal_cleanup_status: terminal_context
+            .and_then(|details| details.get("cleanup"))
             .and_then(|cleanup| cleanup.get("status"))
             .and_then(Value::as_str)
             .map(str::to_owned),

@@ -839,7 +839,9 @@ fn tool_card_renders_terminal_task_status_and_preview() {
                         "created_at_ms": 10,
                         "updated_at_ms": 20,
                         "output_hash": "hash",
-                        "output_truncated": true
+                        "output_truncated": true,
+                        "enforcement_backend": "local",
+                        "sandbox_profile": "unconfined"
                     }
                 }
             }
@@ -862,6 +864,7 @@ fn tool_card_renders_terminal_task_status_and_preview() {
     assert!(activity.defaults_expanded);
     assert!(text.contains("Terminal terminal-1 cargo test"));
     assert!(text.contains("RUNNING"));
+    assert!(text.contains("local unconfined"));
     assert!(text.contains("terminal"));
     assert!(text.contains("log"));
     assert!(text.contains("running tests"));
@@ -903,7 +906,10 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
                 "task_id": "terminal-exited",
                 "status": "exited",
                 "status_detail": {"state": "exited", "exit_code": 7},
-                "command": "cargo test"
+                "command": "cargo test",
+                "enforcement_backend": "local",
+                "sandbox_profile": "unconfined",
+                "cleanup": {"status": "completed"}
             }
         }
     }));
@@ -937,7 +943,10 @@ fn tool_card_renders_terminal_task_failure_and_exit_details() {
     assert!(plain_text(&failed_lines).contains("(no output preview)"));
 
     assert_eq!(exited_display.status.label, "EXITED");
-    assert_eq!(exited_display.status.detail.as_deref(), Some("exit 7"));
+    assert_eq!(
+        exited_display.status.detail.as_deref(),
+        Some("exit 7 · local unconfined · cleanup completed")
+    );
     assert_eq!(exited_activity.key, "terminal_task:terminal-exited");
     assert_eq!(exited_activity.title, "Terminal terminal-exited cargo test");
     assert_eq!(generic_error_display.status.label, "ERROR");
@@ -1386,6 +1395,13 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
                     "timeout_source": "wall_clock",
                     "cleanup": {"status": "completed"}
                 }
+            },
+            "terminal_task": {
+                "task_id": "terminal-1",
+                "status": "cancelled",
+                "enforcement_backend": "local",
+                "sandbox_profile": "unconfined",
+                "cleanup": {"status": "completed"}
             }
         }
     }));
@@ -1426,6 +1442,18 @@ fn tool_card_parse_helpers_cover_fallbacks_defaults_and_metadata_sources() {
     );
     assert_eq!(
         metadata.execution_cleanup_status.as_deref(),
+        Some("completed")
+    );
+    assert_eq!(
+        metadata.terminal_enforcement_backend.as_deref(),
+        Some("local")
+    );
+    assert_eq!(
+        metadata.terminal_sandbox_profile.as_deref(),
+        Some("unconfined")
+    );
+    assert_eq!(
+        metadata.terminal_cleanup_status.as_deref(),
         Some("completed")
     );
     assert_eq!(subjects, (None, None, None));

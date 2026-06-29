@@ -27,7 +27,7 @@
 
 后续切片增加 execution coverage labels，用于明确 shell、MCP、插件和远端能力分别由哪个边界控制。该模型只描述真实覆盖关系，不把 MCP、插件或远端服务宣传成本地 shell sandbox 保护。
 
-Persistent terminal 切片不把 PTY 伪装成 non-interactive bash。它先把 terminal task 的 backend kind/capability 写入 durable handle 和 tool metadata，让 projection、恢复和 UI 能区分 local process 与 local PTY 边界。
+Persistent terminal 切片不把 PTY 伪装成 non-interactive bash。它先把 terminal task 的 backend kind/capability 写入 durable handle 和 tool metadata，让 projection、恢复和 UI 能区分 local process 与 local PTY 边界。E05.13 的前置 lifecycle metadata 已让 terminal handle 额外记录 enforcement backend、sandbox profile、backend capability summary 和 cleanup receipt；TUI terminal card 会显示 `local unconfined` / cleanup fact，避免把当前 local PTY 宣传成 sandboxed PTY。
 
 ## 2. Goals
 
@@ -98,9 +98,12 @@ pub trait ExecutionBackend {
   - file/search/agent 等 kernel-mediated 工具不会复用 shell sandbox 文案。
 - 已新增 persistent terminal execution metadata：
   - `TerminalTaskHandle` 可记录 `execution_backend` 和 `execution_backend_capabilities`。
+  - `TerminalTaskHandle` 可记录 `enforcement_backend`、`enforcement_backend_capabilities` 和 `sandbox_profile`。
+  - `TerminalTaskEntry` 可记录 terminal cleanup receipt；running/starting 不声明 cleanup，exited 记录 `not_needed`，cancelled 记录 best-effort completed，interrupted/unknown path 记录 unknown。
   - local process terminal 标记为 `local_process`，支持 cancel/output log，不支持 persistent PTY input/resize。
   - local PTY terminal 标记为 `local_pty`，支持 persistent PTY、input、resize、cancel 和 output log。
-  - terminal tool result details 会带出这些字段，`TerminalTaskEntry::from_tool_result_details` 可从 metadata 重建；旧日志缺字段时保持兼容。
+  - terminal tool result details 和 session restore payload 会带出这些字段，`TerminalTaskEntry::from_tool_result_details` 可从 metadata 重建；旧日志缺字段时保持兼容。
+  - TUI terminal card 已展示 terminal enforcement boundary 和 cleanup status；当前 local process/local PTY 明确显示为 `local unconfined`，不宣传为 sandbox。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
 - 已完成 E05.6 capability truthfulness 修正：macOS Seatbelt backend 不再声明 `network_isolation`，`build_offline` 会拒绝该 backend，sandbox conformance tests 不再把 loopback `nc` 行为当成网络隔离证明。
 - 已完成 E05.7 capability matrix / selection contract：
@@ -149,7 +152,7 @@ pub trait ExecutionBackend {
 - E05.10 Windows Restricted Backend Spike：Windows restricted token / job object / cleanup 能力验证，必须有 Windows 环境。
 - E05.11 Network Policy Enforcement and Receipt：已完成 network allowed/denied/unsupported/unknown receipt、verification binding/hash 集成和 bash metadata 展示；macOS Seatbelt 仍不宣传网络隔离。
 - E05.12 Resource Limits and Process Cleanup：已完成 core semantics 和 Local non-interactive cleanup path；container/bwrap/Windows/PTY 等 backend-specific cleanup 继续由后续切片落地。
-- E05.13 Persistent Terminal Sandbox Backend：为 PTY/long-lived process 定义 start/input/resize/kill/cleanup 的 sandbox lifecycle。
+- E05.13 Persistent Terminal Sandbox Backend：pre-lifecycle metadata contract 已实现；完整 PTY/long-lived process sandbox lifecycle 仍 gated，等待 backend 支持 persistent PTY 或 container exec lifecycle。
 - E05.14 MCP Stdio Sandbox Handoff：本地 stdio MCP server 通过 execution backend 或明确标记 outside local sandbox。
 - E05.15 Plugin Hook Process Sandbox Handoff：未来插件 hook command runtime 必须经过 execution backend 或显式 unconfined/unsupported。
 - E05.16 Sandbox Product Surface and Doctor：已实现 minimal doctor 展示；TUI tool/approval card 的更完整 coverage surface 仍可后续扩展。

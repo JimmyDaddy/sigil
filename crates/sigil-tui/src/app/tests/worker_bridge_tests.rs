@@ -2346,11 +2346,15 @@ fn worker_terminal_entry(
             created_at_ms: 10,
             execution_backend: None,
             execution_backend_capabilities: None,
+            enforcement_backend: None,
+            enforcement_backend_capabilities: None,
+            sandbox_profile: None,
         },
         status,
         output_preview: Some("cancelled output".to_owned()),
         output_hash: Some("hash".to_owned()),
         output_truncated: false,
+        cleanup: None,
         updated_at_ms: 20,
     })
 }

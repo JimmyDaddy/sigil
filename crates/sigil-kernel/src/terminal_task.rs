@@ -7,6 +7,10 @@ use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::execution_backend::{
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupReceipt,
+    ExecutionCleanupStatus, ExecutionSandboxProfile,
+};
 use crate::session::{ControlEntry, SessionLogEntry};
 
 /// Stable identifier for one local terminal task.
@@ -55,6 +59,12 @@ pub struct TerminalTaskHandle {
     pub execution_backend: Option<TerminalExecutionBackendKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_backend_capabilities: Option<TerminalExecutionBackendCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement_backend: Option<ExecutionBackendKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforcement_backend_capabilities: Option<ExecutionBackendCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_profile: Option<ExecutionSandboxProfile>,
 }
 
 /// Terminal execution backend used for a persistent terminal task.
@@ -162,6 +172,8 @@ pub struct TerminalTaskEntry {
     pub output_hash: Option<String>,
     #[serde(default)]
     pub output_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<ExecutionCleanupReceipt>,
     pub updated_at_ms: u64,
 }
 
@@ -213,6 +225,25 @@ impl TerminalTaskEntry {
                 .map_err(|error| {
                     anyhow!("invalid terminal task execution_backend_capabilities: {error}")
                 })?,
+                enforcement_backend: optional_value(details, "enforcement_backend")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|error| {
+                        anyhow!("invalid terminal task enforcement_backend: {error}")
+                    })?,
+                enforcement_backend_capabilities: optional_value(
+                    details,
+                    "enforcement_backend_capabilities",
+                )
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| {
+                    anyhow!("invalid terminal task enforcement_backend_capabilities: {error}")
+                })?,
+                sandbox_profile: optional_value(details, "sandbox_profile")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|error| anyhow!("invalid terminal task sandbox_profile: {error}"))?,
             },
             status,
             output_preview: optional_string(details, "output_preview").map(str::to_owned),
@@ -221,6 +252,10 @@ impl TerminalTaskEntry {
                 .get("output_truncated")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            cleanup: optional_value(details, "cleanup")
+                .map(|value| serde_json::from_value(value.clone()))
+                .transpose()
+                .map_err(|error| anyhow!("invalid terminal task cleanup: {error}"))?,
             updated_at_ms: required_u64(details, "updated_at_ms")?,
         }))
     }
@@ -310,6 +345,7 @@ pub struct TerminalTaskSummary {
     pub output_preview: Option<String>,
     pub output_hash: Option<String>,
     pub output_truncated: bool,
+    pub cleanup: Option<ExecutionCleanupReceipt>,
     pub updated_at_ms: u64,
 }
 
@@ -321,6 +357,9 @@ impl TerminalTaskSummary {
             output_preview: self.output_preview.clone(),
             output_hash: self.output_hash.clone(),
             output_truncated: self.output_truncated,
+            cleanup: Some(ExecutionCleanupReceipt::unknown(
+                "terminal task was interrupted before cleanup could be proven",
+            )),
             updated_at_ms,
         }
     }
@@ -334,7 +373,35 @@ impl From<&TerminalTaskEntry> for TerminalTaskSummary {
             output_preview: entry.output_preview.clone(),
             output_hash: entry.output_hash.clone(),
             output_truncated: entry.output_truncated,
+            cleanup: entry.cleanup.clone(),
             updated_at_ms: entry.updated_at_ms,
+        }
+    }
+}
+
+#[must_use]
+pub fn terminal_cleanup_receipt_for_status(
+    status: &TerminalTaskStatus,
+) -> Option<ExecutionCleanupReceipt> {
+    match status {
+        TerminalTaskStatus::Starting | TerminalTaskStatus::Running => None,
+        TerminalTaskStatus::Exited { .. } => Some(ExecutionCleanupReceipt::not_needed()),
+        TerminalTaskStatus::Cancelled => Some(ExecutionCleanupReceipt::completed(
+            "terminal process was cancelled and reaped",
+        )),
+        TerminalTaskStatus::Interrupted => Some(ExecutionCleanupReceipt::unknown(
+            "terminal process disappeared before cleanup could be proven",
+        )),
+        TerminalTaskStatus::Failed { reason } => {
+            let status = if reason.contains("kill") || reason.contains("cancel") {
+                ExecutionCleanupStatus::Failed
+            } else {
+                ExecutionCleanupStatus::Unknown
+            };
+            Some(ExecutionCleanupReceipt {
+                status,
+                reason: Some(reason.clone()),
+            })
         }
     }
 }

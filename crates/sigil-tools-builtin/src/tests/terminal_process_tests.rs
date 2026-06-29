@@ -11,8 +11,9 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 use anyhow::{Result, anyhow};
 use sigil_kernel::{
-    TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
-    TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
+    ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
+    ExecutionSandboxProfile, TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind,
+    TerminalTaskEntry, TerminalTaskHandle, TerminalTaskId, TerminalTaskStatus,
 };
 use tokio::{
     fs::OpenOptions,
@@ -106,6 +107,19 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
         entry.handle.execution_backend_capabilities,
         Some(TerminalExecutionBackendCapabilities::local_process())
     );
+    assert_eq!(
+        entry.handle.enforcement_backend,
+        Some(ExecutionBackendKind::Local)
+    );
+    assert_eq!(
+        entry.handle.enforcement_backend_capabilities,
+        Some(ExecutionBackendCapabilities::default())
+    );
+    assert_eq!(
+        entry.handle.sandbox_profile,
+        Some(ExecutionSandboxProfile::Unconfined)
+    );
+    assert!(entry.cleanup.is_none());
     let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
     assert!(matches!(
         final_entry.status,
@@ -121,6 +135,14 @@ async fn terminal_process_manager_start_read_and_status_writes_artifacts() -> Re
     );
     assert!(!final_entry.output_truncated);
     assert!(final_entry.output_hash.is_some());
+    assert_eq!(
+        final_entry
+            .cleanup
+            .as_ref()
+            .expect("terminal exit should record cleanup")
+            .status,
+        ExecutionCleanupStatus::NotNeeded
+    );
     let preview = final_entry.output_preview.as_deref().unwrap_or_default();
     assert!(preview.contains("out"));
     assert!(preview.contains("err"));
@@ -203,6 +225,14 @@ async fn terminal_process_manager_cancel_marks_running_task_cancelled() -> Resul
     let cancelled = manager.cancel(&entry.handle.task_id).await?;
 
     assert!(matches!(cancelled.status, TerminalTaskStatus::Cancelled));
+    assert_eq!(
+        cancelled
+            .cleanup
+            .as_ref()
+            .expect("terminal cancel should record cleanup")
+            .status,
+        ExecutionCleanupStatus::Completed
+    );
     assert!(cancelled.status.is_terminal());
     let status = manager.status(&entry.handle.task_id).await?;
     assert!(matches!(status.status, TerminalTaskStatus::Cancelled));
@@ -397,11 +427,27 @@ async fn terminal_process_manager_pty_records_context_and_env() -> Result<()> {
         entry.handle.execution_backend_capabilities,
         Some(TerminalExecutionBackendCapabilities::local_pty())
     );
+    assert_eq!(
+        entry.handle.enforcement_backend,
+        Some(ExecutionBackendKind::Local)
+    );
+    assert_eq!(
+        entry.handle.sandbox_profile,
+        Some(ExecutionSandboxProfile::Unconfined)
+    );
     let final_entry = wait_for_terminal_status(&manager, &entry.handle.task_id).await?;
     assert!(matches!(
         final_entry.status,
         TerminalTaskStatus::Exited { exit_code: Some(0) }
     ));
+    assert_eq!(
+        final_entry
+            .cleanup
+            .as_ref()
+            .expect("terminal exit should record cleanup")
+            .status,
+        ExecutionCleanupStatus::NotNeeded
+    );
     let read = manager.read(&entry.handle.task_id, 0, 1024).await?;
     assert!(read.content.contains("env:ok"));
     Ok(())
@@ -498,6 +544,14 @@ async fn terminal_process_manager_pty_cancel_marks_task_cancelled() -> Result<()
     let cancelled = manager.cancel(&entry.handle.task_id).await?;
 
     assert!(matches!(cancelled.status, TerminalTaskStatus::Cancelled));
+    assert_eq!(
+        cancelled
+            .cleanup
+            .as_ref()
+            .expect("terminal cancel should record cleanup")
+            .status,
+        ExecutionCleanupStatus::Completed
+    );
     Ok(())
 }
 
@@ -911,11 +965,15 @@ fn test_entry(task_id: TerminalTaskId) -> TerminalTaskEntry {
             created_at_ms: 1,
             execution_backend: None,
             execution_backend_capabilities: None,
+            enforcement_backend: None,
+            enforcement_backend_capabilities: None,
+            sandbox_profile: None,
         },
         status: TerminalTaskStatus::Running,
         output_preview: None,
         output_hash: None,
         output_truncated: false,
+        cleanup: None,
         updated_at_ms: 1,
     }
 }

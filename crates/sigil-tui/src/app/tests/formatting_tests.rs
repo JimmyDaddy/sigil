@@ -248,6 +248,18 @@ fn format_terminal_task_block_redacted_summarizes_failed_and_exited_statuses() -
         exited["metadata"]["details"]["terminal_task"]["status_detail"]["exit_code"],
         7
     );
+    assert_eq!(
+        exited["metadata"]["details"]["terminal_task"]["enforcement_backend"],
+        "local"
+    );
+    assert_eq!(
+        exited["metadata"]["details"]["terminal_task"]["sandbox_profile"],
+        "unconfined"
+    );
+    assert_eq!(
+        exited["metadata"]["details"]["terminal_task"]["cleanup"]["status"],
+        "not_needed"
+    );
     Ok(())
 }
 
@@ -299,11 +311,17 @@ fn format_terminal_entry(
             created_at_ms: 10,
             execution_backend: None,
             execution_backend_capabilities: None,
+            enforcement_backend: Some(sigil_kernel::ExecutionBackendKind::Local),
+            enforcement_backend_capabilities: Some(
+                sigil_kernel::ExecutionBackendCapabilities::default(),
+            ),
+            sandbox_profile: Some(sigil_kernel::ExecutionSandboxProfile::Unconfined),
         },
         status,
         output_preview: Some("line 1\nline 2".to_owned()),
         output_hash: Some("hash".to_owned()),
         output_truncated: false,
+        cleanup: Some(sigil_kernel::ExecutionCleanupReceipt::not_needed()),
         updated_at_ms: 20,
     })
 }

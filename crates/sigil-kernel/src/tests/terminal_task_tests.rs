@@ -9,8 +9,12 @@ use serde_json::json;
 use super::{
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
     TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus,
+    terminal_cleanup_receipt_for_status,
 };
-use crate::{ControlEntry, SessionLogEntry};
+use crate::{
+    ControlEntry, ExecutionBackendCapabilities, ExecutionBackendKind, ExecutionCleanupStatus,
+    ExecutionSandboxProfile, SessionLogEntry,
+};
 
 #[test]
 fn terminal_task_id_accepts_stable_values_and_rejects_path_unsafe_values() {
@@ -210,6 +214,20 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
             "cancel": true,
             "output_log": true
         },
+        "enforcement_backend": "local",
+        "enforcement_backend_capabilities": {
+            "filesystem_isolation": false,
+            "network_isolation": false,
+            "process_isolation": false,
+            "resource_limits": false,
+            "persistent_pty": false,
+            "workspace_snapshot": false
+        },
+        "sandbox_profile": "unconfined",
+        "cleanup": {
+            "status": "completed",
+            "reason": "terminal process was cancelled and reaped"
+        },
         "updated_at_ms": 140,
         "output_preview": "final tail",
         "output_hash": "sha256:def",
@@ -229,7 +247,23 @@ fn terminal_task_entry_projects_from_terminal_tool_details() -> Result<()> {
         entry.handle.execution_backend_capabilities,
         Some(TerminalExecutionBackendCapabilities::local_pty())
     );
+    assert_eq!(
+        entry.handle.enforcement_backend,
+        Some(ExecutionBackendKind::Local)
+    );
+    assert_eq!(
+        entry.handle.enforcement_backend_capabilities,
+        Some(ExecutionBackendCapabilities::default())
+    );
+    assert_eq!(
+        entry.handle.sandbox_profile,
+        Some(ExecutionSandboxProfile::Unconfined)
+    );
     assert!(matches!(entry.status, TerminalTaskStatus::Cancelled));
+    assert_eq!(
+        entry.cleanup.as_ref().expect("cleanup should parse").status,
+        ExecutionCleanupStatus::Completed
+    );
     assert_eq!(entry.output_preview.as_deref(), Some("final tail"));
     assert_eq!(entry.output_hash.as_deref(), Some("sha256:def"));
     assert!(entry.output_truncated);
@@ -267,6 +301,31 @@ fn terminal_task_entry_ignores_non_terminal_tool_details_and_rejects_partial_met
     );
 }
 
+#[test]
+fn terminal_cleanup_receipt_maps_terminal_statuses_without_claiming_running_cleanup() {
+    assert!(terminal_cleanup_receipt_for_status(&TerminalTaskStatus::Running).is_none());
+    assert_eq!(
+        terminal_cleanup_receipt_for_status(&TerminalTaskStatus::Exited { exit_code: Some(0) })
+            .expect("exited status should have cleanup receipt")
+            .status,
+        ExecutionCleanupStatus::NotNeeded
+    );
+    assert_eq!(
+        terminal_cleanup_receipt_for_status(&TerminalTaskStatus::Cancelled)
+            .expect("cancelled status should have cleanup receipt")
+            .status,
+        ExecutionCleanupStatus::Completed
+    );
+    assert_eq!(
+        terminal_cleanup_receipt_for_status(&TerminalTaskStatus::Failed {
+            reason: "failed to kill terminal process".to_owned(),
+        })
+        .expect("failed cleanup should be recorded")
+        .status,
+        ExecutionCleanupStatus::Failed
+    );
+}
+
 fn terminal_task_id() -> TerminalTaskId {
     TerminalTaskId::new("terminal-1").expect("valid terminal task id")
 }
@@ -293,11 +352,15 @@ fn sample_entry_for_id(
             created_at_ms: 100,
             execution_backend: None,
             execution_backend_capabilities: None,
+            enforcement_backend: None,
+            enforcement_backend_capabilities: None,
+            sandbox_profile: None,
         },
         status,
         output_preview: Some("tail".to_owned()),
         output_hash: Some("sha256:abc".to_owned()),
         output_truncated: true,
+        cleanup: None,
         updated_at_ms,
     }
 }

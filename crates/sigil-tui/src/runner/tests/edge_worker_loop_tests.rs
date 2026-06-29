@@ -1183,11 +1183,15 @@ fn edge_terminal_entry(task_id: &str, status: TerminalTaskStatus) -> Result<Term
             created_at_ms: 10,
             execution_backend: None,
             execution_backend_capabilities: None,
+            enforcement_backend: None,
+            enforcement_backend_capabilities: None,
+            sandbox_profile: None,
         },
         status,
         output_preview: Some("old preview".to_owned()),
         output_hash: Some("sha256:old".to_owned()),
         output_truncated: false,
+        cleanup: None,
         updated_at_ms: 20,
     })
 }

@@ -203,7 +203,7 @@ pub use task_orchestrator::{
 pub use terminal_task::{
     TerminalExecutionBackendCapabilities, TerminalExecutionBackendKind, TerminalTaskEntry,
     TerminalTaskHandle, TerminalTaskId, TerminalTaskProjection, TerminalTaskStatus,
-    TerminalTaskSummary,
+    TerminalTaskSummary, terminal_cleanup_receipt_for_status,
 };
 pub use time::saturating_elapsed;
 pub use tool::{

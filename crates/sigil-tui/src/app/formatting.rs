@@ -325,7 +325,11 @@ pub(super) fn format_terminal_task_block_redacted(
             "created_at_ms": entry.handle.created_at_ms,
             "updated_at_ms": entry.updated_at_ms,
             "output_hash": &entry.output_hash,
-            "output_truncated": entry.output_truncated
+            "output_truncated": entry.output_truncated,
+            "enforcement_backend": &entry.handle.enforcement_backend,
+            "enforcement_backend_capabilities": &entry.handle.enforcement_backend_capabilities,
+            "sandbox_profile": &entry.handle.sandbox_profile,
+            "cleanup": &entry.cleanup
         }
     });
     let status = if matches!(entry.status, TerminalTaskStatus::Failed { .. }) {
