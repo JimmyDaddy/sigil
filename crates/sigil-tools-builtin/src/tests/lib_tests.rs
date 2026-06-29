@@ -1,5 +1,3 @@
-#[cfg(target_os = "macos")]
-use std::net::TcpListener;
 use std::{
     collections::BTreeMap,
     fs,
@@ -118,11 +116,27 @@ fn macos_seatbelt_backend_satisfies_required_sandbox_policy() -> Result<()> {
     assert_eq!(backend.kind(), ExecutionBackendKind::MacosSeatbelt);
     let capabilities = backend.capabilities();
     assert!(capabilities.filesystem_isolation);
-    assert!(capabilities.network_isolation);
+    assert!(!capabilities.network_isolation);
     assert!(capabilities.process_isolation);
     assert!(!capabilities.persistent_pty);
     assert!(!capabilities.workspace_snapshot);
     Ok(())
+}
+
+#[test]
+fn macos_seatbelt_backend_does_not_satisfy_offline_build_profile() {
+    let backend = MacosSeatbeltExecutionBackend::default();
+    let config = ExecutionConfig {
+        backend: ExecutionBackendKind::MacosSeatbelt,
+        isolation: ExecutionIsolationPolicy::RequireSandbox,
+        profile: sigil_kernel::ExecutionSandboxProfile::BuildOffline,
+    };
+
+    let error = config
+        .validate_profile_capabilities(backend.capabilities())
+        .expect_err("build_offline requires proven network isolation");
+
+    assert!(error.contains("network isolation"));
 }
 
 #[test]
@@ -312,62 +326,11 @@ async fn sandbox_conformance_macos_seatbelt_enforces_filesystem_write_claim() ->
     Ok(())
 }
 
-#[tokio::test]
-#[cfg(target_os = "macos")]
-async fn sandbox_conformance_macos_seatbelt_denies_network_when_claimed() -> Result<()> {
-    let nc = Path::new("/usr/bin/nc");
-    if !nc.is_file() {
-        eprintln!("skipping network conformance: /usr/bin/nc is unavailable");
-        return Ok(());
-    }
-
-    let workspace = tempfile::tempdir()?;
-    let workspace_root = fs::canonicalize(workspace.path())?;
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port().to_string();
-    let nc_args = vec![
-        "-z".to_owned(),
-        "-G".to_owned(),
-        "1".to_owned(),
-        "127.0.0.1".to_owned(),
-        port,
-    ];
-
-    let local_receipt = LocalExecutionBackend
-        .execute(ExecutionRequest {
-            program: nc.display().to_string(),
-            args: nc_args.clone(),
-            cwd: workspace_root.clone(),
-            env: BTreeMap::new(),
-            timeout_ms: None,
-            timeout_secs: 5,
-        })
-        .await?;
-    if local_receipt.exit_code != Some(0) {
-        eprintln!(
-            "skipping network conformance: local nc preflight failed with exit {:?}",
-            local_receipt.exit_code
-        );
-        return Ok(());
-    }
-
+#[test]
+fn sandbox_conformance_macos_seatbelt_does_not_claim_network_isolation() {
     let backend = MacosSeatbeltExecutionBackend::default();
-    assert!(backend.capabilities().network_isolation);
 
-    let sandboxed_receipt = backend
-        .execute(ExecutionRequest {
-            program: nc.display().to_string(),
-            args: nc_args,
-            cwd: workspace_root,
-            env: BTreeMap::new(),
-            timeout_ms: None,
-            timeout_secs: 5,
-        })
-        .await?;
-
-    assert_ne!(sandboxed_receipt.exit_code, Some(0));
-    assert!(!sandboxed_receipt.timed_out);
-    Ok(())
+    assert!(!backend.capabilities().network_isolation);
 }
 
 #[tokio::test]

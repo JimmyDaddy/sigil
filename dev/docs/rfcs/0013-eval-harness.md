@@ -1,6 +1,6 @@
 # RFC-0013 Eval Harness
 
-状态：draft / roadmap candidate
+状态：draft / E13.1-E13.10 deterministic harness implemented / E13.11 model eval gated
 
 创建日期：2026-06-28
 
@@ -137,6 +137,7 @@ Implementation progress:
 - 2026-06-28: E13.9 added integrity eval cases for the RFC-0001/0002 fact layer. The cases map checksum mismatch, sequence gap, middle stream corruption, unknown critical events, prepared-without-commit, file-written-without-commit, and partial changeset reconciliation into structured `EvalResult` diagnostics without introducing projection or protocol product surfaces.
 - 2026-06-28: E13.8 added path/capability security eval cases. The cases cover symlink escape, parent path normalization bypass, read-only shell write denial through permission/capability policy, and approval denial mapping, without implementing real OS sandbox backends or a security dashboard.
 - 2026-06-28: E13.10 added `scripts/run-evals.sh --deterministic` and deterministic report artifacts. The runner writes structured JSONL results, a Markdown summary, and retained session-log artifacts for non-success outcomes under a repo-local output directory, without invoking real providers or making evals part of normal user flows.
+- 2026-06-29: E13.11 tracks the future model eval runner trigger. It remains gated by deterministic baseline stability, fixture/provider metadata repeatability, budget policy and nightly/release-prep execution policy. Deterministic eval results must not be presented as real-model task success rates.
 
 ## 9. Acceptance Criteria
 

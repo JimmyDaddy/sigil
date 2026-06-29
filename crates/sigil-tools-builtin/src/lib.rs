@@ -232,7 +232,7 @@ impl ExecutionBackend for MacosSeatbeltExecutionBackend {
     fn capabilities(&self) -> ExecutionBackendCapabilities {
         ExecutionBackendCapabilities {
             filesystem_isolation: true,
-            network_isolation: true,
+            network_isolation: false,
             process_isolation: true,
             resource_limits: false,
             persistent_pty: false,

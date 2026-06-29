@@ -1,6 +1,6 @@
 # RFC-0012 Protocol and App Server Boundary
 
-状态：draft / roadmap candidate
+状态：draft / E12.1-E12.3 implemented / E12.4-E12.5 gated
 
 创建日期：2026-06-28
 
@@ -147,6 +147,7 @@ Core DTO semantics implemented:
 Productization remains:
 
 - Localhost listener, OpenAPI and SSE productization are separate slices.
+- 2026-06-29 审计确认：当前实现是 DTO / registry / runner bridge，不是完整 app-server。E12.4 / E12.5 继续 gated；没有 auth/local-only listener 前，不应宣传 OpenAPI/SSE productization。
 
 ## 9. Acceptance Criteria
 

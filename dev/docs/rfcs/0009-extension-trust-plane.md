@@ -1,6 +1,6 @@
 # RFC-0009 Extension Trust Plane
 
-状态：draft / roadmap candidate
+状态：draft / E09.1-E09.4 implemented / E09.5 planned
 
 创建日期：2026-06-28
 
@@ -141,6 +141,7 @@ Productization remains:
   plugin process runtime.
 - Context and compaction hooks remain gated until their RFC-0006 integration
   boundary is implemented.
+- 2026-06-29 审计确认：context/compaction hook runtime 尚未接入，这是 E09.5 的计划范围，不新增重复 slice。
 
 ## 9. Acceptance Criteria
 

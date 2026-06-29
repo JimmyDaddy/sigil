@@ -1,6 +1,6 @@
 # RFC-0005 Execution Backend
 
-状态：draft / E05.3 persistent terminal metadata implemented
+状态：draft / E05.1-E05.6 implemented / productization remains
 
 创建日期：2026-06-28
 
@@ -22,6 +22,8 @@
 第三切片将 RFC-0003 verification check runner 接入同一个 `ExecutionBackend`。验证命令不再直接 spawn 本地进程；`/task` orchestrator 使用 runtime 配置的 backend，并在缺少 backend 时 fail closed。
 
 第四切片增加第一个 OS sandbox backend MVP：macOS `sandbox-exec` / Seatbelt 后端。它仅覆盖 non-interactive command execution，不覆盖 persistent terminal、MCP、插件或远端工具。
+
+2026-06-29 审计补充：macOS Seatbelt backend 当前仍只能宣传为 non-interactive filesystem/process sandbox MVP。手动测试显示 loopback `nc` 行为未被可靠拦截；E05.6 已将 backend 的 `network_isolation` capability 下调为 `false`，避免 verification receipt 过度信任未证明的网络隔离。
 
 后续切片增加 execution coverage labels，用于明确 shell、MCP、插件和远端能力分别由哪个边界控制。该模型只描述真实覆盖关系，不把 MCP、插件或远端服务宣传成本地 shell sandbox 保护。
 
@@ -74,7 +76,7 @@ pub trait ExecutionBackend {
 - 已新增 `backend = "macos_seatbelt"`，在 macOS 上通过 `/usr/bin/sandbox-exec` 执行非交互命令。
   - profile 允许全文件系统读取。
   - profile 只允许写入命令 working directory。
-  - profile 不开放 network access。
+  - backend 不声明 `network_isolation`；因此 `Sandboxed` verification policy 不会把该 backend 当成已证明强制禁网。
   - `sandbox-exec` 缺失或非 macOS 平台会 fail closed。
   - Apple 已将 `sandbox-exec` 标记为 deprecated，因此该 backend 是 enforcement MVP，不是最终跨平台 sandbox 策略。
 - 已新增 `sigil-tools-builtin` 的 `LocalExecutionBackend`。
@@ -85,7 +87,7 @@ pub trait ExecutionBackend {
 - 已增加 fail-closed policy：当配置要求 sandbox 或选择需要 sandbox 的 profile preset 时，`LocalBackend` 会拒绝构建工具 registry，而不是静默继续裸跑。
 - 已新增 coarse sandbox profile presets：`unconfined`、`workspace_write`、`build_offline`、`build_networked`。
   - `workspace_write` 和 `build_*` 要求 filesystem + process isolation。
-  - `build_offline` 额外要求 network isolation。
+  - `build_offline` 额外要求 network isolation；macOS Seatbelt backend 当前不能满足该 profile。
   - `build_*` 标记 dependency caches should be mounted read-only，具体 mount enforcement 留给 backend implementation。
 - 已新增 execution coverage labels：
   - `shell` 工具标记为 `local_backend_enforced`，由配置的 local execution backend 控制。
@@ -99,6 +101,7 @@ pub trait ExecutionBackend {
   - local PTY terminal 标记为 `local_pty`，支持 persistent PTY、input、resize、cancel 和 output log。
   - terminal tool result details 会带出这些字段，`TerminalTaskEntry::from_tool_result_details` 可从 metadata 重建；旧日志缺字段时保持兼容。
 - 已补测试确认 `LocalExecutionBackend` 可以执行命令，并且不会声明 filesystem/network/process isolation。
+- 已完成 E05.6 capability truthfulness 修正：macOS Seatbelt backend 不再声明 `network_isolation`，`build_offline` 会拒绝该 backend，sandbox conformance tests 不再把 loopback `nc` 行为当成网络隔离证明。
 - 已保留 `bash` 的 timeout、stdout/stderr metadata、exit-code error 和 scratch env 行为。
 
 ## 6. Productization Remains

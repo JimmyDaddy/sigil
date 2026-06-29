@@ -1,6 +1,6 @@
 # RFC-0011 Crash Resume and Job Reconciliation
 
-状态：draft / roadmap candidate
+状态：draft / E11.1-E11.5 implemented / in-flight execution resume remains out of scope
 
 创建日期：2026-06-28
 

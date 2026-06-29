@@ -1,6 +1,6 @@
 # RFC-0006 Context Engine and Trust-labeled Retrieval
 
-状态：draft / slice 1 context digest and provenance model implemented
+状态：draft / E06.1-E06.5 implemented / full repo intelligence gated
 
 创建日期：2026-06-28
 
@@ -102,6 +102,12 @@ Implementation progress:
 - 已新增 code-intel context adapter，将 symbols、diagnostics、references、repo file hits 和 current diff 转为 provenance-labeled context hits；secret hits without egress are represented as excluded context.
 - 已新增 deterministic token budget packer，输出 stable prefix、dynamic suffix 和 excluded context，保持 provider prefix cache 友好并记录 budget/secret exclusion reason。
 - 已新增 TUI provenance summary view model，展示 context budget、top included sources、excluded reason summary、untrusted/secret warning 和一个 recommended action。
+
+2026-06-29 审计补充：
+
+- 当前实现是 V0 Context Engine：ContextDigestV0、session archive BM25、code-intel adapter、token budget packer 和 TUI provenance summary。
+- 它不是完整持久 repo graph、semantic vector retrieval、call/impact graph 或跨 session repo knowledge。
+- 这些更重能力由 `.repo-local-dev/rfcs/0006-context-engine/e06-06-persistent-repo-graph-semantic-retrieval-trigger.md` 作为 gated trigger 跟踪，只有真实 context-quality 证据或明确产品需求出现后才开工。
 
 ## 6. ContextDigestV0
 

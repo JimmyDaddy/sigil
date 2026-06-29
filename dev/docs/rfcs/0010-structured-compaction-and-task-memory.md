@@ -1,6 +1,6 @@
 # RFC-0010 Structured Compaction and Task Memory
 
-状态：draft / roadmap candidate
+状态：draft / E10.1/E10.2/E10.5 implemented / E10.6 planned
 
 创建日期：2026-06-28
 
@@ -95,6 +95,7 @@ It should not replay every old tool output into transcript.
 3. Optional model-assisted summary with sourced/unverified markings.
 4. Context Engine retrieval integration.
 5. TUI memory inspect view.
+6. Default compaction flow attaches deterministic `TaskMemoryV1` when durable evidence exists.
 
 ## 8.1 Implementation Progress
 
@@ -110,6 +111,10 @@ It should not replay every old tool output into transcript.
 
 Productization remains:
 
+- Default compaction flow still needs E10.6 to attach deterministic
+  `TaskMemoryV1` automatically when durable evidence exists. Until then, the
+  inspect view may be empty for sessions whose latest compaction record has
+  `task_memory: None`.
 - Model-assisted memory generation and sourced/unverified markings for model
   summaries are still gated behind the optional model-summary slice.
 - Context Engine retrieval integration remains gated until RFC-0006 retrieval

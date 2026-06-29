@@ -1,6 +1,6 @@
 # RFC-0008 Thread Projection and Agent Graph Observability
 
-状态：draft / E08.4 dispatch trace projection implemented
+状态：draft / E08.1-E08.4 implemented / E08.6 product adoption planned
 
 创建日期：2026-06-28
 
@@ -87,6 +87,7 @@ Projection lag must be visible when it matters. UI must not treat lagging projec
 3. Agent graph projection.
 4. Dispatch trace projection.
 5. Optional SQLite/materialized view when product query volume requires it.
+6. Product view projection adoption for suitable historical/audit views.
 
 ## 8. Acceptance Criteria
 
@@ -125,6 +126,11 @@ cargo test -p sigil-tui session
 - Dispatch trace projection 不保存 streaming token deltas、egress payload 或 raw tool result content；仅保存 hash、destination、计数、redaction/truncation metadata 和 bounded summary fields。
 
 本阶段没有引入 SQLite，也没有让 active approval/tool execution 依赖 projection。
+
+2026-06-29 审计补充：
+
+- 当前是 projection infrastructure + selected adapter adoption，不是所有 TUI/product views 全面 projection-first。
+- E08.6 跟踪下一步：审计并迁移适合的历史/审计产品视图，同时保持 active turn、approval 和 transient progress 使用 live runtime state。
 
 ## 11. Open Questions
 

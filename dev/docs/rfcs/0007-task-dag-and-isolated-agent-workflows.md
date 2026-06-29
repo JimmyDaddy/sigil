@@ -1,6 +1,6 @@
 # RFC-0007 Task DAG and Isolated Agent Workflows
 
-状态：draft / roadmap candidate
+状态：draft / E07.1/E07.3/E07.4 implemented / E07.2 planned / E07.5 gated
 
 创建日期：2026-06-28
 
