@@ -135,6 +135,7 @@ pub trait ExecutionBackend {
   - backend selection 在非 Linux、缺 `bwrap` 或 namespace smoke check 失败时 fail closed。
   - non-interactive command path 使用 bwrap 构造 read-only host root、writable workspace/cwd、writable `$SIGIL_SCRATCH_DIR`、tmpfs `/tmp`、PID namespace、die-with-parent 和 offline `--unshare-net`。
   - 已有 Linux-only ignored conformance test 和手动 `Sandbox Conformance` GitHub Actions workflow；2026-06-29 首次 GitHub Ubuntu runner diagnostics 在 `bwrap --unshare-net` 阶段失败（`loopback: Failed RTM_NEWADDR: Operation not permitted`），因此 E05.8 仍不能标记 done，需要兼容的 Linux host/runner 证明 namespace/network conformance。
+  - 手动 workflow 已调整为 preflight/report 模式：默认把不兼容 hosted runner 记录为 `unsupported runner` 并跳过 conformance，不把它伪装成 conformance success；手动输入 `require_conformance=true` 时仍会 fail closed。
 - 已保留 `bash` 的 timeout、stdout/stderr metadata、exit-code error 和 scratch env 行为。
 
 ## 6. Productization Remains
@@ -157,7 +158,7 @@ pub trait ExecutionBackend {
 - E05.15 Plugin Hook Process Sandbox Handoff：未来插件 hook command runtime 必须经过 execution backend 或显式 unconfined/unsupported。
 - E05.16 Sandbox Product Surface and Doctor：已实现 minimal doctor 展示；TUI tool/approval card 的更完整 coverage surface 仍可后续扩展。
 
-E05.8 已新增手动 `Sandbox Conformance` workflow，通过 GitHub Actions 的 Ubuntu runner 安装 `bubblewrap` 后运行 ignored Linux conformance test。当前 `linux_bubblewrap` backend code 和 workflow 均已存在；2026-06-29 首次 workflow 运行在 host namespace diagnostics 阶段失败，原因是 runner 不允许 bwrap 配置 loopback network namespace。下一步需要在兼容 Linux host/runner 上运行 ignored test 并记录结果。E05.9 同时保留 fake-Docker request construction 测试和显式 real-Docker conformance 测试；后者需要健康 Docker daemon 与本机已有镜像。
+E05.8 已新增手动 `Sandbox Conformance` workflow，通过 GitHub Actions 的 Ubuntu runner 安装 `bubblewrap` 后运行 ignored Linux conformance test。当前 `linux_bubblewrap` backend code 和 workflow 均已存在；2026-06-29 首次 workflow 运行在 host namespace diagnostics 阶段失败，原因是 runner 不允许 bwrap 配置 loopback network namespace。workflow 现已改为 preflight/report 模式：默认记录 unsupported runner 并保留 E05.8 gated；需要硬门禁时用 `require_conformance=true` 运行。下一步需要在兼容 Linux host/runner 上运行 ignored test 并记录结果。E05.9 同时保留 fake-Docker request construction 测试和显式 real-Docker conformance 测试；后者需要健康 Docker daemon 与本机已有镜像。
 
 ## 7. Validation
 

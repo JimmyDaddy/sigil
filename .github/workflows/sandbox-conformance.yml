@@ -2,6 +2,12 @@ name: Sandbox Conformance
 
 on:
   workflow_dispatch:
+    inputs:
+      require_conformance:
+        description: "Fail the workflow when the hosted runner cannot prove bubblewrap conformance"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,23 +42,70 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bubblewrap wget
 
-      - name: Host namespace diagnostics
+      - name: Host namespace preflight
+        id: namespace_preflight
         run: |
-          set -euxo pipefail
-          bwrap --version
-          sysctl kernel.unprivileged_userns_clone || true
-          bwrap \
-            --die-with-parent \
-            --unshare-pid \
-            --unshare-net \
-            --ro-bind / / \
-            --proc /proc \
-            --dev /dev \
-            /bin/true
+          set -euo pipefail
+          echo "### Bubblewrap host preflight" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '```text'
+            bwrap --version
+            sysctl kernel.unprivileged_userns_clone || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          set +e
+          preflight_output="$(
+            bwrap \
+              --die-with-parent \
+              --unshare-pid \
+              --unshare-net \
+              --ro-bind / / \
+              --proc /proc \
+              --dev /dev \
+              /bin/true 2>&1
+          )"
+          preflight_status=$?
+          set -e
+
+          if [[ "$preflight_status" -eq 0 ]]; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+            echo "Bubblewrap network namespace preflight passed." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "supported=false" >> "$GITHUB_OUTPUT"
+          echo "Bubblewrap network namespace preflight is unsupported on this runner." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          echo "$preflight_output" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "Conformance remains unproven unless this workflow is rerun on a compatible Linux host or with require_conformance enabled." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Linux Bubblewrap conformance
+        if: steps.namespace_preflight.outputs.supported == 'true'
         run: |
           cargo test --locked \
             -p sigil-tools-builtin \
             tests::linux_bubblewrap_execution_backend_real_conformance \
             -- --ignored --exact --nocapture
+
+      - name: Report unsupported hosted runner
+        if: steps.namespace_preflight.outputs.supported != 'true' && !inputs.require_conformance
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+
+          ### Result
+
+          This hosted runner cannot run the Bubblewrap network namespace preflight.
+          The workflow is diagnostic-only by default, so this is recorded as an unsupported runner rather than a code failure.
+
+          E05.8 remains gated until the ignored Linux conformance test passes on a compatible Linux host.
+          EOF
+
+      - name: Enforce required conformance
+        if: steps.namespace_preflight.outputs.supported != 'true' && inputs.require_conformance
+        run: |
+          echo "Bubblewrap conformance was required, but this runner does not support the required namespace setup." >&2
+          exit 1
